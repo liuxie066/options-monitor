@@ -91,7 +91,7 @@ def test_assistant_turn_copilot_gate_requires_explicit_channel_scene(tmp_path: P
     assert "copilot: status=not_ready" in audit["response_text"]
 
 
-def test_assistant_turn_copilot_scene_allowlist_does_not_open_local_only_scene(tmp_path: Path) -> None:
+def test_assistant_turn_channel_copilot_income_requires_model_config_before_tools(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def execute_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +99,7 @@ def test_assistant_turn_copilot_scene_allowlist_does_not_open_local_only_scene(t
         return build_response(tool_name=tool_name, ok=True, data={})
 
     result = handle_assistant_turn(
-        _request(tmp_path, "6月收益主要来自哪里"),
+        _request(tmp_path, "7月收益"),
         execute_tool_fn=execute_tool,
         allowed_senders="u_runtime",
         settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("monthly_income_attribution",))),
@@ -111,13 +111,13 @@ def test_assistant_turn_copilot_scene_allowlist_does_not_open_local_only_scene(t
     assert result.render_route == "copilot"
     assert result.meta["assistant"]["copilot"]["channel_scenes"] == ["monthly_income_attribution"]
     copilot = result.data["action"]["result"]["data"]["copilot"]
-    assert result.trace["copilot"] == {"status": "not_ready"}
+    assert result.trace["copilot"]["status"] == "not_ready"
+    assert result.trace["copilot"]["scene"] == "monthly_income_attribution"
+    assert result.trace["copilot"]["channel_gate"] == "channel_model_config_missing"
     assert copilot["status"] == "not_ready"
-    assert copilot["decision_trace"]["selected_scene"] is None
-    assert {"scene_name": "monthly_income_attribution", "reason": "environment_not_allowed"} in copilot[
-        "decision_trace"
-    ]["rejected_scenes"]
-    assert "Copilot 渠道自由问答尚未开放到可执行场景" in result.response_text
+    assert copilot["decision_trace"]["selected_scene"] == "monthly_income_attribution"
+    assert copilot["decision_trace"]["channel_gate"] == "channel_model_config_missing"
+    assert "渠道 Copilot 需要显式可用的 assistant 模型配置" in result.response_text
 
 
 def test_assistant_turn_channel_copilot_requires_model_config_before_tools(tmp_path: Path) -> None:
@@ -274,6 +274,198 @@ def test_assistant_turn_channel_copilot_runs_operations_diagnostics_with_model_c
     row = audit["audit_rows"][0]
     assert row["copilot"] == result.trace["copilot"]
     assert row["copilot_events"]["event_count"] > 0
+    assert "copilot: status=answered" in audit["response_text"]
+
+
+def test_assistant_turn_channel_copilot_runs_monthly_income_with_model_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.copilot import local_harness
+    from src.application.copilot import tools as copilot_tools
+    from src.application.copilot.model_client import CopilotModelSettings
+
+    assistant_config = tmp_path / "config.assistant.json"
+    assistant_config.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "enabled": True,
+                    "llm": {
+                        "provider": "openai",
+                        "model": "gpt-test",
+                        "api_key_env": "OM_TEST_KEY",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OM_TEST_KEY", "sk-test")
+    model_requests: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_build_action_model(settings: CopilotModelSettings):
+        assert settings.provider == "openai"
+        assert settings.model == "gpt-test"
+        assert settings.api_key_env == "OM_TEST_KEY"
+
+        def model(request: dict[str, Any]) -> dict[str, Any]:
+            model_requests.append(request)
+            missing = request["finish_conditions"]["unattempted_tools_without_evidence"]
+            if missing:
+                return {"kind": "tool", "tool_name": missing[0], "reason": "need monthly income evidence", "answer_report": None}
+            return {
+                "kind": "finish",
+                "tool_name": None,
+                "reason": "enough monthly income evidence",
+                "answer_report": {
+                    "conclusion": "结论：7月收益主要来自权利金收入。",
+                    "attempted_checks": ["analysis_catalog", "analysis_query", "monthly_income_report"],
+                    "findings": [
+                        {
+                            "summary": "月度收益报告显示 2026-07 净收益 1000 CNY，其中权利金收入 900 CNY。",
+                            "evidence_refs": ["obs_3"],
+                        },
+                        {
+                            "summary": "分析视图交叉检查同样显示 2026-07 收益行。",
+                            "evidence_refs": ["obs_2"],
+                        },
+                    ],
+                    "recommendations": [],
+                    "missing_data": [],
+                    "evidence_refs": ["obs_2", "obs_3"],
+                },
+            }
+
+        return model
+
+    def fake_call(tool_name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
+        assert tool_name in allowed_tools
+        tool_calls.append((tool_name, dict(payload)))
+        if tool_name == "analysis_catalog":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {"view_count": 4, "views": [{"name": "monthly_income_summary"}]},
+            }
+        if tool_name == "analysis_query":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {
+                    "row_count": 1,
+                    "views_used": ["monthly_income_summary"],
+                    "query": {"filters": {"months": ["2026-07"], "accounts": ["lx"]}},
+                    "view_datasets": {
+                        "monthly_income_summary": {
+                            "row_count": 1,
+                            "rows": [
+                                {
+                                    "month": "2026-07",
+                                    "account": "lx",
+                                    "net_income_cny": 1000,
+                                    "premium_income_cny": 900,
+                                    "realized_pnl_cny": 100,
+                                }
+                            ],
+                        }
+                    },
+                },
+            }
+        if tool_name == "monthly_income_report":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {
+                    "return_summary": [
+                        {
+                            "month": "2026-07",
+                            "account": "lx",
+                            "net_income_cny": 1000,
+                            "premium_income_cny": 900,
+                            "realized_pnl_cny": 100,
+                        }
+                    ],
+                    "summary": [
+                        {
+                            "month": "2026-07",
+                            "account": "lx",
+                            "currency": "CNY",
+                            "net_cashflow_gross": 1000,
+                            "premium_received_gross": 900,
+                            "realized_pnl_gross": 100,
+                        }
+                    ],
+                    "premium_rows": [
+                        {
+                            "month": "2026-07",
+                            "account": "lx",
+                            "symbol": "NVDA",
+                            "currency": "USD",
+                            "premium_received_gross": 900,
+                            "contracts": 1,
+                        }
+                    ],
+                    "realized_rows": [
+                        {
+                            "month": "2026-07",
+                            "account": "lx",
+                            "symbol": "NVDA",
+                            "currency": "USD",
+                            "realized_gross": 100,
+                            "contracts_closed": 1,
+                        }
+                    ],
+                    "diagnostics": [{"account": "lx", "month": "2026-07", "status": "ok", "matched_trade_events_count": 1}],
+                },
+            }
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    monkeypatch.setattr(local_harness, "build_action_model", fake_build_action_model)
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+
+    request = AssistantRequest(
+        text="7月收益",
+        sender_id="u_runtime",
+        channel="test",
+        conversation_id="c_runtime",
+        message_id="m_runtime",
+        audit_db=str(tmp_path / "assistant_audit.db"),
+        config_key="us",
+        assistant_config_path=str(assistant_config),
+    )
+    result = handle_assistant_turn(
+        request,
+        allowed_senders="u_runtime",
+        settings=AssistantSettings(
+            copilot=CopilotSettings(
+                enabled=True,
+                channel_scenes=("monthly_income_attribution",),
+            )
+        ),
+        now_fn=lambda: date(2026, 7, 6),
+    )
+
+    assert result.ok is True
+    assert result.render_route == "copilot"
+    copilot = result.data["action"]["result"]["data"]["copilot"]
+    assert result.trace["copilot"]["status"] == "answered"
+    assert result.trace["copilot"]["scene"] == "monthly_income_attribution"
+    assert copilot["status"] == "answered"
+    assert copilot["decision_trace"]["selected_scene"] == "monthly_income_attribution"
+    assert copilot["decision_trace"]["selection_environment"] == "channel"
+    assert copilot["decision_trace"]["scope_sources"]["month"] == "message.month"
+    assert [name for name, _payload in tool_calls] == ["analysis_catalog", "analysis_query", "monthly_income_report"]
+    assert tool_calls[1][1]["month"] == "2026-07"
+    assert tool_calls[2][1]["month"] == "2026-07"
+    assert len(model_requests) >= 3
+    assert "结论：7月收益主要来自权利金收入" in result.response_text
+
+    audit = collect_recent_audit(audit_db=str(tmp_path / "assistant_audit.db"), channel="test", sender_id="u_runtime")
+    row = audit["audit_rows"][0]
+    assert row["copilot"] == result.trace["copilot"]
     assert "copilot: status=answered" in audit["response_text"]
 
 

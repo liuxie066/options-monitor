@@ -1379,12 +1379,12 @@ def test_copilot_phase2_keeps_non_review_model_action_fixtures() -> None:
         assert (fixture_root / name).is_file(), name
 
 
-def test_copilot_current_slice_only_exposes_diagnostics_channel_scene() -> None:
+def test_copilot_current_slice_exposes_declared_channel_scenes() -> None:
     from src.application.copilot.scene import SCENE_CATALOG
 
     channel_ready = [scene.name for scene in SCENE_CATALOG if scene.phase_readiness == "channel_ready"]
 
-    assert channel_ready == ["operations_diagnostics"]
+    assert channel_ready == ["operations_diagnostics", "monthly_income_attribution"]
 
 
 def test_copilot_channel_tests_do_not_use_monthly_review_as_smoke_scene() -> None:
@@ -1527,7 +1527,7 @@ def test_copilot_phase2_completion_checklist_has_test_evidence() -> None:
     for local_model_test in (
         "test_service_projects_scene_to_host_manifest_without_answer_markers",
         "test_write_like_request_is_refused_before_host",
-        "test_channel_environment_has_no_executable_freeform_scene",
+        "test_channel_environment_keeps_monthly_option_review_not_ready",
         "test_local_runtime_question_runs_service_host_agent_loop",
         "test_monthly_option_review_is_not_a_dedicated_copilot_capability",
         "test_model_decider_falls_back_to_default_tool_collection_on_model_error",

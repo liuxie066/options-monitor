@@ -25,8 +25,9 @@ Current behavior:
 - if `assistant.copilot.enabled=true` is explicitly configured, unsupported
   natural-language text enters the Copilot channel gate, but a scene still must
   be channel-ready and explicitly allowlisted in
-  `assistant.copilot.channel_scenes`; only `operations_diagnostics` is
-  channel-ready in the current slice, and channel execution still requires
+  `assistant.copilot.channel_scenes`; `operations_diagnostics` and
+  `monthly_income_attribution` are channel-ready in the current slice, and
+  channel execution still requires
   explicit assistant model configuration before any tool call;
 - Copilot channel execution admits one run per channel conversation in the
   current service process. A concurrent same-conversation request returns
@@ -99,7 +100,8 @@ Relevant assistant config:
 - `assistant.copilot.enabled`: disabled-by-default entry into the Copilot
   channel gate;
 - `assistant.copilot.channel_scenes`: explicit channel scene allowlist; only
-  `operations_diagnostics` is channel-ready in the current slice;
+  `operations_diagnostics` and `monthly_income_attribution` are channel-ready
+  in the current slice;
 - `assistant.copilot.human_review`: when true, Host-backed Copilot channel
   answers are held for manual review; the audit keeps the sanitized Copilot
   trace/event summary, but the channel reply does not expose the model answer;

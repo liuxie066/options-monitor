@@ -59,7 +59,8 @@ manifest and not the Inbound Assistant channel path:
 ```
 
 Current Copilot v2 answer-quality rollout is local/eval first for analysis
-scenes; only `operations_diagnostics` is channel-ready in the current slice.
+scenes; `operations_diagnostics` and `monthly_income_attribution` are
+channel-ready in the current slice.
 Channel adapters must not
 call the Host or Agent directly. By default, free-form channel text
 continues to return `NATURAL_LANGUAGE_REBUILDING`. If
@@ -167,10 +168,10 @@ runtime. Free-form natural-language execution is disabled by default:
 non-slash, non-permission messages return `NATURAL_LANGUAGE_REBUILDING`,
 perform no tool calls, and do not fall back to a generic planner or ordinary
 LLM chat. The optional `assistant.copilot.enabled` gate only routes free-form
-text into the Copilot Service boundary. Only `operations_diagnostics` is
-channel-ready in the current slice; channel execution requires
-`assistant.copilot.channel_scenes` to explicitly allowlist it and explicit
-assistant model configuration. Missing readiness, scene allowlist,
+text into the Copilot Service boundary. `operations_diagnostics` and
+`monthly_income_attribution` are channel-ready in the current slice; channel
+execution requires `assistant.copilot.channel_scenes` to explicitly allowlist
+the selected scene and explicit assistant model configuration. Missing readiness, scene allowlist,
 or model configuration returns `not_ready` before any tool call.
 Deterministic OM tools own facts, and write actions remain behind
 preview/confirm gates.
