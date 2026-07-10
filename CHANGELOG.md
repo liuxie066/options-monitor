@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.375 - 2026-07-10
+
+### Changed
+- Aligned Copilot scene execution with Dayu-style evidence-first runs by expanding agent iteration budget, disabling the core run timeout by default, and collecting required read-only tool evidence before model synthesis.
+
 ## 1.2.374 - 2026-07-10
 
 ### Fixed
