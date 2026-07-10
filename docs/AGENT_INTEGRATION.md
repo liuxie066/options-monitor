@@ -160,8 +160,8 @@ the existing operation path. The current `./om assistant ...` CLI namespace and
 `assistant` config keys remain compatibility names. Free-form natural-language
 execution is disabled by default and returns `NATURAL_LANGUAGE_REBUILDING`;
 the explicit `assistant.copilot.enabled` gate only enters the Copilot channel
-facade. No business scene is channel-ready in the current slice. Future channel
-execution will require a channel-ready scene allowlisted in
+facade. Only `operations_diagnostics` is channel-ready in the current slice;
+channel execution requires that scene to be allowlisted in
 `assistant.copilot.channel_scenes` plus explicit assistant model configuration
 before any tool call. `assistant.copilot.human_review=true` holds Host-backed
 Copilot answers at the channel boundary while retaining sanitized audit
