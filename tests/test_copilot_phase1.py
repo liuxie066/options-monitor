@@ -156,9 +156,22 @@ def test_eval_monthly_option_review_accepts_model_report_with_refs() -> None:
 
     assert result.status == "answered"
     assert result.ok is True
-    assert result.answer_report.recommendations
-    assert "评估是否减仓或滚动" in result.user_response
-    assert "obs_4" in result.answer_report.evidence_refs
+    report = result.answer_report
+    assert set(report.evidence_refs) == {"obs_2", "obs_3", "obs_4", "obs_5"}
+    assert "收益质量" in report.conclusion
+    assert "行权/股票本金占用" in report.conclusion
+    assert "Close Advice" in report.conclusion
+    assert "FUTU 的行权生命周期 P/L 为 -1,640 USD" in result.user_response
+    assert "9992.HK/HKD 12张" in result.user_response
+    assert "2条 close、6条 not_evaluable、5条 quote_unusable" in result.user_response
+    assert "trade_events.row_count=0" in " ".join(report.missing_data)
+    assert {item["answer_dimension"] for item in report.recommendations} == {
+        "profit quality",
+        "assignment cash outlay",
+        "open-exposure concentration",
+        "current close-advice signals",
+        "evidence gaps",
+    }
 
 
 def test_eval_model_report_with_non_claimable_ref_is_not_admitted() -> None:
