@@ -161,6 +161,102 @@ def test_eval_model_report_with_non_claimable_ref_is_not_admitted() -> None:
     assert result.answer_report.recommendations == []
 
 
+def test_eval_monthly_option_review_requires_cited_recommendation() -> None:
+    result = run_local_request(
+        _request(
+            "分析6月的期权操作有没有不合理，需要优化的地方",
+            month="2026-06",
+            environment="eval",
+            scene="monthly_option_review",
+            fixture="june_option_review_model_ready",
+        ),
+        reference_year=2026,
+        model_action_json=_model_action_fixture("bad_missing_recommendation_model_action.json"),
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
+    assert result.answer_report.recommendations == []
+
+
+def test_eval_monthly_option_review_rejects_row_dump_answer() -> None:
+    result = run_local_request(
+        _request(
+            "分析6月的期权操作有没有不合理，需要优化的地方",
+            month="2026-06",
+            environment="eval",
+            scene="monthly_option_review",
+            fixture="june_option_review_model_ready",
+        ),
+        reference_year=2026,
+        model_action_json=_model_action_fixture("bad_raw_rows_model_action.json"),
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
+    assert result.answer_report.findings == []
+    assert result.answer_report.recommendations == []
+
+
+def test_eval_monthly_option_review_rejects_failed_observation_recommendation() -> None:
+    result = run_local_request(
+        _request(
+            "分析6月的期权操作有没有不合理，需要优化的地方",
+            month="2026-06",
+            environment="eval",
+            scene="monthly_option_review",
+            fixture="june_option_review_close_advice_missing",
+        ),
+        reference_year=2026,
+        model_action_json=_model_action_fixture("bad_failed_ref_model_action.json"),
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert "close_advice_read evidence unavailable: DEPENDENCY_MISSING" in result.answer_report.missing_data
+    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
+    assert result.answer_report.recommendations == []
+
+
+def test_eval_monthly_option_review_recommendation_needs_requested_period_basis() -> None:
+    result = run_local_request(
+        _request(
+            "分析6月的期权操作有没有不合理，需要优化的地方",
+            month="2026-06",
+            environment="eval",
+            scene="monthly_option_review",
+            fixture="june_option_review_model_ready",
+        ),
+        reference_year=2026,
+        model_action_json=_model_action_fixture("bad_current_only_recommendation_model_action.json"),
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
+    assert result.answer_report.recommendations == []
+
+
+def test_eval_monthly_option_review_missing_monthly_evidence_only_reports_partial_context() -> None:
+    result = render_user_response(
+        run_local_request(
+            _request(
+                "分析6月的期权操作有没有不合理，需要优化的地方",
+                month="2026-06",
+                environment="eval",
+                scene="monthly_option_review",
+                fixture="june_option_review_income_missing_current_exposure",
+            ),
+            reference_year=2026,
+            model_action_json=_model_action_fixture("june_option_review_income_missing_current_exposure_model_action.json"),
+        )
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert result.answer_report.conclusion == "结论：当前证据不足，Copilot 未能形成有效结论。"
+    assert result.answer_report.recommendations == []
+    assert "只能作为当前暴露上下文" in result.user_response
+    assert "请求月份没有匹配的本地交易事件" in result.user_response
+
+
 def test_model_decider_falls_back_to_default_tool_collection_on_model_error() -> None:
     def broken_model(_request: dict) -> dict:
         raise RuntimeError("model unavailable")
