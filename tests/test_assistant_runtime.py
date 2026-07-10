@@ -59,7 +59,7 @@ def test_assistant_turn_copilot_gate_requires_explicit_channel_scene(tmp_path: P
         return build_response(tool_name=tool_name, ok=True, data={})
 
     result = handle_assistant_turn(
-        _request(tmp_path, "分析6月的期权操作有没有不合理，需要优化的地方"),
+        _request(tmp_path, "最近 close advice 为什么没有通知"),
         execute_tool_fn=execute_tool,
         allowed_senders="u_runtime",
         settings=AssistantSettings(copilot=CopilotSettings(enabled=True)),
@@ -76,11 +76,14 @@ def test_assistant_turn_copilot_gate_requires_explicit_channel_scene(tmp_path: P
     assert result.data["reasoning"]["action_kind"] == "copilot"
     assert result.data["action"]["tool_name"] == "copilot.channel"
     copilot = result.data["action"]["result"]["data"]["copilot"]
-    assert result.trace["copilot"] == {"status": "not_ready"}
+    assert result.trace["copilot"]["status"] == "not_ready"
+    assert result.trace["copilot"]["scene"] == "operations_diagnostics"
+    assert result.trace["copilot"]["channel_gate"] == "channel_scene_allowlist_missing"
     assert copilot["status"] == "not_ready"
-    assert copilot["decision_trace"]["selected_scene"] is None
+    assert copilot["decision_trace"]["selected_scene"] == "operations_diagnostics"
+    assert copilot["decision_trace"]["channel_gate"] == "channel_scene_allowlist_missing"
     assert copilot["decision_trace"]["selection_environment"] == "channel"
-    assert "Copilot 渠道自由问答尚未开放到可执行场景" in result.response_text
+    assert "渠道入口没有显式开放该 Copilot 场景" in result.response_text
 
     audit = collect_recent_audit(audit_db=str(tmp_path / "assistant_audit.db"), channel="test", sender_id="u_runtime")
     row = audit["audit_rows"][0]
@@ -88,7 +91,7 @@ def test_assistant_turn_copilot_gate_requires_explicit_channel_scene(tmp_path: P
     assert "copilot: status=not_ready" in audit["response_text"]
 
 
-def test_assistant_turn_copilot_scene_allowlist_does_not_open_non_channel_scene(tmp_path: Path) -> None:
+def test_assistant_turn_copilot_scene_allowlist_does_not_open_local_only_scene(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def execute_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -96,25 +99,55 @@ def test_assistant_turn_copilot_scene_allowlist_does_not_open_non_channel_scene(
         return build_response(tool_name=tool_name, ok=True, data={})
 
     result = handle_assistant_turn(
-        _request(tmp_path, "分析6月的期权操作有没有不合理，需要优化的地方"),
+        _request(tmp_path, "6月收益主要来自哪里"),
         execute_tool_fn=execute_tool,
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("channel_smoke",))),
+        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("monthly_income_attribution",))),
         now_fn=lambda: date(2026, 7, 6),
     )
 
     assert calls == []
     assert result.ok is True
     assert result.render_route == "copilot"
-    assert result.meta["assistant"]["copilot"]["channel_scenes"] == ["channel_smoke"]
+    assert result.meta["assistant"]["copilot"]["channel_scenes"] == ["monthly_income_attribution"]
     copilot = result.data["action"]["result"]["data"]["copilot"]
     assert result.trace["copilot"] == {"status": "not_ready"}
     assert copilot["status"] == "not_ready"
     assert copilot["decision_trace"]["selected_scene"] is None
+    assert {"scene_name": "monthly_income_attribution", "reason": "environment_not_allowed"} in copilot[
+        "decision_trace"
+    ]["rejected_scenes"]
     assert "Copilot 渠道自由问答尚未开放到可执行场景" in result.response_text
 
 
-def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_scene(
+def test_assistant_turn_channel_copilot_requires_model_config_before_tools(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def execute_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, dict(payload)))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    result = handle_assistant_turn(
+        _request(tmp_path, "最近 close advice 为什么没有通知"),
+        execute_tool_fn=execute_tool,
+        allowed_senders="u_runtime",
+        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("operations_diagnostics",))),
+        now_fn=lambda: date(2026, 7, 6),
+    )
+
+    assert calls == []
+    assert result.ok is True
+    assert result.render_route == "copilot"
+    copilot = result.data["action"]["result"]["data"]["copilot"]
+    assert result.trace["copilot"]["status"] == "not_ready"
+    assert result.trace["copilot"]["scene"] == "operations_diagnostics"
+    assert result.trace["copilot"]["channel_gate"] == "channel_model_config_missing"
+    assert copilot["decision_trace"]["selected_scene"] == "operations_diagnostics"
+    assert copilot["decision_trace"]["channel_gate"] == "channel_model_config_missing"
+    assert "渠道 Copilot 需要显式可用的 assistant 模型配置" in result.response_text
+
+
+def test_assistant_turn_channel_copilot_runs_operations_diagnostics_with_model_config(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -158,43 +191,21 @@ def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_s
                 "tool_name": None,
                 "reason": "enough channel evidence",
                 "answer_report": {
-                    "conclusion": "结论：6月期权复盘收益为正，但 0700.HK assignment 现金占用和 short put 暴露集中，需要复核。",
-                    "attempted_checks": [
-                        "analysis_catalog",
-                        "analysis_query",
-                        "monthly_income_report",
-                        "option_positions_read",
-                        "close_advice_read",
-                    ],
+                    "conclusion": "结论：最近 close advice 没有通知的主要原因是没有确认发送记录。",
+                    "attempted_checks": ["runtime_status", "close_advice_read"],
                     "findings": [
                         {
-                            "summary": "6月 lx 账户 0700.HK 净收入 1200 CNY，premium 贡献 800 CNY。",
-                            "evidence_refs": ["obs_2", "obs_3"],
+                            "summary": "运行状态显示通知通道可用，但没有 close advice confirmed send 记录。",
+                            "evidence_refs": ["obs_1"],
                         },
                         {
-                            "summary": "0700.HK assignment 买入现金流为 45000 HKD，premium 为 1467 HKD。",
-                            "evidence_refs": ["obs_3"],
-                        },
-                        {
-                            "summary": "当前 lx 账户 0700.HK 有 4 张 short put，现金占用 180000 HKD。",
-                            "evidence_refs": ["obs_4"],
-                        },
-                        {
-                            "summary": "当前 0700.HK close advice 为 consider_close/attention。",
-                            "evidence_refs": ["obs_5"],
+                            "summary": "close_advice_read 返回 0 行，说明当前没有可通知的 close advice 候选。",
+                            "evidence_refs": ["obs_2"],
                         },
                     ],
-                    "recommendations": [
-                        {
-                            "summary": "基于 0700.HK 当前 short put 暴露集中和 close advice 信号，复核是否减仓或滚动。",
-                            "action": "复核是否减仓或滚动",
-                            "target_scope": "0700.HK short put 暴露",
-                            "review_dimension": "open-exposure concentration",
-                            "basis_refs": ["obs_2", "obs_3", "obs_4", "obs_5"],
-                        }
-                    ],
+                    "recommendations": [],
                     "missing_data": [],
-                    "evidence_refs": ["obs_2", "obs_3", "obs_4", "obs_5"],
+                    "evidence_refs": ["obs_1", "obs_2"],
                 },
             }
 
@@ -203,133 +214,16 @@ def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_s
     def fake_call(tool_name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
         assert tool_name in allowed_tools
         tool_calls.append(tool_name)
-        if tool_name == "analysis_catalog":
-            return {"tool_name": tool_name, "ok": True, "data": {"view_count": 8, "view_names": _monthly_views()}}
-        if tool_name == "analysis_query":
-            view_datasets = {
-                "account_monthly_performance": {
-                    "row_count": 1,
-                    "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 1200, "premium_income_cny": 800}],
-                },
-                "account_monthly_income_components": {
-                    "row_count": 1,
-                    "rows": [{"month": "2026-06", "account": "lx", "component": "premium", "amount_cny": 800}],
-                },
-                "monthly_income_summary": {
-                    "row_count": 1,
-                    "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 1200, "premium_income_cny": 800}],
-                },
-                "symbol_income_attribution": {
-                    "row_count": 1,
-                    "rows": [
-                        {
-                            "month": "2026-06",
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "currency": "HKD",
-                            "component": "premium",
-                            "amount_gross": 1467,
-                        }
-                    ],
-                },
-                "trade_events": {
-                    "row_count": 1,
-                    "rows": [
-                        {
-                            "month": "2026-06",
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "currency": "HKD",
-                            "position_effect": "open",
-                            "side": "sell",
-                            "option_type": "put",
-                            "contracts": 4,
-                        }
-                    ],
-                },
-                "open_option_exposure": {
-                    "row_count": 1,
-                    "rows": [
-                        {
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "currency": "HKD",
-                            "option_type": "put",
-                            "side": "short",
-                            "contracts_open": 4,
-                            "cash_secured_amount": 180000,
-                        }
-                    ],
-                },
-                "expiration_risk_buckets": {
-                    "row_count": 1,
-                    "rows": [
-                        {
-                            "account": "lx",
-                            "expiration_bucket": "30-60d",
-                            "currency": "HKD",
-                            "contracts_open": 4,
-                            "cash_secured_amount": 180000,
-                        }
-                    ],
-                },
-                "close_advice_snapshot": {
-                    "row_count": 1,
-                    "rows": [{"account": "lx", "symbol": "0700.HK", "close_action": "consider_close", "tier": "attention"}],
-                },
-            }
+        if tool_name == "runtime_status":
             return {
                 "tool_name": tool_name,
                 "ok": True,
                 "data": {
-                    "query": {"mode": "views", "filters": {"months": ["2026-06"]}},
-                    "row_count": 8,
-                    "views_used": _monthly_views(),
-                    "view_datasets": view_datasets,
-                    "evidence": {"coverage": {"row_count": 8, "account_count": 1, "symbol_count": 1}},
-                },
-            }
-        if tool_name == "monthly_income_report":
-            return {
-                "tool_name": tool_name,
-                "ok": True,
-                "data": {
-                    "premium_rows": [
-                        {"account": "lx", "symbol": "0700.HK", "currency": "HKD", "contracts": 3, "premium_received_gross": 1467}
-                    ],
-                    "realized_rows": [
-                        {"account": "lx", "symbol": "0700.HK", "currency": "HKD", "contracts_closed": 4, "realized_gross": 1947}
-                    ],
-                    "assignment_lifecycle_rows": [
-                        {
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "currency": "HKD",
-                            "assigned_contracts": 1,
-                            "assignment_buy_cash_hkd": 45000,
-                            "premium_hkd": 1467,
-                        }
-                    ],
-                },
-            }
-        if tool_name == "option_positions_read":
-            return {
-                "tool_name": tool_name,
-                "ok": True,
-                "data": {
-                    "row_count": 1,
-                    "rows": [
-                        {
-                            "account": "lx",
-                            "symbol": "0700.HK",
-                            "option_type": "put",
-                            "side": "short",
-                            "contracts_open": 4,
-                            "currency": "HKD",
-                            "cash_secured_amount": 180000,
-                            "status": "open",
-                        }
-                    ],
+                    "summary": {
+                        "wechat_clawbot_available": True,
+                        "assistant_freeform_runtime_enabled": False,
+                    },
+                    "notification": {"recent_confirmed_send_count": 0},
                 },
             }
         if tool_name == "close_advice_read":
@@ -337,10 +231,8 @@ def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_s
                 "tool_name": tool_name,
                 "ok": True,
                 "data": {
-                    "row_count": 1,
-                    "rows": [
-                        {"account": "lx", "symbol": "0700.HK", "close_action": "consider_close", "tier": "attention"}
-                    ],
+                    "row_count": 0,
+                    "rows": [],
                 },
             }
         raise AssertionError(f"unexpected tool: {tool_name}")
@@ -349,7 +241,7 @@ def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_s
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
 
     request = AssistantRequest(
-        text="分析6月的期权操作有没有不合理，需要优化的地方",
+        text="最近 close advice 为什么没有通知",
         sender_id="u_runtime",
         channel="test",
         conversation_id="c_runtime",
@@ -361,25 +253,28 @@ def test_assistant_turn_channel_copilot_model_config_does_not_open_non_channel_s
     result = handle_assistant_turn(
         request,
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("channel_smoke",))),
+        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("operations_diagnostics",))),
         now_fn=lambda: date(2026, 7, 6),
     )
 
     assert result.ok is True
     assert result.render_route == "copilot"
     copilot = result.data["action"]["result"]["data"]["copilot"]
-    assert result.trace["copilot"] == {"status": "not_ready"}
-    assert copilot["status"] == "not_ready"
-    assert copilot["decision_trace"]["selected_scene"] is None
+    assert result.trace["copilot"]["status"] == "answered"
+    assert result.trace["copilot"]["run_id"] == copilot["run_id"]
+    assert result.trace["copilot"]["scene"] == "operations_diagnostics"
+    assert copilot["status"] == "answered"
+    assert copilot["decision_trace"]["selected_scene"] == "operations_diagnostics"
     assert copilot["decision_trace"]["selection_environment"] == "channel"
-    assert tool_calls == []
-    assert model_requests == []
-    assert "Copilot 渠道自由问答尚未开放到可执行场景" in result.response_text
+    assert tool_calls == ["runtime_status", "close_advice_read"]
+    assert len(model_requests) >= 2
+    assert "结论：最近 close advice 没有通知" in result.response_text
 
     audit = collect_recent_audit(audit_db=str(tmp_path / "assistant_audit.db"), channel="test", sender_id="u_runtime")
     row = audit["audit_rows"][0]
     assert row["copilot"] == result.trace["copilot"]
-    assert "copilot: status=not_ready" in audit["response_text"]
+    assert row["copilot_events"]["event_count"] > 0
+    assert "copilot: status=answered" in audit["response_text"]
 
 
 def test_assistant_turn_channel_copilot_persists_failed_event_summary(
@@ -399,14 +294,14 @@ def test_assistant_turn_channel_copilot_persists_failed_event_summary(
             request_id=str(kwargs.get("request_id") or ""),
             contract_id="contract_failed",
             run_id=run_id,
-            decision_trace={"selected_scene": "channel_smoke"},
+            decision_trace={"selected_scene": "operations_diagnostics"},
             events=[
                 AppEvent(
                     event_id="evt_1",
                     run_id=run_id,
                     type="contract_received",
                     timestamp=utc_now_iso(),
-                    payload={"contract_id": "contract_failed", "scene": "channel_smoke"},
+                    payload={"contract_id": "contract_failed", "scene": "operations_diagnostics"},
                 ),
                 AppEvent(
                     event_id="evt_2",
@@ -430,7 +325,7 @@ def test_assistant_turn_channel_copilot_persists_failed_event_summary(
     result = handle_assistant_turn(
         _request(tmp_path, "分析6月的期权操作有没有不合理，需要优化的地方"),
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("channel_smoke",))),
+        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("operations_diagnostics",))),
         now_fn=lambda: date(2026, 7, 6),
     )
 
@@ -463,7 +358,7 @@ def test_assistant_turn_channel_copilot_event_summary_stabilizes_failure_reasons
             request_id=str(kwargs.get("request_id") or ""),
             contract_id="contract_secret_failure",
             run_id=run_id,
-            decision_trace={"selected_scene": "channel_smoke"},
+            decision_trace={"selected_scene": "operations_diagnostics"},
             events=[
                 AppEvent(
                     event_id="evt_1",
@@ -494,7 +389,7 @@ def test_assistant_turn_channel_copilot_event_summary_stabilizes_failure_reasons
     result = handle_assistant_turn(
         _request(tmp_path, "分析6月的期权操作有没有不合理，需要优化的地方"),
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("channel_smoke",))),
+        settings=AssistantSettings(copilot=CopilotSettings(enabled=True, channel_scenes=("operations_diagnostics",))),
         now_fn=lambda: date(2026, 7, 6),
     )
 
@@ -526,14 +421,14 @@ def test_assistant_turn_channel_copilot_human_review_holds_channel_answer(
             request_id=str(kwargs.get("request_id") or ""),
             contract_id="contract_review",
             run_id=run_id,
-            decision_trace={"selected_scene": "channel_smoke"},
+            decision_trace={"selected_scene": "operations_diagnostics"},
             events=[
                 AppEvent(
                     event_id="evt_1",
                     run_id=run_id,
                     type="contract_received",
                     timestamp=utc_now_iso(),
-                    payload={"contract_id": "contract_review", "scene": "channel_smoke"},
+                    payload={"contract_id": "contract_review", "scene": "operations_diagnostics"},
                 ),
                 AppEvent(
                     event_id="evt_2",
@@ -553,7 +448,7 @@ def test_assistant_turn_channel_copilot_human_review_holds_channel_answer(
         settings=AssistantSettings(
             copilot=CopilotSettings(
                 enabled=True,
-                channel_scenes=("channel_smoke",),
+                channel_scenes=("operations_diagnostics",),
                 human_review=True,
             )
         ),

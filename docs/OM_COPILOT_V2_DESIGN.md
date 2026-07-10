@@ -11,9 +11,10 @@ Current runtime authority remains [ARCHITECTURE.md](ARCHITECTURE.md) and
 natural-language execution is disabled by default and returns
 `NATURAL_LANGUAGE_REBUILDING`. The local `./om copilot ...` surface is the
 local/eval entry. A disabled-by-default channel gate exists, but no real
-business scene is `channel_ready` yet. Channel execution will require
-`assistant.copilot.channel_scenes` to explicitly allowlist a channel-ready scene
-plus explicit usable assistant model configuration: config file present, model
+analysis scene is `channel_ready` yet. The `operations_diagnostics` scene is
+the first channel-ready slice. Channel execution requires
+`assistant.copilot.channel_scenes` to explicitly allowlist it plus explicit
+usable assistant model configuration: config file present, model
 profile present, and the referenced API-key environment variable configured.
 Without those gates the facade returns `not_ready` before calling tools.
 `assistant.copilot.human_review=true` can hold Host-backed channel answers for
@@ -2063,10 +2064,10 @@ Current implemented Phase 3 slice:
 - After channel gates pass, the facade passes the same prepared
   `ExecutionContract` into Host execution; channel execution does not re-run
   request understanding or scene selection through the local CLI harness.
-- No production scene is `channel_ready` in the current slice. The channel
-  facade still proves the gate order and will require an allowlisted
-  channel-ready scene plus explicit usable assistant model configuration before
-  calling tools. That means the assistant config file must exist, contain an
+- `operations_diagnostics` is `channel_ready` in the current slice. The channel
+  facade still enforces gate order and requires that scene to be allowlisted
+  plus explicit usable assistant model configuration before calling tools. That
+  means the assistant config file must exist, contain an
   enabled model profile, and point to an API-key environment variable that is
   actually configured. Without those gates, channel free-form returns
   `not_ready` and does not call tools or use the old assistant planner/evidence
