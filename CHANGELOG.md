@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.378 - 2026-07-10
+
+### Added
+- Added conversation-aware batch confirmation for multi-contract option-expiry notices, so replying `确认` applies the unique pending expiry batch without copying an operation id.
+
 ## 1.2.377 - 2026-07-10
 
 ### Added
