@@ -14,6 +14,7 @@ from src.application.copilot.contracts import (
 )
 from src.application.copilot.host import run_contract
 from src.application.copilot.local_harness import run_local_request
+from src.application.copilot.model_client import ACTION_JSON_SCHEMA
 from src.application.copilot.model_decider import ModelActionDecider
 from src.application.copilot.rendering import render_user_response
 from src.application.copilot.scene import build_scene_manifest
@@ -53,6 +54,23 @@ def _request(
 
 def _model_action_fixture(name: str) -> str:
     return (COPILOT_FIXTURES / name).read_text(encoding="utf-8")
+
+
+def test_action_json_schema_is_strict_provider_compatible() -> None:
+    def assert_strict_objects(schema: object, path: str = "$") -> None:
+        if isinstance(schema, dict):
+            properties = schema.get("properties")
+            if isinstance(properties, dict):
+                required = schema.get("required")
+                assert isinstance(required, list), path
+                assert set(properties) <= set(required), path
+            for key, value in schema.items():
+                assert_strict_objects(value, f"{path}.{key}")
+        elif isinstance(schema, list):
+            for index, item in enumerate(schema):
+                assert_strict_objects(item, f"{path}[{index}]")
+
+    assert_strict_objects(ACTION_JSON_SCHEMA)
 
 
 def test_service_projects_scene_to_host_manifest_without_answer_markers() -> None:
