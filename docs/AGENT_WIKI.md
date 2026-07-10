@@ -35,8 +35,9 @@ Entrypoint rule:
   non-permission messages return `NATURAL_LANGUAGE_REBUILDING` unless the
   explicit `assistant.copilot.enabled` gate is enabled. That gate still requires
   a scene allowlist in `assistant.copilot.channel_scenes` and explicit assistant
-  model configuration before a channel-ready scene can run. Only
-  `operations_diagnostics` is channel-ready in the current slice.
+  model configuration before a channel-ready scene can run. The current
+  channel-ready scenes are `operations_diagnostics` and
+  `monthly_income_attribution`.
   `assistant.copilot.human_review=true` holds Host-backed channel answers for
   manual review while retaining sanitized audit summaries.
 
