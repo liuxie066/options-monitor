@@ -96,7 +96,7 @@ def test_write_like_request_is_refused_before_host() -> None:
     assert prepared.decision_trace["safety_hits"]
 
 
-def test_channel_environment_has_no_executable_freeform_scene() -> None:
+def test_channel_environment_keeps_monthly_option_review_not_ready() -> None:
     prepared = prepare_contract(
         _request(
             "分析6月的期权操作有没有不合理，需要优化的地方",
@@ -109,6 +109,20 @@ def test_channel_environment_has_no_executable_freeform_scene() -> None:
     assert isinstance(prepared, AppResult)
     assert prepared.status == "not_ready"
     assert "渠道自由问答尚未开放" in prepared.answer_report.conclusion
+
+
+def test_channel_environment_prepares_monthly_income_attribution() -> None:
+    prepared = prepare_contract(
+        _request("7月收益", environment="channel"),
+        reference_year=2026,
+    )
+
+    assert not isinstance(prepared, AppResult)
+    assert prepared.scene_name == "monthly_income_attribution"
+    assert prepared.execution_environment == "channel"
+    assert prepared.input["month"] == "2026-07"
+    assert prepared.decision_trace["requested_capabilities"] == ["monthly_income_attribution"]
+    assert prepared.decision_trace["scope_sources"]["month"] == "message.month"
 
 
 def test_monthly_option_review_is_not_a_dedicated_copilot_capability() -> None:

@@ -10,11 +10,11 @@ Current runtime authority remains [ARCHITECTURE.md](ARCHITECTURE.md) and
 [INBOUND_CONTROL.md](INBOUND_CONTROL.md): production/channel free-form
 natural-language execution is disabled by default and returns
 `NATURAL_LANGUAGE_REBUILDING`. The local `./om copilot ...` surface is the
-local/eval entry. A disabled-by-default channel gate exists, but no real
-analysis scene is `channel_ready` yet. The `operations_diagnostics` scene is
-the first channel-ready slice. Channel execution requires
-`assistant.copilot.channel_scenes` to explicitly allowlist it plus explicit
-usable assistant model configuration: config file present, model
+local/eval entry. A disabled-by-default channel gate exists, and the first
+channel-ready slices are `operations_diagnostics` and
+`monthly_income_attribution`. Channel execution requires
+`assistant.copilot.channel_scenes` to explicitly allowlist the selected scene
+plus explicit usable assistant model configuration: config file present, model
 profile present, and the referenced API-key environment variable configured.
 Without those gates the facade returns `not_ready` before calling tools.
 `assistant.copilot.human_review=true` can hold Host-backed channel answers for
@@ -647,12 +647,12 @@ mock_data_not_allowed
 ambiguous_scene
 ```
 
-Current local/eval scene catalog:
+Current scene catalog:
 
 | Scene | Match fields | Toolsets | Readiness | Environment |
 |---|---|---|---|---|
-| `operations_diagnostics` | `task_kind=diagnosis`, capabilities for runtime, candidate-filter, and close-advice notification diagnosis; `config_key` required | `runtime_status`, `candidate_filter_explain`, `close_advice_read`; eval fixtures `candidate_filter_diagnostics_model_ready` and `close_advice_notification_diagnostics_model_ready` only in `eval` | `local_only` | `local`, `eval` |
-| `monthly_income_attribution` | `task_kind=read_analysis`, capability `monthly_income_attribution`, `config_key` and `month` required | `analysis_catalog`, `analysis_query` in approved income view-mode, `monthly_income_report`; eval fixture `june_income_attribution_basic` only in `eval` | `local_only` | `local`, `eval` |
+| `operations_diagnostics` | `task_kind=diagnosis`, capabilities for runtime, candidate-filter, and close-advice notification diagnosis; `config_key` required | `runtime_status`, `candidate_filter_explain`, `close_advice_read`; eval fixtures `candidate_filter_diagnostics_model_ready` and `close_advice_notification_diagnostics_model_ready` only in `eval` | `channel_ready` | `local`, `eval`, `channel` |
+| `monthly_income_attribution` | `task_kind=read_analysis`, capability `monthly_income_attribution`, `config_key` and `month` required | `analysis_catalog`, `analysis_query` in approved income view-mode, `monthly_income_report`; eval fixture `june_income_attribution_basic` only in `eval` | `channel_ready` | `local`, `eval`, `channel` |
 | `current_option_exposure` | `task_kind=read_analysis`, capability `current_option_exposure`, `config_key` required | `analysis_catalog`, `analysis_query` over exposure views, `option_positions_read`; eval fixture `current_option_exposure_model_ready` only in `eval` | `local_only` | `local`, `eval` |
 
 Capability activation patterns are task anchors, not answer-intent templates.
@@ -1680,7 +1680,7 @@ It must not fall back to all `SceneDefinition.allowed_tools`.
 | Scene | Environment | Tool source | Acceptance |
 |---|---|---|---|
 | `operations_diagnostics` | `local`, `eval` | local: `runtime_status`, `candidate_filter_explain`, `close_advice_read`; eval fixtures `candidate_filter_diagnostics_model_ready` and `close_advice_notification_diagnostics_model_ready` | Local run can answer runtime-health, candidate-filter, and close-advice notification diagnosis questions with conclusion, attempted checks, evidence, and remaining gaps. Eval verifies the same Host-admitted model answer path on non-analysis diagnostics scenes and must label the result as eval-only. |
-| `monthly_income_attribution` | `local`, `eval` | local: `analysis_catalog`, `analysis_query` view-mode over approved income views, `monthly_income_report`; eval: fixture `june_income_attribution_basic` | Local run attempts real read-only income evidence. Without a model action decider it remains `insufficient_evidence`; with a configured local model it may return an evidence-backed income attribution answer and does not require recommendations. Eval `june_income_attribution_basic` verifies both the no-model answer shape and the explicit model-action answer-quality admission path, and must label the result as eval-only. |
+| `monthly_income_attribution` | `local`, `eval`, `channel` | local/channel: `analysis_catalog`, `analysis_query` view-mode over approved income views, `monthly_income_report`; eval: fixture `june_income_attribution_basic` | Local run attempts real read-only income evidence. Channel run uses the same Host path only after scene allowlist and assistant model gates pass. Without a model action decider it remains `insufficient_evidence`; with a configured model it may return an evidence-backed income attribution answer and does not require recommendations. Eval `june_income_attribution_basic` verifies both the no-model answer shape and the explicit model-action answer-quality admission path, and must label the result as eval-only. |
 | `current_option_exposure` | `local`, `eval` | local: `analysis_catalog`, `analysis_query` view-mode over `open_option_exposure` and `expiration_risk_buckets`, `option_positions_read`; eval: fixture `current_option_exposure_model_ready` | Local run attempts real read-only exposure evidence. Without a model action decider it remains `insufficient_evidence`; with a configured local model it may return an evidence-backed exposure concentration answer. Eval verifies the same answer-quality admission path on a non-review synthesis scene and must label the result as eval-only. |
 
 Normal `./om copilot run` must not use fixture observations in local mode. Phase
@@ -2064,9 +2064,10 @@ Current implemented Phase 3 slice:
 - After channel gates pass, the facade passes the same prepared
   `ExecutionContract` into Host execution; channel execution does not re-run
   request understanding or scene selection through the local CLI harness.
-- `operations_diagnostics` is `channel_ready` in the current slice. The channel
-  facade still enforces gate order and requires that scene to be allowlisted
-  plus explicit usable assistant model configuration before calling tools. That
+- `operations_diagnostics` and `monthly_income_attribution` are `channel_ready`
+  in the current slice. The channel facade still enforces gate order and
+  requires the selected scene to be allowlisted plus explicit usable assistant
+  model configuration before calling tools. That
   means the assistant config file must exist, contain an
   enabled model profile, and point to an API-key environment variable that is
   actually configured. Without those gates, channel free-form returns

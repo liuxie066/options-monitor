@@ -39,9 +39,10 @@ Inbound Assistant currently rejects:
 Rejected free text returns `NATURAL_LANGUAGE_REBUILDING` by default. If
 `assistant.copilot.enabled=true` is explicitly configured, free text enters the
 Copilot channel gate. A scene must also be allowlisted in
-`assistant.copilot.channel_scenes`; only `operations_diagnostics` is
-channel-ready in the current slice. Channel execution also requires explicit
-assistant model configuration before any tool call. `assistant.copilot.human_review=true`
+`assistant.copilot.channel_scenes`; `operations_diagnostics` and
+`monthly_income_attribution` are channel-ready in the current slice. Channel
+execution also requires explicit assistant model configuration before any tool
+call. `assistant.copilot.human_review=true`
 holds Host-backed
 channel answers for manual review while retaining sanitized audit summaries.
 
@@ -106,6 +107,7 @@ The previous free-form task/evidence/answer stack has been removed. Do not add
 hardcoded question templates or channel-specific intent rules to compensate for
 that removal. The replacement is the Copilot v2 Service + Host + Agent task
 system, currently exposed only through local/eval `./om copilot ...` commands
-for answer-quality work. The Inbound Assistant has only a disabled-by-default
-channel gate; only `operations_diagnostics` is channel-ready in the current
-slice, while analysis scenes remain local/eval only.
+for answer-quality work. The Inbound Assistant has a disabled-by-default channel
+gate; `operations_diagnostics` and `monthly_income_attribution` are
+channel-ready in the current slice, while current exposure analysis remains
+local/eval only.

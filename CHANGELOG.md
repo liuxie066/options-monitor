@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.372 - 2026-07-10
+
+### Added
+- Enabled `monthly_income_attribution` as a channel-ready Copilot scene so ClawBot can answer read-only monthly income questions such as `7月收益` after the scene and model gates pass.
+
 ## 1.2.371 - 2026-07-10
 
 ### Added
