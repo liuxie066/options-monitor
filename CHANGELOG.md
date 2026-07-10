@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.377 - 2026-07-10
+
+### Added
+- Added `/record-expiry` for Futu option-expiry notices, parsing every contract into an independently confirmed ledger preview so multi-leg notices cannot silently drop positions.
+
 ## 1.2.376 - 2026-07-10
 
 ### Fixed

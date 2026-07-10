@@ -181,7 +181,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="manual_expiry",
         tool_name="inbound.manual_trade",
-        commands=(),
+        commands=("/record-expiry",),
         display_name="记录到期失效",
         arguments=("raw_text", "account"),
         read_only=False,
@@ -190,6 +190,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         examples=(
             "期权到期失效通知",
             "已到期失效",
+            "/record-expiry <富途期权到期失效通知>",
         ),
         summary="preview an expired-unassigned option lifecycle record",
         operation_action="preview",

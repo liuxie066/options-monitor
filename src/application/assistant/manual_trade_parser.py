@@ -20,7 +20,7 @@ _FUTU_LIFECYCLE_NOTICE_RE = re.compile(
     r"(?P<symbol>[A-Za-z0-9_.]{1,16}|[\u4e00-\u9fff]{2,12})\s+"
     r"(?P<expiration>\d{6})\s+"
     r"(?P<strike>\d+(?:\.\d+)?)\s*"
-    r"(?P<option_type>[PCpc]|购|沽)\s*期权"
+    r"(?P<option_type>[PCpc]|购|沽)(?:\s*期权)?"
 )
 
 
@@ -67,6 +67,9 @@ def build_manual_trade_draft(
             allow_opend_refresh=allow_opend_refresh,
         )
     elif operation_type == "manual_expiry":
+        notice_values = _extract_futu_lifecycle_notice_values_all(raw_text, accounts=accounts)
+        if len(notice_values) > 1:
+            raise ValueError("multiple expiry contracts require build_manual_expiry_drafts")
         arguments, diagnostics = _build_expiry_draft(
             raw_text,
             accounts=accounts,
@@ -79,6 +82,49 @@ def build_manual_trade_draft(
     else:
         raise ValueError(f"unsupported manual trade operation_type: {operation_type}")
     return {"arguments": arguments, "diagnostics": diagnostics}
+
+
+def build_manual_expiry_drafts(
+    *,
+    raw_text: str,
+    accounts: list[str] | tuple[str, ...] | None,
+    config_key: str | None,
+    config_path: str | Path | None,
+    runtime_config: dict[str, Any] | None,
+    repo_base: Path,
+    allow_opend_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    notices = _extract_futu_lifecycle_notice_values_all(raw_text, accounts=accounts)
+    if not notices:
+        return [
+            build_manual_trade_draft(
+                "manual_expiry",
+                raw_text=raw_text,
+                accounts=accounts,
+                config_key=config_key,
+                config_path=config_path,
+                runtime_config=runtime_config,
+                repo_base=repo_base,
+                allow_opend_refresh=allow_opend_refresh,
+            )
+        ]
+    drafts: list[dict[str, Any]] = []
+    for index, notice in enumerate(notices, start=1):
+        arguments, diagnostics = _build_expiry_draft(
+            raw_text,
+            accounts=accounts,
+            config_key=config_key,
+            config_path=config_path,
+            runtime_config=runtime_config,
+            repo_base=repo_base,
+            allow_opend_refresh=allow_opend_refresh,
+            notice=notice,
+        )
+        if len(notices) > 1:
+            diagnostics["batch_index"] = index
+            diagnostics["batch_size"] = len(notices)
+        drafts.append({"arguments": arguments, "diagnostics": diagnostics})
+    return drafts
 
 
 def _build_open_draft(
@@ -336,10 +382,11 @@ def _build_expiry_draft(
     runtime_config: dict[str, Any] | None,
     repo_base: Path,
     allow_opend_refresh: bool,
+    notice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del repo_base, allow_opend_refresh
     labeled = _extract_labeled_values(text)
-    notice = _extract_futu_lifecycle_notice_values(text, accounts=accounts)
+    notice = dict(notice) if isinstance(notice, dict) else _extract_futu_lifecycle_notice_values(text, accounts=accounts)
     raw_symbol, symbol_source = _first_value_with_source(
         (labeled.get("symbol"), "labeled"),
         (notice.get("raw_symbol") or notice.get("symbol"), "futu_lifecycle_notice"),
@@ -459,27 +506,36 @@ def _extract_futu_fill_values(text: str, *, accounts: list[str] | tuple[str, ...
 
 
 def _extract_futu_lifecycle_notice_values(text: str, *, accounts: list[str] | tuple[str, ...] | None) -> dict[str, Any]:
+    values = _extract_futu_lifecycle_notice_values_all(text, accounts=accounts)
+    return values[0] if values else {}
+
+
+def _extract_futu_lifecycle_notice_values_all(
+    text: str,
+    *,
+    accounts: list[str] | tuple[str, ...] | None,
+) -> list[dict[str, Any]]:
     if not _looks_like_futu_lifecycle_notice(text):
-        return {}
-    match = _FUTU_LIFECYCLE_NOTICE_RE.search(text)
-    if not match:
-        return {}
-    signed_contracts = int(match.group("contracts"))
-    raw_symbol = match.group("symbol").strip()
-    option_type = _parse_option_type(match.group("option_type"))
-    out: dict[str, Any] = {
-        "raw_symbol": raw_symbol,
-        "symbol": raw_symbol,
-        "expiration_ymd": _parse_yymmdd(match.group("expiration")),
-        "option_type": option_type,
-        "contracts": abs(signed_contracts),
-        "contracts_signed": signed_contracts,
-        "position_side": "short" if signed_contracts < 0 else "long" if signed_contracts > 0 else None,
-        "strike": float(match.group("strike")),
-        "account": _extract_account(text, accounts=accounts),
-        "broker": "富途",
-    }
-    return {key: value for key, value in out.items() if value not in (None, "")}
+        return []
+    account = _extract_account(text, accounts=accounts)
+    out: list[dict[str, Any]] = []
+    for match in _FUTU_LIFECYCLE_NOTICE_RE.finditer(text):
+        signed_contracts = int(match.group("contracts"))
+        raw_symbol = match.group("symbol").strip()
+        values: dict[str, Any] = {
+            "raw_symbol": raw_symbol,
+            "symbol": raw_symbol,
+            "expiration_ymd": _parse_yymmdd(match.group("expiration")),
+            "option_type": _parse_option_type(match.group("option_type")),
+            "contracts": abs(signed_contracts),
+            "contracts_signed": signed_contracts,
+            "position_side": "short" if signed_contracts < 0 else "long" if signed_contracts > 0 else None,
+            "strike": float(match.group("strike")),
+            "account": account,
+            "broker": "富途",
+        }
+        out.append({key: value for key, value in values.items() if value not in (None, "")})
+    return out
 
 
 def _looks_like_futu_lifecycle_notice(text: str) -> bool:
