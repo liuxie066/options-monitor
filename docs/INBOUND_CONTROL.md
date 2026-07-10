@@ -77,8 +77,10 @@ explicit command
 The preview does not mutate live config, positions, trade events, notifications,
 or broker-facing state. Confirmation is required before an apply path runs.
 When one expiry notice contains multiple contracts, `/record-expiry` creates one
-pending operation per contract. Each operation must be confirmed separately by
-its explicit `/confirm trade <operation_id>` command.
+pending operation per contract. Confirm the whole notice with
+the plain reply `确认` (the conversation resolves its unique `command_id`), use
+`/confirm trade <command_id>` as an explicit fallback, or confirm individual contracts with
+`/confirm trade <operation_id>`.
 
 ## Reply Contract
 

@@ -660,6 +660,7 @@ def _operation_summary(operation: dict[str, Any]) -> dict[str, Any]:
     operation_type = str(operation.get("operation_type") or "")
     return {
         "operation_id": operation.get("operation_id"),
+        "command_id": operation.get("command_id"),
         "operation_type": operation_type,
         "summary": _operation_summary_text(operation_type, operation),
         "conversation_id": operation.get("conversation_id"),

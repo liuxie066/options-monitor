@@ -348,6 +348,33 @@ def _preview_and_save_expiry_batch(
 
 
 def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
+    batch_operation_ids = _pending_expiry_batch_operation_ids(operation_id=operation_id, request=request, store=store)
+    if batch_operation_ids:
+        results: list[dict[str, Any]] = []
+        for child_operation_id in batch_operation_ids:
+            try:
+                results.append(_confirm_operation(operation_id=child_operation_id, request=request, store=store))
+            except AgentToolError as exc:
+                raise AgentToolError(
+                    code=exc.code,
+                    message=f"批量确认部分完成：已写入 {len(results)}/{len(batch_operation_ids)} 笔；{child_operation_id} 失败：{exc.message}",
+                    hint="请使用 /pending 查看仍待确认的记录。",
+                    details={"command_id": operation_id, "applied_count": len(results), "failed_operation_id": child_operation_id},
+                ) from exc
+        return build_response(
+            tool_name="inbound.manual_trade",
+            ok=True,
+            data={
+                "command_id": operation_id,
+                "operation_ids": batch_operation_ids,
+                "operation_type": "manual_expiry",
+                "status": "applied",
+                "applied_count": len(results),
+                "operations": [dict(result.get("data") or {}) for result in results],
+                "response_text": f"已批量确认 {len(results)} 笔期权到期失效记录，已写入账本。\ncommand_id: {operation_id}",
+            },
+            meta={"audit_db": mask_path(store.path)},
+        )
     operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
         operation_id=operation_id,
         request=request,
@@ -395,6 +422,28 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
             "response_text": text,
         },
         meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _pending_expiry_batch_operation_ids(
+    *,
+    operation_id: str | None,
+    request: AssistantRequest,
+    store: InboundOperationStore,
+) -> list[str]:
+    command_id = str(operation_id or "").strip()
+    if not command_id or store.get(command_id) is not None:
+        return []
+    pending = store.list_pending_operations(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+        operation_types={"manual_expiry"},
+    )
+    return list(
+        reversed(
+            [str(item["operation_id"]) for item in pending if str(item.get("command_id") or "") == command_id]
+        )
     )
 
 
@@ -887,7 +936,10 @@ def _manual_expiry_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def render_manual_expiry_batch_response(operations: list[dict[str, Any]]) -> str:
-    lines = [f"交易记录预览：到期失效（{len(operations)} 笔）", "以下每笔独立确认，当前均未写入账本。"]
+    command_id = str(operations[0].get("operation_id") or "").rpartition(":")[0] if operations else ""
+    lines = [f"交易记录预览：到期失效（{len(operations)} 笔）", "当前均未写入账本。", "直接回复“确认”可批量写入。"]
+    if command_id:
+        lines.append(f"命令确认：/confirm trade {command_id}")
     for index, operation in enumerate(operations, start=1):
         payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
         args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
@@ -906,7 +958,7 @@ def render_manual_expiry_batch_response(operations: list[dict[str, Any]]) -> str
                 f"   取消：/cancel trade {operation_id}",
             ]
         )
-    lines.extend(["", "请按 operation_id 逐笔确认；不会一次写入全部合约。"])
+    lines.extend(["", "也可按 operation_id 逐笔确认。"])
     return "\n".join(lines)
 
 

@@ -703,6 +703,8 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
         ("lx", "0700.HK", "2026-07-10", 410.0, "put", "short", 1),
     ]
     assert repo.list_trade_events() == initial_events
+    assert "直接回复“确认”可批量写入。" in preview["data"]["response_text"]
+    assert f"命令确认：/confirm trade {preview['data']['command_id']}" in preview["data"]["response_text"]
     assert all(f"/confirm trade {operation_id}" in preview["data"]["response_text"] for operation_id in operation_ids)
 
     pending = handle_assistant_request(
@@ -740,6 +742,24 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     assert expire_events[0]["symbol"] == "3690.HK"
     remaining = InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1")
     assert {item["operation_id"] for item in remaining} == {operation_ids[0], operation_ids[2]}
+
+    batch_confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_expiry_batch_confirm_remaining",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert batch_confirmed["ok"] is True
+    assert batch_confirmed["data"]["applied_count"] == 2
+    assert batch_confirmed["data"]["command_id"] == preview["data"]["command_id"]
+    assert InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1") == []
+    expire_events = [item for item in repo.list_trade_events() if item.get("event_type") == "expire_close"]
+    assert len(expire_events) == 3
 
 
 def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:

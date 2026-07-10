@@ -206,6 +206,16 @@ def _resolve_operation_id(
     request: AssistantRequest,
     store: InboundOperationStore,
 ) -> str:
+    if operation_id is None and family.key == "trade":
+        pending = store.list_pending_operations(
+            channel=request.channel,
+            sender_id=request.sender_id,
+            conversation_id=request.conversation_id,
+            operation_types=family.operation_types,
+        )
+        command_ids = {str(item.get("command_id") or "") for item in pending}
+        if len(pending) > 1 and {item.get("operation_type") for item in pending} == {"manual_expiry"} and len(command_ids) == 1:
+            return command_ids.pop()
     resolved_operation_id, _operation, _resolution = resolve_pending_operation_or_raise(
         operation_id=operation_id,
         request=request,
