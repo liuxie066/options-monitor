@@ -111,6 +111,18 @@ def test_channel_environment_has_no_executable_freeform_scene() -> None:
     assert "渠道自由问答尚未开放" in prepared.answer_report.conclusion
 
 
+def test_monthly_option_review_is_not_a_dedicated_copilot_capability() -> None:
+    prepared = prepare_contract(
+        _request("分析6月的期权操作有没有不合理，需要优化的地方", month="2026-06"),
+        reference_year=2026,
+    )
+
+    assert isinstance(prepared, AppResult)
+    assert prepared.status == "needs_clarification"
+    assert prepared.decision_trace["selected_scene"] is None
+    assert "monthly_option_review" not in prepared.decision_trace["candidate_scenes"]
+
+
 def test_local_runtime_question_runs_service_host_agent_loop(monkeypatch) -> None:
     from src.application.copilot import tools as copilot_tools
 
@@ -137,178 +149,6 @@ def test_local_runtime_question_runs_service_host_agent_loop(monkeypatch) -> Non
     assert result.ok is True
     assert result.answer_report.evidence_refs == ["obs_1"]
     assert result.user_response.startswith("结论")
-
-
-def test_eval_monthly_option_review_accepts_model_report_with_refs() -> None:
-    result = render_user_response(
-        run_local_request(
-            _request(
-                "分析6月的期权操作有没有不合理，需要优化的地方",
-                month="2026-06",
-                environment="eval",
-                scene="monthly_option_review",
-                fixture="june_option_review_model_ready",
-            ),
-            reference_year=2026,
-            model_action_json=_model_action_fixture("june_option_review_model_action.json"),
-        )
-    )
-
-    assert result.status == "answered"
-    assert result.ok is True
-    report = result.answer_report
-    assert set(report.evidence_refs) == {"obs_2", "obs_3", "obs_4", "obs_5"}
-    assert "收益质量" in report.conclusion
-    assert "行权/股票本金占用" in report.conclusion
-    assert "Close Advice" in report.conclusion
-    assert "FUTU 的行权生命周期 P/L 为 -1,640 USD" in result.user_response
-    assert "9992.HK/HKD 12张" in result.user_response
-    assert "2条 close、6条 not_evaluable、5条 quote_unusable" in result.user_response
-    assert "trade_events.row_count=0" in " ".join(report.missing_data)
-    assert {item["answer_dimension"] for item in report.recommendations} == {
-        "profit quality",
-        "assignment cash outlay",
-        "open-exposure concentration",
-        "current close-advice signals",
-        "evidence gaps",
-    }
-
-
-def test_eval_model_report_with_non_claimable_ref_is_not_admitted() -> None:
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_model_ready",
-        ),
-        reference_year=2026,
-        model_action_json=_model_action_fixture("bad_catalog_ref_model_action.json"),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert result.ok is True
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_requires_cited_recommendation() -> None:
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_model_ready",
-        ),
-        reference_year=2026,
-        model_action_json=_model_action_fixture("bad_missing_recommendation_model_action.json"),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_rejects_row_dump_answer() -> None:
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_model_ready",
-        ),
-        reference_year=2026,
-        model_action_json=_model_action_fixture("bad_raw_rows_model_action.json"),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.findings == []
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_rejects_failed_observation_recommendation() -> None:
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_close_advice_missing",
-        ),
-        reference_year=2026,
-        model_action_json=_model_action_fixture("bad_failed_ref_model_action.json"),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert "close_advice_read evidence unavailable: DEPENDENCY_MISSING" in result.answer_report.missing_data
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_recommendation_needs_requested_period_basis() -> None:
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_model_ready",
-        ),
-        reference_year=2026,
-        model_action_json=_model_action_fixture("bad_current_only_recommendation_model_action.json"),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_recommendation_needs_allowed_answer_dimension() -> None:
-    raw = json.loads(_model_action_fixture("june_option_review_model_action.json"))
-    raw["answer_report"]["recommendations"][0]["answer_dimension"] = "当前快照建议"
-
-    result = run_local_request(
-        _request(
-            "分析6月的期权操作有没有不合理，需要优化的地方",
-            month="2026-06",
-            environment="eval",
-            scene="monthly_option_review",
-            fixture="june_option_review_model_ready",
-        ),
-        reference_year=2026,
-        model_action_json=json.dumps(raw, ensure_ascii=False),
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert "recommendation answer dimension" in result.answer_report.missing_data
-    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
-    assert result.answer_report.recommendations == []
-
-
-def test_eval_monthly_option_review_missing_monthly_evidence_only_reports_partial_context() -> None:
-    result = render_user_response(
-        run_local_request(
-            _request(
-                "分析6月的期权操作有没有不合理，需要优化的地方",
-                month="2026-06",
-                environment="eval",
-                scene="monthly_option_review",
-                fixture="june_option_review_income_missing_current_exposure",
-            ),
-            reference_year=2026,
-            model_action_json=_model_action_fixture("june_option_review_income_missing_current_exposure_model_action.json"),
-        )
-    )
-
-    assert result.status == "insufficient_evidence"
-    assert result.answer_report.conclusion == "结论：当前证据不足，Copilot 未能形成有效结论。"
-    assert result.answer_report.recommendations == []
-    assert "只能作为当前暴露上下文" in result.user_response
-    assert "请求月份没有匹配的本地交易事件" in result.user_response
 
 
 def test_model_decider_falls_back_to_default_tool_collection_on_model_error() -> None:

@@ -48,10 +48,10 @@ channel answers for manual review while retaining sanitized audit summaries.
 ## Local Copilot v2 Capabilities
 
 Local Copilot v2 currently supports read-only local/eval scenes for operations
-diagnostics, income attribution, current exposure, and monthly option-review
-benchmarks. It selects a declared scene through Service, executes only
-Host-admitted read tools from that scene, and returns `insufficient_evidence`
-when observations cannot support a conclusion.
+diagnostics, income attribution, and current exposure. It selects a declared
+scene through Service, executes only Host-admitted read tools from that scene,
+and returns `insufficient_evidence` when observations cannot support a
+conclusion.
 
 Examples:
 
@@ -59,8 +59,6 @@ Examples:
 ./om copilot run --text "NVDA 为什么没有通过筛选" --config-key us
 ./om copilot eval --scene current_option_exposure --fixture current_option_exposure_model_ready --text "当前期权风险暴露集中在哪些标的" --model-action-json-file tests/fixtures/copilot/current_option_exposure_model_action.json
 ./om copilot eval --scene monthly_income_attribution --fixture june_income_attribution_basic --text "6月收益主要来自哪里" --model-action-json-file tests/fixtures/copilot/june_income_attribution_model_action.json
-./om copilot run --text "分析6月的期权操作有没有不合理，需要优化的地方" --config-key us
-./om copilot eval --scene monthly_option_review --fixture june_option_review_model_ready --month 2026-06 --model-action-json-file tests/fixtures/copilot/june_option_review_model_action.json
 ```
 
 This surface is for local validation and answer-quality regression. It must not

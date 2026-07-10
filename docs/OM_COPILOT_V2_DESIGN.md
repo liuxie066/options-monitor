@@ -340,8 +340,7 @@ to become an implicit business router.
 
 The distinction is:
 
-- Service may decide "this accepted request should run the
-  `monthly_option_review` scene".
+- Service may decide "this accepted request should run a declared scene".
 - Service must not decide "June option trades were unreasonable because of X".
 - Service may match declared capabilities, task kind, required scope, safety
   mode, and toolset readiness.
@@ -653,28 +652,11 @@ Current local/eval scene catalog:
 |---|---|---|---|---|
 | `operations_diagnostics` | `task_kind=diagnosis`, capabilities for runtime, candidate-filter, and close-advice notification diagnosis; `config_key` required | `runtime_status`, `candidate_filter_explain`, `close_advice_read`; eval fixtures `candidate_filter_diagnostics_model_ready` and `close_advice_notification_diagnostics_model_ready` only in `eval` | `local_only` | `local`, `eval` |
 | `monthly_income_attribution` | `task_kind=read_analysis`, capability `monthly_income_attribution`, `config_key` and `month` required | `analysis_catalog`, `analysis_query` in approved income view-mode, `monthly_income_report`; eval fixture `june_income_attribution_basic` only in `eval` | `local_only` | `local`, `eval` |
-| `monthly_option_review` | `task_kind=read_analysis`, capability `monthly_option_review`, `config_key` and `month` required | `analysis_catalog`, `analysis_query` in approved view-mode, `monthly_income_report`, `option_positions_read`, `close_advice_read`; eval fixtures `june_option_review_basic`, `june_option_review_model_ready`, `june_option_review_close_advice_missing`, `june_option_review_income_missing_current_exposure`, and `june_option_review_snapshot_only` only in `eval` | `local_only` | `local`, `eval` |
 | `current_option_exposure` | `task_kind=read_analysis`, capability `current_option_exposure`, `config_key` required | `analysis_catalog`, `analysis_query` over exposure views, `option_positions_read`; eval fixture `current_option_exposure_model_ready` only in `eval` | `local_only` | `local`, `eval` |
 
-For the request "分析6月的期权操作有没有不合理，需要优化的地方",
-Service may select `monthly_option_review` because the accepted task kind is
-`read_analysis`, the requested capability is monthly option review, and month
-scope is present. Service still does not decide findings, evidence, or
-recommendations. In Phase 1 local execution, that scene may call only the
-declared read-only evidence groups: approved analysis workspace views, monthly
-income, option positions, and close advice. It must return
-`insufficient_evidence` when those tools cannot support a conclusion. Mock
-observations remain legal only in
-`execution_environment=eval` with an explicit fixture. Channel execution remains
-disabled until Phase 3.
-
 Capability activation patterns are task anchors, not answer-intent templates.
-For example, `monthly_option_review` may match monthly option operation/review
-language, but it must not depend on judgement or recommendation words such as
-"unreasonable" or "optimize" to enter the scene.
 `monthly_income_attribution` owns monthly income/source questions and does not
-require recommendations; it prevents income attribution requests from inheriting
-the stronger monthly review answer contract.
+require recommendations.
 Likewise, `current_option_exposure` may match current option exposure or
 concentration language, but concentration thresholds and recommendations remain
 Agent/model conclusions backed by observations, not Service routing rules.
@@ -1383,8 +1365,7 @@ It must not prove production monthly-review quality.
 ### Phase 1 Outcome
 
 When Phase 1 is done, these representative local/eval lanes work. The lanes are
-ordered by Copilot capability breadth, not by business priority. Monthly review
-is deliberately last because it is the benchmark, not the default product shape.
+ordered by Copilot capability breadth, not by business priority.
 
 | Lane | Representative command |
 |---|---|
@@ -1392,57 +1373,25 @@ is deliberately last because it is the benchmark, not the default product shape.
 | Close-advice notification diagnosis | `./om copilot eval --scene operations_diagnostics --fixture close_advice_notification_diagnostics_model_ready --text "最近 close advice 为什么没有通知" --model-action-json-file tests/fixtures/copilot/close_advice_notification_diagnostics_model_action.json` |
 | Monthly income attribution | `./om copilot eval --scene monthly_income_attribution --fixture june_income_attribution_basic --text "6月收益主要来自哪里" --model-action-json-file tests/fixtures/copilot/june_income_attribution_model_action.json` |
 | Current exposure analysis | `./om copilot eval --scene current_option_exposure --fixture current_option_exposure_model_ready --text "当前期权风险暴露集中在哪些标的" --model-action-json-file tests/fixtures/copilot/current_option_exposure_model_action.json` |
-| Monthly option-review benchmark | `./om copilot eval --scene monthly_option_review --fixture june_option_review_model_ready --month 2026-06 --model-action-json-file tests/fixtures/copilot/june_option_review_model_action.json` |
-
-Additional monthly-review benchmark fixtures may exist for the hardest
-evidence-boundary cases, but they are not the Phase 1 shape of Copilot:
-
-```text
-./om copilot eval --scene monthly_option_review --fixture june_option_review_basic --month 2026-06
-./om copilot eval --scene monthly_option_review --fixture june_option_review_close_advice_missing --month 2026-06 --model-action-json-file tests/fixtures/copilot/bad_failed_ref_model_action.json
-./om copilot eval --scene monthly_option_review --fixture june_option_review_income_missing_current_exposure --month 2026-06 --model-action-json-file tests/fixtures/copilot/june_option_review_income_missing_current_exposure_model_action.json
-./om copilot eval --scene monthly_option_review --fixture june_option_review_snapshot_only --month 2026-06 --model-action-json '<snapshot-only action>'
-```
 
 The `run` commands execute real read-only OM tools. With an explicit model
 action decider, local diagnostics such as close-advice notification questions may
 return a synthesized conclusion from runtime and close-advice observations; they
 must not claim that a notification was sent unless an observation proves it. The
-monthly review run may return `insufficient_evidence` if local income, position,
-or close-advice observations are missing; it must not substitute mock data or
-generic chat. The `eval` without model config runs against deterministic mock
-observations and is marked eval-only. `eval` with explicit model config may run
-answer synthesis against synthetic fixture facts only; it must not call real OM
-read tools.
+`eval` without model config runs against deterministic mock observations and is
+marked eval-only. `eval` with explicit model config may run answer synthesis
+against synthetic fixture facts only; it must not call real OM read tools.
 `eval` with explicit model action JSON exercises the same model-action parsing,
 repair, Host admission, and CLI rendering path without calling a provider; it is
 an eval harness input, not a production answer path or answer template store.
 The file form exists only to make long eval actions reproducible; it is still
 eval-only and is not accepted by `./om copilot run` or channel paths.
-The extra monthly-review fixtures above exist only because that scene exercises
-the hardest evidence-boundary cases: recommendations, requested-period refs,
-current snapshots, and missing evidence. They must not become templates for
-other scenes.
-`june_option_review_basic` is the no-model shape fixture.
-`june_option_review_model_ready` is the answer-quality fixture and must remain
-`insufficient_evidence` unless a model action decider returns a Host-admitted
-`AnswerReport`. `june_option_review_close_advice_missing` is the missing-evidence
-fixture for proving failed observations cannot support recommendations.
-`june_option_review_income_missing_current_exposure` proves that current
-exposure can appear as partial context when requested-month income evidence is
-missing, but cannot support a requested-month operation-quality conclusion or
-recommendations.
-`june_option_review_snapshot_only` proves current position and latest close-advice
-snapshots cannot by themselves support a requested-month operation review
-conclusion or recommendation. Bad model-action fixtures under
-`tests/fixtures/copilot/bad_*` must remain `insufficient_evidence` and must not
-render `建议：`.
 
 `./om copilot run` is deterministic when no local LLM config is available. Phase
 1 allowed only an explicit opt-in model config argument. Phase 2 expands the
 same model-backed answer-quality loop across diagnostics, income attribution,
-current exposure, and monthly review before any channel expansion. It may also
-load an explicit assistant config path through Copilot's own config adapter, without
+and current exposure before any channel expansion. It may also load an explicit
+assistant config path through Copilot's own config adapter, without
 importing the old assistant runtime. Default assistant config loading is not a
 Copilot path; every model-backed local run must pass model config explicitly so
 machine-local state cannot change deterministic runs or silently export
@@ -1731,28 +1680,18 @@ It must not fall back to all `SceneDefinition.allowed_tools`.
 |---|---|---|---|
 | `operations_diagnostics` | `local`, `eval` | local: `runtime_status`, `candidate_filter_explain`, `close_advice_read`; eval fixtures `candidate_filter_diagnostics_model_ready` and `close_advice_notification_diagnostics_model_ready` | Local run can answer runtime-health, candidate-filter, and close-advice notification diagnosis questions with conclusion, attempted checks, evidence, and remaining gaps. Eval verifies the same Host-admitted model answer path on non-analysis diagnostics scenes and must label the result as eval-only. |
 | `monthly_income_attribution` | `local`, `eval` | local: `analysis_catalog`, `analysis_query` view-mode over approved income views, `monthly_income_report`; eval: fixture `june_income_attribution_basic` | Local run attempts real read-only income evidence. Without a model action decider it remains `insufficient_evidence`; with a configured local model it may return an evidence-backed income attribution answer and does not require recommendations. Eval `june_income_attribution_basic` verifies both the no-model answer shape and the explicit model-action answer-quality admission path, and must label the result as eval-only. |
-| `monthly_option_review` | `local`, `eval` | local: `analysis_catalog`, `analysis_query` view-mode over approved views, `monthly_income_report`, `option_positions_read`, `close_advice_read`; eval: fixtures `june_option_review_basic`, `june_option_review_model_ready`, `june_option_review_close_advice_missing`, `june_option_review_income_missing_current_exposure`, and `june_option_review_snapshot_only` | Local run attempts real read-only evidence. Without a model action decider it remains `insufficient_evidence`; with a configured local model it may return an evidence-backed `AnswerReport` only when cited findings and cited recommendations are present. Eval `june_option_review_basic` verifies answer shape and must label the result as eval-only. Eval `june_option_review_model_ready` verifies model-backed synthesis and must remain `insufficient_evidence` unless a model action decider returns a Host-admitted report. Eval `june_option_review_close_advice_missing` verifies missing close-advice evidence cannot support recommendations. Eval `june_option_review_income_missing_current_exposure` verifies current exposure can be reported as partial context when requested-month income is missing, but cannot support monthly operation conclusions or recommendations. Eval `june_option_review_snapshot_only` verifies current snapshot refs cannot support requested-month operation conclusions when month-scoped evidence is missing. |
 | `current_option_exposure` | `local`, `eval` | local: `analysis_catalog`, `analysis_query` view-mode over `open_option_exposure` and `expiration_risk_buckets`, `option_positions_read`; eval: fixture `current_option_exposure_model_ready` | Local run attempts real read-only exposure evidence. Without a model action decider it remains `insufficient_evidence`; with a configured local model it may return an evidence-backed exposure concentration answer. Eval verifies the same answer-quality admission path on a non-review synthesis scene and must label the result as eval-only. |
 
-Normal `./om copilot run` can select `monthly_option_review` only when
-`config_key` and `month` are available. It must not use fixture observations in
-local mode. Phase 1 did not claim that the monthly review answer was
-production-grade; it only proved that the Dayu-style Service/Host contract could
-run a real read-only analysis scene without the old evidence pipeline. Phase 2
-extends answer-quality validation across multiple scene types: diagnostics,
-income attribution, monthly review, and current exposure. Monthly review remains
-a high-value pressure test, not the Copilot architecture center.
+Normal `./om copilot run` must not use fixture observations in local mode. Phase
+1 proved that the Dayu-style Service/Host contract could run read-only scenes
+without the old evidence pipeline. Phase 2 extends answer-quality validation
+across multiple scene types: diagnostics, income attribution, and current
+exposure.
 The Phase 2 success criterion is that at least one diagnostics scene and one
 analysis scene can both use the same model-backed Agent loop to produce
-Host-admitted answers. `monthly_option_review` must not become the default
-Service route, a shared answer template, or the only scene with answer-quality
-coverage.
+Host-admitted answers.
 `requires_answer_synthesis=true` remains the scene-level guard that prevents
-Host-side observation projection from being reported as a completed monthly
-review.
-`requires_recommendations=true` is specific to monthly option review because the
-user-facing task asks for unreasonable operations and optimization suggestions;
-it does not encode recommendation wording or strategy thresholds.
+Host-side observation projection from being reported as a completed analysis.
 `current_option_exposure` follows the same synthesis guard for current exposure
 analysis: Host may collect read-only exposure observations, but it must not
 convert grouped exposure rows into the final concentration judgement by itself.
@@ -1953,8 +1892,6 @@ Current deterministic tests cover four answer-quality lanes:
 | Close-advice notification diagnosis through eval fixture | `operations_diagnostics` selected; eval-only model action can explain missing close-advice notifications from runtime notification diagnosis and close-advice observations without recommendations. |
 | Monthly income attribution in local run | `monthly_income_attribution` selected; income read-only tools called; no-model or weak evidence returns `insufficient_evidence`; configured local model may synthesize an evidence-backed attribution answer; recommendations are not required. |
 | Monthly income attribution through eval fixture | `monthly_income_attribution` selected; eval-only answer-shaped result and explicit model-action admission path; no production tool calls; recommendations are not required. |
-| Monthly option review in local run | `monthly_option_review` selected; real read-only tools called; no mock observations rendered; no-model or weak evidence returns `insufficient_evidence`; configured local model may produce referenced findings and recommendations. |
-| Monthly option review through eval fixture | `monthly_option_review` selected; eval-only answer-shaped result. |
 | Current option exposure through eval fixture | `current_option_exposure` selected; eval-only model action can produce an evidence-backed exposure answer without recommendations. |
 | Current option exposure in local run | `current_option_exposure` selected; real read-only exposure tools called; no-model or weak evidence returns `insufficient_evidence`; configured local model may synthesize an evidence-backed exposure answer. |
 | Eval scene override without matching free text | `capability_sources.source=scene_override`; fixture still runs. |
@@ -1967,7 +1904,6 @@ Current deterministic tests cover four answer-quality lanes:
 
 - channel rollout;
 - `./om assistant ...` Copilot commands;
-- production-grade monthly option review quality claims;
 - close-advice notification diagnosis;
 - broad conversation memory;
 - full SceneDefinition DSL implementation;
@@ -1996,35 +1932,29 @@ Phase 1 is done only when:
 
 ### Phase 2: Model-Backed Answer-Quality Loop
 
-Phase 2 is not a monthly-review model. It proves that the same generic
-Service/Host/Agent loop can synthesize dependable answers across multiple
-read-only OM scenes. Monthly option-operation review is one high-value pressure
-test, not the owner of shared Agent behavior. Any rule that mentions
-monthly transactions, close-advice review signals, or scene answer dimensions
-belongs in the monthly scene contract, tool evidence context, fixtures, or eval
-case, not in shared Agent, Engine, Host, ModelClient, or generic result
-admission code.
+Phase 2 proves that the same generic Service/Host/Agent loop can synthesize
+dependable answers across multiple read-only OM scenes. Scene-specific evidence
+rules belong in scene contracts, tool evidence context, fixtures, or eval cases,
+not in shared Agent, Engine, Host, ModelClient, or generic result admission
+code.
 
 Phase 2 starts with a model-backed local loop, not channel rollout. The loop is
 complete only when the same runtime path can answer, refuse, or ask for scope
 across multiple read-only scenes:
 
-- diagnostics, income attribution, current exposure, and monthly review are all
-  exercised through the same Service/Host/Agent loop. This is the lane order for
+- diagnostics, income attribution, and current exposure are all exercised
+  through the same Service/Host/Agent loop. This is the lane order for
   implementation and review: diagnostics first, income attribution second,
-  current exposure third, monthly option review last as the benchmark;
+  current exposure third;
 - at least one diagnostics scene, such as close-advice notification diagnosis,
   uses the same model action loop to return a Host-admitted answer without
   recommendations or mutation/send claims;
 - at least one non-review synthesis scene, such as current option exposure or
   monthly income attribution, uses the same model action loop to return a
   Host-admitted answer with cited findings;
-- no additional monthly-review-only fixture, quality rule, or prompt constraint
-  is accepted unless the existing diagnostics, income attribution, and current
-  exposure lanes still pass through the same shared loop;
 - architecture guards prevent shared Agent/Host/ModelClient/Engine code from
-  importing old assistant runtime modules or hardcoding monthly review scene
-  names, fixture names, answer dimensions, or business thresholds;
+  importing old assistant runtime modules or hardcoding business scene names,
+  fixture names, answer dimensions, or business thresholds;
 - for every exercised scene, the Agent attempts the scene-declared read-only
   tool set before finishing, unless missing evidence or budget exhaustion is
   explicit;
@@ -2043,16 +1973,15 @@ across multiple read-only scenes:
   fallback answer rewriting;
 - deterministic evals prove the model-facing request includes the facts, finish
   conditions, and answer-quality contract needed for diagnostics, attribution,
-  exposure, and review answers. Recommendation rendering is verified only in
-  scenes that require recommendations;
+  and exposure answers. Recommendation rendering is verified only in scenes that
+  require recommendations;
 - eval-only action JSON can exercise model-action parsing, Host admission, and
   rendering without a live provider call. Eval-only answers must disclose that
   they are fixtures, and live provider probes that export eval fixture or
   production observations remain explicit operator-approved actions;
 - multi-month wording such as "May and June", "5、6月", or "5-6月" is not
-  silently narrowed to the first detected month. Until multi-month review is
-  implemented, single-month scenes must ask for a specific month before calling
-  tools.
+  silently narrowed to the first detected month. Single-month scenes must ask
+  for a specific month before calling tools.
 
 Phase 2 shared runtime rules are intentionally scene-neutral:
 
@@ -2061,7 +1990,7 @@ Phase 2 shared runtime rules are intentionally scene-neutral:
   scene-specific guidance.
 - Agent, Engine, Host, ModelClient, result admission, and result projection may
   enforce the generic contract implied by those fields, but must not own income,
-  exposure, diagnostics, or monthly-review semantics.
+  exposure, or diagnostics semantics.
 - Observation evidence context may declare `time_basis`, `use_as`,
   `not_evidence_for`, `empty_result_meaning`, `answer_dimensions`,
   `facts_omitted`, and similar compact markers. The shared loop forwards and
@@ -2074,19 +2003,6 @@ Phase 2 shared runtime rules are intentionally scene-neutral:
   make an actual judgment or explicit insufficiency statement, cite current
   claimable refs, and keep claims consistent with the cited evidence boundaries.
 
-Monthly option review remains only the hardest Phase 2 benchmark:
-
-- its evidence checklist, answer dimensions, and recommendation requirement live
-  in its `SceneDefinition` and tool evidence context;
-- it may require cited recommendations because the user asks for optimization
-  advice, but that requirement is a scene contract, not the default Copilot
-  answer shape;
-- current snapshots and latest signal snapshots may add context, but cannot
-  become proof of requested-period transaction history when their evidence
-  context says otherwise;
-- the benchmark must not add fixed conclusions, strategy thresholds, or
-  recommendation templates to shared runtime code.
-
 Phase 2 completion checklist:
 
 | Lane | Required proof |
@@ -2094,17 +2010,15 @@ Phase 2 completion checklist:
 | Diagnostics | Local model loop and eval fixture both return Host-admitted diagnostic answers without recommendations or mutation/send claims; local model-loop coverage also proves missing candidate-filter trace evidence prevents unsupported filter-cause conclusions, and missing `close_advice_read` evidence prevents unsupported close-advice notification root-cause conclusions. |
 | Income attribution | Local model loop and eval fixture both return Host-admitted attribution answers from income/analysis observations; local model-loop coverage also proves missing `monthly_income_report`, missing attribution view, and stale analysis evidence prevent unsupported attribution conclusions. Recommendations are not required. |
 | Current exposure | Local model loop and eval fixture both return Host-admitted exposure answers from exposure/position observations; local model-loop coverage also proves stale analysis evidence and missing `option_positions_read` evidence prevent unsupported concentration conclusions. Recommendations are not required. |
-| Monthly option review | Local model loop and eval fixture return Host-admitted review answers only when cited findings and cited recommendations pass the scene-owned review contract. |
-| Missing/stale evidence | Tool compaction turns missing-view, warning, and stale-view diagnostics into weak evidence with stable missing-data items; model action parsing requires those gaps to be reported before accepting a final answer. This must be proven on at least one non-review local model loop such as `current_option_exposure`, not only on the monthly-review benchmark. |
-| Shared runtime boundary | Architecture guards show Agent, Engine, Host, Service, ModelClient, and generic admission code do not hardcode `monthly_option_review` or fixture names. |
+| Missing/stale evidence | Tool compaction turns missing-view, warning, and stale-view diagnostics into weak evidence with stable missing-data items; model action parsing requires those gaps to be reported before accepting a final answer. This must be proven on at least one local model loop such as `current_option_exposure`. |
+| Shared runtime boundary | Architecture guards show Agent, Engine, Host, Service, ModelClient, and generic admission code do not hardcode scene or fixture names. |
 | Channel boundary | Channel facade stays scene-neutral; channel rollout remains gated by explicit scene allowlist and explicit usable assistant model config. |
 
-Current shared-runtime audit status: monthly-review scene names, fixture names,
+Current shared-runtime audit status: scene names, fixture names,
 answer-dimension labels, and evidence-boundary labels are forbidden from Agent,
 Engine, Host, Service, ModelClient, local harness, contracts, result admission,
-result projection, and generic answer-quality code. Those values may live only in
-scene definitions, tool evidence context, fixtures, rendering labels, tests, or
-this design document.
+result projection, and generic answer-quality code unless they are part of a
+scene catalog or tool-view declaration.
 
 The broader answer-quality milestone depends on these read-only tool views:
 
@@ -2113,7 +2027,7 @@ The broader answer-quality milestone depends on these read-only tool views:
 - positions and exposure reads;
 - close-advice snapshot/read surface;
 - analysis catalog/query reads for approved artifacts: partially ready in the
-  local monthly-review path through view-mode only, not model-generated SQL.
+  local analysis path through view-mode only, not model-generated SQL.
 
 Each tool group may be added only after it has canonical metadata, compact
 output behavior, recoverable error observations, read-only enforcement, and eval
@@ -2125,10 +2039,9 @@ Follow-on answer-quality eval cases for the broader Copilot surface:
 2. Close-advice notification diagnosis.
 3. Monthly income attribution.
 4. Current option risk exposure concentration.
-5. Monthly option-operation review.
-6. Missing archive/artifact handling.
-7. Stale data handling.
-8. Write-like request refusal.
+5. Missing archive/artifact handling.
+6. Stale data handling.
+7. Write-like request refusal.
 
 ### Phase 3: Channel Rollout
 
