@@ -1340,10 +1340,10 @@ def test_copilot_model_client_uses_shared_provider_boundary() -> None:
     assert "Use task_guidance only for scene evidence expectations and stopping conditions." in model_client_text
     assert "Use quality_contract as the output contract" in model_client_text
     assert "Use answer_quality as the output quality contract" not in model_client_text
-    assert '"required": ["summary", "action", "target_scope", "basis_refs"]' in model_client_text
-    assert '"required": ["summary", "action", "target_scope", "answer_dimension", "basis_refs"]' not in model_client_text
-    assert "Required only when task_guidance.answer_dimensions is present." in model_client_text
-    assert "include answer_dimension only when task_guidance.answer_dimensions is present" in model_client_text
+    assert '"required": ["summary", "action", "target_scope", "answer_dimension", "basis_refs"]' in model_client_text
+    assert '"type": ["string", "null"]' in model_client_text
+    assert "Use one task_guidance.answer_dimensions value when present; otherwise null." in model_client_text
+    assert "set answer_dimension to one task_guidance.answer_dimensions value when present, otherwise null" in model_client_text
     assert "Use each observation's evidence_context to distinguish requested-scope evidence, current context" in model_client_text
     assert "finish_conditions.refs_with_omitted_facts" not in model_client_text
     assert "finish_conditions.snapshot_view_boundaries" not in model_client_text

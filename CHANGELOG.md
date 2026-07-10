@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.368 - 2026-07-10
+
+### Fixed
+- Made the Copilot model action schema compatible with strict OpenAI structured outputs so real model synthesis is not rejected before answer generation.
+
 ## 1.2.367 - 2026-07-10
 
 ### Changed
