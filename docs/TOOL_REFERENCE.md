@@ -128,8 +128,8 @@ om assistant model check --active
 当前 `assistant` config 保留模型/profile 诊断、legacy 兼容字段，以及默认关闭的
 `assistant.copilot.enabled` gate；自由问答默认禁用，不会触发工具调用、planner
 或普通 LLM fallback。显式开启 gate 后，还必须在
-`assistant.copilot.channel_scenes` 放行 channel-ready 场景；当前没有业务场景
-开放到渠道，并且未来开放仍要求显式 assistant 模型配置。
+`assistant.copilot.channel_scenes` 放行 channel-ready 场景；当前只有
+`operations_diagnostics` 开放到渠道，并且仍要求显式 assistant 模型配置。
 `assistant.copilot.human_review=true` 会把 Host-backed 渠道答案保留到人工复核，
 同时继续写入脱敏审计摘要。
 当前可见和可执行能力用

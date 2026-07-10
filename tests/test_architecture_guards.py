@@ -1379,12 +1379,12 @@ def test_copilot_phase2_keeps_non_review_model_action_fixtures() -> None:
         assert (fixture_root / name).is_file(), name
 
 
-def test_copilot_current_slice_has_no_real_channel_ready_scene() -> None:
+def test_copilot_current_slice_only_exposes_diagnostics_channel_scene() -> None:
     from src.application.copilot.scene import SCENE_CATALOG
 
     channel_ready = [scene.name for scene in SCENE_CATALOG if scene.phase_readiness == "channel_ready"]
 
-    assert channel_ready == []
+    assert channel_ready == ["operations_diagnostics"]
 
 
 def test_copilot_channel_tests_do_not_use_monthly_review_as_smoke_scene() -> None:
