@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.376 - 2026-07-10
+
+### Fixed
+- Preserved confirmed trade-intake receipts when later cycles skip an already-notified unresolved or failed deal, preventing duplicate online notifications.
+
 ## 1.2.375 - 2026-07-10
 
 ### Changed
