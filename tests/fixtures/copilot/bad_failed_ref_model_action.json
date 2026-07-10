@@ -33,6 +33,7 @@
       }
     ],
     "missing_data": [
+      "fixture observations are not production evidence",
       "close_advice_read evidence unavailable: DEPENDENCY_MISSING"
     ],
     "evidence_refs": [

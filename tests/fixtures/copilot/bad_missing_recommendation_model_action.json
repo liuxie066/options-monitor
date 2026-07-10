@@ -21,7 +21,9 @@
       }
     ],
     "recommendations": [],
-    "missing_data": [],
+    "missing_data": [
+      "fixture observations are not production evidence"
+    ],
     "evidence_refs": [
       "obs_2",
       "obs_4"

@@ -1,9 +1,9 @@
 {
   "kind": "finish",
   "tool_name": null,
-  "reason": "bad eval action: raw grouped rows",
+  "reason": "bad eval action: recommendation cites only current snapshot refs",
   "answer_report": {
-    "conclusion": "结论（eval-only）：6月期权复盘如下。",
+    "conclusion": "结论（eval-only）：6月样例显示收益为正，但当前 0700.HK 暴露仍需要处理。",
     "attempted_checks": [
       "analysis_catalog",
       "analysis_query",
@@ -13,18 +13,25 @@
     ],
     "findings": [
       {
-        "summary": "1. account=sy symbol=0700.HK assignment_buy_cash=269000 assigned_contracts=4 premium=2934 realized=5011",
+        "summary": "6月收益和 assignment 现金占用证据可用。",
         "evidence_refs": [
           "obs_2",
           "obs_3"
+        ]
+      },
+      {
+        "summary": "当前 0700.HK 开放 short put 暴露和 close advice attention 信号同时存在。",
+        "evidence_refs": [
+          "obs_4",
+          "obs_5"
         ]
       }
     ],
     "recommendations": [
       {
-        "summary": "优先复核 0700.HK 的集中暴露。",
-        "action": "复核",
-        "target_scope": "0700.HK 集中暴露",
+        "summary": "基于当前开放 short put 和 close advice attention，评估是否减仓或滚动。",
+        "action": "评估减仓或滚动",
+        "target_scope": "当前 0700.HK 开放 short put",
         "answer_dimension": "open-exposure concentration",
         "basis_refs": [
           "obs_4",
