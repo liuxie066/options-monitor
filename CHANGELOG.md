@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.371 - 2026-07-10
+
+### Added
+- Enabled `operations_diagnostics` as the first channel-ready Copilot scene so ClawBot can answer allowlisted read-only diagnostics questions through the Copilot channel gate.
+
 ## 1.2.370 - 2026-07-10
 
 ### Removed
