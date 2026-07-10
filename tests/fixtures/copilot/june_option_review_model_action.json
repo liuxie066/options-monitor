@@ -3,7 +3,7 @@
   "tool_name": null,
   "reason": "explicit eval action",
   "answer_report": {
-    "conclusion": "结论（eval-only）：6月样例显示收益为正，但 assignment 现金流和 0700.HK 开放 short put 暴露集中。",
+    "conclusion": "结论（eval-only）：6月期权操作总体有收益，但存在需要优化的地方：收益质量部分依赖已实现盈亏而非单纯权利金，且出现较大的行权/股票本金占用；当前未平仓风险集中在少数港股标的，Close Advice 只有少量明确平仓信号但也有较多不可评估/报价不可用项。",
     "attempted_checks": [
       "analysis_catalog",
       "analysis_query",
@@ -13,28 +13,41 @@
     ],
     "findings": [
       {
-        "summary": "收益质量样例为正，净收入 1200 CNY，其中 premium 800 CNY、realized P/L 400 CNY，但 premium 不是整月结果的唯一来源。",
+        "summary": "6月账面收益为正，但收益质量不完全来自稳定权利金：月度净收入约13,883.63 CNY，权利金收入约9,599.20 CNY，已实现盈亏约36,703.16 CNY；分析视图也交叉显示相同的净收入、权利金和已实现盈亏规模。",
         "evidence_refs": [
           "obs_2",
           "obs_3"
         ]
       },
       {
-        "summary": "0700.HK yield enhancement call 平仓贡献 620 HKD realized P/L，应纳入收益质量判断。",
-        "evidence_refs": [
-          "obs_3"
-        ]
-      },
-      {
-        "summary": "assignment 买入现金流合计 314000 HKD，显著高于 premium 4401 HKD，需要单独复核现金占用和行权后处理。",
+        "summary": "行权/股票本金占用是主要不合理点之一：6月汇总现金流为 HKD -308,155、USD -71,188，行权股票净现金流为 HKD -321,800、USD -71,490；按标的看，0700.HK/HKD 净现金流 -310,752，FUTU/USD -46,490，PDD/USD -24,828。",
         "evidence_refs": [
           "obs_2",
           "obs_3"
         ]
       },
       {
-        "summary": "0700.HK 开放 short put 暴露和 close advice attention 信号同时存在，说明当前仍需处理仓位集中和平仓时机。",
+        "summary": "标的层面存在收益与风险不匹配：0700.HK 和 9992.HK 是主要权利金/已实现收益来源之一，但 0700.HK 同时对应较大负现金流；FUTU 的行权生命周期 P/L 为 -1,640 USD，assigned stock realized P/L 为 -2,000 USD。",
         "evidence_refs": [
+          "obs_3"
+        ]
+      },
+      {
+        "summary": "当前未平仓风险集中在少数标的和卖出 Put：共有34张未平仓合约，其中9992.HK/HKD 12张、0700.HK/HKD 11张、3690.HK/HKD 4张；现金担保金额主要集中在0700.HK/HKD 344,000、9992.HK/HKD 163,500、3690.HK/HKD 135,000。",
+        "evidence_refs": [
+          "obs_4"
+        ]
+      },
+      {
+        "summary": "最新 Close Advice 没有显示大面积强平仓信号，但信号质量有限：29条建议中 close 仅2条，hold 14条；分层上 weak 2条、none 16条、not_evaluable 11条，同时有6条不可评估、5条报价不可用。",
+        "evidence_refs": [
+          "obs_5"
+        ]
+      },
+      {
+        "summary": "分析视图中 close_advice_snapshot、expiration_risk_buckets、open_option_exposure 和 trade_events 的对应查询行数为0；因此，本次关于6月交易过程、当前到期桶和当前敞口的判断主要依赖月度收入报表、当前持仓快照和 Close Advice 快照。",
+        "evidence_refs": [
+          "obs_2",
           "obs_4",
           "obs_5"
         ]
@@ -42,20 +55,63 @@
     ],
     "recommendations": [
       {
-        "summary": "基于 0700.HK assignment 现金占用、开放 short put 集中度和 close advice attention，评估是否减仓或滚动。",
-        "action": "评估减仓或滚动",
-        "target_scope": "0700.HK assignment 和开放 short put 集中度",
-        "answer_dimension": "open-exposure concentration",
+        "summary": "降低6月后延续下来的接货和本金沉淀风险，优先复盘0700.HK、FUTU、PDD相关行权链路。",
+        "action": "对6月出现大额负现金流或行权生命周期亏损的标的逐一做只读复盘，区分计划内接货、被动接货和平仓不及时造成的本金占用。",
+        "target_scope": "6月行权/现金流异常标的：0700.HK/HKD、FUTU/USD、PDD/USD",
+        "answer_dimension": "assignment cash outlay",
         "basis_refs": [
           "obs_2",
+          "obs_3"
+        ]
+      },
+      {
+        "summary": "把收益考核从“净收入为正”升级为“权利金质量+本金占用后收益率”。",
+        "action": "后续月度复盘同时跟踪权利金收入、已实现盈亏、行权本金占用和现金担保金额；对依赖已实现盈亏或卖股收益拉高净收入的月份单独标记。",
+        "target_scope": "6月账户月度表现与后续月度复盘口径",
+        "answer_dimension": "profit quality",
+        "basis_refs": [
+          "obs_2",
+          "obs_3"
+        ]
+      },
+      {
+        "summary": "控制当前未平仓集中度，尤其是0700.HK、9992.HK、3690.HK的卖出 Put 风险。",
+        "action": "在新开仓前先降低同标的、同方向敞口占比，并对0700.HK/HKD、9992.HK/HKD、3690.HK/HKD short put 设置更严格的开仓间距、合约张数上限和现金担保上限。",
+        "target_scope": "当前未平仓集中敞口：0700.HK/HKD、9992.HK/HKD、3690.HK/HKD short put",
+        "answer_dimension": "open-exposure concentration",
+        "basis_refs": [
           "obs_3",
+          "obs_4"
+        ]
+      },
+      {
+        "summary": "优先人工检查2条 close 建议和所有不可评估/报价不可用仓位。",
+        "action": "将最新 Close Advice 中 action=close 的仓位列为第一优先级复核，同时补齐不可评估和报价不可用仓位的行情/合约数据后再判断是否需要调整。",
+        "target_scope": "最新 Close Advice：2条 close、6条 not_evaluable、5条 quote_unusable",
+        "answer_dimension": "current close-advice signals",
+        "basis_refs": [
+          "obs_3",
+          "obs_4",
+          "obs_5"
+        ]
+      },
+      {
+        "summary": "补齐到期桶和逐笔交易视图后，再做更细的执行质量诊断。",
+        "action": "后续复盘应补充按到期日、行权价、开平仓时点的逐笔数据和到期风险桶，重点验证是否存在过近到期卖 Put、滚仓不及时、接货后止损/止盈规则不清的问题。",
+        "target_scope": "6月交易事件、当前到期风险桶、当前敞口视图缺口",
+        "answer_dimension": "evidence gaps",
+        "basis_refs": [
+          "obs_2",
           "obs_4",
           "obs_5"
         ]
       }
     ],
     "missing_data": [
-      "fixture observations are not production evidence"
+      "fixture observations are not production evidence",
+      "analysis_query 中 trade_events.row_count=0，无法基于该视图完整复盘6月逐笔开平仓执行过程。",
+      "analysis_query 中 expiration_risk_buckets.row_count=0、open_option_exposure.row_count=0，当前到期桶和敞口分析主要依赖 option_positions_read 的当前持仓快照。",
+      "close_advice_read 存在 not_evaluable 和 quote_unusable 项，部分仓位缺少可用的退出信号评估。"
     ],
     "evidence_refs": [
       "obs_2",
