@@ -892,6 +892,19 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     assert Path(rate_calls[0]["cache_path"]) == tmp_path / "output_shared" / "state" / "rate_cache.json"
     assert out["warnings"] == []
     assert out["data"]["row_count"] == 1
+    assert out["data"]["summary_count"] == 1
+    assert out["data"]["scope"] == {
+        "config_key": None,
+        "broker": "富途",
+        "account": "user1",
+        "month": "2026-04",
+    }
+    assert out["data"]["coverage"] == {
+        "diagnostic_scope_count": 1,
+        "reported_scope_count": 1,
+        "unreported_scope_count": 0,
+    }
+    assert out["data"]["freshness"]["market_quotes_included"] is False
     assert out["data"]["premium_row_count"] == 1
     assert out["data"]["calculation_method"] == "trade_events"
     assert len(out["data"]["summary"]) == 1
@@ -1174,6 +1187,9 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
         "market_price": "not_observed",
         "margin_state": "not_observed",
     }
+    assert listed["data"]["coverage"] == listed["data"]["evidence_scope"]
+    assert listed["data"]["scope"]["action"] == "list"
+    assert listed["data"]["freshness"] == {"kind": "ledger_snapshot"}
     assert listed["data"]["row_count"] == 1
     assert listed["data"]["rows"][0]["record_id"] == record_id
     assert listed["data"]["rows"][0]["expiration_state"] == "expired"

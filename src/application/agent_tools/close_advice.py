@@ -9,7 +9,7 @@ _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "close_advice_read.output.v1",
     "source_label": "OM 本地 Close Advice 报告",
     "primary_rows": "rows",
-    "row_count_field": "row_count",
+    "row_count_field": "returned_count",
     "fact_fields": [
         "query",
         "source.run_id",
@@ -26,7 +26,14 @@ _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].evaluation_status",
         "rows[].quote_status",
         "rows[].reason",
+        "coverage.source_count",
+        "coverage.matched_count",
+        "coverage.returned_count",
+        "coverage.truncated",
     ],
+    "freshness_fields": ["freshness.kind", "freshness.run_ids[]"],
+    "missing_data_fields": ["rows[].evaluation_status", "rows[].quote_status"],
+    "model_preview_fields": ["scope", "coverage", "freshness", "summary", "rows"],
 }
 
 
@@ -73,6 +80,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
     output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "market_scope", "query", "run_id"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (CLOSE_ADVICE_READ_TOOL,)

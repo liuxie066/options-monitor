@@ -182,6 +182,7 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "account": "sy"}},
     ),
     output_contract=_CASH_HEADROOM_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "account", "broker", "top", "no_exchange_rates"),
 )
 
 GET_PORTFOLIO_CONTEXT_TOOL = build_agent_tool(

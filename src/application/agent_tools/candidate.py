@@ -53,6 +53,29 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "candidate_rank_explain.output.v1",
+    "source_label": "OM candidate report CSV",
+    "primary_rows": "ranked",
+    "row_count_field": "row_count",
+    "fact_fields": [
+        "mode",
+        "top_n",
+        "groups[].mode",
+        "groups[].ranking_policy",
+        "groups[].row_count",
+        "ranked[].rank",
+        "ranked[].symbol",
+        "ranked[].contract_symbol",
+        "ranked[].strategy_score",
+        "ranked[].annualized_return",
+        "ranked[].net_income",
+        "ranked[].rank_reason",
+        "ranked[].risk_notes",
+        "ranked[].score_warnings",
+    ],
+}
+
 
 def _candidate_rank_explain_tool(
     ctx: AgentToolContext,
@@ -97,7 +120,10 @@ def _candidate_filter_explain_tool(
 
 CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_rank_explain",
-    description="Explain existing candidate CSV ranking scores without running scans, sending notifications, or writing reports.",
+    description=(
+        "Explain how already-generated candidate rows were ranked. Use after candidates exist when the question is "
+        "about ordering or score drivers; use candidate_filter_explain instead for rejection or absence questions."
+    ),
     requires=("local_candidate_reports",),
     capabilities=("ranking_explain", "read_only"),
     input_schema={
@@ -123,6 +149,8 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"mode": "put", "top_n": 5}},
         {"input": {"candidate_path": "output_shared/reports/sell_put_candidates_labeled.csv", "mode": "put"}},
     ),
+    output_contract=_CANDIDATE_RANK_OUTPUT_CONTRACT,
+    copilot_input_fields=("mode", "top_n", "run_id", "account", "score_weights", "compare_baseline"),
 )
 
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
@@ -179,6 +207,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "symbol", "account", "function", "run_id"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (
