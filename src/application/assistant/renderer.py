@@ -740,6 +740,7 @@ def _format_config_mapping(value: dict[str, Any]) -> str:
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
     detail_lines = _monthly_income_detail_lines(data)
+    assigned_stock_lines = _monthly_income_assigned_stock_lines(data)
     combined_return_summary = data.get("combined_return_summary")
     if isinstance(combined_return_summary, list) and combined_return_summary:
         combined_rows = [row for row in combined_return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
@@ -760,30 +761,29 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
                 lines.append("")
                 lines.append("分账户：")
                 for row in account_rows:
-                    net_by_ccy = _dict(row.get("net_income_by_ccy"))
-                    net_text = (
-                        _format_ccy_amounts(net_by_ccy)
+                    realized_by_ccy = _dict(row.get("realized_pnl_by_ccy"))
+                    realized_text = (
+                        _format_ccy_amounts(realized_by_ccy)
                         if mixed_currency
-                        else _cny_with_original(row.get("net_income_cny"), net_by_ccy)
+                        else _cny_with_original(row.get("realized_pnl_cny"), realized_by_ccy)
                     )
                     rate_text = (
-                        _format_ccy_rates(_dict(row.get("net_return_rate_by_ccy")))
+                        _format_ccy_rates(_dict(row.get("realized_return_rate_by_ccy")))
                         if mixed_currency
-                        else _pct(row.get("net_return_rate"))
+                        else _pct(row.get("realized_return_rate"))
                     )
                     lines.append(
-                        f"- {row.get('account') or '-'}：净现金流 {net_text}"
-                        f" | 现金流率 {rate_text}"
+                        f"- {row.get('account') or '-'}：已实现期权 PnL（毛） {realized_text}"
+                        f" | 收益率 {rate_text}"
                     )
+            if assigned_stock_lines:
+                lines.append("")
+                lines.extend(assigned_stock_lines)
             if detail_lines:
                 lines.append("")
                 lines.extend(detail_lines)
             lines.append("")
-            lines.append(
-                "口径：金额和收益率按原币分别列示，不跨币种合并。"
-                if mixed_currency
-                else "口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。"
-            )
+            lines.append(_monthly_income_basis_line(mixed_currency=mixed_currency))
             return "\n".join(lines)
 
     return_summary = data.get("return_summary")
@@ -802,14 +802,17 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             recovery_note = _monthly_income_long_option_recovery_note(data, row)
             if recovery_note:
                 long_option_recovery_notes.append(recovery_note)
+        if assigned_stock_lines:
+            lines.append("")
+            lines.extend(assigned_stock_lines)
         if detail_lines:
             lines.append("")
             lines.extend(detail_lines)
         lines.append("")
         lines.append(
-            "口径：金额和收益率按原币分别列示，不跨币种合并。"
-            if any(_return_row_has_multiple_currencies(row) for row in calculable_rows)
-            else "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。"
+            _monthly_income_basis_line(
+                mixed_currency=any(_return_row_has_multiple_currencies(row) for row in calculable_rows)
+            )
         )
         if long_option_recovery_notes:
             lines.append("提示：" + "；".join(_unique(long_option_recovery_notes)))
@@ -931,17 +934,71 @@ def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
     if _return_row_has_multiple_currencies(row):
         return [
             f"{account_label} {row.get('month') or '-'} 收益摘要（按币种）",
-            f"- 净现金流：{_format_ccy_amounts(_dict(row.get('net_income_by_ccy')))} | 现金流率 {_format_ccy_rates(_dict(row.get('net_return_rate_by_ccy')))}",
-            f"- 已实现PnL：{_format_ccy_amounts(_dict(row.get('realized_pnl_by_ccy')))} | 已实现率 {_format_ccy_rates(_dict(row.get('realized_return_rate_by_ccy')))}",
-            f"- 权利金：{_format_ccy_amounts(_dict(row.get('premium_income_by_ccy')))} | 权利金率 {_format_ccy_rates(_dict(row.get('premium_return_rate_by_ccy')))}",
+            f"- 已实现期权 PnL（毛）：{_format_ccy_amounts(_dict(row.get('realized_pnl_by_ccy')))} | 收益率 {_format_ccy_rates(_dict(row.get('realized_return_rate_by_ccy')))}",
+            f"- 开仓权利金（活动）：{_format_ccy_amounts(_dict(row.get('premium_income_by_ccy')))} | 活动率 {_format_ccy_rates(_dict(row.get('premium_return_rate_by_ccy')))}",
+            f"- 期权现金流（兼容口径）：{_format_ccy_amounts(_dict(row.get('net_income_by_ccy')))} | 现金流率 {_format_ccy_rates(_dict(row.get('net_return_rate_by_ccy')))}",
         ]
+    realized_line = (
+        f"- 已实现期权 PnL（毛）："
+        f"{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))}"
+        f" | 收益率 {_pct(row.get('realized_return_rate'))}"
+    )
+    if annualized_days > 0:
+        realized_line += (
+            f" | 年化 {_pct(row.get('annualized_realized_return_rate'))}"
+            f"（{annualized_suffix}）"
+        )
     return [
         f"{account_label} {row.get('month') or '-'} 收益摘要",
-        f"- 净现金流：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
-        f"- 已实现PnL：{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))} | 已实现率 {_pct(row.get('realized_return_rate'))}",
-        f"- 权利金：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))} | 权利金率 {_pct(row.get('premium_return_rate'))}",
-        f"- 年化：{_pct(row.get('annualized_net_return_rate'))}（按净现金流，{annualized_suffix}）",
+        realized_line,
+        f"- 开仓权利金（活动）：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))} | 活动率 {_pct(row.get('premium_return_rate'))}",
+        f"- 期权现金流（兼容口径）：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
     ]
+
+
+def _monthly_income_assigned_stock_lines(data: dict[str, Any]) -> list[str]:
+    lifecycle_rows = _list(data.get("assignment_lifecycle_rows"))
+    sale_rows = _list(data.get("assigned_stock_sale_rows"))
+    review_rows = _list(data.get("assigned_stock_review_rows"))
+    if not lifecycle_rows and not sale_rows and not review_rows:
+        return []
+
+    realized_by_ccy: dict[str, float] = {}
+    for row_raw in sale_rows:
+        row = _dict(row_raw)
+        currency = str(row.get("currency") or "").upper().strip()
+        amount = _float_or_none(row.get("assigned_stock_realized_pnl"))
+        if currency and amount is not None:
+            realized_by_ccy[currency] = realized_by_ccy.get(currency, 0.0) + amount
+
+    unrealized_by_ccy: dict[str, float] = {}
+    for row_raw in lifecycle_rows:
+        row = _dict(row_raw)
+        currency = str(row.get("currency") or "").upper().strip()
+        amount = _float_or_none(row.get("assigned_stock_unrealized_pnl"))
+        if currency and amount is not None:
+            unrealized_by_ccy[currency] = unrealized_by_ccy.get(currency, 0.0) + amount
+
+    lines = ["指派正股（独立于期权 PnL）："]
+    if realized_by_ccy:
+        lines.append(f"- 本月正股卖出已实现：{_format_ccy_amounts(realized_by_ccy)}")
+    if unrealized_by_ccy:
+        lines.append(f"- 当前正股浮盈亏：{_format_ccy_amounts(unrealized_by_ccy)}")
+    missing_symbols = _assigned_stock_unusable_quote_symbols(data=data, rows=lifecycle_rows)
+    if missing_symbols:
+        lines.append(f"- 行情缺口：{'、'.join(missing_symbols)}，无法完整计算当前正股浮盈亏。")
+    if len(lines) == 1:
+        lines.append("- 已有接货记录；正股盈亏需按独立口径查看。")
+    return lines
+
+
+def _monthly_income_basis_line(*, mixed_currency: bool) -> str:
+    currency_note = "金额和收益率按原币分别列示，不跨币种合并；" if mixed_currency else ""
+    return (
+        f"口径：{currency_note}主指标为已实现期权 PnL（毛，未扣手续费，收益率按当前现金担保计算）；"
+        "开仓权利金是活动指标，期权现金流是兼容指标，均不能与 PnL 相加；"
+        "接货本金是现金转为正股，不是亏损，正股盈亏单独核算。"
+    )
 
 
 def _monthly_income_long_option_recovery_note(data: dict[str, Any], return_row: dict[str, Any]) -> str:
@@ -964,7 +1021,11 @@ def _monthly_income_long_option_recovery_note(data: dict[str, Any], return_row: 
             recovered_by_ccy[currency] = recovered_by_ccy.get(currency, 0.0) + recovered
     if not recovered_by_ccy:
         return ""
-    return "净现金流包含 long option 成本回收约 " + _format_ccy_amounts(recovered_by_ccy) + "，交易盈利看已实现PnL"
+    return (
+        "期权现金流（兼容口径）包含 long option 成本回收约 "
+        + _format_ccy_amounts(recovered_by_ccy)
+        + "，交易盈利看已实现期权 PnL（毛）"
+    )
 
 
 def _return_row_is_calculable(row: dict[str, Any]) -> bool:
@@ -1093,12 +1154,15 @@ def _ccy_pair_text(currencies: list[str]) -> str:
 
 def _original_currency_summary_lines(return_row: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    realized = _dict(return_row.get("realized_pnl_by_ccy"))
     net = _dict(return_row.get("net_income_by_ccy"))
     premium = _dict(return_row.get("premium_income_by_ccy"))
-    if net:
-        lines.append("净现金流：" + _format_ccy_amounts(net))
+    if realized:
+        lines.append("已实现期权 PnL（毛）：" + _format_ccy_amounts(realized))
     if premium:
-        lines.append("权利金：" + _format_ccy_amounts(premium))
+        lines.append("开仓权利金（活动）：" + _format_ccy_amounts(premium))
+    if net:
+        lines.append("期权现金流（兼容口径）：" + _format_ccy_amounts(net))
     cash = _dict(return_row.get("cash_secured_by_ccy"))
     premium_rates = _dict(return_row.get("premium_return_rate_by_ccy"))
     if not premium_rates and premium and cash:

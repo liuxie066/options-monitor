@@ -222,6 +222,17 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     income = get_tool_definition("monthly_income_report")
     assert income is not None
     income_contract = income.resolve_output_contract({})
+    assert income_contract["schema_version"] == "monthly_income_report.output.v2"
+    assert income_contract["primary_rows"] == "return_summary"
+    assert "row_count_field" not in income_contract
+    assert income_contract["fact_fields"].index("return_summary[].realized_pnl_cny") < income_contract[
+        "fact_fields"
+    ].index("return_summary[].premium_income_cny")
+    assert income_contract["fact_fields"].index("return_summary[].premium_income_cny") < income_contract[
+        "fact_fields"
+    ].index("return_summary[].net_income_cny")
+    assert "legacy option-cashflow metric" in income.description
+    assert "must not be added" in income.description
     assert "diagnostics[].income_amount_status" in income_contract["fact_fields"]
     assert "diagnostics[].position_lot_snapshots_count" in income_contract["fact_fields"]
     assert "diagnostics[].missing_fields" in income_contract["missing_data_fields"]
@@ -235,6 +246,8 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     income = get_tool_definition("monthly_income_report")
     assert income is not None
     detail_contract = income.resolve_output_contract({"include_rows": True})
+    assert detail_contract["schema_version"] == "monthly_income_report.detail_output.v2"
+    assert detail_contract["primary_rows"] == "return_summary"
     assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
 
 

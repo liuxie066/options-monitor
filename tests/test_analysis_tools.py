@@ -92,19 +92,34 @@ def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() ->
     view = data["views"]["account_monthly_performance"]
     assert view["row_grain"] == "month + account"
     assert view["alias_of"] == "monthly_income_return_summary"
+    assert view["primary_metric"] == "realized_pnl_cny"
     assert view["safe_join_keys"] == ("month", "account")
     assert "net_income_cny" in view["fields"]
+
+    realized_pnl = view["field_semantics"]["realized_pnl_cny"]
+    assert realized_pnl["metric_role"] == "primary_realized_option_pnl"
+    assert realized_pnl["gross_before_fees"] is True
+    assert realized_pnl["assigned_stock_pnl_included"] is False
+
+    premium_income = view["field_semantics"]["premium_income_cny"]
+    assert premium_income["metric_role"] == "premium_activity"
+    assert premium_income["profit_metric"] is False
 
     net_income = view["field_semantics"]["net_income_cny"]
     assert net_income["type"] == "money"
     assert net_income["currency"] == "CNY"
     assert net_income["aggregation"] == "sum"
+    assert net_income["metric_role"] == "legacy_option_cashflow"
+    assert net_income["profit_metric"] is False
 
     net_return = view["field_semantics"]["net_return_rate"]
     assert net_return["type"] == "rate"
     assert net_return["aggregation"] == "weighted_recompute"
+    assert net_return["metric_role"] == "legacy_cashflow_ratio"
     assert "avg" in net_return["do_not"]
 
+    assert data["metric_policy"]["primary_profit"].startswith("realized_pnl_*")
+    assert all("net_income_cny" not in item["sql"] for item in data["query_patterns"])
     assert data["field_types"]["account_monthly_performance"]["net_return_rate"] == "rate"
     assert data["aggregation_policies"]["account_monthly_performance"]["net_return_rate"] == "weighted_recompute"
     assert data["join_policies"]["account_monthly_performance"]["safe_join_keys"] == ["month", "account"]
@@ -116,7 +131,11 @@ def test_analysis_catalog_exposes_p0_semantic_views() -> None:
         {"views": ["account_monthly_income_components", "assigned_stock_position_pnl", "assigned_stock_sale_events"]},
     )
 
-    assert data["views"]["account_monthly_income_components"]["row_grain"] == "month + account + component"
+    components = data["views"]["account_monthly_income_components"]
+    assert components["row_grain"] == "month + account + component"
+    assert components["status"] == "legacy_compatibility"
+    assert components["additivity"] == "non_additive"
+    assert components["field_semantics"]["amount_cny"]["aggregation"] == "sum_within_same_component_only"
     assert data["views"]["assigned_stock_position_pnl"]["row_grain"] == "account + symbol + stock_lot_id"
     assert data["views"]["assigned_stock_sale_events"]["row_grain"] == "account + symbol + stock_lot_id + sale event"
     assert data["views"]["assigned_stock_position_pnl"]["alias_of"] == "assigned_stock_lifecycle"
@@ -238,7 +257,8 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
         {"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 10},
     )
 
-    assert warnings == []
+    assert len(warnings) == 1
+    assert "legacy option-cashflow metric" in warnings[0]
     assert calls == ["monthly"]
     assert data["rows"] == [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]
     assert data["source"]["kind"] == "materialized_views"
@@ -274,9 +294,11 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
         },
     )
 
-    assert warnings == []
+    assert len(warnings) == 1
+    assert "non-additive metric roles" in warnings[0]
     assert calls == ["monthly", "positions"]
     assert data["query"]["mode"] == "views"
+    assert data["preflight"]["warnings"] == warnings
     assert data["views_used"] == ["account_monthly_performance", "open_option_exposure"]
     assert data["view_datasets"]["account_monthly_performance"]["rows"] == [
         {"month": "2026-06", "account": "lx", "net_income_cny": 1.0}
@@ -1386,7 +1408,7 @@ def test_analysis_query_unknown_column_returns_structured_suggestions() -> None:
     assert exc.value.details["unknown_column"] == "net_cashflow"
     assert exc.value.details["referenced_views"] == ["account_monthly_performance"]
     assert "net_income_cny" in exc.value.details["suggestions"]
-    assert "net_return_rate" in exc.value.details["suggestions"]
+    assert "realized_pnl_cny" in exc.value.details["suggestions"]
 
 
 def test_analysis_query_executes_read_only_aggregates() -> None:
@@ -1433,11 +1455,12 @@ def test_analysis_query_explain_warns_on_invalid_rate_aggregation() -> None:
     assert query_explain["coverage"]["months"] == ["2026-05"]
     assert query_explain["aggregations"][0]["field"] == "net_return_rate"
     assert query_explain["aggregations"][0]["policy"] == "invalid_rate_aggregation"
-    assert warnings == [query_explain["aggregations"][0]["warning"]]
+    assert warnings[0] == query_explain["aggregations"][0]["warning"]
+    assert any("legacy cashflow ratios" in warning for warning in warnings)
     assert evidence["aggregation_policy"][0]["status"] == "warning"
 
 
-def test_analysis_query_explain_marks_safe_money_sum() -> None:
+def test_analysis_query_explain_marks_legacy_cashflow_sum_and_warns_not_pnl() -> None:
     query_explain, warnings, evidence = _query_explain_and_evidence(
         sql="select month, sum(net_income_cny) as total_income from account_monthly_performance group by month",
         rows=[{"month": "2026-05", "total_income": 59815.0}],
@@ -1445,10 +1468,38 @@ def test_analysis_query_explain_marks_safe_money_sum() -> None:
         views_used=["account_monthly_performance"],
     )
 
-    assert warnings == []
+    assert len(warnings) == 1
+    assert "not profit or PnL" in warnings[0]
     assert query_explain["aggregations"][0]["field"] == "net_income_cny"
     assert query_explain["aggregations"][0]["policy"] == "allowed"
     assert evidence["coverage"]["views"] == ["account_monthly_performance"]
+
+
+def test_analysis_query_explain_warns_premium_and_realized_pnl_are_non_additive() -> None:
+    query_explain, warnings, _evidence = _query_explain_and_evidence(
+        sql=(
+            "select month, account, realized_pnl_cny, premium_income_cny "
+            "from account_monthly_performance"
+        ),
+        rows=[{"month": "2026-05", "account": "lx", "realized_pnl_cny": 250.0, "premium_income_cny": 1200.0}],
+        columns=["month", "account", "realized_pnl_cny", "premium_income_cny"],
+        views_used=["account_monthly_performance"],
+    )
+
+    assert len(warnings) == 1
+    assert "must not be added" in warnings[0]
+    assert query_explain["warnings"] == warnings
+
+
+def test_analysis_query_explain_warns_legacy_component_view_is_non_additive() -> None:
+    _query_explain, warnings, _evidence = _query_explain_and_evidence(
+        sql="select month, account, sum(amount_cny) from account_monthly_income_components group by month, account",
+        rows=[{"month": "2026-05", "account": "lx", "sum(amount_cny)": 1500.0}],
+        columns=["month", "account", "sum(amount_cny)"],
+        views_used=["account_monthly_income_components"],
+    )
+
+    assert any("legacy non-additive compatibility view" in warning for warning in warnings)
 
 
 def _removed_legacy_answer_guard_tests() -> None:

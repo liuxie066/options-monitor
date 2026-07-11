@@ -91,8 +91,10 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
         "prompts/om_chat.md",
     ]
     assert "Make the first non-empty line `结论：...`" in definition["system_prompt"]
-    assert "give a supported judgment" in definition["system_prompt"]
-    assert "Do not stop at a sufficient data" in definition["system_prompt"]
+    assert "supported judgments with pros/cons/actions" in definition["system_prompt"]
+    assert "no summary/row dumps" in definition["system_prompt"]
+    assert "pre-fee `realized_pnl_*` is primary" in definition["system_prompt"]
+    assert "Assignment principal is asset conversion" in definition["system_prompt"]
     assert "Moneyness requires an observed underlying price" in definition["system_prompt"]
     assert "Treat non-empty runtime context fields as fixed scope" in definition["system_prompt"]
     assert "do not print tool-call syntax as text" in definition["system_prompt"]
@@ -130,11 +132,11 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
 def test_agent_tool_view_exposes_result_contract() -> None:
     view = next(item for item in copilot_tools.tool_descriptions(("monthly_income_report",)))
 
-    assert view["output_contract"]["primary_rows"] == "summary"
+    assert view["output_contract"]["primary_rows"] == "return_summary"
     assert "Key result fields:" in view["description"]
     observation = copilot_tools.compact_observation(
         "monthly_income_report",
-        {"ok": True, "data": {"summary": [{"month": "2026-07"}], "row_count": 1}},
+        {"ok": True, "data": {"return_summary": [{"month": "2026-07"}], "row_count": 1}},
         {"month": "2026-07"},
     )
     assert "rows=1" in observation["summary"]
