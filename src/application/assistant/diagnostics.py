@@ -4,13 +4,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.capability_catalog import llm_capability_manifest
+from src.application.agent_tool_registry import pure_read_tool_names, pure_read_toolsets
 from src.application.assistant.config_loader import load_assistant_config
-from src.application.assistant.llm_common import (
+from src.application.llm_provider_registry import (
     is_supported_llm_provider,
     normalize_llm_provider,
     provider_api_kind,
-    provider_endpoint_url,
+    provider_requires_api_key,
     supported_llm_providers,
 )
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
@@ -44,8 +44,6 @@ def check_assistant_llm(
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
     checks.extend(_config_checks(settings, effective_env=effective_env))
-    manifest = llm_capability_manifest()
-
     live_probe = _live_probe_check(
         live=bool(live),
     )
@@ -86,10 +84,13 @@ def check_assistant_llm(
             "chat_completions_url": resolve_chat_completions_url(settings.base_url)
             if _provider_api_kind(settings) == "chat_completions"
             else None,
-            "api_key_configured": bool(effective_env.get(settings.api_key_env)),
+            "api_key_configured": (
+                not provider_requires_api_key(settings.provider)
+                or bool(effective_env.get(settings.api_key_env))
+            ),
             "api_key_source": _source_value(effective_env.source_of(settings.api_key_env)),
         },
-        "capabilities": _capability_summary(manifest),
+        "capabilities": _capability_summary(),
         "checks": checks,
     }
 
@@ -119,14 +120,29 @@ def _config_checks(settings: AssistantLlmSettings, *, effective_env: Any) -> lis
     })
     checks.append(_provider_check(settings.provider, required=settings.enabled))
     checks.append(_required_text_check("model", settings.model, required=settings.enabled))
-    checks.append(_required_text_check("api_key_env", settings.api_key_env, required=settings.enabled))
+    requires_api_key = provider_requires_api_key(settings.provider)
+    checks.append(
+        _required_text_check("api_key_env", settings.api_key_env, required=settings.enabled)
+        if requires_api_key
+        else {
+            "name": "api_key_env",
+            "status": "skipped",
+            "message": "provider does not require an API key environment variable",
+        }
+    )
 
     api_key_source = effective_env.source_of(settings.api_key_env)
-    api_key_configured = bool(effective_env.get(settings.api_key_env))
+    api_key_configured = not requires_api_key or bool(effective_env.get(settings.api_key_env))
     checks.append({
         "name": "api_key",
         "status": "ok" if api_key_configured else ("error" if settings.enabled else "warn"),
-        "message": f"{settings.api_key_env} is configured" if api_key_configured else f"{settings.api_key_env} is not configured",
+        "message": (
+            "provider does not require an API key"
+            if not requires_api_key
+            else f"{settings.api_key_env} is configured"
+            if api_key_configured
+            else f"{settings.api_key_env} is not configured"
+        ),
         "value": {
             "env_name": settings.api_key_env,
             "configured": api_key_configured,
@@ -226,7 +242,9 @@ def _provider_api_kind(settings: AssistantLlmSettings) -> str:
 
 
 def _provider_endpoint_url(settings: AssistantLlmSettings) -> str:
-    return provider_endpoint_url(settings)
+    if _provider_api_kind(settings) == "chat_completions":
+        return resolve_chat_completions_url(settings.base_url)
+    return resolve_responses_url(settings.base_url)
 
 
 def _base_url_message(settings: AssistantLlmSettings) -> str:
@@ -242,30 +260,23 @@ def _live_probe_check(
     return {
         "name": "live_probe",
         "status": "skipped",
-        "message": "live provider probe removed; free-form assistant execution is rebuilding",
+        "message": "provider diagnostics are configuration-only; use Copilot execution for an end-to-end model probe",
         "value": {
             "live_requested": bool(live),
             "probe_count": 0,
-            "freeform_runtime": False,
+            "copilot_runtime": True,
         },
     }
 
 
-def _capability_summary(manifest: dict[str, Any]) -> dict[str, Any]:
-    capabilities = list(manifest.get("capabilities") or [])
-    executable = list(manifest.get("llm_executable_intents") or [])
-    non_executable = [
-        str(item.get("capability_id") or "")
-        for item in capabilities
-        if item.get("llm_visible") and not item.get("llm_executable")
-    ]
+def _capability_summary() -> dict[str, Any]:
+    tool_names = sorted(pure_read_tool_names())
+    toolsets = {name: list(names) for name, names in sorted(pure_read_toolsets().items())}
     return {
-        "schema_version": manifest.get("schema_version"),
-        "visible_count": len(capabilities),
-        "llm_executable_count": len(executable),
-        "llm_executable_intents": executable,
-        "known_non_executable_count": len([item for item in non_executable if item]),
-        "known_non_executable_intents": [item for item in non_executable if item],
+        "schema_version": "om-copilot-tool-summary-v1",
+        "pure_read_tool_count": len(tool_names),
+        "pure_read_tools": tool_names,
+        "toolsets": toolsets,
     }
 
 

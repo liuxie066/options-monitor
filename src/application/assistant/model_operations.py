@@ -6,7 +6,7 @@ from typing import Any
 
 from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.llm_model_profiles import (
     configured_model_profiles_payload,
     current_model_payload,
@@ -39,7 +39,7 @@ MODEL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def handle_model_operation(
-    intent: PerceptionResult,
+    intent: ControlCommand,
     request: AssistantRequest,
     *,
     command_id: str,

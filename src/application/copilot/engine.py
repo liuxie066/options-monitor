@@ -1,27 +1,27 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable
 
-from src.application.copilot.agent import (
-    ActionDecider,
-    AgentAction,
-    AgentState,
-    default_action_decider,
-)
-from src.application.copilot.contracts import SceneManifest, new_id
+from src.application.copilot.agent import AgentRunResult, AgentState, ModelRequest, ModelRunner, ToolCall
+from src.application.copilot.contracts import SceneManifest
 
 
 ToolPayloadBuilder = Callable[[str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]]
 ReadToolCaller = Callable[[str, dict[str, Any]], dict[str, Any]]
-ObservationCompactor = Callable[[str, dict[str, Any]], dict[str, Any]]
-ObservationEventBuilder = Callable[[dict[str, Any], int], dict[str, Any]]
+ObservationCompactor = Callable[[str, dict[str, Any], dict[str, Any] | None], dict[str, Any]]
 FixtureLoader = Callable[[str | None], list[dict[str, Any]]]
 EventRecorder = Callable[[str, dict[str, Any], str | None], None]
 Clock = Callable[[], float]
 CancellationChecker = Callable[[], bool]
-ObservationProjector = Callable[[list[dict[str, Any]], bool], Any]
-AgentReportProjector = Callable[[list[dict[str, Any]], dict[str, Any], list[str]], Any]
+
+OBSERVATION_PAGE_CHARS = 12_000
+DEFAULT_MAX_CONTEXT_CHARS = 96_000
+DEFAULT_MAX_CONTEXT_TOKENS = 24_000
+TRANSIENT_TOOL_ERRORS = frozenset(
+    {"REQUEST_TIMEOUT", "TOOL_EXECUTION_TIMEOUT", "EXECUTION_ERROR", "TOOL_EXCEPTION"}
+)
 
 
 def run_engine(
@@ -32,484 +32,651 @@ def run_engine(
     build_tool_payload: ToolPayloadBuilder,
     call_read_tool: ReadToolCaller,
     compact_observation: ObservationCompactor,
-    build_observation_event: ObservationEventBuilder,
     fixture_observations: FixtureLoader,
-    project_observations: ObservationProjector,
-    project_agent_report: AgentReportProjector,
+    model_runner: ModelRunner | None,
     use_mock_observations: bool = False,
     fixture_id: str | None = None,
-    require_mock_model_synthesis: bool = False,
-    decide_next_action: ActionDecider | None = None,
     clock: Clock | None = None,
     is_cancelled: CancellationChecker | None = None,
-) -> Any:
+) -> AgentRunResult:
+    if model_runner is None:
+        return AgentRunResult(
+            status="failed",
+            error={"code": "MODEL_REQUIRED", "message": "Copilot model is not configured"},
+        )
+    state = AgentState(manifest=manifest, messages=[dict(item) for item in manifest.messages])
     if use_mock_observations:
-        try:
-            fixture_items = list(fixture_observations(fixture_id))
-        except Exception:
-            fixture_items = [_tool_exception_response("fixture", code="FIXTURE_ERROR")]
-        observations = []
-        for index, item in enumerate(fixture_items, start=1):
-            try:
-                observation = build_observation_event(item, index)
-            except Exception:
-                observation = build_observation_event(_tool_exception_response("fixture", code="FIXTURE_ERROR"), index)
-            observations.append(observation)
-        for item in observations:
-            record_event("observation", item, item["ref"])
-        if decide_next_action is not None:
-            return _run_mock_model_synthesis(
-                manifest,
-                observations=observations,
-                record_event=record_event,
-                build_observation_event=build_observation_event,
-                project_observations=project_observations,
-                project_agent_report=project_agent_report,
-                decide_next_action=decide_next_action,
-            )
-        if require_mock_model_synthesis:
-            state = AgentState(
-                manifest=manifest,
-                observations=list(observations),
-                attempted_tools=_attempted_allowed_tools(manifest, observations),
-            )
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="eval_model",
-                code="MODEL_REQUIRED",
-                summary="Eval model synthesis is required for this fixture.",
-                missing_data="eval model answer report",
-            )
-            return project_observations(state.observations, True)
-        return project_observations(observations, True)
+        _load_fixture_observations(state, fixture_id, fixture_observations, record_event)
 
-    state = AgentState(manifest=manifest)
-    decider = decide_next_action or default_action_decider
-    max_turns = int(manifest.limits.get("max_model_turns") or 0)
-    max_tool_calls = int(manifest.limits.get("max_tool_calls") or 0)
-    timeout_seconds = float(manifest.limits.get("timeout_seconds") or 0)
+    max_iterations = max(1, int(manifest.limits.get("max_model_turns") or 1))
+    max_tool_calls = max(0, int(manifest.limits.get("max_tool_calls") or 0))
+    max_context_chars = max(
+        8_000,
+        int(manifest.limits.get("max_context_chars") or DEFAULT_MAX_CONTEXT_CHARS),
+    )
+    max_context_tokens = max(
+        2_000,
+        int(manifest.limits.get("max_context_tokens") or DEFAULT_MAX_CONTEXT_TOKENS),
+    )
+    timeout_seconds = max(0.0, float(manifest.limits.get("timeout_seconds") or 0))
+    final_answer_reserve_seconds = max(
+        1.0,
+        float(manifest.limits.get("final_answer_reserve_seconds") or 30),
+    )
+    max_failed_batches = max(1, int(manifest.limits.get("max_consecutive_failed_tool_batches") or 3))
     clock_fn = clock or time.monotonic
     started_at = clock_fn()
-    finished = False
+    consecutive_failed_batches = 0
 
-    while state.turns < max_turns:
-        if is_cancelled and is_cancelled():
-            record_event("run_cancelled", {"reason": "cancellation_requested"}, None)
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="cancellation",
-                code="CANCELLED",
-                summary="Run was cancelled before completion.",
-                missing_data="remaining agent/tool work",
-            )
+    while state.iterations < max_iterations:
+        stop = _stop_reason(
+            state,
+            max_tool_calls=max_tool_calls,
+            timeout_seconds=timeout_seconds,
+            reserve_seconds=final_answer_reserve_seconds,
+            started_at=started_at,
+            clock=clock_fn,
+            is_cancelled=is_cancelled,
+        )
+        if stop:
+            record_event(stop[0], stop[1], None)
             break
-        if timeout_seconds > 0 and clock_fn() - started_at >= timeout_seconds:
-            record_event("budget_exhausted", {"limit": "timeout_seconds"}, None)
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="timeout",
-                code="BUDGET_EXHAUSTED",
-                summary="Run timeout expired before completing remaining work.",
-                missing_data="remaining agent/tool work",
+        turn = _call_model(
+            state,
+            model_runner,
+            force_finish=False,
+            max_context_chars=max_context_chars,
+            max_context_tokens=max_context_tokens,
+            timeout_seconds=_remaining_seconds(timeout_seconds, started_at, clock_fn),
+            record_event=record_event,
+        )
+        if isinstance(turn, AgentRunResult):
+            if state.observations:
+                break
+            return turn
+        if turn.finish_reason == "content_filter":
+            return AgentRunResult(
+                status="failed",
+                error={"code": "MODEL_ERROR", "message": "model response was blocked by content filtering"},
             )
-            break
-
-        try:
-            action = decider(state)
-        except Exception:
-            action = AgentAction(kind="invalid", reason="action_decider_exception")
-        state.turns += 1
-        record_event("agent_action", _agent_action_payload(state.turns, action, manifest.allowed_tools), None)
-        if action.kind in {"tool", "finish"}:
-            _record_model_error_if_present(state.turns, action, record_event)
-
-        if action.kind == "finish":
-            if isinstance(action.final_report, dict):
-                return project_agent_report(
-                    state.observations,
-                    action.final_report,
-                    manifest.allowed_tools,
+        if turn.text and not turn.tool_calls:
+            if turn.finish_reason == "length" and state.iterations < max_iterations:
+                state.accumulated_text_parts.append(turn.text)
+                state.continuation_count += 1
+                state.messages.extend(
+                    (
+                        {"role": "assistant", "content": turn.text},
+                        {
+                            "role": "system",
+                            "content": (
+                                "The previous answer was truncated. Continue from exactly where it stopped, "
+                                "without repeating earlier text or calling tools unless essential."
+                            ),
+                        },
+                    )
                 )
-            if _has_unattempted_manifest_tools(state):
                 record_event(
-                    "agent_action_rejected",
-                    {"turn": state.turns, "reason": "early_finish_without_report"},
+                    "model_continuation_requested",
+                    {"continuation_count": state.continuation_count, "finish_reason": "length"},
                     None,
                 )
-                _append_recoverable_observation(
-                    state,
-                    record_event,
-                    build_observation_event,
-                    tool_name="agent_finish",
-                    code="INSUFFICIENT_EVIDENCE",
-                    summary="Agent finished without an answer report before remaining work completed.",
-                    missing_data="remaining agent/tool work",
-                )
-                finished = True
-                break
-            finished = True
-            break
-        if action.kind != "tool" or not action.tool_name:
-            _record_model_error_if_present(state.turns, action, record_event)
-            record_event("agent_action_rejected", {"turn": state.turns, "reason": "invalid_action"}, None)
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="agent_action",
-                code=_action_error_code(action) or "INVALID_ACTION",
-                summary="Next action was invalid; no tool was executed.",
-                missing_data=_invalid_action_missing_data(action),
-            )
-            continue
-        if action.tool_name not in manifest.allowed_tools:
+                continue
+            text = _joined_answer(state.accumulated_text_parts, turn.text)
             record_event(
-                "agent_action_rejected",
-                {"turn": state.turns, "reason": "tool_not_allowed", "tool_name_allowed": False},
-                None,
-            )
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="agent_action",
-                code="POLICY_ERROR",
-                summary="Tool call was rejected by execution policy.",
-                missing_data="allowed tool observation",
-            )
-            continue
-        if action.tool_name in set(state.attempted_tools):
-            record_event(
-                "agent_action_rejected",
-                {"turn": state.turns, "reason": "tool_already_attempted"},
-                None,
-            )
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="agent_action",
-                code="POLICY_ERROR",
-                summary="Tool call repeated an already attempted tool; no tool was executed.",
-                missing_data="valid agent action",
-            )
-            continue
-        if state.tool_calls >= max_tool_calls:
-            record_event("budget_exhausted", {"limit": "max_tool_calls"}, None)
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name=action.tool_name,
-                code="BUDGET_EXHAUSTED",
-                summary="Tool call budget was exhausted before remaining tools completed.",
-                missing_data="remaining tool observations",
-            )
-            break
-
-        state.attempted_tools.append(action.tool_name)
-        try:
-            payload, skip_reason = build_tool_payload(action.tool_name, scene_input)
-        except Exception:
-            payload, skip_reason = None, "payload_exception"
-        if skip_reason:
-            record_event("tool_skipped", {"tool_name": action.tool_name, "reason": "payload_unavailable"}, None)
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name=action.tool_name,
-                code="INPUT_ERROR",
-                summary="Required tool input was unavailable.",
-                missing_data=f"{action.tool_name} required input",
-            )
-            continue
-        state.tool_calls += 1
-        tool_call_id = new_id("toolcall")
-        record_event("tool_attempt", _tool_attempt_payload(action.tool_name, payload, tool_call_id, state.turns), None)
-        try:
-            response = call_read_tool(action.tool_name, payload or {})
-        except Exception:
-            response = _tool_exception_response(action.tool_name)
-        try:
-            observation = build_observation_event(
-                compact_observation(action.tool_name, response),
-                len(state.observations) + 1,
-            )
-        except Exception:
-            observation = build_observation_event(
-                _tool_exception_response(action.tool_name, code="OBSERVATION_ERROR"),
-                len(state.observations) + 1,
-            )
-        observation["tool_call_id"] = tool_call_id
-        state.observations.append(observation)
-        record_event("observation", observation, observation["ref"])
-        if not bool(observation.get("ok")):
-            record_event(
-                "tool_failed",
+                "agent_terminated",
                 {
-                    "tool_name": action.tool_name,
-                    "tool_call_id": tool_call_id,
-                    "error_code": _error_code(observation),
+                    "reason": "final_answer",
+                    "continuation_count": state.continuation_count,
+                    "compaction_count": state.compaction_count,
+                    "model_retry_count": state.model_retry_count,
                 },
                 None,
             )
+            return AgentRunResult(status="answered", text=text)
+        if not turn.tool_calls:
+            state.messages.append(
+                {
+                    "role": "system",
+                    "content": "The previous model turn returned neither text nor tool calls. Answer or call a tool.",
+                }
+            )
+            continue
 
-    if not finished and state.turns >= max_turns and _has_unattempted_manifest_tools(state):
-        record_event("budget_exhausted", {"limit": "max_model_turns"}, None)
-        _append_recoverable_observation(
-            state,
-            record_event,
-            build_observation_event,
-            tool_name="agent_turns",
-            code="BUDGET_EXHAUSTED",
-            summary="Action turn budget was exhausted before remaining work completed.",
-            missing_data="remaining agent/tool work",
-        )
+        _append_assistant_tool_calls(state, turn.text, turn.tool_calls)
+        batch_ok = False
+        for call in turn.tool_calls:
+            if state.tool_calls >= max_tool_calls:
+                observation = _append_tool_observation(
+                    state,
+                    call,
+                    _error_observation(call.name, "BUDGET_EXHAUSTED", "tool-call budget is exhausted"),
+                    record_event,
+                )
+                batch_ok = batch_ok or bool(observation.get("ok"))
+                continue
+            observation = _execute_tool_call(
+                state,
+                call,
+                scene_input=scene_input,
+                build_tool_payload=build_tool_payload,
+                call_read_tool=call_read_tool,
+                compact_observation=compact_observation,
+                record_event=record_event,
+            )
+            batch_ok = batch_ok or bool(observation.get("ok"))
+        consecutive_failed_batches = 0 if batch_ok else consecutive_failed_batches + 1
+        if consecutive_failed_batches >= max_failed_batches:
+            record_event(
+                "tool_failure_fallback",
+                {"consecutive_failed_batches": consecutive_failed_batches},
+                None,
+            )
+            break
 
-    return project_observations(state.observations, False)
-
-
-def _run_mock_model_synthesis(
-    manifest: SceneManifest,
-    *,
-    observations: list[dict[str, Any]],
-    record_event: EventRecorder,
-    build_observation_event: ObservationEventBuilder,
-    project_observations: ObservationProjector,
-    project_agent_report: AgentReportProjector,
-    decide_next_action: ActionDecider,
-) -> Any:
-    state = AgentState(
-        manifest=manifest,
-        observations=list(observations),
-        attempted_tools=_attempted_allowed_tools(manifest, observations),
+    if is_cancelled and is_cancelled():
+        return AgentRunResult(status="cancelled", error={"code": "CANCELLED", "message": "run cancelled"})
+    final_turn = _call_model(
+        state,
+        model_runner,
+        force_finish=True,
+        max_context_chars=max_context_chars,
+        max_context_tokens=max_context_tokens,
+        timeout_seconds=_remaining_seconds(timeout_seconds, started_at, clock_fn),
+        record_event=record_event,
     )
-    max_turns = int(manifest.limits.get("max_model_turns") or 0)
-    while state.turns < max_turns:
-        try:
-            action = decide_next_action(state)
-        except Exception:
-            action = AgentAction(kind="invalid", reason="action_decider_exception")
-        state.turns += 1
-        record_event("agent_action", _agent_action_payload(state.turns, action, manifest.allowed_tools), None)
-        _record_model_error_if_present(state.turns, action, record_event)
-        if _action_error_code(action) == "MODEL_ERROR":
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="eval_model",
-                code="MODEL_ERROR",
-                summary="Eval model synthesis was unavailable.",
-                missing_data="eval model answer report",
-            )
-            break
-        if _action_error_code(action) == "MODEL_ACTION_INVALID":
-            _append_recoverable_observation(
-                state,
-                record_event,
-                build_observation_event,
-                tool_name="eval_model",
-                code="MODEL_ACTION_INVALID",
-                summary="Eval model action was invalid.",
-                missing_data=_invalid_action_missing_data(action),
-            )
-            break
-        if action.kind == "finish" and isinstance(action.final_report, dict):
-            return project_agent_report(
-                state.observations,
-                action.final_report,
-                manifest.allowed_tools,
-            )
+    if isinstance(final_turn, AgentRunResult):
+        return final_turn
+    if final_turn.text:
+        text = _joined_answer(state.accumulated_text_parts, final_turn.text)
         record_event(
-            "agent_action_rejected",
-            {"turn": state.turns, "reason": "eval_fixture_requires_finish"},
+            "agent_terminated",
+            {
+                "reason": "forced_final_answer",
+                "finish_reason": final_turn.finish_reason,
+                "continuation_count": state.continuation_count,
+                "compaction_count": state.compaction_count,
+                "model_retry_count": state.model_retry_count,
+            },
             None,
         )
-        _append_recoverable_observation(
-            state,
-            record_event,
-            build_observation_event,
-            tool_name="eval_fixture",
-            code="POLICY_ERROR",
-            summary="Eval fixture observations were already loaded; model must finish instead of requesting tools.",
-            missing_data="eval fixture answer report",
+        return AgentRunResult(status="answered", text=text)
+    return AgentRunResult(
+        status="failed",
+        error={"code": "EMPTY_FINAL_RESPONSE", "message": "model did not produce a final answer"},
+    )
+
+
+def _call_model(
+    state: AgentState,
+    model_runner: ModelRunner,
+    *,
+    force_finish: bool,
+    max_context_chars: int,
+    max_context_tokens: int,
+    timeout_seconds: int | None,
+    record_event: EventRecorder,
+):
+    tools = () if force_finish else tuple(_model_tools(state))
+    messages, omitted = _bounded_messages(
+        state.messages,
+        max_chars=max_context_chars,
+        max_tokens=max_context_tokens,
+    )
+    request = ModelRequest(
+        messages=messages,
+        tools=tools,
+        force_finish=force_finish,
+        timeout_seconds=timeout_seconds,
+    )
+    state.iterations += 1
+    if omitted:
+        state.compaction_count += 1
+        record_event(
+            "context_compacted",
+            {
+                "iteration": state.iterations,
+                "omitted_message_count": omitted,
+                "max_context_chars": max_context_chars,
+                "max_context_tokens": max_context_tokens,
+                "compaction_count": state.compaction_count,
+            },
+            None,
         )
-    return project_observations(state.observations, True)
+    record_event(
+        "model_turn_started",
+        {"iteration": state.iterations, "force_finish": force_finish, "tool_count": len(tools)},
+        None,
+    )
+    try:
+        turn = model_runner(request)
+    except Exception as exc:
+        attempts = max(1, int(getattr(exc, "attempt_count", 1) or 1))
+        state.model_retry_count += max(0, attempts - 1)
+        record_event(
+            "model_error",
+            {
+                "iteration": state.iterations,
+                "error_type": type(exc).__name__,
+                "attempt_count": attempts,
+                "model_retry_count": state.model_retry_count,
+            },
+            None,
+        )
+        return AgentRunResult(
+            status="failed",
+            error={"code": "MODEL_ERROR", "message": "model request failed"},
+        )
+    state.model_retry_count += max(0, int(turn.attempt_count) - 1)
+    record_event(
+        "model_turn_completed",
+        {
+            "iteration": state.iterations,
+            "has_text": bool(turn.text),
+            "tool_call_count": len(turn.tool_calls),
+            "force_finish": force_finish,
+            "finish_reason": turn.finish_reason,
+            "usage": dict(turn.usage),
+            "attempt_count": turn.attempt_count,
+            "model_retry_count": state.model_retry_count,
+        },
+        None,
+    )
+    return turn
 
 
-def _attempted_allowed_tools(manifest: SceneManifest, observations: list[dict[str, Any]]) -> list[str]:
-    allowed = set(manifest.allowed_tools)
-    return [
-        tool_name
-        for tool_name in (str(item.get("tool_name") or "").strip() for item in observations)
-        if tool_name in allowed
-    ]
+def _bounded_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
+) -> tuple[tuple[dict[str, Any], ...], int]:
+    copied = [dict(item) for item in messages]
+    effective_chars = min(max_chars, max_tokens * 4)
+    if _message_chars(copied) <= effective_chars:
+        return tuple(copied), 0
+
+    system = [item for item in copied if str(item.get("role") or "") == "system"]
+    conversation = [item for item in copied if str(item.get("role") or "") != "system"]
+    groups = _message_groups(conversation)
+    fixed = system[:1]
+    notice = {
+        "role": "system",
+        "content": "Earlier conversation and tool details were compacted to stay within the model context budget.",
+    }
+    budget = max(1_000, effective_chars - _message_chars([*fixed, notice]))
+    kept: list[list[dict[str, Any]]] = []
+    used = 0
+    for group in reversed(groups):
+        size = _message_chars(group)
+        if kept and used + size > budget:
+            break
+        if size > budget:
+            group = _clip_group(group, budget)
+            size = _message_chars(group)
+        kept.append(group)
+        used += size
+        if used >= budget:
+            break
+    kept.reverse()
+    flattened = [item for group in kept for item in group]
+    omitted = max(0, len(conversation) - len(flattened))
+    return tuple([*fixed, notice, *flattened]), omitted
 
 
-def _has_unattempted_manifest_tools(state: AgentState) -> bool:
-    attempted = set(state.attempted_tools)
-    return any(tool_name not in attempted for tool_name in state.manifest.allowed_tools)
+def _message_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(messages):
+        item = messages[index]
+        group = [item]
+        index += 1
+        if str(item.get("role") or "") == "assistant" and item.get("tool_calls"):
+            while index < len(messages) and str(messages[index].get("role") or "") == "tool":
+                group.append(messages[index])
+                index += 1
+        groups.append(group)
+    return groups
 
 
-def _tool_attempt_payload(
-    tool_name: str,
-    payload: dict[str, Any] | None,
-    tool_call_id: str,
-    turn: int,
+def _clip_group(group: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
+    if len(group) > 1:
+        compacted = [dict(group[0])]
+        per_tool_chars = max(512, max_chars // max(1, len(group) - 1))
+        for message in group[1:]:
+            item = dict(message)
+            try:
+                payload = json.loads(str(item.get("content") or "{}"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                payload = _compact_json_value(payload, max_chars=per_tool_chars)
+                payload["context_compacted"] = True
+                item["content"] = json.dumps(payload, ensure_ascii=False, default=str)
+            compacted.append(item)
+        return compacted
+    item = dict(group[0])
+    content = str(item.get("content") or "")
+    if len(content) > max_chars:
+        item["content"] = content[: max(0, max_chars - 32)] + "\n[content truncated]"
+    return [item]
+
+
+def _message_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(item, ensure_ascii=False, default=str)) for item in messages)
+
+
+def _compact_json_value(value: Any, *, max_chars: int, depth: int = 0) -> Any:
+    if depth >= 4:
+        return _clip_text(value, min(240, max_chars))
+    if isinstance(value, dict):
+        priority = ("error", "message", "hint", "account", "currency", "month", "period", "source", "truncation")
+        ordered = [key for key in priority if key in value]
+        ordered.extend(key for key in value if key not in ordered)
+        result: dict[str, Any] = {}
+        for key in ordered[:20]:
+            result[str(key)] = _compact_json_value(
+                value[key],
+                max_chars=max(96, max_chars // max(1, min(len(ordered), 8))),
+                depth=depth + 1,
+            )
+        if len(ordered) > 20:
+            result["_omitted_fields"] = len(ordered) - 20
+        return result
+    if isinstance(value, list):
+        kept = value[:8]
+        result = [
+            _compact_json_value(item, max_chars=max(96, max_chars // max(1, len(kept))), depth=depth + 1)
+            for item in kept
+        ]
+        if len(value) > len(kept):
+            result.append({"_omitted_items": len(value) - len(kept)})
+        return result
+    if isinstance(value, str):
+        return _clip_text(value, max(64, min(500, max_chars)))
+    return value
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: max(0, limit - 16)] + "...[truncated]"
+
+
+def _model_tools(state: AgentState) -> list[dict[str, Any]]:
+    tools = [dict(item) for item in state.manifest.tool_descriptions]
+    if state.result_pages:
+        tools.append(
+            {
+                "name": "__read_observation__",
+                "description": "Read the next page of a truncated prior tool result.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"continuation_token": {"type": "string"}},
+                    "required": ["continuation_token"],
+                    "additionalProperties": False,
+                },
+            }
+        )
+    return tools
+
+
+def _append_assistant_tool_calls(state: AgentState, text: str, calls: tuple[ToolCall, ...]) -> None:
+    state.messages.append(
+        {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": [
+                {"id": call.call_id, "name": call.name, "arguments": dict(call.arguments)} for call in calls
+            ],
+        }
+    )
+
+
+def _execute_tool_call(
+    state: AgentState,
+    call: ToolCall,
+    *,
+    scene_input: dict[str, Any],
+    build_tool_payload: ToolPayloadBuilder,
+    call_read_tool: ReadToolCaller,
+    compact_observation: ObservationCompactor,
+    record_event: EventRecorder,
 ) -> dict[str, Any]:
-    payload_dict = payload if isinstance(payload, dict) else {}
-    return {
-        "tool_name": tool_name,
-        "tool_call_id": tool_call_id,
-        "turn": turn,
-        "payload_keys": sorted(key for key in payload_dict if isinstance(key, str)),
-    }
+    if call.name == "__read_observation__":
+        state.tool_calls += 1
+        record_event("tool_call", {"tool_name": call.name, "tool_input": dict(call.arguments)}, None)
+        observation = _read_observation_page(state, call.arguments)
+        return _append_tool_observation(state, call, observation, record_event)
+    if call.name not in state.manifest.allowed_tools:
+        return _append_tool_observation(
+            state,
+            call,
+            _error_observation(
+                call.name,
+                "POLICY_ERROR",
+                "tool is outside the Host allowlist",
+                hint="Choose one of the tools supplied in the current model request.",
+            ),
+            record_event,
+        )
+    if "__invalid_arguments__" in call.arguments:
+        return _append_tool_observation(
+            state,
+            call,
+            _error_observation(
+                call.name,
+                "INPUT_ERROR",
+                "tool arguments are not valid JSON",
+                hint="Retry once with a valid JSON object matching the tool schema.",
+            ),
+            record_event,
+        )
+    payload, payload_error = build_tool_payload(call.name, _tool_input(call.arguments, scene_input))
+    if payload_error or payload is None:
+        return _append_tool_observation(
+            state,
+            call,
+            _error_observation(
+                call.name,
+                "INPUT_ERROR",
+                payload_error or "tool input could not be prepared",
+                hint="Correct the arguments using the tool schema or choose another read-only tool.",
+            ),
+            record_event,
+        )
+    signature = json.dumps([call.name, payload], ensure_ascii=False, sort_keys=True, default=str)
+    if signature in state.call_signatures:
+        previous_error = state.call_outcomes.get(signature, "")
+        if previous_error not in TRANSIENT_TOOL_ERRORS or state.call_attempts.get(signature, 0) >= 2:
+            return _append_tool_observation(
+                state,
+                call,
+                _error_observation(
+                    call.name,
+                    "DUPLICATE_TOOL_CALL",
+                    "identical tool call was already attempted",
+                    hint="Reuse the prior result or change the arguments only if new information is needed.",
+                ),
+                record_event,
+            )
+    state.call_signatures.add(signature)
+    state.call_attempts[signature] = state.call_attempts.get(signature, 0) + 1
+    state.tool_calls += 1
+    record_event("tool_call", {"tool_name": call.name, "tool_input": payload}, None)
+    try:
+        response = call_read_tool(call.name, payload)
+    except SystemExit:
+        response = {"ok": False, "error": {"code": "CONFIG_ERROR", "message": "tool configuration rejected"}}
+    except Exception:
+        response = {"ok": False, "error": {"code": "TOOL_EXCEPTION", "message": "tool raised an exception"}}
+    try:
+        observation = compact_observation(call.name, response, payload)
+    except Exception:
+        observation = _error_observation(call.name, "OBSERVATION_ERROR", "tool result could not be normalized")
+    observation["tool_input"] = payload
+    _attach_result_page(state, observation, response)
+    state.call_outcomes[signature] = str(observation.get("error") or "SUCCESS")
+    return _append_tool_observation(state, call, observation, record_event)
 
 
-def _tool_exception_response(tool_name: str, *, code: str = "TOOL_EXCEPTION") -> dict[str, Any]:
-    return {
-        "tool_name": tool_name,
-        "ok": False,
-        "summary": f"{tool_name} failed with code {code}.",
-        "error": {"code": code},
-        "evidence_ok": False,
-        "missing_data": [f"{tool_name} evidence unavailable: {code}"],
-    }
-
-
-def _agent_action_payload(turn: int, action: Any, allowed_tools: list[str]) -> dict[str, Any]:
-    payload = {"turn": turn, "kind": action.kind}
-    if action.tool_name and action.tool_name in allowed_tools:
-        payload["tool_name"] = action.tool_name
-    elif action.tool_name:
-        payload["tool_name_allowed"] = False
-    if action.reason:
-        payload["reason_present"] = True
-    if action.kind == "finish" and isinstance(getattr(action, "final_report", None), dict):
-        payload["final_report_present"] = True
+def _tool_input(arguments: dict[str, Any], scene_input: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(arguments)
+    for key in ("config_key", "symbol", "month", "reference_year"):
+        value = scene_input.get(key)
+        if value not in (None, ""):
+            payload[key] = value
     return payload
 
 
-def _record_model_error_if_present(turn: int, action: Any, record_event: EventRecorder) -> None:
-    code = _action_error_code(action)
-    if code not in {"MODEL_ERROR", "MODEL_ACTION_INVALID"}:
+def _append_tool_observation(
+    state: AgentState,
+    call: ToolCall,
+    observation: dict[str, Any],
+    record_event: EventRecorder,
+) -> dict[str, Any]:
+    item = dict(observation)
+    item.setdefault("ref", f"obs_{len(state.observations) + 1}")
+    item.setdefault("tool_name", call.name)
+    state.observations.append(item)
+    state.messages.append(
+        {
+            "role": "tool",
+            "tool_call_id": call.call_id,
+            "name": call.name,
+            "content": json.dumps(
+                _project_observation_for_model(item),
+                ensure_ascii=False,
+                default=str,
+            ),
+        }
+    )
+    record_event("tool_result", item, str(item.get("ref") or "") or None)
+    return item
+
+
+def _project_observation_for_model(observation: dict[str, Any]) -> dict[str, Any]:
+    if not bool(observation.get("ok")):
+        return {
+            key: observation[key]
+            for key in ("error", "message", "hint")
+            if observation.get(key) not in (None, "")
+        }
+
+    value = observation.get("value")
+    if isinstance(value, dict):
+        projected = dict(value)
+    elif isinstance(value, list):
+        projected = {"items": value}
+    elif value is None:
+        projected = {}
+    else:
+        projected = {"content": value}
+
+    if not projected and observation.get("summary"):
+        projected["summary"] = observation["summary"]
+    truncation = observation.get("truncation")
+    if isinstance(truncation, dict) and truncation:
+        projected["truncation"] = dict(truncation)
+    return projected
+
+
+def _attach_result_page(state: AgentState, observation: dict[str, Any], response: dict[str, Any]) -> None:
+    raw = json.dumps(response.get("data") if isinstance(response, dict) else {}, ensure_ascii=False, default=str)
+    if len(raw) <= OBSERVATION_PAGE_CHARS:
         return
-    record_event("model_error", {"turn": turn, "code": code}, None)
+    ref = f"obs_{len(state.observations) + 1}"
+    state.result_pages[ref] = raw
+    observation["truncation"] = {
+        "next_action": "fetch_more",
+        "continuation_token": f"{ref}:{OBSERVATION_PAGE_CHARS}",
+    }
 
 
-def _action_error_code(action: Any) -> str | None:
-    code = str(getattr(action, "error_code", "") or "").strip().upper()
-    return code or None
+def _read_observation_page(state: AgentState, arguments: dict[str, Any]) -> dict[str, Any]:
+    token = str(arguments.get("continuation_token") or "").strip()
+    try:
+        ref, offset_text = token.rsplit(":", 1)
+        offset = int(offset_text)
+        raw = state.result_pages[ref]
+    except Exception:
+        return _error_observation("__read_observation__", "INPUT_ERROR", "invalid continuation token")
+    next_offset = offset + OBSERVATION_PAGE_CHARS
+    return {
+        "tool_name": "__read_observation__",
+        "ok": True,
+        "summary": f"continued observation {ref}",
+        "value": {"content": raw[offset:next_offset]},
+        **(
+            {
+                "truncation": {
+                    "next_action": "fetch_more",
+                    "continuation_token": f"{ref}:{next_offset}",
+                }
+            }
+            if next_offset < len(raw)
+            else {}
+        ),
+    }
 
 
-def _invalid_action_missing_data(action: Any) -> str:
-    reason = str(getattr(action, "reason", "") or "")
-    if reason.strip().endswith("finish action requires conclusion"):
-        return "valid conclusion"
-    if "finish action requires cited findings" in reason:
-        return "cited findings"
-    if "finish action requires finding evidence" in reason:
-        return "finding evidence"
-    if "finish action requires recommendations empty when evidence missing" in reason:
-        return "recommendations blocked by missing evidence"
-    if "finish action requires concrete recommendations" in reason:
-        return "concrete recommendations"
-    if "finish action requires substantive conclusion" in reason:
-        return "substantive conclusion"
-    if "finish action requires conclusion finding support" in reason:
-        return "conclusion finding support"
-    if "finish action requires conclusion missing-data support" in reason:
-        return "conclusion missing-data support"
-    if "finish action requires conclusion target support" in reason:
-        return "conclusion target support"
-    if "finish action requires conclusion account support" in reason:
-        return "conclusion account support"
-    if "finish action requires conclusion numeric support" in reason:
-        return "conclusion numeric support"
-    if "finish action violates evidence-use boundary" in reason:
-        return "evidence-use boundary"
-    if "finish action violates omitted-evidence boundary" in reason:
-        return "omitted evidence boundary"
-    if "finish action requires recommendations" in reason:
-        return "cited recommendations"
-    if "finish action requires recommendation evidence" in reason:
-        return "recommendation evidence"
-    if "finish action requires recommendation finding support" in reason:
-        return "recommendation finding support"
-    if "finish action requires substantive findings" in reason:
-        return "substantive findings"
-    if "finish action requires recommendation answer dimension" in reason:
-        return "recommendation answer dimension"
-    if "finish action requires answer-dimension findings" in reason:
-        return "answer-dimension findings"
-    if "finish action requires finding dimension support" in reason:
-        return "finding dimension support"
-    if "finish action requires recommendation dimension evidence" in reason:
-        return "recommendation dimension evidence"
-    if "finish action requires recommendation dimension support" in reason:
-        return "recommendation dimension support"
-    if "finish action requires recommendation target support" in reason:
-        return "recommendation target support"
-    if "finish action requires recommendation account support" in reason:
-        return "recommendation account support"
-    if "finish action requires recommendation numeric support" in reason:
-        return "recommendation numeric support"
-    if "finish action requires requested-period finding evidence" in reason:
-        return "requested-period finding evidence"
-    if "finish action requires requested-period recommendation evidence" in reason:
-        return "requested-period recommendation evidence"
-    if "finish action requires synthesized summaries" in reason:
-        return "synthesized answer report"
-    if "finish action requires tool evidence" in reason:
-        return "remaining agent/tool work"
-    if "finish action requires missing evidence" in reason:
-        return "missing tool evidence"
-    if "finish action requires eval fixture disclosure" in reason:
-        return "eval fixture disclosure"
-    if "finish action claims external action" in reason:
-        return "mutation_claim"
-    if "finish action uses non-claimable evidence refs" in reason:
-        return "non-claimable evidence refs"
-    return "valid agent action"
+def _load_fixture_observations(
+    state: AgentState,
+    fixture_id: str | None,
+    fixture_observations: FixtureLoader,
+    record_event: EventRecorder,
+) -> None:
+    try:
+        items = [dict(item) for item in fixture_observations(fixture_id)]
+    except Exception:
+        items = [_error_observation("fixture", "FIXTURE_ERROR", "fixture observations could not be loaded")]
+    for item in items:
+        item.setdefault("ref", f"obs_{len(state.observations) + 1}")
+        state.observations.append(item)
+        record_event("fixture_observation", item, str(item.get("ref") or "") or None)
+    state.messages.append(
+        {
+            "role": "system",
+            "content": "Evaluation-only read observations:\n" + json.dumps(items, ensure_ascii=False, default=str),
+        }
+    )
 
 
-def _error_code(observation: dict[str, Any]) -> str | None:
-    error = observation.get("error")
-    if isinstance(error, dict):
-        code = str(error.get("code") or "").strip()
-        return code or None
+def _stop_reason(
+    state: AgentState,
+    *,
+    max_tool_calls: int,
+    timeout_seconds: float,
+    reserve_seconds: float,
+    started_at: float,
+    clock: Clock,
+    is_cancelled: CancellationChecker | None,
+) -> tuple[str, dict[str, Any]] | None:
+    if is_cancelled and is_cancelled():
+        return "run_cancelled", {"reason": "cancellation_requested"}
+    if timeout_seconds and clock() - started_at >= max(0.0, timeout_seconds - reserve_seconds):
+        return "budget_exhausted", {"limit": "timeout_seconds"}
+    if max_tool_calls and state.tool_calls >= max_tool_calls:
+        return "budget_exhausted", {"limit": "max_tool_calls"}
     return None
 
 
-def _append_recoverable_observation(
-    state: AgentState,
-    record_event: EventRecorder,
-    build_observation_event: ObservationEventBuilder,
-    *,
-    tool_name: str,
-    code: str,
-    summary: str,
-    missing_data: str,
-) -> None:
-    observation = build_observation_event(
-        {
-            "tool_name": tool_name,
-            "ok": False,
-            "summary": summary,
-            "data": {},
-            "error": {"code": code, "message": summary},
-            "evidence_ok": False,
-            "missing_data": [missing_data],
-        },
-        len(state.observations) + 1,
-    )
-    state.observations.append(observation)
-    record_event("observation", observation, observation["ref"])
+def _remaining_seconds(timeout_seconds: float, started_at: float, clock: Clock) -> int | None:
+    if timeout_seconds <= 0:
+        return None
+    return max(1, int(timeout_seconds - (clock() - started_at)))
+
+
+def _joined_answer(parts: list[str], final_text: str) -> str:
+    return "".join([*parts, final_text]).strip()
+
+
+def _error_observation(tool_name: str, code: str, message: str, *, hint: str | None = None) -> dict[str, Any]:
+    return {
+        "tool_name": tool_name,
+        "ok": False,
+        "error": code,
+        "message": message,
+        **({"hint": hint} if hint else {}),
+    }
+
+
+__all__ = ["run_engine"]

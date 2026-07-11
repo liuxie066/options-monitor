@@ -153,20 +153,13 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 ```
 
 This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
-tool and not a shell bridge. It performs slash-command parsing, deterministic
-operation-alias handling, sender allowlist checks, message idempotency, SQLite
-audit, and then calls an allowlisted tool or creates a pending preview through
-the existing operation path. The current `./om assistant ...` CLI namespace and
-`assistant` config keys remain compatibility names. Free-form natural-language
-execution is disabled by default and returns `NATURAL_LANGUAGE_REBUILDING`;
-the explicit `assistant.copilot.enabled` gate only enters the Copilot channel
-facade. `operations_diagnostics` and `monthly_income_attribution` are
-channel-ready in the current slice; channel execution requires the selected
-scene to be allowlisted in `assistant.copilot.channel_scenes` plus explicit
-assistant model configuration before any tool call.
-`assistant.copilot.human_review=true` holds Host-backed
-Copilot answers at the channel boundary while retaining sanitized audit
-summaries. Confirm/cancel/apply remains deterministic-only.
+tool and not a shell bridge. It performs sender allowlist checks, message
+idempotency, and SQLite audit. Explicit commands and pending-operation replies
+enter deterministic Control; every other message enters the single read-only
+`om_chat` Copilot Scene when `assistant.copilot.enabled` is true. Copilot needs
+an explicit assistant model configuration and cannot enter confirm, cancel,
+apply, notification, config-write, ledger/trade, broker-write, service-control,
+or upgrade paths.
 
 Remote channels require:
 

@@ -294,10 +294,7 @@ def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
         "intent_name": row.get("intent_name"),
         "tool_name": row.get("tool_name"),
         "tool_payload": _loads(row.get("tool_payload_json")),
-        "perception": _loads(row.get("perception_json")),
-        "reasoning": _loads(row.get("reasoning_json")),
-        "action": _loads(row.get("action_json")),
-        "observation": _loads(row.get("observation_json")),
+        "control": _audit_control(row),
         "decision": row.get("decision"),
         "result_ok": bool(row.get("result_ok")),
         "error_code": row.get("error_code") or error.get("code"),
@@ -645,9 +642,9 @@ def _audit_operation_key(row: dict[str, Any]) -> str | None:
     operation_id = _response_operation_id(row)
     if operation_id:
         return operation_id
-    reasoning = _loads(row.get("reasoning_json"))
-    safety_class = str(reasoning.get("safety_class") or "").strip()
-    requires_confirmation = bool(reasoning.get("requires_confirmation"))
+    control = _audit_control(row)
+    safety_class = str(control.get("safety_class") or "").strip()
+    requires_confirmation = bool(control.get("requires_confirmation"))
     tool_name = str(row.get("tool_name") or "").strip()
     if requires_confirmation or safety_class.startswith("write_"):
         return _first_text(row.get("command_id"))
@@ -681,13 +678,17 @@ def _audit_operation_status(row: dict[str, Any]) -> str | None:
     status = _first_text(data.get("status"))
     if status:
         return status
-    reasoning = _loads(row.get("reasoning_json"))
-    safety_class = str(reasoning.get("safety_class") or "").strip()
+    control = _audit_control(row)
+    safety_class = str(control.get("safety_class") or "").strip()
     if safety_class == "write_preview":
         return "previewed"
     if safety_class == "write_apply":
         return "applied"
     return None
+
+
+def _audit_control(row: dict[str, Any]) -> dict[str, Any]:
+    return _loads(row.get("control_json"))
 
 
 def _ledger_identity_from_result(result: dict[str, Any]) -> dict[str, Any]:

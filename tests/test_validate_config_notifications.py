@@ -138,7 +138,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.enabled is retired; use assistant.planner.enabled" in str(exc)
+        assert "assistant.llm.enabled is retired; use assistant.copilot.enabled" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": ["openai"]}}
@@ -222,7 +222,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         assert "assistant.llm.provider must be one of: openai, deepseek, kimi" in str(exc)
 
 
-def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_config() -> None:
+def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
@@ -259,7 +259,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_conf
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.planner must be an object" in str(exc)
+        assert "assistant has unsupported keys: planner" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"planner": {"enabled": "yes"}}
@@ -268,12 +268,12 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_conf
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.planner.enabled must be a boolean" in str(exc)
+        assert "assistant has unsupported keys: planner" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {
         "enabled": True,
-        "planner": {"enabled": True},
+        "copilot": {"enabled": True},
         "llm": {
             "provider": "openai",
             "base_url": "https://llm.example/v1",
@@ -288,7 +288,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_conf
     cfg = _base_cfg()
     cfg["assistant"] = {
         "enabled": True,
-        "planner": {"enabled": True},
+        "copilot": {"enabled": True},
         "llm": {
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com",

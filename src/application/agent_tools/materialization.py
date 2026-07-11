@@ -122,8 +122,6 @@ def _get_close_advice_tool(
 
 _CASH_HEADROOM_OUTPUT_CONTRACT = {
     "schema_version": "query_cash_headroom.output.v1",
-    "canonical_renderer": "cash_headroom",
-    "guard_profile": "cash_headroom",
     "source_label": "OM cash headroom query",
     "result_shape": "scalar",
     "fact_fields": [
@@ -136,25 +134,6 @@ _CASH_HEADROOM_OUTPUT_CONTRACT = {
     ],
     "missing_data_fields": ["cash_secured_unavailable_by_symbol", "cash_secured_unavailable_reason"],
 }
-
-_CASH_HEADROOM_PLANNER_NOTES = (
-    "Use for sell put collateral vs account cash/cash-like sufficiency questions.",
-    "Do not use healthcheck for cash sufficiency; healthcheck only reports system readiness.",
-)
-
-_CASH_HEADROOM_PLANNER_SEMANTICS = {
-    "answers": [
-        "sell put cash-secured collateral currently used",
-        "cash plus cash-like assets converted to CNY",
-        "whether used collateral exceeds cash-like assets",
-    ],
-    "not_promised": [
-        "candidate recommendation ranking",
-        "config max strike thresholds",
-        "notification delivery health",
-    ],
-}
-
 
 SCAN_OPPORTUNITIES_TOOL = build_agent_tool(
     name="scan_opportunities",
@@ -186,7 +165,11 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
         "data_config": "optional explicit data config path",
-        "account": "optional account label",
+        "account": {
+            "type": "string",
+            "required": True,
+            "description": "Account label required by the portfolio cash source, for example lx or sy",
+        },
         "broker": "optional broker name, preferred public field",
         "top": "optional int",
         "no_exchange_rates": "optional bool",
@@ -199,8 +182,6 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "account": "sy"}},
     ),
     output_contract=_CASH_HEADROOM_OUTPUT_CONTRACT,
-    planner_notes=_CASH_HEADROOM_PLANNER_NOTES,
-    planner_semantics=_CASH_HEADROOM_PLANNER_SEMANTICS,
 )
 
 GET_PORTFOLIO_CONTEXT_TOOL = build_agent_tool(

@@ -14,7 +14,7 @@ from domain.domain import (
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
-from src.application.assistant.llm_provider_registry import supported_llm_providers
+from src.application.llm_provider_registry import provider_requires_api_key, supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
@@ -100,14 +100,12 @@ INLINE_SECRET_CONFIG_KEYS = {
 }
 ASSISTANT_CONFIG_KEYS = {
     'active_model',
-    'agent_loop',
     'context_window_messages',
     'copilot',
     'default_market_scope',
     'enabled',
     'llm',
     'models',
-    'planner',
 }
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
@@ -229,7 +227,7 @@ def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_re
             die(f'{path}.provider is required when {required_reason}')
         if not str(llm_cfg.get('model') or '').strip():
             die(f'{path}.model is required when {required_reason}')
-        if not str(llm_cfg.get('api_key_env') or '').strip():
+        if provider_requires_api_key(llm_provider) and not str(llm_cfg.get('api_key_env') or '').strip():
             die(f'{path}.api_key_env is required when {required_reason}')
 
 
@@ -277,27 +275,15 @@ def _validate_assistant_config(cfg: dict) -> None:
         die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
     if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
         die('assistant.enabled must be a boolean')
-    planner = assistant.get('planner') or {}
-    if planner and not isinstance(planner, dict):
-        die('assistant.planner must be an object')
-    if isinstance(planner, dict) and 'enabled' in planner and planner.get('enabled') is not None and not isinstance(planner.get('enabled'), bool):
-        die('assistant.planner.enabled must be a boolean')
     copilot = assistant.get('copilot') or {}
     if copilot and not isinstance(copilot, dict):
         die('assistant.copilot must be an object')
     if isinstance(copilot, dict):
-        for key in ('enabled', 'human_review'):
-            if key in copilot and copilot.get(key) is not None and not isinstance(copilot.get(key), bool):
-                die(f'assistant.copilot.{key} must be a boolean')
-        if 'channel_scenes' in copilot and copilot.get('channel_scenes') is not None:
-            scenes = copilot.get('channel_scenes')
-            if not isinstance(scenes, list) or any(not isinstance(item, str) for item in scenes):
-                die('assistant.copilot.channel_scenes must be a list of strings')
-    agent_loop = assistant.get('agent_loop') or {}
-    if agent_loop and not isinstance(agent_loop, dict):
-        die('assistant.agent_loop must be an object')
-    if isinstance(agent_loop, dict) and 'enabled' in agent_loop and agent_loop.get('enabled') is not None and not isinstance(agent_loop.get('enabled'), bool):
-        die('assistant.agent_loop.enabled must be a boolean')
+        unsupported_copilot = sorted(str(key) for key in copilot if key != 'enabled')
+        if unsupported_copilot:
+            die(f'assistant.copilot contains unsupported keys: {", ".join(unsupported_copilot)}')
+        if 'enabled' in copilot and copilot.get('enabled') is not None and not isinstance(copilot.get('enabled'), bool):
+            die('assistant.copilot.enabled must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
@@ -311,12 +297,12 @@ def _validate_assistant_config(cfg: dict) -> None:
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.planner.enabled')
+        die('assistant.llm.enabled is retired; use assistant.copilot.enabled')
     _validate_llm_config(
         llm,
         path='assistant.llm',
         enabled=False,
-        required_reason='assistant planner uses LLM',
+        required_reason='assistant Copilot uses LLM',
     )
 
     if 'agent' in cfg:

@@ -7,9 +7,7 @@ from src.application.agent_tools.base import AgentTool, AgentToolContext, build_
 
 _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "healthcheck.output.v1",
-    "canonical_renderer": "healthcheck",
     "source_label": "OM 本地健康检查",
-    "guard_profile": "status_summary",
     "primary_rows": "checks",
     "fact_fields": [
         "summary.ok",
@@ -23,9 +21,7 @@ _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_status.output.v1",
-    "canonical_renderer": "runtime_status",
     "source_label": "OM 本地 runtime_status",
-    "guard_profile": "status_summary",
     "primary_rows": "summary",
     "fact_fields": [
         "summary.ok",
@@ -39,48 +35,6 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "latest_scanned_run.path",
     ],
 }
-
-_ASSISTANT_TRACE_OUTPUT_CONTRACT: dict[str, Any] = {
-    "schema_version": "assistant_trace.output.v1",
-    "canonical_renderer": "assistant_trace",
-    "source_label": "OM inbound audit agent_sessions",
-    "guard_profile": "diagnostic_trace",
-    "primary_rows": "traces",
-    "row_count_field": "trace_count",
-    "fact_fields": [
-        "traces[].identity.session_id",
-        "traces[].identity.command_id",
-        "traces[].task.goal",
-        "traces[].task.state",
-        "traces[].evidence.fact_count",
-        "traces[].evidence.missing_data_count",
-        "traces[].capability_selection.selected_tools[]",
-        "traces[].compact_trace.selected_capability",
-        "traces[].compact_trace.model_turns.tool_call_count",
-        "traces[].compact_trace.tool_observations[].tool_name",
-        "traces[].compact_trace.evidence_gaps[].suggested_tool",
-        "traces[].compact_trace.stop_reason",
-        "traces[].compact_trace.answer_route",
-        "traces[].capability_selection.selected[].tool_name",
-        "traces[].capability_selection.selected[].effect",
-        "traces[].capability_selection.required[]",
-        "traces[].capability_selection.satisfied[]",
-        "traces[].capability_selection.rejected[].tool_name",
-        "traces[].capability_selection.rejected[].reason",
-        "traces[].progress.state",
-        "traces[].progress.summary",
-        "traces[].progress.coverage_status",
-        "traces[].progress.next_action",
-        "traces[].progress.blocked_by[].kind",
-        "traces[].progress.blocked_by[].tool_name",
-        "traces[].answer.response_status",
-        "traces[].answer.synthesis_reason",
-        "traces[].answer.clarification_request.status",
-        "traces[].answer.clarification_request.questions[].slot",
-        "traces[].answer.clarification_request.questions[].question",
-    ],
-}
-
 
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
@@ -148,25 +102,6 @@ def _operation_timeline_tool(
     return data, warnings, {"audit_db": data.get("audit_db")}
 
 
-def _assistant_trace_tool(
-    ctx: AgentToolContext,
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    data = ctx.collect_assistant_trace(
-        audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
-        session_id=payload.get("session_id"),
-        command_id=payload.get("command_id"),
-        channel=payload.get("channel"),
-        sender_id=payload.get("sender_id"),
-        conversation_id=payload.get("conversation_id"),
-        message_id=payload.get("message_id"),
-        limit=int(payload.get("limit") or 10),
-        include_snapshot=bool(payload.get("include_snapshot", False)),
-    )
-    warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
-    return data, warnings, {"audit_db": data.get("audit_db")}
-
-
 HEALTHCHECK_TOOL = build_agent_tool(
     name="healthcheck",
     description="Validate runtime config and summarize local readiness without sending notifications or writing remote data.",
@@ -193,7 +128,6 @@ HEALTHCHECK_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
-    answer_policy="facts_then_analysis",
     output_contract=_HEALTHCHECK_OUTPUT_CONTRACT,
 )
 
@@ -203,9 +137,13 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     requires=("runtime_config",),
     capabilities=("status", "read_only"),
     input_schema={
-        "config_key": "us|hk",
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
         "config_path": "optional explicit config path",
-        "accounts": "optional list[str]",
+        "accounts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional account labels",
+        },
         "report_dir": "optional report dir; defaults to output_shared/reports",
         "state_dir": "optional shared state dir; defaults to output_shared/state",
         "shared_state_dir": "optional shared state dir; defaults to output_shared/state",
@@ -213,8 +151,17 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
         "runs_root": "optional run history root; defaults to output_runs",
         "run_id": "optional output_runs run id to inspect instead of the last_run_dir pointer",
         "run_dir": "optional explicit run directory to inspect instead of the last_run_dir pointer",
-        "max_notification_chars": "optional int, capped at 20000",
-        "max_run_age_minutes": "optional freshness threshold; defaults to 60",
+        "max_notification_chars": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000,
+            "description": "Maximum notification preview characters",
+        },
+        "max_run_age_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Freshness threshold; defaults to 60",
+        },
         "profile_path": "optional service.profile.json path",
         "include_service_status": "optional bool; inspect configured systemd/launchd service status when a service profile is loaded",
         "trigger_source": "optional outer runner source such as cron or om_direct",
@@ -227,7 +174,6 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
-    answer_policy="facts_then_analysis",
     output_contract=_RUNTIME_STATUS_OUTPUT_CONTRACT,
 )
 
@@ -260,47 +206,14 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
     ),
 )
 
-ASSISTANT_TRACE_TOOL = build_agent_tool(
-    name="assistant_trace",
-    description=(
-        "Read durable Assistant session snapshots from inbound SQLite to explain recent assistant plans, tool calls, "
-        "evidence counts, answer-route decisions, and permission state."
-    ),
-    requires=("inbound_audit_db",),
-    capabilities=("assistant_trace", "assistant_diagnostics", "read_only"),
-    input_schema={
-        "audit_db": "optional inbound audit SQLite path",
-        "inbound_audit_db": "optional alias for audit_db",
-        "session_id": "optional exact Assistant session id",
-        "command_id": "optional exact inbound command id",
-        "channel": "optional channel filter such as feishu",
-        "sender_id": "optional operator sender id filter",
-        "conversation_id": "optional conversation filter",
-        "message_id": "optional inbound message id filter",
-        "limit": "optional number of recent Assistant sessions to return; defaults to 10",
-        "include_snapshot": "optional bool; include compact raw Assistant session snapshot for deep debugging",
-    },
-    handler=_assistant_trace_tool,
-    pure_read=True,
-    safe_default_input={"limit": 10},
-    examples=(
-        {"input": {"limit": 10}},
-        {"input": {"channel": "feishu", "sender_id": "ou_1", "limit": 5}},
-        {"input": {"command_id": "in_abc"}},
-    ),
-    output_contract=_ASSISTANT_TRACE_OUTPUT_CONTRACT,
-)
-
 TOOLS: tuple[AgentTool, ...] = (
     HEALTHCHECK_TOOL,
     RUNTIME_STATUS_TOOL,
     OPERATION_TIMELINE_TOOL,
-    ASSISTANT_TRACE_TOOL,
 )
 
 
 __all__ = [
-    "ASSISTANT_TRACE_TOOL",
     "HEALTHCHECK_TOOL",
     "OPENCLAW_READINESS_TOOL",
     "OPERATION_TIMELINE_TOOL",

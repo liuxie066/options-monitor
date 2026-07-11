@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.agent_tool_contracts import build_response
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
+from src.application.assistant.inbound_control import execute_explicit_control
+from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
-from src.application.assistant.reasoning import resolve_reasoning
 from src.application.ledger.read_model import list_position_rows
 
 
@@ -59,9 +62,9 @@ class _Repo:
         ]
 
 
-def _position_intent(text: str, *, today: date, intent_name: str = "position_query") -> PerceptionResult:
+def _position_intent(text: str, *, today: date, intent_name: str = "position_query") -> ControlCommand:
     query = parse_position_query_text(text, today=today)
-    return PerceptionResult(intent_name=intent_name, arguments=position_query_intent_arguments(query))
+    return ControlCommand(intent_name=intent_name, arguments=position_query_intent_arguments(query))
 
 
 def test_position_query_parser_preserves_expiration_month_constraint() -> None:
@@ -97,24 +100,34 @@ def test_position_query_parser_treats_detail_synonyms_as_plain_open_list() -> No
         }
 
 
-def test_position_query_reasoning_preserves_query_constraints() -> None:
-    perception = _position_intent("0700 5月 call 持仓", today=date(2026, 5, 19))
-    resolution = resolve_reasoning(
-        perception,
-        request=AssistantRequest(text="0700 5月 call 持仓", sender_id="local", config_key="hk"),
+def _execute_control(command: ControlCommand, request: AssistantRequest, tmp_path: Path):
+    return execute_explicit_control(
+        command,
+        request=request,
+        command_id="test_control",
+        operation_store=InboundOperationStore(tmp_path / "inbound.sqlite3"),
+        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
     )
 
-    assert perception.public_payload()["arguments"] == {
+
+def test_position_query_control_preserves_query_constraints(tmp_path: Path) -> None:
+    command = _position_intent("0700 5月 call 持仓", today=date(2026, 5, 19))
+    control = _execute_control(
+        command,
+        AssistantRequest(text="0700 5月 call 持仓", sender_id="local", config_key="hk"),
+        tmp_path,
+    )
+
+    assert command.public_payload()["arguments"] == {
         "status": "open",
         "symbol": "0700.HK",
         "option_type": "call",
         "expiration": {"month": "2026-05"},
         "limit": 50,
     }
-    assert resolution.status == "supported"
-    assert resolution.tool_call is not None
-    assert resolution.tool_call.tool_name == "option_positions_read"
-    assert resolution.tool_call.payload == {
+    assert control.status == "supported"
+    assert control.tool_name == "option_positions_read"
+    assert control.payload == {
         "config_key": "hk",
         "action": "list",
         "query": {
@@ -127,16 +140,16 @@ def test_position_query_reasoning_preserves_query_constraints() -> None:
     }
 
 
-def test_reasoning_routes_exit_analysis_to_close_advice_read() -> None:
-    resolution = resolve_reasoning(
-        PerceptionResult(intent_name="position_exit_analysis", arguments={"option_type": "call", "side": "long"}),
-        request=AssistantRequest(text="分析 long call", sender_id="local", config_key="us"),
+def test_control_routes_exit_analysis_to_close_advice_read(tmp_path: Path) -> None:
+    control = _execute_control(
+        ControlCommand(intent_name="position_exit_analysis", arguments={"option_type": "call", "side": "long"}),
+        AssistantRequest(text="分析 long call", sender_id="local", config_key="us"),
+        tmp_path,
     )
 
-    assert resolution.status == "supported"
-    assert resolution.tool_call is not None
-    assert resolution.tool_call.tool_name == "close_advice_read"
-    assert resolution.tool_call.payload == {
+    assert control.status == "supported"
+    assert control.tool_name == "close_advice_read"
+    assert control.payload == {
         "config_key": "us",
         "market_scope": "all",
         "query": {
@@ -148,25 +161,25 @@ def test_reasoning_routes_exit_analysis_to_close_advice_read() -> None:
     }
 
 
-def test_exit_analysis_does_not_downgrade_to_position_query() -> None:
-    perception = _position_intent(
+def test_exit_analysis_does_not_downgrade_to_position_query(tmp_path: Path) -> None:
+    command = _position_intent(
         "泡泡玛特 long call 的持仓应该止盈吗",
         today=date(2026, 5, 29),
         intent_name="position_exit_analysis",
     )
-    resolution = resolve_reasoning(
-        perception,
-        request=AssistantRequest(text="泡泡玛特 long call 的持仓应该止盈吗", sender_id="local", config_key="hk"),
+    control = _execute_control(
+        command,
+        AssistantRequest(text="泡泡玛特 long call 的持仓应该止盈吗", sender_id="local", config_key="hk"),
+        tmp_path,
     )
 
-    assert perception.intent_name == "position_exit_analysis"
-    assert perception.arguments["symbol"] == "9992.HK"
-    assert perception.arguments["option_type"] == "call"
-    assert perception.arguments["side"] == "long"
-    assert resolution.status == "supported"
-    assert resolution.tool_call is not None
-    assert resolution.tool_call.tool_name == "close_advice_read"
-    assert resolution.tool_call.payload == {
+    assert command.intent_name == "position_exit_analysis"
+    assert command.arguments["symbol"] == "9992.HK"
+    assert command.arguments["option_type"] == "call"
+    assert command.arguments["side"] == "long"
+    assert control.status == "supported"
+    assert control.tool_name == "close_advice_read"
+    assert control.payload == {
         "config_key": "hk",
         "query": {
             "status": "open",

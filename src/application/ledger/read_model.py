@@ -196,6 +196,9 @@ def build_position_lot_view(
     expiration_date = expiration_timestamp_to_date(fields.get("expiration"))
     resolved_as_of_date = as_of_date or datetime.now(EXPIRATION_DATE_TZ).date()
     days_to_expiration = (expiration_date - resolved_as_of_date).days if expiration_date is not None else None
+    status = str(fields.get("status") or "").strip().lower()
+    expiration_state = "unknown" if days_to_expiration is None else ("expired" if days_to_expiration < 0 else "active")
+    state_warning = "expired_position_marked_open" if expiration_state == "expired" and status == "open" else None
     return {
         "record_id": record.get("record_id"),
         "fields": fields,
@@ -212,11 +215,14 @@ def build_position_lot_view(
         "expiration_ymd": fields.get("expiration_ymd"),
         "expiration_date": expiration_date,
         "days_to_expiration": days_to_expiration,
+        "expiration_state": expiration_state,
+        "state_warning": state_warning,
         "contracts": fields.get("contracts"),
         "contracts_open": fields.get("contracts_open"),
         "contracts_closed": fields.get("contracts_closed"),
         "currency": fields.get("currency"),
         "cash_secured_amount": fields.get("cash_secured_amount"),
+        "cash_secured_amount_role": "assignment_collateral" if fields.get("cash_secured_amount") not in (None, "") else None,
         "underlying_share_locked": fields.get("underlying_share_locked"),
         "premium": fields.get("premium"),
         "opened_at": fields.get("opened_at"),
@@ -311,11 +317,14 @@ def list_position_rows(
                 "expiration": view.get("expiration"),
                 "expiration_ymd": view.get("expiration_ymd"),
                 "days_to_expiration": days_to_expiration,
+                "expiration_state": view.get("expiration_state"),
+                "state_warning": view.get("state_warning"),
                 "contracts": view.get("contracts"),
                 "contracts_open": view.get("contracts_open"),
                 "contracts_closed": view.get("contracts_closed"),
                 "currency": view.get("currency"),
                 "cash_secured_amount": view.get("cash_secured_amount"),
+                "cash_secured_amount_role": view.get("cash_secured_amount_role"),
                 "underlying_share_locked": view.get("underlying_share_locked"),
                 "close_type": view.get("close_type"),
                 "close_reason": view.get("close_reason"),

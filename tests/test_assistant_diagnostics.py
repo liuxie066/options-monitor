@@ -7,9 +7,8 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.diagnostics import check_assistant_llm
-from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace
+from src.application.copilot.model_config import model_api_key_configured
 
 
 def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -20,7 +19,7 @@ def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
             "enabled": True,
             "context_window_messages": 8,
             "default_market_scope": "us",
-            "planner": {"enabled": enabled},
+            "copilot": {"enabled": enabled},
             "llm": llm_cfg,
         },
     }
@@ -32,7 +31,7 @@ def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
     return path
 
 
-def test_llm_check_allows_disabled_planner_without_api_key(tmp_path: Path) -> None:
+def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> None:
     cfg_path = _write_config(tmp_path, _assistant_config())
 
     out = check_assistant_llm(
@@ -44,13 +43,41 @@ def test_llm_check_allows_disabled_planner_without_api_key(tmp_path: Path) -> No
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
     assert out["llm"]["enabled"] is False
-    assert "runtime_status" in out["capabilities"]["llm_executable_intents"]
-    assert "manual_trade_open" in out["capabilities"]["known_non_executable_intents"]
+    assert "runtime_status" in out["capabilities"]["pure_read_tools"]
+    assert "manual_trade_open" not in out["capabilities"]["pure_read_tools"]
     assert out["llm"]["api_key_configured"] is False
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["enabled"]["status"] == "warn"
     assert checks["provider"]["status"] == "skipped"
     assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_ollama_model_config_does_not_require_api_key() -> None:
+    assert model_api_key_configured({"provider": "ollama", "model": "gpt-oss:20b"}, environ={}) == (True, None)
+
+
+def test_llm_check_reports_ready_ollama_without_api_key(tmp_path: Path) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _assistant_config(
+            llm={
+                "enabled": True,
+                "provider": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "gpt-oss:20b",
+                "api_key_env": "",
+            }
+        ),
+    )
+
+    out = check_assistant_llm(repo_root=tmp_path, config_path=cfg_path, include_local_env_file=False)
+
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["api_key_configured"] is True
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["api_key_env"]["message"] == "provider does not require an API key environment variable"
+    assert checks["api_key"]["status"] == "ok"
+    assert checks["api_key"]["message"] == "provider does not require an API key"
 
 
 def test_llm_check_rejects_missing_explicit_assistant_config(tmp_path: Path) -> None:
@@ -283,85 +310,7 @@ def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> 
     checks = {item["name"]: item for item in out["checks"]}
     live_probe = checks["live_probe"]
     assert live_probe["status"] == "skipped"
-    assert live_probe["message"] == "live provider probe removed; free-form assistant execution is rebuilding"
-    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "freeform_runtime": False}
-
-
-def test_assistant_trace_exposes_compact_diagnostics_without_raw_provider_payload(tmp_path: Path) -> None:
-    audit_db = tmp_path / "inbound.sqlite3"
-    request = AssistantRequest(
-        text="看一下状态",
-        sender_id="u1",
-        channel="local",
-        message_id="msg_trace_diag",
-        audit_db=str(audit_db),
+    assert live_probe["message"] == (
+        "provider diagnostics are configuration-only; use Copilot execution for an end-to-end model probe"
     )
-    snapshot = {
-        "session_id": "session_trace_diag",
-        "request": request.public_payload(),
-        "goal": "看一下状态",
-        "task_state": "done",
-        "capability_selection": {
-            "selected_tools": ["runtime_status"],
-            "selected": [{"tool_name": "runtime_status", "effect": "read"}],
-        },
-        "progress": {
-            "state": "done",
-            "tool_call_count": 1,
-            "blocked_by": [
-                {
-                    "kind": "evidence_gap",
-                    "gap_kind": "analysis_breakdown_needed",
-                    "suggested_tool": "analysis_query",
-                }
-            ],
-        },
-        "plan_revisions": [],
-        "tool_transcript": [
-            {
-                "index": 1,
-                "tool_name": "runtime_status",
-                "payload": {"config_key": "us"},
-                "authorized": True,
-                "precheck": {"decision": "allow", "risk_class": "READ_AUTO"},
-                "evidence_summary": {"row_count": 1},
-                "ok": True,
-            }
-        ],
-        "evidence_bundle": {"fact_count": 1, "dataset_count": 1},
-        "answer_trace": {
-            "answer_route": "llm_from_tool_observation",
-            "final_response": {"status": "rendered", "reason": "model_final_answer"},
-            "synthesis": {
-                "event_loop": {
-                    "loop_stop_reason": "model_final_answer",
-                    "continuation_count": 1,
-                    "raw_provider_payload": {"api_key": "sk-secret"},
-                }
-            },
-        },
-    }
-    AgentSessionStore(audit_db).upsert_snapshot(
-        snapshot=snapshot,
-        command_id="cmd_trace_diag",
-        request=request,
-        response={"ok": True, "data": {"response_text": "状态正常。"}},
-    )
-
-    out = collect_assistant_trace(audit_db=str(audit_db), command_id="cmd_trace_diag")
-
-    compact_trace = out["traces"][0]["compact_trace"]
-    for key in {
-        "selected_capability",
-        "model_turns",
-        "tool_observations",
-        "evidence_gaps",
-        "stop_reason",
-        "answer_route",
-    }:
-        assert key in compact_trace
-    serialized = json.dumps(compact_trace, ensure_ascii=False).lower()
-    assert "raw_provider_payload" not in serialized
-    assert "api_key" not in serialized
-    assert compact_trace["model_turns"]["continuation_count"] == 1
-    assert compact_trace["stop_reason"] == "model_final_answer"
+    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "copilot_runtime": True}

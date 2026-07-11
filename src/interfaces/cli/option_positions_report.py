@@ -76,10 +76,10 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
                 f"{row.get('account') or '-'} {row.get('month') or '-'} "
                 f"status={row.get('status') or '-'} "
                 f"events={row.get('matched_trade_events_count') or 0} "
-                f"lots={row.get('matched_lots_count') or 0} "
+                f"lots={row.get('position_lot_snapshots_count', row.get('matched_lots_count')) or 0} "
                 f"closed={row.get('closed_lots_count') or 0} "
                 f"premium={row.get('premium_rows_count') or 0} "
-                f"cash_secured={'yes' if row.get('cash_secured_available') else 'no'} "
+                f"cash_secured={'yes' if row.get('cash_secured_collateral_status') == 'reported' or row.get('cash_secured_available') else 'no'} "
                 f"missing={','.join(str(item) for item in missing) if missing else '-'}"
             )
 

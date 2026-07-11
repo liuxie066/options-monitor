@@ -8,6 +8,7 @@ from typing import Any
 from src.application.config_validator import validate_assistant_config
 from src.application.config_yaml import default_yaml_assistant_config_path
 from src.application.copilot.model_client import CopilotModelSettings
+from src.application.llm_provider_registry import provider_requires_api_key
 
 
 def load_assistant_llm_config(
@@ -48,6 +49,8 @@ def model_api_key_configured(raw: dict[str, Any], *, environ: dict[str, str] | N
         settings = CopilotModelSettings.from_config(raw)
     except Exception:
         return False, "invalid_model_config"
+    if not provider_requires_api_key(settings.provider):
+        return True, None
     env = environ if environ is not None else os.environ
     if not str(env.get(settings.api_key_env) or "").strip():
         return False, "model_api_key_missing"

@@ -2,131 +2,23 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any, Callable
 
+from src.application.copilot.agent import ModelRequest, ModelRunner, ModelTurn, ToolCall
 from src.application.llm_provider_registry import (
     provider_api_kind,
     provider_chat_completion_payload_options,
+    provider_requires_api_key,
     require_provider_spec,
 )
-from src.infrastructure.openai_chat_completions import (
-    create_json_chat_completion,
-    extract_chat_completion_text,
-)
-from src.infrastructure.openai_responses import (
-    create_structured_response,
-    extract_response_text,
-)
+from src.infrastructure.openai_chat_completions import create_chat_completion
+from src.infrastructure.openai_responses import create_response
 
 
-ModelCallable = Callable[[dict[str, Any]], dict[str, Any]]
 CreateResponseFn = Callable[..., dict[str, Any]]
-
-
-ACTION_JSON_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["kind", "tool_name", "reason", "answer_report"],
-    "properties": {
-        "kind": {"type": "string", "enum": ["tool", "finish"]},
-        "tool_name": {"type": ["string", "null"]},
-        "reason": {"type": ["string", "null"]},
-        "answer_report": {
-            "type": ["object", "null"],
-            "additionalProperties": False,
-            "required": [
-                "conclusion",
-                "attempted_checks",
-                "findings",
-                "recommendations",
-                "missing_data",
-                "evidence_refs",
-            ],
-            "properties": {
-                "conclusion": {"type": "string"},
-                "attempted_checks": {"type": "array", "items": {"type": "string"}},
-                "findings": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["summary", "evidence_refs"],
-                        "properties": {
-                            "summary": {"type": "string"},
-                            "evidence_refs": {"type": "array", "items": {"type": "string"}},
-                        },
-                    },
-                },
-                "recommendations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["summary", "action", "target_scope", "answer_dimension", "basis_refs"],
-                        "properties": {
-                            "summary": {
-                                "type": "string",
-                                "description": "Concrete next-step summary; do not use a generic follow-up.",
-                            },
-                            "action": {
-                                "type": "string",
-                                "description": "The concrete read-only next action or operator decision to take.",
-                            },
-                            "target_scope": {
-                                "type": "string",
-                                "description": "The entity, account, metric, date range, or review scope this recommendation applies to.",
-                            },
-                            "answer_dimension": {
-                                "type": ["string", "null"],
-                                "description": (
-                                    "Use one task_guidance.answer_dimensions value when present; otherwise null."
-                                ),
-                            },
-                            "basis_refs": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Observation refs that support this recommendation.",
-                            },
-                        },
-                    },
-                },
-                "missing_data": {"type": "array", "items": {"type": "string"}},
-                "evidence_refs": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-    },
-}
-
-ACTION_INSTRUCTIONS = """You are the action selector inside OM Copilot.
-Return one JSON object only.
-Choose "tool" only from allowed_tools when another read-only observation is needed.
-When kind is "tool", set answer_report to null.
-Choose "finish" only when the observations are sufficient.
-When kind is "finish", set tool_name to null and answer_report to an object.
-Use task_guidance only for scene evidence expectations and stopping conditions.
-Use quality_contract as the output contract when deciding whether a finish report is good enough.
-Use each observation's evidence_context to distinguish requested-scope evidence, current context, latest context, and evidence boundaries.
-Do not finish with raw rows, receipt-like field dumps, or a generic "analysis completed" answer.
-Respect finish_conditions. If unattempted_tools_without_evidence is non-empty, choose a tool from that list before finishing.
-Do not choose a tool already listed in attempted_tools; failed or weak attempted tools are missing evidence, not retry targets.
-Use attempted_tools_without_evidence only to understand which already-attempted tools still lack usable evidence.
-If finish_conditions.missing_allowed_tool_evidence lists a failed or weak attempted tool, copy the relevant missing_data text into answer_report.missing_data when finishing.
-If finish_conditions.requires_cited_findings is true, a finish answer_report must include at least one finding with observation refs.
-If finish_conditions.requires_recommendations is true and finish_conditions.unattempted_tools_without_evidence plus finish_conditions.missing_allowed_tool_evidence are both empty, a finish answer_report must include at least one recommendation with basis_refs from finish_conditions.claimable_refs.
-If finish_conditions.requires_recommendations is true but finish_conditions.missing_allowed_tool_evidence is non-empty, do not invent recommendations; finish with missing_data instead.
-Every recommendation basis_refs list should overlap at least one cited finding's evidence_refs.
-When finishing, answer_report.conclusion must start with "结论" and be supported by cited findings.
-If the conclusion is explicitly about missing evidence, the gap must appear in answer_report.missing_data.
-Do not use refs beyond their evidence_context boundary.
-Every finding must cite ref values listed in finish_conditions.claimable_refs.
-Use finish_conditions.claimable_refs_by_tool to choose refs from the tool observations that directly support each finding or recommendation.
-Use finish_conditions.claimable_ref_context to check each cited ref's tool, time scope, record type, and non-use boundary.
-Use finish_conditions.requested_scope_refs for scoped evidence and finish_conditions.current_context_refs only for current/latest context.
-If an observation has facts_omitted, do not make only/no other/all-style exhaustive claims from that ref.
-When recommendations are useful, include answer_report.recommendations with action, target_scope, summary, basis_refs, and answer_dimension; set answer_dimension to one task_guidance.answer_dimensions value when present, otherwise null.
-If execution_environment is "eval", the conclusion must say it is eval-only and answer_report.missing_data must include "fixture observations are not production evidence".
-Do not claim writes, notifications, broker actions, config changes, deployments, or service changes."""
 
 
 @dataclass(frozen=True)
@@ -135,8 +27,9 @@ class CopilotModelSettings:
     model: str
     base_url: str = ""
     api_key_env: str = ""
-    timeout_seconds: int = 20
-    max_output_tokens: int = 1024
+    timeout_seconds: int = 90
+    max_output_tokens: int = 2048
+    max_attempts: int = 2
 
     @classmethod
     def from_config(cls, raw: dict[str, Any]) -> "CopilotModelSettings":
@@ -148,90 +41,319 @@ class CopilotModelSettings:
             model=str(cfg.get("model") or "").strip(),
             base_url=str(cfg.get("base_url") or spec.default_base_url).strip(),
             api_key_env=str(cfg.get("api_key_env") or spec.default_api_key_env).strip(),
-            timeout_seconds=_bounded_int(cfg.get("timeout_seconds"), default=20, minimum=1, maximum=120),
-            max_output_tokens=_bounded_int(cfg.get("max_output_tokens"), default=1024, minimum=128, maximum=4096),
+            timeout_seconds=_bounded_int(cfg.get("timeout_seconds"), default=90, minimum=1, maximum=180),
+            max_output_tokens=_bounded_int(cfg.get("max_output_tokens"), default=2048, minimum=256, maximum=8192),
+            max_attempts=_bounded_int(cfg.get("max_attempts"), default=2, minimum=1, maximum=3),
         )
 
 
-def build_action_model(
+def build_model_runner(
     settings: CopilotModelSettings,
     *,
     environ: dict[str, str] | None = None,
     create_response_fn: CreateResponseFn | None = None,
     create_chat_completion_fn: CreateResponseFn | None = None,
-) -> ModelCallable:
+    sleep_fn: Callable[[float], None] | None = None,
+) -> ModelRunner:
     if not settings.model.strip():
         raise ValueError("model is required")
     api_key = _api_key_value(settings, environ=environ)
-    if not api_key:
+    if provider_requires_api_key(settings.provider) and not api_key:
         raise ValueError("api key env is not configured")
 
-    def _model(request: dict[str, Any]) -> dict[str, Any]:
-        input_text = json.dumps(dict(request), ensure_ascii=False, sort_keys=True)
-        if provider_api_kind(settings.provider) == "chat_completions":
-            raw = _call_chat_completion(settings, api_key, input_text, create_chat_completion_fn)
-            text = extract_chat_completion_text(raw)
-        else:
-            raw = (create_response_fn or create_structured_response)(
-                api_key=api_key,
-                base_url=settings.base_url,
-                model=settings.model,
-                input_text=input_text,
-                instructions=ACTION_INSTRUCTIONS,
-                json_schema=ACTION_JSON_SCHEMA,
-                timeout=settings.timeout_seconds,
-                max_output_tokens=settings.max_output_tokens,
-                temperature=0.0,
-            )
-            text = extract_response_text(raw)
-        return _parse_json_object(text)
+    def _run(request: ModelRequest) -> ModelTurn:
+        last_error: Exception | None = None
+        sleeper = sleep_fn or time.sleep
+        for attempt in range(1, settings.max_attempts + 1):
+            try:
+                if provider_api_kind(settings.provider) == "chat_completions":
+                    raw = _call_chat_completion(
+                        settings,
+                        api_key,
+                        request,
+                        create_chat_completion_fn,
+                    )
+                    return replace(_parse_chat_completion(raw), attempt_count=attempt)
+                raw = _call_response(settings, api_key, request, create_response_fn)
+                return replace(_parse_response(raw), attempt_count=attempt)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= settings.max_attempts or not _is_transient_model_error(exc):
+                    break
+                sleeper(min(1.0, 0.25 * (2 ** (attempt - 1))))
+        assert last_error is not None
+        try:
+            setattr(last_error, "attempt_count", attempt)
+        except Exception:
+            pass
+        raise last_error
 
-    return _model
+    return _run
+
+
+def _call_response(
+    settings: CopilotModelSettings,
+    api_key: str,
+    request: ModelRequest,
+    create_response_fn: CreateResponseFn | None,
+) -> dict[str, Any]:
+    instructions, messages = _split_system_messages(request.messages)
+    return (create_response_fn or create_response)(
+        api_key=api_key,
+        base_url=settings.base_url,
+        model=settings.model,
+        input_items=_responses_input(messages),
+        instructions=instructions,
+        tools=[] if request.force_finish else _responses_tools(request.tools),
+        timeout=_effective_timeout(settings, request),
+        max_output_tokens=settings.max_output_tokens,
+        temperature=0.0,
+    )
 
 
 def _call_chat_completion(
     settings: CopilotModelSettings,
     api_key: str,
-    input_text: str,
+    request: ModelRequest,
     create_chat_completion_fn: CreateResponseFn | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": settings.base_url,
         "model": settings.model,
-        "input_text": input_text,
-        "instructions": ACTION_INSTRUCTIONS,
-        "json_schema": ACTION_JSON_SCHEMA,
-        "timeout": settings.timeout_seconds,
+        "messages": _chat_messages(request.messages),
+        "tools": [] if request.force_finish else _chat_tools(request.tools),
+        "timeout": _effective_timeout(settings, request),
         "max_output_tokens": settings.max_output_tokens,
     }
     kwargs.update(provider_chat_completion_payload_options(settings.provider))
-    return (create_chat_completion_fn or create_json_chat_completion)(**kwargs)
+    return (create_chat_completion_fn or create_chat_completion)(**kwargs)
+
+
+def _effective_timeout(settings: CopilotModelSettings, request: ModelRequest) -> int:
+    if request.timeout_seconds is None:
+        return settings.timeout_seconds
+    return max(1, min(settings.timeout_seconds, int(request.timeout_seconds)))
+
+
+def _split_system_messages(messages: tuple[dict[str, Any], ...]) -> tuple[str, list[dict[str, Any]]]:
+    instructions: list[str] = []
+    remaining: list[dict[str, Any]] = []
+    for item in messages:
+        if str(item.get("role") or "") == "system":
+            text = str(item.get("content") or "").strip()
+            if text:
+                instructions.append(text)
+            continue
+        remaining.append(dict(item))
+    return "\n\n".join(instructions), remaining
+
+
+def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            text = str(message.get("content") or "").strip()
+            if text:
+                items.append({"role": "assistant", "content": text})
+            for call in message["tool_calls"]:
+                if not isinstance(call, dict):
+                    continue
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(call.get("id") or ""),
+                        "name": str(call.get("name") or ""),
+                        "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                    }
+                )
+            continue
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id") or ""),
+                    "output": str(message.get("content") or ""),
+                }
+            )
+            continue
+        items.append({"role": role, "content": str(message.get("content") or "")})
+    return items
+
+
+def _chat_messages(messages: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            items.append(
+                {
+                    "role": "assistant",
+                    "content": str(message.get("content") or ""),
+                    "tool_calls": [
+                        {
+                            "id": str(call.get("id") or ""),
+                            "type": "function",
+                            "function": {
+                                "name": str(call.get("name") or ""),
+                                "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for call in message["tool_calls"]
+                        if isinstance(call, dict)
+                    ],
+                }
+            )
+            continue
+        if role == "tool":
+            items.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(message.get("tool_call_id") or ""),
+                    "content": str(message.get("content") or ""),
+                }
+            )
+            continue
+        items.append({"role": role, "content": str(message.get("content") or "")})
+    return items
+
+
+def _responses_tools(tools: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "name": str(item.get("name") or ""),
+            "description": str(item.get("description") or ""),
+            "parameters": dict(item.get("input_schema") or {"type": "object", "properties": {}}),
+        }
+        for item in tools
+    ]
+
+
+def _chat_tools(tools: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "parameters": dict(item.get("input_schema") or {"type": "object", "properties": {}}),
+            },
+        }
+        for item in tools
+    ]
+
+
+def _parse_response(raw: dict[str, Any]) -> ModelTurn:
+    texts: list[str] = []
+    calls: list[ToolCall] = []
+    for item in raw.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            calls.append(
+                ToolCall(
+                    call_id=str(item.get("call_id") or item.get("id") or ""),
+                    name=str(item.get("name") or ""),
+                    arguments=_arguments(item.get("arguments")),
+                )
+            )
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+    output_text = raw.get("output_text")
+    if isinstance(output_text, str) and output_text.strip() and not texts:
+        texts.append(output_text.strip())
+    incomplete = raw.get("incomplete_details") if isinstance(raw.get("incomplete_details"), dict) else {}
+    finish_reason = None
+    if str(raw.get("status") or "").strip().lower() == "incomplete":
+        reason = str(incomplete.get("reason") or "incomplete").strip()
+        finish_reason = "length" if reason == "max_output_tokens" else reason
+    elif str(raw.get("status") or "").strip():
+        finish_reason = str(raw.get("status")).strip()
+    return ModelTurn(
+        text="\n".join(texts).strip(),
+        tool_calls=tuple(calls),
+        finish_reason=finish_reason,
+        usage=_normalized_usage(raw.get("usage")),
+        raw=dict(raw),
+    )
+
+
+def _parse_chat_completion(raw: dict[str, Any]) -> ModelTurn:
+    choices = raw.get("choices")
+    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    if not isinstance(message, dict):
+        message = {}
+    calls: list[ToolCall] = []
+    for item in message.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        calls.append(
+            ToolCall(
+                call_id=str(item.get("id") or ""),
+                name=str(function.get("name") or ""),
+                arguments=_arguments(function.get("arguments")),
+            )
+        )
+    return ModelTurn(
+        text=str(message.get("content") or "").strip(),
+        tool_calls=tuple(calls),
+        finish_reason=str(first_choice.get("finish_reason") or "").strip() or None,
+        usage=_normalized_usage(raw.get("usage")),
+        raw=dict(raw),
+    )
+
+
+def _normalized_usage(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    aliases = {
+        "input_tokens": ("input_tokens", "prompt_tokens"),
+        "output_tokens": ("output_tokens", "completion_tokens"),
+        "total_tokens": ("total_tokens",),
+    }
+    usage: dict[str, int] = {}
+    for target, keys in aliases.items():
+        for key in keys:
+            raw = value.get(key)
+            if isinstance(raw, int) and raw >= 0:
+                usage[target] = raw
+                break
+    return usage
+
+
+def _is_transient_model_error(exc: Exception) -> bool:
+    status = getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        return status in {408, 409, 425, 429} or status >= 500
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(token in name or token in text for token in ("timeout", "network", "connection", "temporar"))
+
+
+def _arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except Exception:
+        return {"__invalid_arguments__": str(value or "")}
+    return dict(parsed) if isinstance(parsed, dict) else {"__invalid_arguments__": str(value or "")}
 
 
 def _api_key_value(settings: CopilotModelSettings, *, environ: dict[str, str] | None) -> str:
     env = environ if environ is not None else os.environ
     return str(env.get(settings.api_key_env) or "").strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    value = _strip_json_code_fence(text)
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
-        raise ValueError("model action response must be an object")
-    return parsed
-
-
-def _strip_json_code_fence(text: str) -> str:
-    value = str(text or "").strip()
-    if value.startswith("```"):
-        lines = value.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        value = "\n".join(lines).strip()
-    return value
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -240,3 +362,6 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except Exception:
         parsed = int(default)
     return max(int(minimum), min(parsed, int(maximum)))
+
+
+__all__ = ["CopilotModelSettings", "build_model_runner"]

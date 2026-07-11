@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from typing import Any
 
-from src.application.copilot.agent import ActionDecider
-from src.application.copilot.contracts import AnswerReport, AppResult, CopilotRequest, ExecutionContract
-from src.application.copilot.eval_fixtures import fixture_observations, fixture_requires_model_synthesis
+from src.application.copilot.agent import ModelRequest, ModelRunner, ModelTurn, ToolCall
+from src.application.copilot.contracts import AppResult, CopilotRequest, ExecutionContract
+from src.application.copilot.eval_fixtures import fixture_observations
 from src.application.copilot.host import run_contract
+from src.application.copilot.host_store import CopilotHostStore
+from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.application.copilot.model_config import load_assistant_llm_config, model_api_key_configured
-from src.application.copilot.model_client import CopilotModelSettings, build_action_model
-from src.application.copilot.model_decider import ModelActionDecider
 from src.application.copilot.service import prepare_contract
 
 
@@ -19,26 +20,30 @@ def run_local_request(
     reference_year: int,
     model_config_json: str | None = None,
     assistant_config_path: str | None = None,
-    model_action_json: str | None = None,
+    model_turn_json: str | None = None,
+    host_store: CopilotHostStore | None = None,
+    session_key: str | None = None,
 ) -> AppResult:
     try:
         prepared = prepare_contract(request, reference_year=reference_year)
     except Exception:
         return AppResult(
             status="failed",
-            answer_report=AnswerReport(conclusion="结论：Copilot 未能准备执行合同，未调用工具。"),
+            user_response="Copilot 未能准备执行合同。",
+            error={"code": "PREPARE_CONTRACT_FAILED"},
             request_id=request.request_id,
             decision_trace={"service_error": "prepare_contract_failed"},
             ok=False,
         )
     if isinstance(prepared, AppResult):
         return prepared
-
     return run_prepared_contract(
         prepared,
         model_config_json=model_config_json,
         assistant_config_path=assistant_config_path,
-        model_action_json=model_action_json,
+        model_turn_json=model_turn_json,
+        host_store=host_store,
+        session_key=session_key,
     )
 
 
@@ -47,74 +52,89 @@ def run_prepared_contract(
     *,
     model_config_json: str | None = None,
     assistant_config_path: str | None = None,
-    model_action_json: str | None = None,
+    model_turn_json: str | None = None,
+    host_store: CopilotHostStore | None = None,
+    session_key: str | None = None,
 ) -> AppResult:
-    action_decider, model_error = _action_decider(
+    model_runner, model_error = _resolve_model_runner(
         model_config_json=model_config_json,
         assistant_config_path=assistant_config_path,
-        model_action_json=model_action_json,
+        model_turn_json=model_turn_json,
         execution_environment=prepared.execution_environment,
     )
     if model_error:
         return _invalid_model_config_result(prepared, model_error)
     return run_contract(
         prepared,
-        decide_next_action=action_decider,
+        model_runner=model_runner,
         fixture_observations_loader=fixture_observations,
-        fixture_synthesis_policy=fixture_requires_model_synthesis,
+        host_store=host_store,
+        session_key=session_key,
     )
 
 
-def _action_decider(
+def _resolve_model_runner(
     *,
     model_config_json: str | None,
     assistant_config_path: str | None,
-    model_action_json: str | None,
+    model_turn_json: str | None,
     execution_environment: str,
-) -> tuple[ActionDecider | None, str | None]:
-    if _has_model_config(model_config_json) and _has_model_config(assistant_config_path):
+) -> tuple[ModelRunner | None, str | None]:
+    configured_sources = sum(bool(str(item or "").strip()) for item in (model_config_json, assistant_config_path))
+    if configured_sources > 1:
         return None, "ambiguous_model_source"
-    action_decider, action_error = _action_decider_from_action_json(
-        model_action_json,
-        execution_environment=execution_environment,
-    )
-    if model_action_json or action_error:
-        if _has_model_config(model_config_json) or _has_model_config(assistant_config_path):
-            return None, "model_action_conflicts_with_model_config"
-        return action_decider, action_error
-    action_decider, model_error = _action_decider_from_json(model_config_json)
-    if model_config_json or model_error:
-        return action_decider, model_error
-    return _action_decider_from_assistant_config(assistant_config_path)
+    if model_turn_json is not None:
+        if configured_sources:
+            return None, "model_turn_conflicts_with_model_config"
+        return _scripted_model_runner(model_turn_json, execution_environment=execution_environment)
+    if model_config_json:
+        return _model_runner_from_json(model_config_json)
+    return _model_runner_from_assistant_config(assistant_config_path)
 
 
-def _action_decider_from_action_json(
-    model_action_json: str | None,
+def _scripted_model_runner(
+    model_turn_json: str,
     *,
     execution_environment: str,
-) -> tuple[ActionDecider | None, str | None]:
-    if model_action_json is None:
-        return None, None
+) -> tuple[ModelRunner | None, str | None]:
     if execution_environment != "eval":
-        return None, "model_action_requires_eval"
-    if not model_action_json.strip():
-        return None, "invalid_model_action"
+        return None, "model_turn_requires_eval"
     try:
-        raw = json.loads(model_action_json)
-        if not isinstance(raw, dict):
-            raise ValueError("model action must be an object")
+        raw = json.loads(model_turn_json)
+        items = raw if isinstance(raw, list) else [raw]
+        turns = [_model_turn(item) for item in items]
+        if not turns:
+            raise ValueError("at least one model turn is required")
     except Exception:
-        return None, "invalid_model_action"
+        return None, "invalid_model_turn"
+    queue = list(turns)
 
-    def _model(_request: dict) -> dict:
-        return deepcopy(raw)
+    def _run(_request: ModelRequest) -> ModelTurn:
+        if not queue:
+            return ModelTurn(text="评估模型脚本没有提供后续回答。")
+        return deepcopy(queue.pop(0))
 
-    return ModelActionDecider(_model), None
+    return _run, None
 
 
-def _action_decider_from_json(model_config_json: str | None) -> tuple[ActionDecider | None, str | None]:
-    if not model_config_json:
-        return None, None
+def _model_turn(raw: Any) -> ModelTurn:
+    if not isinstance(raw, dict):
+        raise ValueError("model turn must be an object")
+    calls: list[ToolCall] = []
+    for index, item in enumerate(raw.get("tool_calls") or [], start=1):
+        if not isinstance(item, dict):
+            raise ValueError("tool call must be an object")
+        calls.append(
+            ToolCall(
+                call_id=str(item.get("call_id") or item.get("id") or f"call_{index}"),
+                name=str(item.get("name") or "").strip(),
+                arguments=dict(item.get("arguments") or {}),
+            )
+        )
+    return ModelTurn(text=str(raw.get("text") or "").strip(), tool_calls=tuple(calls), raw=dict(raw))
+
+
+def _model_runner_from_json(model_config_json: str) -> tuple[ModelRunner | None, str | None]:
     try:
         raw = json.loads(model_config_json)
         if not isinstance(raw, dict):
@@ -122,49 +142,34 @@ def _action_decider_from_json(model_config_json: str | None) -> tuple[ActionDeci
         ok, key_error = model_api_key_configured(raw)
         if not ok:
             return None, key_error
-        settings = CopilotModelSettings.from_config(raw)
-        model = build_action_model(settings)
+        return build_model_runner(CopilotModelSettings.from_config(raw)), None
     except Exception:
         return None, "invalid_model_config"
-    return ModelActionDecider(model), None
 
 
-def _has_model_config(value: str | None) -> bool:
-    return bool(str(value or "").strip())
-
-
-def _action_decider_from_assistant_config(assistant_config_path: str | None) -> tuple[ActionDecider | None, str | None]:
-    require_config = assistant_config_path is not None and bool(str(assistant_config_path).strip())
+def _model_runner_from_assistant_config(path: str | None) -> tuple[ModelRunner | None, str | None]:
+    require_config = bool(str(path or "").strip())
     if not require_config:
         return None, None
-    raw, load_error = load_assistant_llm_config(
-        config_path=assistant_config_path,
-        require_config=require_config,
-    )
+    raw, load_error = load_assistant_llm_config(config_path=path, require_config=True)
     if load_error:
         return None, load_error
     if not raw:
         return None, None
+    ok, key_error = model_api_key_configured(raw)
+    if not ok:
+        return None, "assistant_model_api_key_missing" if key_error == "model_api_key_missing" else key_error
     try:
-        ok, key_error = model_api_key_configured(raw)
-        if not ok:
-            if key_error == "model_api_key_missing":
-                return None, "assistant_model_api_key_missing"
-            return None, key_error
-        settings = CopilotModelSettings.from_config(raw)
-        model = build_action_model(settings)
+        return build_model_runner(CopilotModelSettings.from_config(raw)), None
     except Exception:
         return None, "invalid_model_config"
-    return ModelActionDecider(model), None
 
 
 def _invalid_model_config_result(contract: ExecutionContract, reason: str) -> AppResult:
     return AppResult(
         status="failed",
-        answer_report=AnswerReport(
-            conclusion=f"结论：Copilot 模型决策器配置无效：{_model_error_text(reason)}，未调用工具。",
-            missing_data=[reason],
-        ),
+        user_response=f"Copilot 模型配置无效：{_model_error_text(reason)}。",
+        error={"code": "MODEL_CONFIG_ERROR", "reason": reason},
         request_id=contract.request_id,
         contract_id=contract.contract_id,
         decision_trace={**contract.decision_trace, "model_config_error": reason},
@@ -178,9 +183,12 @@ def _model_error_text(reason: str) -> str:
         "assistant_config_not_found": "assistant 配置文件不存在",
         "assistant_model_api_key_missing": "模型 API key 环境变量未配置",
         "invalid_assistant_config": "assistant 配置无效",
-        "invalid_model_action": "显式模型 action 无效",
         "invalid_model_config": "模型配置无效",
+        "invalid_model_turn": "评估模型轮次无效",
         "model_api_key_missing": "模型 API key 环境变量未配置",
-        "model_action_conflicts_with_model_config": "显式模型 action 与模型配置冲突",
-        "model_action_requires_eval": "显式模型 action 只能用于 eval",
-    }.get(reason, "模型配置无效")
+        "model_turn_conflicts_with_model_config": "评估模型轮次与模型配置冲突",
+        "model_turn_requires_eval": "显式模型轮次只允许用于评估环境",
+    }.get(reason, reason)
+
+
+__all__ = ["run_local_request", "run_prepared_contract"]

@@ -22,14 +22,11 @@ class AssistantToolBinding:
     display_name: str = ""
     arguments: tuple[str, ...] = ()
     read_only: bool = True
-    llm_allowed: bool = True
-    llm_visible: bool = True
     supported: bool = True
     risk_level: str | None = None
     examples: tuple[str, ...] = ()
     summary: str = ""
     kind: str | None = None
-    planner_allowed: bool | None = None
     direct_executable: bool | None = None
     requires_pending: bool | None = None
     requires_confirm: bool | None = None
@@ -56,7 +53,6 @@ _LOCAL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         display_name="监控标的",
         examples=("查看监控标的", "/symbols"),
         summary="list monitored symbols",
-        planner_allowed=False,
         scope_policy="config_required",
     ),
     AssistantToolBinding(
@@ -66,14 +62,12 @@ _LOCAL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         display_name="待确认",
         examples=("待确认", "/pending"),
         summary="list pending preview operations",
-        planner_allowed=False,
     ),
     AssistantToolBinding(
         intent_name="model_list",
         tool_name="inbound.model",
         commands=("/model",),
         display_name="模型",
-        llm_allowed=False,
         examples=("/model", "/model list"),
         summary="list configured assistant model profiles",
     ),
@@ -92,11 +86,6 @@ _SYSTEM_ARGUMENTS = frozenset(
 )
 
 _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
-    "assistant_trace": {"planner_allowed": False},
-    "version_check": {"planner_allowed": False},
-    "scheduler_status": {"planner_allowed": False},
-    "candidate_rank_explain": {"planner_allowed": False},
-    "preview_notification": {"planner_allowed": False},
     "runtime_status": {
         "commands": ("/status",),
         "display_name": "状态",
@@ -173,13 +162,10 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
     "operation_timeline": {
         "display_name": "操作时间线",
         "arguments": ("operation_id", "operation_types", "statuses", "limit"),
-        "llm_allowed": False,
-        "llm_visible": False,
-        "planner_allowed": True,
         "direct_executable": False,
         "risk_level": "read_only",
         "examples": ("查询升级 command_id 的操作时间线",),
-        "summary": "planner-only read surface for operation audit evidence such as upgrade status and receipt diagnostics",
+        "summary": "read operation audit receipts such as upgrade status and diagnostics",
     },
     "option_positions_read": {
         "intent_name": "position_query",
@@ -332,28 +318,9 @@ def config_required_intent_names() -> frozenset[str]:
     )
 
 
-def planner_config_scoped_tool_names() -> frozenset[str]:
-    return frozenset(
-        str(binding.tool_name)
-        for binding in assistant_tool_bindings()
-        if binding.tool_name is not None and binding.scope_policy != "none"
-    )
-
-
 def symbol_market_config_tool_names() -> frozenset[str]:
     return frozenset(
         str(binding.tool_name)
         for binding in assistant_tool_bindings()
         if binding.tool_name is not None and binding.scope_policy.startswith("symbol_market_config")
     )
-
-
-def planner_binding_for_tool(tool_name: str) -> AssistantToolBinding | None:
-    normalized = str(tool_name or "")
-    for binding in assistant_tool_bindings():
-        if binding.tool_name == normalized and binding.primary_for_tool:
-            return binding
-    for binding in assistant_tool_bindings():
-        if binding.tool_name == normalized:
-            return binding
-    return None

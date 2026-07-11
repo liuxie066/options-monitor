@@ -12,6 +12,7 @@ class LlmProviderSpec:
     default_base_url: str
     default_api_key_env: str
     recommended_models: tuple[str, ...]
+    requires_api_key: bool = True
 
     def public_payload(self) -> dict[str, Any]:
         return {
@@ -21,6 +22,7 @@ class LlmProviderSpec:
             "default_base_url": self.default_base_url,
             "default_api_key_env": self.default_api_key_env,
             "recommended_models": list(self.recommended_models),
+            "requires_api_key": self.requires_api_key,
             "supports_live_model_list": False,
         }
 
@@ -57,6 +59,15 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         default_base_url="https://api.kimi.com/coding/v1",
         default_api_key_env="KIMI_API_KEY",
         recommended_models=("kimi-for-coding",),
+    ),
+    "ollama": LlmProviderSpec(
+        provider_id="ollama",
+        display_name="Ollama",
+        api_kind="chat_completions",
+        default_base_url="http://127.0.0.1:11434/v1",
+        default_api_key_env="",
+        recommended_models=("gpt-oss:20b",),
+        requires_api_key=False,
     ),
 }
 
@@ -100,11 +111,21 @@ def provider_api_kind(provider: str) -> str:
     return spec.api_kind if spec is not None else "responses"
 
 
+def provider_requires_api_key(provider: str) -> bool:
+    spec = provider_spec(provider)
+    return spec.requires_api_key if spec is not None else True
+
+
 def provider_chat_completion_payload_options(provider: str) -> dict[str, Any]:
     normalized = normalize_llm_provider(provider)
     if normalized in {"kimi", "kimi-code"}:
         return {
             "temperature": None,
+            "thinking": None,
+        }
+    if normalized == "ollama":
+        return {
+            "temperature": 0.0,
             "thinking": None,
         }
     return {
@@ -133,6 +154,7 @@ __all__ = [
     "provider_catalog_payload",
     "provider_spec",
     "provider_specs",
+    "provider_requires_api_key",
     "require_provider_spec",
     "supported_llm_providers",
 ]

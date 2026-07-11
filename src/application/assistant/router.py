@@ -5,26 +5,20 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.action import ExecuteToolFn, perform_action
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
-from src.application.assistant.contracts import (
-    ActionResult,
-    AssistantRequest,
-    ObservationResponse,
-    PerceptionResult,
-    ReasoningResolution,
-)
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.observation import build_observation
+from src.application.assistant.inbound_control import ControlExecution, ExecuteToolFn, execute_explicit_control
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
-from src.application.assistant.reasoning import resolve_reasoning
 from src.application.assistant.renderer import render_inbound_text
+from src.application.copilot.channel_facade import run_channel_request
+from src.application.copilot.contracts import AppResult
 from src.application.tool_execution import execute_tool
 
 
-ParsePerceptionFn = Callable[[str, Callable[[], date] | None], PerceptionResult]
+ParseCommandFn = Callable[[str, Callable[[], date] | None], ControlCommand | None]
 
 
 def handle_assistant_request(
@@ -34,7 +28,7 @@ def handle_assistant_request(
     execute_tool_fn: ExecuteToolFn = execute_tool,
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
-    parse_perception_fn: ParsePerceptionFn | None = None,
+    parse_command_fn: ParseCommandFn | None = None,
 ) -> dict[str, Any]:
     normalized_request = _normalize_request(request)
     store = audit_store or InboundAuditStore(normalized_request.audit_db)
@@ -75,10 +69,8 @@ def handle_assistant_request(
         return _duplicate_response(existing)
 
     created_at = utc_now_iso()
-    perception: PerceptionResult | None = None
-    resolution: ReasoningResolution | None = None
-    action: ActionResult | None = None
-    observation: ObservationResponse | None = None
+    command: ControlCommand | None = None
+    control: ControlExecution | None = None
     response: dict[str, Any]
     decision = "unknown"
     error_code: str | None = None
@@ -89,33 +81,40 @@ def handle_assistant_request(
             sender_id=normalized_request.sender_id,
             allowed_senders=allowed_senders,
         )
-        perception = _parse_perception(
+        command = _parse_command(
             normalized_request,
             store=store,
             now_fn=now_fn,
-            parse_perception_fn=parse_perception_fn,
+            parse_command_fn=parse_command_fn,
         )
-        resolution = resolve_reasoning(perception, request=normalized_request)
-        action = perform_action(
-            perception=perception,
-            resolution=resolution,
+        if command is None:
+            response = _copilot_response(normalized_request, command_id=command_id, audit_db=store.path)
+            decision = "copilot"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                command=None,
+                control=None,
+                decision=decision,
+                response=response,
+            )
+        control = execute_explicit_control(
+            command,
             request=normalized_request,
             command_id=command_id,
             operation_store=InboundOperationStore(store.path),
             execute_tool_fn=execute_tool_fn,
         )
-        observation = build_observation(perception=perception, resolution=resolution, action=action)
         response = _success_response(
             command_id=command_id,
             request=normalized_request,
-            perception=perception,
-            resolution=resolution,
-            action=action,
-            observation=observation,
+            control=control,
             sender_decision=sender_decision.public_payload(),
             audit_db=store.path,
         )
-        decision = _decision_for_resolution(resolution, action)
+        decision = _decision_for_control(control)
     except AgentToolError as err:
         error_code = err.code
         response = _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
@@ -126,25 +125,23 @@ def handle_assistant_request(
         request=normalized_request,
         command_id=command_id,
         created_at=created_at,
-        perception=perception,
-        resolution=resolution,
-        action=action,
-        observation=observation,
+        command=command,
+        control=control,
         decision=decision,
         response=response,
         error_code=error_code,
     )
 
 
-def _parse_perception(
+def _parse_command(
     request: AssistantRequest,
     *,
     store: InboundAuditStore,
     now_fn: Callable[[], date] | None,
-    parse_perception_fn: ParsePerceptionFn | None,
-) -> PerceptionResult:
-    if parse_perception_fn is not None:
-        return parse_perception_fn(request.text, now_fn)
+    parse_command_fn: ParseCommandFn | None,
+) -> ControlCommand | None:
+    if parse_command_fn is not None:
+        return parse_command_fn(request.text, now_fn)
     command = parse_assistant_command(request.text, now_fn=now_fn)
     if command is not None:
         return command
@@ -155,59 +152,85 @@ def _parse_perception(
     )
     if permission_response is not None:
         return permission_response
-    raise AgentToolError(
-        code="NATURAL_LANGUAGE_REBUILDING",
-        message="自由问答正在重建中，当前只处理明确指令和待确认操作。",
-        hint="请使用明确 slash command，例如 /status、/pending。",
+    return None
+
+
+def _copilot_response(request: AssistantRequest, *, command_id: str, audit_db: Any) -> dict[str, Any]:
+    result = run_channel_request(
+        user_message=request.text,
+        config_key=request.config_key,
+        request_id=command_id,
+        assistant_config_path=request.assistant_config_path,
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+        host_db_path=str(audit_db),
     )
+    return build_response(
+        tool_name="copilot.chat",
+        ok=bool(result.ok),
+        data={
+            "command_id": command_id,
+            "request": request.public_payload(),
+            "decision": {"allowed": True, "reason": "copilot_freeform"},
+            "response_text": result.user_response,
+            "copilot": _copilot_result_payload(result),
+        },
+        meta={"audit_db": mask_path(audit_db)},
+    )
+
+
+def _copilot_result_payload(result: AppResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "request_id": result.request_id,
+        "contract_id": result.contract_id,
+        "run_id": result.run_id,
+        "event_count": len(result.events),
+        "decision_trace": dict(result.decision_trace),
+    }
 
 
 def _success_response(
     *,
     command_id: str,
     request: AssistantRequest,
-    perception: PerceptionResult,
-    resolution: ReasoningResolution,
-    action: ActionResult,
-    observation: ObservationResponse,
+    control: ControlExecution,
     sender_decision: dict[str, Any],
     audit_db: Any,
 ) -> dict[str, Any]:
-    result = dict(action.result or {})
-    operation_data = dict(result.get("data") or {}) if action.action_kind == "operation" else {}
-    meta = dict(result.get("meta") or {}) if action.action_kind == "operation" else {}
+    result = dict(control.result or {})
+    operation_data = dict(result.get("data") or {}) if control.action_kind == "operation" else {}
+    meta = dict(result.get("meta") or {}) if control.action_kind == "operation" else {}
     meta["audit_db"] = mask_path(audit_db)
     data: dict[str, Any] = {
         "command_id": command_id,
         "request": request.public_payload(),
-        "perception": perception.public_payload(),
-        "reasoning": resolution.public_payload(),
-        "action": action.public_payload(),
-        "observation": observation.public_payload(),
+        "control": control.public_payload(),
         "decision": {
             "allowed": True,
-            "reason": resolution.reason,
+            "reason": control.reason,
             "sender": sender_decision,
         },
-        "response_text": observation.response_text,
+        "response_text": control.response_text,
     }
     if operation_data:
         data.update(operation_data)
-        data["response_text"] = observation.response_text
-    if action.action_kind == "pending" and isinstance(action.result, dict):
-        data.update(action.result)
-    if action.action_kind == "tool":
-        data["tool_call"] = resolution.tool_call.public_payload() if resolution.tool_call else None
-        data["tool_result"] = action.result or {}
+        data["response_text"] = control.response_text
+    if control.action_kind == "pending" and isinstance(control.result, dict):
+        data.update(control.result)
+    if control.action_kind == "tool":
+        data["tool_call"] = {"tool_name": control.tool_name, "payload": dict(control.payload)}
+        data["tool_result"] = control.result or {}
         tool_decision = result.get("_tool_decision")
         if isinstance(tool_decision, dict):
             data["decision"] = {**tool_decision, "sender": sender_decision}
     return build_response(
-        tool_name=str(result.get("tool_name") or action.tool_name or "inbound.handle"),
-        ok=bool(observation.ok),
+        tool_name=str(result.get("tool_name") or control.tool_name or "inbound.handle"),
+        ok=bool(control.ok),
         data=data,
-        error=action.error if not bool(observation.ok) else None,
-        warnings=result.get("warnings") if action.action_kind == "operation" else None,
+        error=control.error if not bool(control.ok) else None,
+        warnings=result.get("warnings") if control.action_kind == "operation" else None,
         meta=meta,
     )
 
@@ -218,15 +241,12 @@ def _record_and_return(
     request: AssistantRequest,
     command_id: str,
     created_at: str,
-    perception: PerceptionResult | None,
-    resolution: ReasoningResolution | None,
-    action: ActionResult | None,
-    observation: ObservationResponse | None,
+    command: ControlCommand | None,
+    control: ControlExecution | None,
     decision: str,
     response: dict[str, Any],
     error_code: str | None = None,
 ) -> dict[str, Any]:
-    call = resolution.tool_call if resolution else None
     store.record_result(
         {
             "command_id": command_id,
@@ -235,14 +255,11 @@ def _record_and_return(
             "conversation_id": request.conversation_id,
             "message_id": request.message_id,
             "raw_text": request.text,
-            "parser": perception.source if perception else None,
-            "intent_name": perception.intent_name if perception else None,
-            "tool_name": call.tool_name if call else None,
-            "tool_payload": call.payload if call else None,
-            "perception": perception.public_payload() if perception else None,
-            "reasoning": resolution.public_payload() if resolution else None,
-            "action": action.public_payload() if action else None,
-            "observation": observation.public_payload() if observation else None,
+            "parser": command.source if command else None,
+            "intent_name": command.intent_name if command else None,
+            "tool_name": control.tool_name if control else None,
+            "tool_payload": control.payload if control else None,
+            "control": control.public_payload() if control else None,
             "decision": decision,
             "result_ok": bool(response.get("ok", False)),
             "error_code": error_code or _response_error_code(response),
@@ -305,12 +322,12 @@ def _response_error_code(response: dict[str, Any]) -> str | None:
     return None
 
 
-def _decision_for_resolution(resolution: ReasoningResolution, action: ActionResult) -> str:
-    if resolution.status == "unsupported":
+def _decision_for_control(control: ControlExecution) -> str:
+    if control.status == "unsupported":
         return "unsupported"
-    if resolution.status == "preview_required":
+    if control.status == "preview_required":
         return "preview"
-    if not action.ok:
+    if not control.ok:
         return "failed"
     return "allowed"
 
@@ -341,4 +358,4 @@ def _normalize_request(request: AssistantRequest) -> AssistantRequest:
     )
 
 
-__all__ = ["ExecuteToolFn", "ParsePerceptionFn", "handle_assistant_request"]
+__all__ = ["ExecuteToolFn", "ParseCommandFn", "handle_assistant_request"]

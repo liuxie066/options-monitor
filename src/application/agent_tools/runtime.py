@@ -9,9 +9,7 @@ from src.application.agent_tools.base import AgentTool, AgentToolContext, build_
 
 _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_runs.output.v1",
-    "canonical_renderer": "runtime_runs",
     "source_label": "OM 本地 output_runs",
-    "guard_profile": "runtime_artifacts",
     "primary_rows": "runs",
     "fact_fields": [
         "summary.limit",
@@ -25,9 +23,7 @@ _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_logs.output.v1",
-    "canonical_renderer": "runtime_logs",
     "source_label": "OM 本地 runtime logs",
-    "guard_profile": "runtime_artifacts",
     "primary_rows": "files",
     "fact_fields": [
         "summary.kind",

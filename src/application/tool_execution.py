@@ -46,6 +46,16 @@ def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[
             ok=False,
             error=build_error_payload(err),
         )
+    except SystemExit as exc:
+        err = AgentToolError(
+            code="CONFIG_ERROR",
+            message=str(exc) or "tool configuration rejected",
+        )
+        return build_response(
+            tool_name=name,
+            ok=False,
+            error=build_error_payload(err),
+        )
     except Exception as exc:
         err = AgentToolError(
             code="INTERNAL_ERROR",

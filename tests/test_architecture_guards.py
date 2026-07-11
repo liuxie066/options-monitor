@@ -176,7 +176,7 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
                 "accounts": ["lx"],
                 "portfolio": {"broker": "富途"},
                 "symbols": [{"symbol": "NVDA"}],
-                "assistant": {"enabled": True, "planner": {"enabled": True}},
+                "assistant": {"enabled": True, "copilot": {"enabled": True}},
             }
         )
 
@@ -205,11 +205,34 @@ def test_old_agent_loop_copilot_modules_are_removed() -> None:
     assert existing == []
 
 
-def test_old_freeform_session_builder_is_removed() -> None:
-    session_source = (ROOT / "src" / "application" / "assistant" / "session.py").read_text(encoding="utf-8")
+def test_old_assistant_evidence_architecture_is_removed() -> None:
+    removed = (
+        "answer_verifier.py",
+        "evidence.py",
+        "task_contract.py",
+    )
 
-    assert "def build_agent_session_snapshot(" not in session_source
-    assert "build_agent_session_snapshot" not in session_source
+    existing = [name for name in removed if (ROOT / "src" / "application" / "assistant" / name).exists()]
+    assert existing == []
+
+    production = ROOT / "src"
+    offenders: list[str] = []
+    for path in sorted(production.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "src.application.assistant.answer_verifier" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+        if "src.application.assistant.evidence" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+        if "src.application.assistant.task_contract" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []
+
+
+def test_old_freeform_session_builder_is_removed() -> None:
+    assistant_root = ROOT / "src" / "application" / "assistant"
+
+    for filename in ("session.py", "session_store.py", "verifier_hooks.py"):
+        assert not (assistant_root / filename).exists()
 
 
 def test_old_freeform_eval_fixtures_are_removed() -> None:
@@ -255,22 +278,6 @@ def test_copilot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -
 
 
 def test_copilot_shared_runtime_does_not_hardcode_monthly_review_scene() -> None:
-    shared_runtime_files = [
-        "agent.py",
-        "contracts.py",
-        "engine.py",
-        "host.py",
-        "local_harness.py",
-        "model_client.py",
-        "model_config.py",
-        "model_decider.py",
-        "result_admission.py",
-        "result_projection.py",
-        "rendering.py",
-        "safety_policy.py",
-        "safety_text.py",
-        "service.py",
-    ]
     forbidden_tokens = (
         "monthly_option_review",
         "june_option_review",
@@ -283,27 +290,15 @@ def test_copilot_shared_runtime_does_not_hardcode_monthly_review_scene() -> None
     )
     offenders: list[str] = []
     copilot_root = ROOT / "src" / "application" / "copilot"
-    for name in shared_runtime_files:
-        path = copilot_root / name
+    for path in sorted(copilot_root.glob("*.py")):
+        if path.name == "eval_fixtures.py":
+            continue
         text = path.read_text(encoding="utf-8")
         for token in forbidden_tokens:
             if token in text:
                 offenders.append(f"{path.relative_to(ROOT)}:{token}")
 
     assert offenders == []
-
-
-def test_copilot_phase2_answer_synthesis_is_not_monthly_review_only() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-
-    scenes = {scene.name: scene for scene in SCENE_CATALOG}
-    synthesis_scenes = {name for name, scene in scenes.items() if scene.requires_answer_synthesis}
-
-    assert "monthly_option_review" not in scenes
-    assert {"monthly_income_attribution", "current_option_exposure"} <= synthesis_scenes
-    assert all(not scene.requires_recommendations for scene in scenes.values())
-    assert scenes["operations_diagnostics"].fixture_ids
-    assert not scenes["operations_diagnostics"].requires_recommendations
 
 
 def test_public_tool_gateway_does_not_import_or_expose_copilot_runtime() -> None:
@@ -381,27 +376,19 @@ def test_copilot_cli_entry_wires_service_to_host_without_agent_internals() -> No
     assert "from src.application.copilot.host import run_contract" not in cli_text
     assert "CopilotRequest(" in cli_text
     assert "ExecutionContract" not in cli_text
-    assert (
-        "return run_local_request(\n"
-        "        request,\n"
-        "        reference_year=_reference_year(),\n"
-        "        model_config_json=model_config_json,\n"
-        "        assistant_config_path=assistant_config_path,\n"
-        "        model_action_json=model_action_json,\n"
-        "    )"
-    ) in cli_text
+    assert "return run_local_request(" in cli_text
+    assert "model_turn_json=model_turn_json" in cli_text
     assert "model_config_json" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
     assert "assistant_config_path" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
-    assert "model_action_json" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
+    assert "model_turn_json" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
     assert "use_default_assistant_config" not in cli_text
     assert "build_action_model" not in cli_text
     assert "ModelActionDecider" not in cli_text
     assert "run_engine(" not in cli_text
     assert 'run.add_argument("--scene"' not in cli_text
     assert 'run.add_argument("--model-action-json-file"' not in cli_text
-    assert 'eval_cmd.add_argument("--scene", required=True)' in cli_text
-    assert 'eval_model.add_argument(\n        "--model-action-json-file",' in cli_text
-    assert 'eval_cmd.add_argument("--text", default="请根据 eval fixture 回答这个只读问题")' in cli_text
+    assert 'eval_cmd.add_argument("--scene", required=True)' not in cli_text
+    assert '"--model-turn-json-file"' in cli_text
     assert 'default="分析 2026-06 的期权操作有没有不合理，需要优化的地方"' not in cli_text
 
 
@@ -412,42 +399,6 @@ def test_copilot_cli_does_not_accept_runtime_environment_paths() -> None:
     assert "--no-local-env-file" not in cli_text
     assert "--config-path" not in cli_text
     assert "--assistant-config" in cli_text
-
-
-def test_channel_copilot_gate_uses_only_facade_not_host_internals() -> None:
-    checked_roots = [
-        ROOT / "src" / "application" / "channels",
-        ROOT / "src" / "application" / "inbound",
-    ]
-    checked_files = [
-        ROOT / "src" / "interfaces" / "cli" / "assistant_ops.py",
-        ROOT / "src" / "interfaces" / "cli" / "channel_ops.py",
-        ROOT / "src" / "interfaces" / "cli" / "inbound_ops.py",
-        ROOT / "src" / "application" / "assistant" / "runtime.py",
-        ROOT / "src" / "application" / "assistant" / "router.py",
-    ]
-
-    offenders: list[str] = []
-    for root in checked_roots:
-        for path in sorted(root.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            if "src.application.copilot" in text or "handle_copilot_request" in text or "CopilotRequest" in text:
-                offenders.append(str(path.relative_to(ROOT)))
-    for path in checked_files:
-        text = path.read_text(encoding="utf-8")
-        if "src.application.copilot" in text or "handle_copilot_request" in text or "CopilotRequest" in text:
-            offenders.append(str(path.relative_to(ROOT)))
-
-    assert offenders == []
-
-    action_path = ROOT / "src" / "application" / "assistant" / "action.py"
-    action_imports = set(_imported_modules(action_path))
-    assert "src.application.copilot.channel_facade" in action_imports
-    assert "src.application.copilot.host" not in action_imports
-    assert "src.application.copilot.agent" not in action_imports
-    assert "src.application.copilot.engine" not in action_imports
-    assert "src.application.copilot.tools" not in action_imports
-    assert "src.application.copilot.service" not in action_imports
 
 
 def test_channel_copilot_facade_does_not_reenter_local_request_harness() -> None:
@@ -467,97 +418,6 @@ def test_channel_copilot_facade_catches_service_prepare_errors() -> None:
     assert '"channel_prepare_contract_failed"' in channel_text
 
 
-def test_copilot_tools_do_not_define_parallel_tool_allowlist() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-    from src.application.copilot.tools import TOOL_VIEWS
-
-    tools_text = (ROOT / "src" / "application" / "copilot" / "tools.py").read_text(encoding="utf-8")
-    scene_text = (ROOT / "src" / "application" / "copilot" / "scene.py").read_text(encoding="utf-8")
-    host_text = (ROOT / "src" / "application" / "copilot" / "host.py").read_text(encoding="utf-8")
-    fixtures_text = (ROOT / "src" / "application" / "copilot" / "eval_fixtures.py").read_text(encoding="utf-8")
-    scene_tools = {tool_name for scene in SCENE_CATALOG for tool_name in scene.allowed_tools}
-
-    assert set(TOOL_VIEWS) == scene_tools
-    assert "READ_TOOL_NAMES" not in tools_text
-    assert "MONTHLY_REVIEW_ANALYSIS_VIEWS" not in tools_text
-    assert "tool_static_payloads" in scene_text
-    assert "tool_static_payloads" in host_text
-    assert "class AgentToolView" in tools_text
-    assert "TOOL_VIEWS" in tools_text
-    assert "static_payload:" not in tools_text
-    assert "static_payload=" not in tools_text
-    assert "get_tool_definition(" in tools_text
-    assert "definition.is_pure_read()" in tools_text
-    assert "observation_summary" in tools_text
-    assert "compact_summary: Any" not in tools_text
-    assert "compact_summary=" not in tools_text
-    assert "evidence_available" in tools_text
-    assert "missing_evidence" in tools_text
-    assert "evidence_ok: Any" not in tools_text
-    assert "evidence_ok=lambda" not in tools_text
-    assert "missing_data: Any" not in tools_text
-    assert "missing_data=lambda" not in tools_text
-    assert "definition.resolve_output_contract(" in tools_text
-    assert '"output_contract": _resolved_output_contract_preview(definition, description_payload)' in tools_text
-    assert '"data": data' not in tools_text
-    assert '"data": response.get("data")' not in tools_text
-    assert '"value_preview": _value_preview' in tools_text
-    assert '"error": error' not in tools_text
-    assert '"has_message"' in tools_text
-    assert "summarize:" not in tools_text
-    assert "_summarize_" not in tools_text
-    assert 'error.get("message")' not in tools_text
-    assert "warning_count=" in tools_text
-    assert "join(str(item)" not in tools_text
-    assert "if tool_name ==" not in tools_text
-    assert "elif tool_name ==" not in tools_text
-    assert "fixture_observations" not in tools_text
-    assert "june_option_review_basic" not in tools_text
-    assert "def fixture_observations(" not in scene_text
-    assert "eval-only 月度复盘发现" not in scene_text
-    assert "def fixture_observations(" in fixtures_text
-    assert "june_option_review_basic" not in fixtures_text
-    assert "from src.application.copilot.eval_fixtures import" not in host_text
-    assert "fixture_observations_loader" in host_text
-    assert "fixture_synthesis_policy" in host_text
-    assert "fixture_observations_loader=fixture_observations" in (
-        ROOT / "src" / "application" / "copilot" / "local_harness.py"
-    ).read_text(encoding="utf-8")
-
-
-def test_copilot_tool_views_are_observation_compactors_not_answer_recipes() -> None:
-    tools_text = (ROOT / "src" / "application" / "copilot" / "tools.py").read_text(encoding="utf-8")
-
-    forbidden_answer_terms = (
-        "结论",
-        "建议",
-        "优化",
-        "合理",
-        "不合理",
-        "recommend",
-        "recommendation",
-        "should ",
-    )
-
-    offenders = [term for term in forbidden_answer_terms if term in tools_text]
-    assert offenders == []
-
-    forbidden_row_aggregate_terms = (
-        "from collections import Counter",
-        "def _top_counts(",
-        "def _sum_number(",
-        "def _sum_first_number(",
-        "def _mapping_counts(",
-        "contracts_open_total",
-        "net_income_cny_total",
-        "premium_symbols",
-        "rows_by_view=",
-    )
-
-    aggregate_offenders = [term for term in forbidden_row_aggregate_terms if term in tools_text]
-    assert aggregate_offenders == []
-
-
 def test_copilot_host_does_not_branch_on_business_scene_names() -> None:
     host_text = (ROOT / "src" / "application" / "copilot" / "host.py").read_text(encoding="utf-8")
 
@@ -571,290 +431,7 @@ def test_copilot_host_does_not_branch_on_business_scene_names() -> None:
     assert 'contract.policy.get("allowed_tools")' not in host_text
     assert 'contract.policy.get("requires_answer_synthesis")' not in host_text
     assert "for tool_name in manifest.allowed_tools" not in host_text
-    assert "requires_answer_synthesis=_manifest_requires_answer_synthesis(manifest)" in host_text
-
-
-def test_copilot_scene_catalog_has_single_owner() -> None:
-    contracts_text = (ROOT / "src" / "application" / "copilot" / "contracts.py").read_text(encoding="utf-8")
-    scene_text = (ROOT / "src" / "application" / "copilot" / "scene.py").read_text(encoding="utf-8")
-    service_text = (ROOT / "src" / "application" / "copilot" / "service.py").read_text(encoding="utf-8")
-
-    assert "SCENE_CATALOG" in scene_text
-    assert "SceneDefinition(" in scene_text
-    assert "CapabilityHintDefinition(" in scene_text
-    assert "activation_terms" in contracts_text
-    assert "activation_reason" in contracts_text
-    assert "output_schema:" in contracts_text
-    assert "activation_pattern" not in contracts_text
-    assert "message_pattern" not in contracts_text
-    assert "message_reason" not in contracts_text
-    assert "activation_terms=" in scene_text
-    assert "activation_reason=" in scene_text
-    assert "activation_pattern=" not in scene_text
-    assert "message_pattern=" not in scene_text
-    assert "message_reason=" not in scene_text
-    assert "def capability_hint_definitions(" in scene_text
-    assert "contract missing required scope" in scene_text
-    assert "contract missing capability scope" in scene_text
-    assert "missing_required_scope(scene, contract.input)" in scene_text
-    assert "missing_capability_scope(scene, requested_capabilities, contract.input)" in scene_text
-    assert "class SceneSelectionDecision" in scene_text
-    assert "def select_scene(" in scene_text
-    assert "-> SceneSelectionDecision" in scene_text
-    assert "output_schema=_scene_output_schema(scene)" in scene_text
-    assert "output_schema={\"type\": \"AnswerReport\"}" not in scene_text
-    assert '"allowed_tools": list(scene.allowed_tools)' not in scene_text
-    assert '"allowed_environments": list(scene.environments)' not in scene_text
-    assert '"phase_readiness": scene.phase_readiness' not in scene_text
-    assert '"mock_environments": list(scene.mock_environments)' not in scene_text
-    assert '"fixture_ids": list(scene.fixture_ids)' not in scene_text
-    assert '_optional_policy_tuple(contract.policy, "allowed_tools")' in scene_text
-    assert '_optional_policy_tuple(contract.policy, "allowed_environments")' in scene_text
-    assert "lower_priority_match" not in scene_text
-    assert "ambiguous_scene_match" in scene_text
-    assert "Start the answer" not in scene_text
-    assert "Start the answer with a conclusion" not in scene_text
-    assert "Select the next action using only allowed read-only OM tools." in scene_text
-    assert "SCENE_CATALOG" not in service_text
-    assert "SceneDefinition" not in service_text
-    assert "SceneSelectionDecision" not in service_text
-    assert "policy_for_scene" not in service_text
-    assert "rejected_scenes" not in service_text
-    assert "candidate_scenes" not in service_text
-    assert "monthly_option_review" not in service_text
-    assert "operations_diagnostics" not in service_text
-    assert "candidate_filter_diagnostics" not in service_text
-    assert "月度期权复盘" not in service_text
-    assert "NVDA 为什么" not in service_text
-    forbidden_service_business_terms = (
-        "runtime_status",
-        "candidate_filter",
-        "monthly_income",
-        "analysis_query",
-        "close_advice",
-        "option_positions",
-        "期权",
-        "候选",
-        "筛选",
-        "收益",
-        "风险",
-        "不合理",
-        "优化",
-    )
-    service_business_offenders = [term for term in forbidden_service_business_terms if term in service_text]
-    assert service_business_offenders == []
-
-
-def test_copilot_scene_guidance_is_not_an_answer_template() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-
-    forbidden_guidance_terms = (
-        "结论",
-        "建议",
-        "不合理",
-        "优化",
-        "recommend",
-        "recommendation",
-        "finding",
-        "evidence_refs",
-        "account=",
-        "symbol=",
-        "premium=",
-        "realized=",
-        "assignment=",
-    )
-    forbidden_tool_names = (
-        "runtime_status",
-        "candidate_filter_explain",
-        "analysis_catalog",
-        "analysis_query",
-        "monthly_income_report",
-        "option_positions_read",
-        "close_advice_read",
-    )
-
-    offenders: list[str] = []
-    for scene in SCENE_CATALOG:
-        guidance = "\n".join(scene.task_guidance)
-        for term in forbidden_guidance_terms + forbidden_tool_names:
-            if term.lower() in guidance.lower():
-                offenders.append(f"{scene.name}:{term}")
-
-    assert offenders == []
-
-
-def test_copilot_capability_activation_hints_are_not_answer_templates() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-
-    forbidden_activation_terms = (
-        "结论",
-        "建议",
-        "不合理",
-        "合理",
-        "优化",
-        "recommend",
-        "recommendation",
-        "should",
-        "finding",
-        "evidence",
-        "account=",
-        "symbol=",
-        "premium=",
-        "realized=",
-        "assignment=",
-    )
-
-    offenders: list[str] = []
-    for scene in SCENE_CATALOG:
-        for hint in scene.capability_hints:
-            flattened_terms = [
-                term
-                for group in hint.activation_terms
-                for term in group
-                if isinstance(term, str) and term.strip()
-            ]
-            if not flattened_terms:
-                offenders.append(f"{scene.name}:{hint.capability}:missing_activation_terms")
-                continue
-            for term in forbidden_activation_terms:
-                if any(term.lower() in item.lower() for item in flattened_terms):
-                    offenders.append(f"{scene.name}:{hint.capability}:{term}")
-
-    assert offenders == []
-
-
-def test_copilot_service_does_not_inline_request_understanding_regexes() -> None:
-    service_text = (ROOT / "src" / "application" / "copilot" / "service.py").read_text(encoding="utf-8")
-    understanding_text = (ROOT / "src" / "application" / "copilot" / "request_understanding.py").read_text(
-        encoding="utf-8"
-    )
-    safety_text = (ROOT / "src" / "application" / "copilot" / "safety_policy.py").read_text(encoding="utf-8")
-
-    assert "understand_request(" in service_text
-    assert "evaluate_safety(" in service_text
-    assert "re.compile" not in service_text
-    assert "_infer_capabilities" not in service_text
-    assert "_CANDIDATE_HINT_RE" not in service_text
-    assert "_WRITE_LIKE_RE" not in service_text
-    assert "capability_hint_definitions(" in service_text
-    assert "capability_hints=capability_hint_definitions()" in service_text
-    assert "src.application.copilot.scene" not in understanding_text
-    assert "_CANDIDATE_HINT_RE" not in understanding_text
-    assert "_RUNTIME_HINT_RE" not in understanding_text
-    assert "_MONTHLY_REVIEW_RE" not in understanding_text
-    assert "phase1_candidate_filter_hint" not in understanding_text
-    assert "phase1_runtime_hint" not in understanding_text
-    assert "phase1_monthly_option_review_hint" not in understanding_text
-    assert "thin_request_understanding" in understanding_text
-    assert "_matches_activation_terms(" in understanding_text
-    assert "activation_terms" in understanding_text
-    assert "activation_pattern" not in understanding_text
-    assert "re.search" not in understanding_text
-    assert "select_scene(" not in understanding_text
-    assert "SceneDefinition" not in understanding_text
-    assert "date.today" not in understanding_text
-    assert "from datetime import date" not in understanding_text
-    assert "reference_year" in understanding_text
-    assert "_WRITE_LIKE_RE" not in understanding_text
-    assert "write_like" not in understanding_text
-    assert "safety_hits" not in understanding_text
-    assert "def evaluate_safety(" in safety_text
-    assert "class SafetyDecision" in safety_text
-    assert "class SafetyRule" in safety_text
-    assert "SAFETY_RULES" in safety_text
-    assert "_is_read_like_mutation_question" in safety_text
-    assert "是否" not in safety_text
-    assert "要不要" not in safety_text
-    assert "需不需要" not in safety_text
-    assert "should" not in safety_text
-    assert "_WRITE_LIKE_RE" not in safety_text
-    assert "src.application.copilot.scene" not in safety_text
-    assert "src.application.copilot.host" not in safety_text
-    assert "src.application.copilot.agent" not in safety_text
-    assert "src.application.copilot.tools" not in safety_text
-    assert "select_scene(" not in safety_text
-    assert "tool_name" not in safety_text
-    for rule_name in (
-        "config_mutation_request",
-        "notification_send_request",
-        "broker_trade_request",
-        "release_or_service_change_request",
-        "state_mutation_request",
-    ):
-        assert rule_name in safety_text
-
-
-def test_copilot_safety_policy_is_not_business_intent_routing() -> None:
-    safety_text = (ROOT / "src" / "application" / "copilot" / "safety_policy.py").read_text(encoding="utf-8")
-
-    forbidden_business_terms = (
-        "monthly_option_review",
-        "operations_diagnostics",
-        "candidate_filter",
-        "runtime_status",
-        "monthly_income_report",
-        "analysis_query",
-        "close_advice",
-        "option_positions",
-        "期权",
-        "复盘",
-        "候选",
-        "筛选",
-        "收益",
-        "风险",
-        "NVDA",
-        "0700",
-    )
-
-    offenders = [term for term in forbidden_business_terms if term in safety_text]
-    assert offenders == []
-
-
-def test_copilot_service_and_host_keep_dayu_import_boundary() -> None:
-    service_path = ROOT / "src" / "application" / "copilot" / "service.py"
-    host_path = ROOT / "src" / "application" / "copilot" / "host.py"
-    service_text = service_path.read_text(encoding="utf-8")
-    host_text = host_path.read_text(encoding="utf-8")
-    service_imports = set(_imported_modules(service_path))
-    host_imports = set(_imported_modules(host_path))
-
-    service_forbidden = {
-        "src.application.copilot.host",
-        "src.application.copilot.agent",
-        "src.application.copilot.engine",
-        "src.application.copilot.event_store",
-        "src.application.copilot.model_decider",
-        "src.application.copilot.result_admission",
-        "src.application.copilot.result_projection",
-        "src.application.copilot.tools",
-        "src.application.agent_tool_registry",
-        "src.application.tool_execution",
-    }
-    host_forbidden = {
-        "src.application.copilot.service",
-        "src.application.copilot.request_understanding",
-        "src.application.copilot.model_client",
-        "src.application.copilot.model_decider",
-        "src.application.agent_tool_registry",
-        "src.application.tool_execution",
-    }
-
-    assert sorted(service_imports & service_forbidden) == []
-    assert sorted(host_imports & host_forbidden) == []
-    assert "HostRunner" not in service_text
-    assert "host_runner" not in service_text
-    assert "handle_copilot_request" not in service_text
-    assert "from src.application.copilot.host import run_contract" not in service_text
-    assert "def handle_request(" not in service_text
-    assert "run_contract(" not in service_text
-    assert "def prepare_contract(" in service_text
-    assert "date.today" not in service_text
-    assert "reference_year: int" in service_text
-    assert "from src.application.copilot.scene import" in service_text
-    assert "src.application.copilot.scene" in host_imports
-    assert "build_scene_manifest(" in host_text
-    assert "model_config_json" not in host_text
-    assert "build_action_model" not in host_text
+    assert "requires_answer_synthesis" not in host_text
 
 
 def test_copilot_local_harness_is_phase1_composition_only() -> None:
@@ -866,7 +443,7 @@ def test_copilot_local_harness_is_phase1_composition_only() -> None:
     assert "src.application.copilot.host" in imports
     assert "src.application.copilot.model_config" in imports
     assert "src.application.copilot.model_client" in imports
-    assert "src.application.copilot.model_decider" in imports
+    assert "src.application.copilot.model_decider" not in imports
     assert "src.application.copilot.scene" not in imports
     assert "src.application.copilot.tools" not in imports
     assert "src.application.copilot.engine" not in imports
@@ -966,7 +543,10 @@ def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
 
     offenders: list[str] = []
     for filename, forbidden_modules in forbidden_by_file.items():
-        imports = _imported_modules_with_from_names(copilot_root / filename)
+        path = copilot_root / filename
+        if not path.exists():
+            continue
+        imports = _imported_modules_with_from_names(path)
         for module in imports:
             for forbidden in forbidden_modules:
                 if module == forbidden or module.startswith(f"{forbidden}."):
@@ -995,7 +575,7 @@ def test_copilot_result_admission_is_not_answer_guard() -> None:
     admission_text = (ROOT / "src" / "application" / "copilot" / "result_admission.py").read_text(encoding="utf-8")
 
     assert "admit_result_with_decision(" in host_text
-    assert "result_admission_rejected" in host_text
+    assert 'event_log.record("result_rejected"' in host_text
     assert "def _admit" not in host_text
     assert "src.application.assistant" not in admission_text
     assert "answer_guard" not in admission_text
@@ -1005,94 +585,17 @@ def test_copilot_result_admission_is_not_answer_guard() -> None:
     assert "import re" not in admission_text
     assert "raw_grouped_rows" not in admission_text
     assert "_looks_like" not in admission_text
-    assert "from src.application.copilot.safety_text import contains_forbidden_external_action_claim" in admission_text
+    assert "safety_text" not in admission_text
     assert "FORBIDDEN_MUTATION_CLAIMS" not in admission_text
     assert "account=" not in admission_text
     assert "symbol=" not in admission_text
     assert "monthly_option_review" not in admission_text
     assert "operations_diagnostics" not in admission_text
-    assert "user_response=" not in admission_text
-
-
-def test_copilot_result_projection_does_not_own_tools_or_old_assistant() -> None:
-    projection_text = (ROOT / "src" / "application" / "copilot" / "result_projection.py").read_text(encoding="utf-8")
-
-    assert "src.application.assistant" not in projection_text
-    assert "ExecutionContract" not in projection_text
-    assert "contract.input" not in projection_text
-    assert "contract.policy" not in projection_text
-    assert "uses_mock_observations" not in projection_text
-    assert "agent_tool_registry" not in projection_text
-    assert "tool_execution" not in projection_text
-    assert "src.infrastructure" not in projection_text
-    assert "openai" not in projection_text.lower()
-    assert "src.application.copilot.answer_quality" not in projection_text
-    assert "has_raw_field_dump" not in projection_text
-    assert "has_conflicting_snapshot_view_use" not in projection_text
-    assert "has_conflicting_valid_empty_result_use" not in projection_text
-    assert "def _has_raw_field_dump(" not in projection_text
-    assert "def _raw_assignment_token_count(" not in projection_text
-    assert "def _receipt_like_row_dump(" not in projection_text
-    assert "monthly_option_review" not in projection_text
-    assert "operations_diagnostics" not in projection_text
-    assert "月度" not in projection_text
-    assert "期权" not in projection_text
-    assert "诊断" not in projection_text
-    assert "分析完成" not in projection_text
-    assert "完成初步" not in projection_text
-    assert "已基于" not in projection_text
-    assert '"data": item.get("data")' not in projection_text
-    assert '"value_preview": _observation_value_preview(item)' in projection_text
-    assert "def _observation_value_preview(" in projection_text
-    assert '"error": item.get("error")' not in projection_text
-    assert '"error": _error_preview(item.get("error"))' in projection_text
-    assert "missing.extend(_missing_data_preview(item_missing))" in projection_text
-    assert "missing.extend(str(value)" not in projection_text
-    assert "user_response=" not in projection_text
-    assert "已尝试检查" not in projection_text
-    assert "MAX_OBSERVATION_SUMMARY_CHARS" in projection_text
-    assert '"summary": _summary_preview(item.get("summary"))' in projection_text
-    assert '"summary": str(item.get("summary") or "")' not in projection_text
-    assert '"facts_omitted"' in projection_text
-    assert '"evidence_context": _string_map_preview(item.get("evidence_context"))' in projection_text
-    assert "def _string_map_preview(" in projection_text
-    assert "def _bounded_count(" in projection_text
-    assert "def _missing_data(eval_only: bool" in projection_text
-    assert "def _missing_data(contract" not in projection_text
-    assert "eval_synthesis_missing = _eval_model_synthesis_missing(" in projection_text
-    assert "suppress_observation_findings = synthesis_missing or eval_synthesis_missing" in projection_text
-    assert "findings=[] if suppress_observation_findings else _observation_findings(observations)" in projection_text
-    assert "def _eval_model_synthesis_missing(" in projection_text
-    assert "def _observation_findings(" in projection_text
-    assert 'raw_report.get("attempted_checks")' not in projection_text
-    assert "def _missing_required_evidence(" not in projection_text
-    assert "weak_tools = {" not in projection_text
-    assert "required evidence missing: " not in projection_text
-    assert "required finding citation missing: " not in projection_text
-    assert "def _missing_required_finding_refs(" not in projection_text
-    assert "claimable_refs = _claimable_refs(observations)" in projection_text
-    assert "elif _has_non_claimable_report_refs(raw_report, claimable_refs):" in projection_text
-    assert "elif not _report_has_visible_refs(report):" in projection_text
-    assert "has_observation_gap = _has_observation_gap(observations)" in projection_text
-    assert "if context.requires_recommendations and not has_observation_gap and not report.recommendations:" in projection_text
-    assert "missing = _dedupe(_safe_report_missing_data(report) + _report_observation_missing_data(observations))" in projection_text
-    assert "if context.requires_answer_synthesis is not True:" not in projection_text
+    assert "Copilot 结果未通过结构或安全校验。" in admission_text
 
 
 def test_copilot_shared_runtime_does_not_own_monthly_answer_dimensions() -> None:
-    shared_files = (
-        ROOT / "src" / "application" / "copilot" / "contracts.py",
-        ROOT / "src" / "application" / "copilot" / "local_harness.py",
-        ROOT / "src" / "application" / "copilot" / "model_client.py",
-        ROOT / "src" / "application" / "copilot" / "model_decider.py",
-        ROOT / "src" / "application" / "copilot" / "result_admission.py",
-        ROOT / "src" / "application" / "copilot" / "result_projection.py",
-        ROOT / "src" / "application" / "copilot" / "service.py",
-        ROOT / "src" / "application" / "copilot" / "host.py",
-        ROOT / "src" / "application" / "copilot" / "agent.py",
-        ROOT / "src" / "application" / "copilot" / "engine.py",
-        ROOT / "src" / "application" / "copilot" / "safety_text.py",
-    )
+    shared_files = sorted((ROOT / "src" / "application" / "copilot").glob("*.py"))
     forbidden_labels = (
         "profit quality",
         "assignment cash outlay",
@@ -1116,295 +619,51 @@ def test_copilot_shared_runtime_does_not_own_monthly_answer_dimensions() -> None
 def test_copilot_error_code_protocol_has_single_contract_owner() -> None:
     contracts_text = (ROOT / "src" / "application" / "copilot" / "contracts.py").read_text(encoding="utf-8")
     tools_text = (ROOT / "src" / "application" / "copilot" / "tools.py").read_text(encoding="utf-8")
-    projection_text = (ROOT / "src" / "application" / "copilot" / "result_projection.py").read_text(encoding="utf-8")
 
     assert "COPILOT_SAFE_ERROR_CODES" in contracts_text
     assert "def safe_error_code(" in contracts_text
     assert "COPILOT_SAFE_ERROR_CODES" not in tools_text
-    assert "COPILOT_SAFE_ERROR_CODES" not in projection_text
     assert "safe_error_code(error.get(\"code\"), default=\"TOOL_ERROR\")" in tools_text
-    assert "safe_error_code(error.get(\"code\"), default=\"\")" in projection_text
 
 
-def test_copilot_application_owns_user_response_rendering() -> None:
-    rendering_text = (ROOT / "src" / "application" / "copilot" / "rendering.py").read_text(encoding="utf-8")
+def test_copilot_uses_model_final_text_without_application_answer_renderer() -> None:
     cli_text = (ROOT / "src" / "interfaces" / "cli" / "copilot_ops.py").read_text(encoding="utf-8")
     host_text = (ROOT / "src" / "application" / "copilot" / "host.py").read_text(encoding="utf-8")
     service_text = (ROOT / "src" / "application" / "copilot" / "service.py").read_text(encoding="utf-8")
 
-    assert "def render_user_response(" in rendering_text
-    assert "_render_report(" in rendering_text
-    assert "已尝试检查" in rendering_text
-    assert "from src.application.copilot.rendering import render_user_response" in cli_text
+    assert not (ROOT / "src" / "application" / "copilot" / "rendering.py").exists()
+    assert "src.application.copilot.rendering" not in cli_text
     assert "def render_user_response(" not in cli_text
     assert "_render_report(" not in cli_text
-    assert "已尝试检查" not in cli_text
-    assert "user_response=" not in host_text
-    assert "user_response=" not in service_text
+    assert "user_response=result.user_response" not in cli_text
+    assert "user_response=" in host_text
+    assert 'user_response="请提供要查询或分析的问题。"' in service_text
 
 
-def test_copilot_agent_uses_host_supplied_tool_interface() -> None:
-    agent_text = (ROOT / "src" / "application" / "copilot" / "agent.py").read_text(encoding="utf-8")
-
-    assert "ActionDecider" in agent_text
-    assert "default_action_decider" in agent_text
-    assert "ExecutionContract" not in agent_text
-    assert "contract:" not in agent_text
-    assert "AppResult" not in agent_text
-    assert "AnswerReport" not in agent_text
-    assert "AppEvent" not in agent_text
-    assert "result_from_observations" not in agent_text
-    assert "observation_event_payload" not in agent_text
-    assert "结论" not in agent_text
-    assert "evidence_refs" not in agent_text
-    assert "agent_tool_registry" not in agent_text
-    assert "tool_execution" not in agent_text
-    assert "execute_tool(" not in agent_text
-    assert "src.application.copilot import tools" not in agent_text
-    assert "while state.turns" not in agent_text
-    assert "tool_attempt" not in agent_text
-    assert "budget_exhausted" not in agent_text
-    assert "run_cancelled" not in agent_text
-    assert "monthly_option_review" not in agent_text
-    assert "operations_diagnostics" not in agent_text
-
-
-def test_copilot_engine_is_host_internal_and_business_neutral() -> None:
-    engine_text = (ROOT / "src" / "application" / "copilot" / "engine.py").read_text(encoding="utf-8")
-    host_text = (ROOT / "src" / "application" / "copilot" / "host.py").read_text(encoding="utf-8")
-
-    assert "run_engine" in engine_text
-    assert "ExecutionContract" not in engine_text
-    assert "AppEvent" not in engine_text
-    assert "AppResult" not in engine_text
-    assert "events:" not in engine_text
-    assert "contract.input" not in engine_text
-    assert "uses_mock_observations(" not in engine_text
-    assert "src.application.copilot.result_projection" not in engine_text
-    assert "observation_event_payload" not in engine_text
-    assert "result_from_observations(" not in engine_text
-    assert "result_from_agent_report(" not in engine_text
-    assert "project_observations=lambda" in host_text
-    assert "project_agent_report=lambda" in host_text
-    assert "build_observation_event=observation_event_payload" in host_text
-    assert "fixture_id = _fixture_id(contract)" in host_text
-    assert "use_mock_observations=fixture_id is not None" in host_text
-    assert "requires_fixture_synthesis = fixture_synthesis_policy or _default_fixture_requires_model_synthesis" in host_text
-    assert "require_mock_model_synthesis=requires_fixture_synthesis(fixture_id)" in host_text
-    assert "scene_input=contract.input" in host_text
-    assert "agent_tool_registry" not in engine_text
-    assert "tool_execution" not in engine_text
-    assert "src.application.assistant" not in engine_text
-    assert "src.infrastructure" not in engine_text
-    assert "monthly_option_review" not in engine_text
-    assert "operations_diagnostics" not in engine_text
-    assert "default_action_decider(state)" not in engine_text
-    assert "_has_unattempted_manifest_tools(" in engine_text
-    assert 'tool_call_id = new_id("toolcall")' in engine_text
-    assert "_tool_attempt_payload(action.tool_name, payload, tool_call_id, state.turns)" in engine_text
-    assert 'observation["tool_call_id"] = tool_call_id' in engine_text
-    assert '"tool_call_id": tool_call_id' in engine_text
-    assert '"payload": payload' not in engine_text
-    assert '"reason": action.reason' not in engine_text
-    assert '"error": observation.get("error")' not in engine_text
-    assert '"error_code": _error_code(observation)' in engine_text
-    assert '"model_error"' in engine_text
-    assert "MODEL_ERROR" in engine_text
-    assert "MODEL_ACTION_INVALID" in engine_text
-    assert "_agent_action_payload(state.turns, action, manifest.allowed_tools)" in engine_text
-    for forbidden in (
-        "Agent returned",
-        "scene manifest",
-        "Tool payload",
-        "before running",
-        "Agent turn budget",
-        "next agent action",
-    ):
-        assert forbidden not in engine_text
-
-
-def test_copilot_model_decider_has_no_live_provider_dependency() -> None:
-    decider_text = (ROOT / "src" / "application" / "copilot" / "model_decider.py").read_text(encoding="utf-8")
-
-    assert "src.application.assistant" not in decider_text
-    assert "src.infrastructure" not in decider_text
-    assert "openai" not in decider_text.lower()
-    assert "urllib" not in decider_text
-    assert "requests" not in decider_text
-    assert '"scene"' not in decider_text
-    assert '"scene_name"' not in decider_text
-    assert '"task_guidance": _model_task_guidance(state.manifest.task_guidance)' in decider_text
-    assert "def _model_task_guidance(" in decider_text
-    assert '"observations": [_model_observation(item) for item in state.observations]' in decider_text
-    assert "def _model_observation(" in decider_text
-    assert '"facts_omitted"' in decider_text
-    assert '"evidence_context": _model_string_map(item.get("evidence_context"))' in decider_text
-    assert "def _model_string_map(" in decider_text
-    assert "INTERNAL_EVIDENCE_CONTEXT_KEYS" not in decider_text
-    assert "def _bounded_count(" in decider_text
-    assert '"remaining_budget": _remaining_budget(state)' in decider_text
-    assert '"quality_contract": _quality_contract(state)' in decider_text
-    assert "def _quality_contract(" in decider_text
-    assert '"limits": dict(state.manifest.limits)' not in decider_text
-    assert '"requires_all_allowed_tool_evidence"' not in decider_text
-    assert '"missing_allowed_tool_evidence": _missing_allowed_tool_evidence(' in decider_text
-    assert "def _missing_allowed_tool_evidence(" in decider_text
-    assert '"attempted_tools_without_evidence": _attempted_tools_without_evidence(state)' in decider_text
-    assert "def _attempted_tools_without_evidence(" in decider_text
-    assert '"summary": _model_summary(item.get("summary"))' in decider_text
-    assert '"summary": item.get("summary")' not in decider_text
-    assert '"output_contract": _model_output_contract(item.get("output_contract"))' in decider_text
-    assert "static_payload_keys" not in decider_text
-    assert "required_scene_fields" not in decider_text
-    assert "payload_fields" not in decider_text
-    assert "def _model_output_contract(" in decider_text
-    assert "MAX_MODEL_SUMMARY_CHARS" in decider_text
-    assert '"tool_name": "required when kind=tool; null when kind=finish"' in decider_text
-    assert '"answer_report": (' in decider_text
-    assert "cite only claimable observation refs" in decider_text
-    assert "finish action requires answer_report" in decider_text
-    assert "finish action requires null tool_name" in decider_text
-    assert "tool action requires null answer_report" in decider_text
-    assert "optional when kind=finish" not in decider_text
-    assert "tool action uses disallowed tool_name" in decider_text
-    assert "tool action repeats attempted tool" in decider_text
-    assert "tool action uses disallowed tool_name:" not in decider_text
-    assert "_parse_model_action(" in decider_text
-    assert "requires_recommendations=_requires_recommendations(state)" in decider_text
-    assert "claimable_refs=_claimable_refs(state.observations)" in decider_text
-    assert '"unattempted_tools_without_evidence": _unattempted_tools_without_evidence(state)' in decider_text
-    assert '"attempted_tools_without_evidence": _attempted_tools_without_evidence(state)' in decider_text
-    assert "unattempted_tools_without_evidence=_unattempted_tools_without_evidence(state)" in decider_text
-    assert 'attempted.update(str(item.get("tool_name") or "") for item in state.observations)' in decider_text
-    assert "missing_allowed_tool_evidence=_missing_allowed_tool_evidence(" in decider_text
-    assert "finish action requires tool evidence" in decider_text
-    assert "finish action requires missing evidence" in decider_text
-    assert "finish action requires conclusion" in decider_text
-    assert "finish action requires cited findings" in decider_text
-    assert "finish action requires recommendations" in decider_text
-    assert "finish action requires finding evidence" not in decider_text
-    assert "def _has_conclusion(" in decider_text
-    assert "from src.application.copilot.safety_text import contains_forbidden_external_action_claim" in decider_text
-    assert "finish action claims external action" in decider_text
-    assert "contains_forbidden_external_action_claim(final_report)" in decider_text
-    assert "has_conflicting_snapshot_view_use(" not in decider_text
-    assert "def _has_raw_field_dump(" not in decider_text
-    assert "def _raw_assignment_token_count(" not in decider_text
-    assert "def _receipt_like_row_dump(" not in decider_text
-    assert "def _has_findings(" in decider_text
-    assert "def _has_recommendations(" in decider_text
-    assert "def _findings_cover_claimable_tools(" not in decider_text
-    assert "finish action uses non-claimable evidence refs" in decider_text
-    assert "def _all_report_refs_are_claimable(" in decider_text
-    assert "def _iter_report_ref_fields(" in decider_text
-    assert "def _reports_missing_tool_evidence(" in decider_text
-    assert "allowed_refs = {ref for ref in claimable_refs or [] if ref}" in decider_text
-    assert 'kind="finish", reason=f"model action invalid' not in decider_text
-    assert 'kind="invalid"' in decider_text
-    assert 'reason=f"model action invalid' in decider_text
-    assert 'error_code="MODEL_ERROR"' in decider_text
-    assert 'error_code="MODEL_ACTION_INVALID"' in decider_text
-    assert '"value_preview"' not in decider_text
-    assert '"data"' not in decider_text
-    assert 'item.get("error")' not in decider_text
-    assert '"error": repair_error' in decider_text
-    assert "config_key" not in decider_text
-    assert "state.contract" not in decider_text
-    assert "_user_message_from_manifest(state.manifest.messages)" in decider_text
-    assert "except Exception as exc" in decider_text
-    assert "exc.__class__.__name__" in decider_text
-    assert "str(exc)" not in decider_text
-    assert '"previous_response": _repair_previous_response(previous_response)' in decider_text
-    assert '"previous_response": previous_response or {}' not in decider_text
-    assert '"has_tool_name": bool(tool_name)' in decider_text
-    assert '"tool_name": previous_response.get("tool_name")' not in decider_text
-
-
-def test_copilot_model_client_uses_shared_provider_boundary() -> None:
-    model_client_text = (ROOT / "src" / "application" / "copilot" / "model_client.py").read_text(encoding="utf-8")
-    assistant_provider_text = (ROOT / "src" / "application" / "assistant" / "llm_provider_registry.py").read_text(encoding="utf-8")
-
-    assert "src.application.llm_provider_registry" in model_client_text
-    assert "src.application.assistant" not in model_client_text
-    assert "src.application.agent_tool_registry" not in model_client_text
-    assert "src.application.tool_execution" not in model_client_text
-    assert "monthly_option_review" not in model_client_text
-    assert "operations_diagnostics" not in model_client_text
-    assert "exposure" not in model_client_text
-    assert "contract counts" not in model_client_text
-    assert "config_key" not in model_client_text
-    assert "final answer shape" not in model_client_text
-    assert "Use task_guidance only for scene evidence expectations and stopping conditions." in model_client_text
-    assert "Use quality_contract as the output contract" in model_client_text
-    assert "Use answer_quality as the output quality contract" not in model_client_text
-    assert '"required": ["summary", "action", "target_scope", "answer_dimension", "basis_refs"]' in model_client_text
-    assert '"type": ["string", "null"]' in model_client_text
-    assert "Use one task_guidance.answer_dimensions value when present; otherwise null." in model_client_text
-    assert "set answer_dimension to one task_guidance.answer_dimensions value when present, otherwise null" in model_client_text
-    assert "Use each observation's evidence_context to distinguish requested-scope evidence, current context" in model_client_text
-    assert "finish_conditions.refs_with_omitted_facts" not in model_client_text
-    assert "finish_conditions.snapshot_view_boundaries" not in model_client_text
-    assert "finish_conditions.valid_empty_result_boundaries" not in model_client_text
-    assert "If an observation has facts_omitted" in model_client_text
-    assert "If unattempted_tools_without_evidence is non-empty, choose a tool from that list before finishing." in model_client_text
-    assert "Do not choose a tool already listed in attempted_tools" in model_client_text
-    assert "Treat allowed_tools_without_evidence as a status summary only" not in model_client_text
-    assert "Use attempted_tools_without_evidence only to understand which already-attempted tools still lack usable evidence." in model_client_text
-    assert "missing evidence, not retry targets" in model_client_text
-    assert "findings must cite each tool listed in finish_conditions.claimable_refs_by_tool" not in model_client_text
-    assert "no useful budget remains" not in model_client_text
-    assert "Follow task_guidance when deciding evidence sufficiency" not in model_client_text
-    assert "from src.application.llm_provider_registry import *" in assistant_provider_text
-
-
-def test_copilot_design_keeps_recommendation_answer_dimension_scene_conditional() -> None:
+def test_copilot_design_does_not_define_recommendation_output_schema() -> None:
     design_text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
 
-    assert "is not a shared recommendation field" in design_text
-    assert "required only when the selected scene" in design_text
-    assert "declares `answer_dimensions`" in design_text
-    assert "`target_scope`, `answer_dimension`, and `basis_refs` as explicit fields" not in design_text
-    assert "`action`, `target_scope`, and `answer_dimension` must be non-empty" not in design_text
+    assert "the generic OM analyst system prompt" in design_text
+    assert "monthly review templates" in design_text
+    assert "answer_dimensions" not in design_text
+    assert "basis_refs" not in design_text
 
 
-def test_copilot_phase2_keeps_non_review_model_action_fixtures() -> None:
+def test_copilot_keeps_generic_answer_quality_model_turn_fixtures() -> None:
     fixture_root = ROOT / "tests" / "fixtures" / "copilot"
 
     for name in (
-        "candidate_filter_diagnostics_model_action.json",
-        "close_advice_notification_diagnostics_model_action.json",
-        "june_income_attribution_model_action.json",
-        "current_option_exposure_model_action.json",
+        "candidate_filter_diagnostics_model_turns.json",
+        "close_advice_notification_diagnostics_model_turns.json",
+        "june_income_attribution_model_turns.json",
+        "current_option_exposure_model_turns.json",
     ):
         assert (fixture_root / name).is_file(), name
 
 
-def test_copilot_current_slice_exposes_declared_channel_scenes() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-
-    channel_ready = [scene.name for scene in SCENE_CATALOG if scene.phase_readiness == "channel_ready"]
-
-    assert channel_ready == ["operations_diagnostics", "monthly_income_attribution"]
-
-
-def test_copilot_channel_tests_do_not_use_monthly_review_as_smoke_scene() -> None:
-    checked_files = (
-        ROOT / "tests" / "test_copilot_phase1.py",
-        ROOT / "tests" / "test_assistant_runtime.py",
-    )
-    forbidden = (
-        'channel_scenes=("monthly_option_review"',
-        '"channel_scenes": ["monthly_option_review"]',
-    )
-
-    for path in checked_files:
-        text = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            assert token not in text, path
-
-
-def test_docs_do_not_claim_monthly_review_is_channel_ready() -> None:
+def test_docs_describe_one_general_copilot_scene() -> None:
     checked_docs = (
+        ROOT / "README.md",
         ROOT / "docs" / "AGENT_INTEGRATION.md",
         ROOT / "docs" / "AGENT_WIKI.md",
         ROOT / "docs" / "ARCHITECTURE.md",
@@ -1413,60 +672,35 @@ def test_docs_do_not_claim_monthly_review_is_channel_ready() -> None:
         ROOT / "docs" / "TOOL_REFERENCE.md",
     )
     forbidden = (
-        "monthly_option_review` is the first channel-ready",
-        "monthly_option_review` as the first channel-ready",
-        "monthly_option_review` is channel-ready",
-        "Only `monthly_option_review` is channel-ready",
-        "当前只有\n`monthly_option_review` 可作为渠道场景",
+        "NATURAL_LANGUAGE_REBUILDING",
+        "assistant.copilot.channel_scenes",
+        "operations_diagnostics",
+        "monthly_income_attribution",
+        "--scene current_option_exposure",
+        "--scene monthly_income_attribution",
     )
 
     for path in checked_docs:
         text = path.read_text(encoding="utf-8")
+        assert "om_chat" in text, path
         for token in forbidden:
             assert token not in text, path
 
 
-def test_capability_map_presents_copilot_as_multi_scene_surface() -> None:
+def test_capability_map_presents_one_general_copilot_scene() -> None:
     text = (ROOT / "docs" / "OM_AGENT_CAPABILITY_MAP.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-
-    for token in (
-        "operations diagnostics",
-        "income attribution",
-        "current exposure",
-    ):
-        assert token in normalized
-    for token in (
-        "--scene current_option_exposure",
-        "--scene monthly_income_attribution",
-    ):
-        assert token in text
-
-    assert "monthly_option_review" not in text
+    assert "single `om_chat` Scene" in text
+    assert "channel_scenes" not in text
+    assert "monthly_income_attribution" not in text
+    assert "operations_diagnostics" not in text
 
 
-def test_readme_presents_local_copilot_as_multi_scene_surface() -> None:
+def test_readme_presents_local_copilot_as_one_scene_surface() -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-
-    for token in (
-        "诊断",
-        "收益归因",
-        "当前暴露",
-        "--scene current_option_exposure",
-        "--scene monthly_income_attribution",
-    ):
-        assert token in normalized
-
-    assert "monthly_option_review" not in text
-
-
-def test_copilot_scene_catalog_has_no_dedicated_monthly_option_review() -> None:
-    from src.application.copilot.scene import SCENE_CATALOG
-
-    scene_names = [scene.name for scene in SCENE_CATALOG]
-
-    assert "monthly_option_review" not in scene_names
+    assert "唯一的只读 `om_chat` Copilot Scene" in text
+    assert "--scene current_option_exposure" not in text
+    assert "--scene monthly_income_attribution" not in text
+    assert "--model-turn-json-file" in text
 
 
 def test_phase2_design_requires_non_review_lanes_before_monthly_benchmark() -> None:
@@ -1477,134 +711,96 @@ def test_phase2_design_requires_non_review_lanes_before_monthly_benchmark() -> N
     assert "monthly option review last as the benchmark" not in normalized
 
 
-def test_phase1_design_main_blueprint_is_lane_based_not_monthly_command_dump() -> None:
+def test_design_phases_keep_real_answer_quality_as_the_cutover_gate() -> None:
     text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    section = text.split("### Phase 1 Outcome", 1)[1].split("`./om copilot run` is deterministic", 1)[0]
-    main_table = section.split("Additional monthly-review benchmark fixtures", 1)[0]
+    phases = [
+        "### P0: Stabilize The Rebuild Baseline",
+        "### P1: Prove The Real Vertical Slice",
+        "### P2: Repair Canonical Tool Contracts From P1 Failures",
+        "### P3: Repair The Generic Agent Loop From P1 Failures",
+        "### P4: Repair Scene And Prompt Behavior From P1 Failures",
+        "### P5: Collapse Control, Cut Over, And Release",
+    ]
 
-    for lane in (
-        "| Candidate diagnosis |",
-        "| Close-advice notification diagnosis |",
-        "| Monthly income attribution |",
-        "| Current exposure analysis |",
+    positions = [text.index(phase) for phase in phases]
+    assert positions == sorted(positions)
+    for token in (
+        "one `om_chat` Scene",
+        "P1 is a hard quality gate",
+        "no benchmark-specific branch, Scene, or answer template",
+        "model-visible success results do not require nested `ok/value/data` decoding",
     ):
-        assert lane in main_table
-
-    assert "monthly_option_review" not in main_table
+        assert token in text
 
 
-def test_phase2_design_does_not_make_monthly_review_rules_the_runtime_blueprint() -> None:
+def test_answer_quality_phase_does_not_make_benchmarks_runtime_capabilities() -> None:
     text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    phase2_text = text.split("### Phase 2: Model-Backed Answer-Quality Loop", 1)[1].split(
-        "### Phase 3: Channel Rollout", 1
+    phase_text = text.split("### P4: Repair Scene And Prompt Behavior From P1 Failures", 1)[1].split(
+        "### P5: Collapse Control, Cut Over, And Release",
+        1,
     )[0]
 
-    for token in (
-        "monthly option-review recommendations must",
-        "every monthly option-review recommendation",
-        "symbol-specific monthly option-review recommendations",
-        "account-specific monthly option-review recommendations",
-        "monthly option-review recommendations that state concrete amounts",
-    ):
-        assert token not in phase2_text
+    assert "tune only when the trace proves" in phase_text
+    assert "no question-specific prompt, tool list, or renderer exists" in phase_text
+    assert "monthly_option_review" not in phase_text
+    assert "monthly review template" not in phase_text
 
 
-def test_copilot_phase2_completion_checklist_has_test_evidence() -> None:
+def test_copilot_evals_cover_broad_free_form_question_families() -> None:
     design_text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    tests_text = (ROOT / "tests" / "test_copilot_phase1.py").read_text(encoding="utf-8")
-    fixture_root = ROOT / "tests" / "fixtures" / "copilot"
+    evaluation = design_text.split("## Evaluation", 1)[1].split("## Implementation Phases", 1)[0]
 
-    for lane in (
-        "Diagnostics",
-        "Income attribution",
-        "Current exposure",
-        "Missing/stale evidence",
-        "Shared runtime boundary",
-        "Channel boundary",
+    for question_family in (
+        "monthly income and attribution",
+        "current option exposure and concentration",
+        "recent option-operation review",
+        "candidate-filter diagnosis",
+        "notification/close-advice diagnosis",
+        "follow-up questions such as `结论呢`",
     ):
-        assert f"| {lane} |" in design_text
-
-    for local_model_test in (
-        "test_service_projects_scene_to_host_manifest_without_answer_markers",
-        "test_write_like_request_is_refused_before_host",
-        "test_channel_environment_keeps_monthly_option_review_not_ready",
-        "test_local_runtime_question_runs_service_host_agent_loop",
-        "test_monthly_option_review_is_not_a_dedicated_copilot_capability",
-        "test_model_decider_collects_required_tools_before_calling_model",
-        "test_model_decider_degrades_after_required_tool_evidence_is_collected",
-        "test_monthly_income_model_error_still_collects_all_required_evidence",
-        "test_result_admission_rejects_external_action_claim",
-        "test_cli_copilot_eval_accepts_model_action_file",
-        "test_cli_copilot_run_uses_local_tools",
-        "test_copilot_code_does_not_reintroduce_marker_based_answer_guard",
-    ):
-        assert local_model_test in tests_text
-
-    for action_fixture in (
-        "candidate_filter_diagnostics_model_action.json",
-        "close_advice_notification_diagnostics_model_action.json",
-        "june_income_attribution_model_action.json",
-        "current_option_exposure_model_action.json",
-    ):
-        assert (fixture_root / action_fixture).is_file(), action_fixture
+        assert question_family in evaluation
+    assert "No individual benchmark becomes a runtime capability or Scene." in evaluation
 
 
-def test_copilot_follow_on_evals_start_with_non_review_lanes() -> None:
-    design_text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    match = re.search(
-        r"Follow-on answer-quality eval cases for the broader Copilot surface:\n\n"
-        r"(?P<items>(?:\d+\. .+\n)+)",
-        design_text,
-    )
-    assert match is not None
-
-    items = [line.split(". ", 1)[1].strip() for line in match.group("items").splitlines()]
-
-    assert items[:2] == ["Candidate rejection diagnosis.", "Close-advice notification diagnosis."]
-    assert items[0] != "Monthly option-operation review."
-
-
-def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
+def test_tool_contracts_do_not_carry_planner_routing_metadata() -> None:
     from dataclasses import fields
 
-    from src.application.agent_tool_registry import get_tool_definition
+    from src.application.agent_tools.base import AgentTool
     from src.application.assistant.tool_bindings import AssistantToolBinding
 
     binding_fields = {field.name for field in fields(AssistantToolBinding)}
+    tool_fields = {field.name for field in fields(AgentTool)}
     assert "description" not in binding_fields
     assert "input_schema" not in binding_fields
     assert "output_contract" not in binding_fields
-    assert "planner_notes" not in binding_fields
-    assert "planner_semantics" not in binding_fields
-    assert "copilot_notes" not in binding_fields
+    for field_name in ("planner_notes", "planner_semantics", "planner_semantics_resolver", "copilot_notes"):
+        assert field_name not in binding_fields
+        assert field_name not in tool_fields
 
-    for tool_name in (
-        "monthly_income_report",
-        "analysis_catalog",
-        "analysis_query",
-        "option_positions_read",
-        "query_cash_headroom",
-        "symbol_config_read",
-        "symbol_resolve",
-        "candidate_filter_explain",
+
+def test_deleted_assistant_answer_helpers_do_not_return() -> None:
+    assistant_root = ROOT / "src" / "application" / "assistant"
+
+    for filename in (
+        "deterministic_commands.py",
+        "llm_common.py",
+        "llm_provider_registry.py",
+        "time_filters.py",
+        "tool_contracts.py",
+        "tool_policy.py",
+        "user_profile.py",
     ):
-        definition = get_tool_definition(tool_name)
-        assert definition is not None, tool_name
-        assert definition.planner_notes, tool_name
-        assert definition.resolve_planner_semantics({"analysis_view_names": None}), tool_name
+        assert not (assistant_root / filename).exists()
 
 
 def test_read_tool_allowlist_has_neutral_owner() -> None:
     from src.application import tool_allowlist
     from src.application.assistant import policy as assistant_policy
-    from src.application.assistant import tool_policy
 
     assert assistant_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
-    assert tool_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
-
-    tool_policy_text = (ROOT / "src" / "application" / "assistant" / "tool_policy.py").read_text(encoding="utf-8")
-    assert "from src.application.inbound.policy import PURE_READ_TOOLS" not in tool_policy_text
-    assert "from src.application.assistant.policy import PURE_READ_TOOLS" not in tool_policy_text
+    assert not (ROOT / "src" / "application" / "assistant" / "tool_policy.py").exists()
+    policy_text = (ROOT / "src" / "application" / "assistant" / "policy.py").read_text(encoding="utf-8")
+    assert "from src.application.tool_allowlist import PURE_READ_TOOLS" in policy_text
 
 
 def test_agent_write_gate_delegates_to_registry_policy() -> None:
@@ -1734,59 +930,34 @@ def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
     assert "handle_assistant_message" not in main_text
 
 
-def test_assistant_runtime_delegates_perception() -> None:
+def test_assistant_runtime_no_longer_owns_perception() -> None:
     runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
-    perception_text = (ROOT / "src" / "application" / "assistant" / "perception.py").read_text(encoding="utf-8")
 
-    assert "PerceptionEngine(" in runtime_text
-    forbidden_runtime_tokens = (
-        "parse_assistant_command",
-        "parse_deterministic_text",
-        "run_read_only_agent_loop",
-        "generate_general_reply",
-        "build_conversation_context",
-        "context_trace",
-    )
-    offenders = [token for token in forbidden_runtime_tokens if token in runtime_text]
-    assert offenders == []
-
-    perception_tokens = (
-        "parse_assistant_command",
-        "parse_permission_response",
-        "natural_language_rebuilding_error",
-    )
-    for token in perception_tokens:
-        assert token in perception_text
-    removed_tokens = (
-        "run_read_only_agent_loop",
-        "generate_general_reply",
-        "build_conversation_context",
-        "context_trace",
-    )
-    offenders = [token for token in removed_tokens if token in perception_text]
-    assert offenders == []
-    assert "translate_inbound_intent" not in perception_text
+    assert "PerceptionEngine" not in runtime_text
+    assert "perception_trace" not in runtime_text
+    assert not (ROOT / "src" / "application" / "assistant" / "perception.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "perception_trace.py").exists()
 
 
-def test_assistant_router_uses_perception_reasoning_action_observation_chain() -> None:
+def test_assistant_router_uses_single_explicit_control_execution() -> None:
     router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
-    reasoning_text = (ROOT / "src" / "application" / "assistant" / "reasoning.py").read_text(encoding="utf-8")
+    control_text = (ROOT / "src" / "application" / "assistant" / "inbound_control.py").read_text(encoding="utf-8")
     contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(encoding="utf-8")
 
-    assert "resolve_reasoning(" in router_text
-    assert "perform_action(" in router_text
-    assert "build_observation(" in router_text
+    assert "execute_explicit_control(" in router_text
+    assert '"control": control.public_payload()' in router_text
+    assert "resolve_reasoning(" not in router_text
+    assert "perform_action(" not in router_text
+    assert "build_observation(" not in router_text
     assert "frame_planner" not in router_text
-    assert "def _tool_call_from_intent" not in router_text
-    assert "is_manual_trade_operation_intent" not in router_text
-    assert "is_symbol_operation_intent" not in router_text
-    assert "is_upgrade_operation_intent" not in router_text
-    assert "def resolve_reasoning(" in reasoning_text
-    assert "ReasoningResolution(" in reasoning_text
-    assert "class PerceptionResult" in contracts_text
-    assert "class ReasoningResolution" in contracts_text
-    assert "class ActionResult" in contracts_text
-    assert "class ObservationResponse" in contracts_text
+    assert "class ControlExecution" in control_text
+    assert "def execute_explicit_control(" in control_text
+    assert "class ControlCommand" in contracts_text
+    assert "class ReasoningResolution" not in contracts_text
+    assert "class ActionResult" not in contracts_text
+    assert "class ObservationResponse" not in contracts_text
+    for filename in ("reasoning.py", "action.py", "observation.py"):
+        assert not (ROOT / "src" / "application" / "assistant" / filename).exists()
     assert "class AssistantFrame" not in contracts_text
     assert "class ToolPlan" not in contracts_text
     for module in ("manual_trade_operations.py", "symbol_operations.py", "upgrade_operations.py"):
@@ -1796,17 +967,44 @@ def test_assistant_router_uses_perception_reasoning_action_observation_chain() -
         assert "is_upgrade_operation_intent" not in module_text
 
 
-def test_assistant_session_trace_does_not_surface_old_answer_guard() -> None:
-    session_store_text = (ROOT / "src" / "application" / "assistant" / "session_store.py").read_text(encoding="utf-8")
+def test_assistant_does_not_recreate_derived_agent_session_trace() -> None:
+    assistant_root = ROOT / "src" / "application" / "assistant"
+    runtime_text = (assistant_root / "runtime.py").read_text(encoding="utf-8")
+    diagnostics_text = (ROOT / "src" / "application" / "agent_tools" / "diagnostics.py").read_text(encoding="utf-8")
 
-    assert "answer_guard" not in session_store_text
-    assert "synthesized_after_answer_guard" not in session_store_text
+    assert "AgentSession" not in runtime_text
+    assert "memory_proposals" not in runtime_text
+    assert "assistant_trace" not in diagnostics_text
+    assert not (assistant_root / "llm_trace.py").exists()
 
 
-def test_assistant_perception_result_is_canonical_contract_name() -> None:
-    from src.application.assistant.contracts import PerceptionResult
+def test_inbound_audit_does_not_recreate_old_answer_stages() -> None:
+    audit_text = (ROOT / "src" / "application" / "assistant" / "audit.py").read_text(encoding="utf-8")
+    diagnostics_text = (
+        ROOT / "src" / "application" / "assistant" / "operation_diagnostics.py"
+    ).read_text(encoding="utf-8")
 
-    assert PerceptionResult.__name__ == "PerceptionResult"
+    for token in (
+        "perception_json",
+        "reasoning_json",
+        "action_json",
+        "observation_json",
+    ):
+        assert token not in audit_text
+        assert token not in diagnostics_text
+
+
+def test_assistant_control_command_is_canonical_contract_name() -> None:
+    from src.application.assistant.contracts import ControlCommand
+
+    assert ControlCommand.__name__ == "ControlCommand"
+    contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(
+        encoding="utf-8"
+    )
+    assert "PerceptionResult" not in contracts_text
+    assert "om-perception-result" not in contracts_text
+    assert "evidence:" not in contracts_text
+    assert "tool_calls:" not in contracts_text
 
     offenders: list[str] = []
     allowed = {"contracts.py", "__init__.py"}
@@ -1820,7 +1018,7 @@ def test_assistant_perception_result_is_canonical_contract_name() -> None:
     assert offenders == []
 
 
-def test_perception_producers_do_not_plan_or_execute_tools() -> None:
+def test_control_command_parser_does_not_plan_or_execute_tools() -> None:
     forbidden = (
         "ToolCall",
         "ReasoningResolution",
@@ -1836,8 +1034,8 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
     )
     checked = [
         ROOT / "src" / "application" / "assistant" / "command_parser.py",
-        ROOT / "src" / "application" / "assistant" / "deterministic_commands.py",
     ]
+    assert not (ROOT / "src" / "application" / "assistant" / "deterministic_commands.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "llm_intent_schema.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "llm_translator.py").exists()
     offenders: dict[str, list[str]] = {}
@@ -1931,7 +1129,7 @@ def test_legacy_provider_planner_runtime_is_removed() -> None:
         ROOT / "src" / "infrastructure" / "openai_chat_completions.py",
         ROOT / "src" / "infrastructure" / "openai_responses.py",
     )
-    provider_forbidden = ("tool_calls", '"tools"', "'tools'", "function_call")
+    provider_forbidden = ("monthly_option_review", "task_kind", "evidence_plan", "ReasoningResolution")
     provider_offenders: dict[str, list[str]] = {}
     for path in provider_files:
         text = path.read_text(encoding="utf-8")
@@ -1951,8 +1149,7 @@ def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
     checked = [
         ROOT / "src" / "application" / "assistant" / "runtime.py",
         ROOT / "src" / "application" / "assistant" / "router.py",
-        ROOT / "src" / "application" / "assistant" / "perception.py",
-        ROOT / "src" / "application" / "assistant" / "reasoning.py",
+        ROOT / "src" / "application" / "assistant" / "inbound_control.py",
     ]
     offenders: dict[str, list[str]] = {}
     for path in checked:
@@ -2106,3 +1303,92 @@ def test_openclaw_readiness_tool_is_retired() -> None:
     assert "service_status_from_profile = _impl.service_status_from_profile" in runtime_shim_text
     assert "from src.application.agent_tools.runtime_status_impl import runtime_status_tool" in diagnostics_text
     assert not (ROOT / "src" / "application" / "agent_tool_handlers.py").exists()
+
+
+def test_copilot_has_one_general_scene_and_no_business_activation_router() -> None:
+    scene_text = (ROOT / "src" / "application" / "copilot" / "scene.py").read_text(encoding="utf-8")
+    service_text = (ROOT / "src" / "application" / "copilot" / "service.py").read_text(encoding="utf-8")
+
+    assert 'GENERAL_SCENE = "om_chat"' in scene_text
+    assert "SCENE_CATALOG" not in scene_text
+    assert "activation_terms" not in scene_text
+    assert "select_scene" not in service_text
+    assert "evaluate_safety" not in service_text
+    assert "monthly_income_attribution" not in scene_text
+    assert "operations_diagnostics" not in scene_text
+
+
+def test_copilot_agent_loop_is_model_first_without_fixed_collection_fallback() -> None:
+    agent_text = (ROOT / "src" / "application" / "copilot" / "agent.py").read_text(encoding="utf-8")
+    engine_text = (ROOT / "src" / "application" / "copilot" / "engine.py").read_text(encoding="utf-8")
+
+    assert not (ROOT / "src" / "application" / "copilot" / "model_decider.py").exists()
+    assert "default_action_decider" not in agent_text + engine_text
+    assert "call_signatures" in agent_text and "call_signatures" in engine_text
+    assert "force_finish" in agent_text and "force_finish" in engine_text
+    assert "__read_observation__" in engine_text
+
+
+def test_copilot_tool_adapter_reuses_registry_without_business_evidence_recipes() -> None:
+    tools_path = ROOT / "src" / "application" / "copilot" / "tools.py"
+    tools_text = tools_path.read_text(encoding="utf-8")
+
+    assert "pure_read_tool_names" in tools_text
+    assert "get_tool_definition" in tools_text
+    assert "TOOL_VIEWS" not in tools_text
+    assert "monthly_income" not in tools_text
+    assert "candidate_filter_facts" not in tools_text
+    assert "src.application.agent_tools" not in tools_text
+
+
+def test_copilot_result_admission_is_structural_and_safety_only() -> None:
+    admission_text = (ROOT / "src" / "application" / "copilot" / "result_admission.py").read_text(encoding="utf-8")
+
+    assert "VALID_STATUSES" in admission_text
+    assert "invalid_status" in admission_text
+    assert "empty_result" in admission_text
+    assert "import re" not in admission_text
+    assert "safety_text" not in admission_text
+    assert "missing_conclusion_prefix" not in admission_text
+    assert "malformed_findings" not in admission_text
+    assert "evidence_refs" not in admission_text
+    assert "attempted_checks" not in admission_text
+
+
+def test_copilot_host_owns_session_serialization_and_context() -> None:
+    host_text = (ROOT / "src" / "application" / "copilot" / "host.py").read_text(encoding="utf-8")
+    channel_text = (ROOT / "src" / "application" / "copilot" / "channel_facade.py").read_text(encoding="utf-8")
+
+    assert "def session_messages(" in host_text
+    assert "def record_session_turn(" in host_text
+    assert "def session_run_slot(" in host_text
+    assert "session_messages(session_key, host_store=host_store)" in channel_text
+    assert "record_session_turn(" in channel_text
+    assert "host_store=host_store" in channel_text
+    assert "_RUNNING_CHANNEL_KEYS" not in channel_text
+
+
+def test_freeform_channel_bypasses_legacy_perception_pipeline() -> None:
+    router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
+    runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
+
+    assert "if command is None:" in router_text
+    assert "_copilot_response(" in router_text
+    assert "PerceptionEngine" not in runtime_text
+    assert not (ROOT / "src" / "application" / "assistant" / "perception.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "perception_trace.py").exists()
+
+
+def test_removed_evidence_architecture_cannot_return_under_copilot_names() -> None:
+    copilot_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "src" / "application" / "copilot").glob("*.py"))
+    )
+    for token in (
+        "answer_verifier",
+        "EvidenceBundle",
+        "required finding citation",
+        "required recommendation citation",
+        "claimable_refs_by_tool",
+    ):
+        assert token not in copilot_text

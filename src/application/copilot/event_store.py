@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, Callable
 
 from src.application.copilot.contracts import AppEvent, AppResult, new_id, utc_now_iso
 
 
-MAX_FINAL_MISSING_DATA_CHARS = 160
+EventSink = Callable[[AppEvent], None]
 
 
 class CopilotEventLog:
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, *, sink: EventSink | None = None) -> None:
         self.run_id = run_id
         self.events: list[AppEvent] = []
         self._final_recorded = False
+        self._sink = sink
 
     def record(
         self,
@@ -31,16 +32,17 @@ class CopilotEventLog:
         payload: dict[str, Any],
         visible_ref: str | None = None,
     ) -> None:
-        self.events.append(
-            AppEvent(
+        event = AppEvent(
                 event_id=new_id("evt"),
                 run_id=self.run_id,
                 type=event_type,
                 timestamp=utc_now_iso(),
                 payload=deepcopy(payload),
                 visible_ref=visible_ref,
-            )
         )
+        self.events.append(event)
+        if self._sink is not None:
+            self._sink(event)
 
     def record_final_result(self, result: AppResult) -> None:
         if self._final_recorded:
@@ -52,32 +54,7 @@ class CopilotEventLog:
                 "ok": result.ok,
                 "request_id": result.request_id,
                 "contract_id": result.contract_id,
-                "evidence_refs": _evidence_refs(result),
-                "missing_data": _missing_data(result),
+                "error_code": str((result.error or {}).get("code") or ""),
             },
         )
         self._final_recorded = True
-
-
-def _evidence_refs(result: AppResult) -> list[str]:
-    refs = result.answer_report.evidence_refs if result.answer_report else []
-    if not isinstance(refs, list):
-        return []
-    return [item for item in refs if isinstance(item, str)]
-
-
-def _missing_data(result: AppResult) -> list[str]:
-    values = result.answer_report.missing_data if result.answer_report else []
-    if not isinstance(values, list):
-        return []
-    missing: list[str] = []
-    for item in values:
-        if not isinstance(item, str):
-            continue
-        text = " ".join(item.split())
-        if not text:
-            continue
-        if len(text) > MAX_FINAL_MISSING_DATA_CHARS:
-            text = f"{text[: MAX_FINAL_MISSING_DATA_CHARS - 3]}..."
-        missing.append(text)
-    return missing

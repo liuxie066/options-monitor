@@ -593,6 +593,12 @@ def option_positions_read_tool(
         }
         data = {
             "action": action,
+            "evidence_scope": {
+                "ledger_positions": "observed",
+                "broker_settlement": "not_observed",
+                "market_price": "not_observed",
+                "margin_state": "not_observed",
+            },
             "rows": rows,
             "row_count": len(rows),
             "filters": {

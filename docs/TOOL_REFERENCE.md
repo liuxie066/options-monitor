@@ -92,7 +92,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
-| `assistant_trace` | `om assistant` inbound audit/session trace diagnostic |
+| `operation_timeline` | explicit Control operation audit and receipt diagnostic |
 | Research / Shadow Replay | `om research collect` / `om research shadow-replay ...` (not an `om-agent` tool) |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
@@ -124,14 +124,10 @@ om assistant model check --active
 
 它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu`
 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id
-幂等、SQLite audit 和工具白名单路径。Inbound command facade 默认开启；
-当前 `assistant` config 保留模型/profile 诊断、legacy 兼容字段，以及默认关闭的
-`assistant.copilot.enabled` gate；自由问答默认禁用，不会触发工具调用、planner
-或普通 LLM fallback。显式开启 gate 后，还必须在
-`assistant.copilot.channel_scenes` 放行 channel-ready 场景；当前
-`operations_diagnostics` 和 `monthly_income_attribution` 开放到渠道，并且仍要求显式 assistant 模型配置。
-`assistant.copilot.human_review=true` 会把 Host-backed 渠道答案保留到人工复核，
-同时继续写入脱敏审计摘要。
+幂等和 SQLite audit 路径。显式命令和 pending-operation 回复进入确定性
+Control；其他文本在 `assistant.copilot.enabled=true` 时进入唯一的只读
+`om_chat` Copilot Scene。渠道不存在业务 Scene allowlist、planner fallback 或
+写工具模型路径，并且需要显式 assistant 模型配置。
 当前可见和可执行能力用
 `om assistant capabilities` 查看；入口和运行时边界以
 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)
@@ -870,31 +866,7 @@ om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-47476
 
 ---
 
-## 5.15.1 `assistant_trace`
-
-用途：
-- 只读 Inbound Assistant 的 SQLite `agent_sessions` trace
-- 诊断 `./om assistant` 如何选择能力、收集证据、判断进度、请求澄清或停在权限预览
-- 读取 `capability_selection`、`progress`、`progress.blocked_by`、
-  `answer.clarification_request` 等派生 session 字段
-- `response_text` 是给操作者看的 compact trace，会隐藏原始内部细节；JSON 结果保留
-  结构化诊断字段，例如 blocker 的 `tool_name`
-
-注意：
-- `assistant_trace` 通过 `om-agent` Tool Gateway 读取，但它诊断的是
-  `./om assistant` session；这不表示 `om-agent` 自身是 Assistant 或 Planner
-- 它不创建 session schema，不执行 planner，不补跑工具，也不修改 pending operation
-
-示例：
-
-```bash
-om-agent run --tool assistant_trace --input-json '{"limit":10}'
-om-agent run --tool assistant_trace --input-json '{"command_id":"<command-id>","include_snapshot":true}'
-```
-
----
-
-## 5.15.2 `notification_perception_read`
+## 5.15.1 `notification_perception_read`
 
 用途：
 - 只读 tick audit 里的 `assistant_perception` 通知感知事件

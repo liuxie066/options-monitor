@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.llm_provider_registry import (
+from src.application.llm_provider_registry import (
     provider_catalog_payload,
+    provider_requires_api_key,
     require_provider_spec,
 )
 from src.application.config_primitives import dump_yaml
@@ -81,7 +82,7 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     assistant = deepcopy(assistant_cfg if isinstance(assistant_cfg, dict) else {})
     models_raw = assistant.pop("models", None)
     active_model_raw = assistant.pop("active_model", None)
-    planner_enabled = _assistant_planner_config_enabled(assistant)
+    copilot_enabled = _assistant_copilot_enabled(assistant)
 
     if models_raw is None and active_model_raw is None:
         return assistant, {
@@ -95,17 +96,17 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     active_model = str(active_model_raw or "").strip()
     warnings: list[str] = []
     if not active_model:
-        if planner_enabled:
+        if copilot_enabled:
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message="assistant.active_model is required when assistant.models is configured and assistant planner config is enabled",
+                message="assistant.active_model is required when assistant.models is configured and assistant.copilot.enabled is true",
             )
         return assistant, {
             "model_profiles_enabled": True,
             "active_model": None,
             "resolved_profile": None,
             "profile_count": len(profiles),
-            "warnings": ["assistant.models configured without active_model; assistant planner config is disabled so assistant.llm is unchanged"],
+            "warnings": ["assistant.models configured without active_model; assistant Copilot is disabled so assistant.llm is unchanged"],
         }
 
     active_model = normalize_model_profile_name(active_model, path="assistant.active_model")
@@ -128,19 +129,11 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     }
 
 
-def _assistant_planner_config_enabled(assistant: dict[str, Any]) -> bool:
+def _assistant_copilot_enabled(assistant: dict[str, Any]) -> bool:
     if isinstance(assistant.get("enabled"), bool) and assistant.get("enabled") is False:
         return False
-    legacy_mode = str(assistant.get("mode") or "").strip().lower()
-    if legacy_mode == "disabled":
-        return False
-    agent_loop = assistant.get("agent_loop")
-    if isinstance(agent_loop, dict) and isinstance(agent_loop.get("enabled"), bool):
-        return bool(agent_loop.get("enabled"))
-    planner = assistant.get("planner")
-    if isinstance(planner, dict) and isinstance(planner.get("enabled"), bool):
-        return bool(planner.get("enabled"))
-    return True
+    copilot = assistant.get("copilot")
+    return bool(isinstance(copilot, dict) and copilot.get("enabled") is True)
 
 
 def parse_model_profiles(raw_models: Any) -> dict[str, LlmModelProfile]:
@@ -167,7 +160,7 @@ def parse_model_profile(name: str, raw_profile: Any, *, path: str = "assistant.m
     if not model:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.model is required")
     api_key_env = str(raw_profile.get("api_key_env") or spec.default_api_key_env).strip()
-    if not api_key_env:
+    if provider_requires_api_key(spec.provider_id) and not api_key_env:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.api_key_env is required")
     base_url = str(raw_profile.get("base_url") or spec.default_base_url).strip()
     return LlmModelProfile(
@@ -201,7 +194,10 @@ def configured_model_profiles_payload(
     items = [
         profile.public_payload(
             active=profile.name == active_model,
-            api_key_configured=bool(effective_env.get(profile.api_key_env)),
+            api_key_configured=(
+                not provider_requires_api_key(profile.provider)
+                or bool(effective_env.get(profile.api_key_env))
+            ),
         )
         for profile in profiles.values()
     ]

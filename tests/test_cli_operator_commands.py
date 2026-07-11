@@ -286,6 +286,8 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     assert providers["kimi-code"]["default_base_url"] == "https://api.kimi.com/coding/v1"
     assert providers["kimi-code"]["default_api_key_env"] == "KIMI_API_KEY"
     assert providers["openai"]["api_kind"] == "responses"
+    assert providers["ollama"]["default_base_url"] == "http://127.0.0.1:11434/v1"
+    assert providers["ollama"]["requires_api_key"] is False
 
 
 def test_assistant_model_list_text_does_not_print_credential_env_name(tmp_path: Path, capsys) -> None:
@@ -303,7 +305,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  planner:
+  copilot:
     enabled: true
   active_model: openai-default
   models:
@@ -347,7 +349,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  planner:
+  copilot:
     enabled: true
   active_model: openai-default
   models:
@@ -390,7 +392,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  planner:
+  copilot:
     enabled: false
 """,
         encoding="utf-8",
@@ -435,7 +437,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  planner:
+  copilot:
     enabled: true
   active_model: openai-default
   models:
@@ -492,7 +494,7 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert rc == 0
     assert payload["tool_name"] == "assistant.commands"
     assert payload["ok"] is True
-    assert payload["data"]["summary"]["llm_allowed_count"] >= 1
+    assert payload["data"]["summary"]["direct_executable_count"] >= 1
     intents = {item["intent_name"] for item in payload["data"]["commands"]}
     assert "runtime_status" in intents
     assert "manual_trade_confirm" in intents
@@ -677,21 +679,21 @@ def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> No
     assert payload["ok"] is True
     assert payload["data"]["summary"]["capability_count"] >= payload["data"]["summary"]["slash_command_count"]
     capabilities = {item["capability_id"]: item for item in payload["data"]["capabilities"]}
-    assert capabilities["runtime_status"]["llm_executable"] is True
-    assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["runtime_status"]["direct_executable"] is True
+    assert capabilities["manual_trade_open"]["direct_executable"] is False
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
 
     rc = cli.main(["assistant", "capabilities", "--format", "text"])
     text = capsys.readouterr().out
 
     assert rc == 0
-    assert "Inbound capabilities" in text
-    assert "LLM executable read-only capabilities" in text
-    assert "LLM recognizable but not executable capabilities" in text
-    assert "Known capabilities not recognizable by LLM" in text
-    assert "runtime_status (状态): risk=read_only llm_executable=true" in text
-    assert "manual_trade_open (记录开仓): risk=preview_write llm_executable=false" in text
-    assert "upgrade_now (立即升级): risk=preview_admin llm_executable=false" in text
+    assert "Deterministic Control capabilities" in text
+    assert "Read and local commands" in text
+    assert "Preview commands" in text
+    assert "Confirm and cancel commands" in text
+    assert "runtime_status (状态): risk=read_only direct_executable=true" in text
+    assert "manual_trade_open (记录开仓): risk=preview_write direct_executable=false" in text
+    assert "upgrade_now (立即升级): risk=preview_admin direct_executable=false" in text
 
 
 def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:

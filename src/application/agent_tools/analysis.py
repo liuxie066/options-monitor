@@ -993,9 +993,7 @@ _OPERATION_SOURCE_VIEWS: set[str] = {"upgrade_operation_status"}
 
 _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "analysis_query.output.v2",
-    "canonical_renderer": "analysis_result",
     "source_label": "OM read-only analysis workspace",
-    "guard_profile": "analysis_result",
     "primary_rows": "rows",
     "row_count_field": "row_count",
     "fact_fields": [
@@ -2941,26 +2939,9 @@ def _upgrade_version_from_audit_rows(timeline: dict[str, Any], field: str) -> st
         if not isinstance(row, dict):
             continue
         tool_payload = row.get("tool_payload") if isinstance(row.get("tool_payload"), dict) else {}
-        reasoning = row.get("reasoning") if isinstance(row.get("reasoning"), dict) else {}
-        action = row.get("action") if isinstance(row.get("action"), dict) else {}
-        candidates.extend(
-            [
-                _nested_value(tool_payload, ("arguments", field)),
-                _nested_value(tool_payload, ("payload", "arguments", field)),
-                _nested_value(reasoning, ("arguments", field)),
-                _nested_value(reasoning, ("tool_call", "payload", field)),
-                _nested_value(reasoning, ("tool_call", "payload", "arguments", field)),
-                _nested_value(action, ("tool_call", "payload", field)),
-                _nested_value(action, ("tool_call", "payload", "arguments", field)),
-            ]
-        )
+        candidates.append(tool_payload.get(field))
         if field == "target_version":
-            candidates.extend(
-                [
-                    _nested_value(tool_payload, ("arguments", "latest_version")),
-                    _nested_value(reasoning, ("arguments", "latest_version")),
-                ]
-            )
+            candidates.append(tool_payload.get("latest_version"))
     return _first_nonempty_text(*candidates)
 
 
@@ -4049,147 +4030,16 @@ def _format_cell(value: Any) -> str:
     return str(value).replace("|", "\\|")
 
 
-_ANALYSIS_CATALOG_PLANNER_NOTES: tuple[str, ...] = (
-    "Use when the user asks what data/fields can be analyzed, or before analysis_query if view names are unknown.",
-    "Task recipes are owned by the assistant TaskProfile registry; this catalog only exposes views, fields, and SQL rules.",
-    "This is a pure-read catalog; it does not answer the business question by itself.",
-)
-
-_ANALYSIS_CATALOG_PLANNER_SEMANTICS: dict[str, Any] = {
-    "data_source": "OM Tool OS catalog",
-    "answer_capabilities": {
-        "analysis_catalog": "lists whitelisted read-only views and SQL rules",
-        "read_only": "catalog only; no ledger mutation",
-    },
-    "scope_semantics": {
-        "view omitted": "return all available analysis views",
-    },
-}
-
-_ANALYSIS_QUERY_PLANNER_NOTES: tuple[str, ...] = (
-    "Use for open-ended analysis: 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, 差额, 收益率差.",
-    "Use for cross-domain analytical comparisons or grouped queries when a narrow renderer cannot answer; use monthly_income_report first for ordinary monthly income source/breakdown questions.",
-    "Generate one SELECT or WITH query over analysis_catalog views; never include writes, PRAGMA, ATTACH, paths, config, or system arguments.",
-    "Use only the columns listed in semantics.analysis_views. Do not invent columns such as net_cashflow, total_return, return_rate, or open_basis_pnl unless they are listed.",
-    "For account income/performance comparison, prefer account_monthly_performance columns month, account, net_income_cny, net_return_rate, realized_pnl_cny, premium_income_cny, and cash_secured_cny.",
-    "For account income composition or source questions, use account_monthly_income_components; filter included_in_net_income=1 when explaining return numerator components.",
-    "For assigned-stock PnL analysis, prefer assigned_stock_position_pnl; use assigned_stock_sale_events when the question asks about sold shares or realized sale PnL.",
-    "For current option exposure or expiry concentration, use open_option_exposure and expiration_risk_buckets; for symbol-level income drivers, use symbol_income_attribution.",
-    "For strategy setting comparisons by symbol/account, use strategy_config_by_symbol_account instead of raw config rows.",
-    "For aggregate candidate diagnostics across symbols/rules/accounts/runs, use candidate_filter_diagnostics; for one-symbol filter reason questions, use candidate_filter_explain instead.",
-    "For close-advice questions, runtime push/scan diagnostics, or quote freshness gaps, use close_advice_snapshot, runtime_tick_status, and quote_freshness.",
-    "Do not avg/sum return-rate fields directly; recompute weighted rates from money numerator and cash_secured_cny when aggregating rows.",
-    "Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.",
-)
-
-
-def _analysis_query_planner_semantics(context: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "data_source": "OM read-only analysis workspace backed by local ledger/config/runtime read tools",
-        "analysis_views": _analysis_views_for_planner_manifest(context.get("analysis_view_names")),
-        "query_templates": {
-            "lx_sy_income_comparison": (
-                "select month, "
-                "round(sum(case when account = 'lx' then net_income_cny else 0 end), 2) as lx_income_cny, "
-                "round(sum(case when account = 'sy' then net_income_cny else 0 end), 2) as sy_income_cny, "
-                "case when sum(case when account = 'lx' then net_income_cny else 0 end) >= "
-                "sum(case when account = 'sy' then net_income_cny else 0 end) then 'lx' else 'sy' end as higher_account, "
-                "round(abs(sum(case when account = 'lx' then net_income_cny else 0 end) - "
-                "sum(case when account = 'sy' then net_income_cny else 0 end)), 2) as income_diff_cny, "
-                "round(max(case when account = 'lx' then net_return_rate end) - "
-                "max(case when account = 'sy' then net_return_rate end), 6) as return_rate_diff "
-                "from account_monthly_performance where account in ('lx','sy') group by month order by month"
-            ),
-        },
-        "answer_capabilities": {
-            "analysis_query": "comparison, ranking, breakdown, trend, grouping, and cross-domain read-only analysis",
-            "read_only": "SELECT-only in-memory SQLite over whitelisted views",
-        },
-        "scope_semantics": {
-            "account/month omitted": "materialize available local OM ledger coverage, then SQL can filter/group rows",
-            "limit": "caps returned rows; tool reports truncation",
-        },
-        "not_promised": [
-            "arbitrary Python execution",
-            "database writes",
-            "broker realtime statement outside existing read tools",
-        ],
-        "answer_rules": [
-            "Use SQL result rows as the source for user-visible amounts, accounts, symbols, dates, quantities, and statuses.",
-            "Do not expose internal canonical/synthesis mode names.",
-            "If a requested comparison is unsupported by available rows, say what data is missing instead of returning a nearby raw report.",
-        ],
-    }
-
-
-def _analysis_views_for_planner_manifest(view_names: Any = None) -> dict[str, dict[str, Any]]:
-    views: dict[str, dict[str, Any]] = {}
-    if view_names is None:
-        names = list(VIEW_SPECS)
-    else:
-        names = [str(item) for item in view_names if str(item) in VIEW_SPECS]
-    for name in names:
-        spec = VIEW_SPECS[name]
-        field_semantics = spec.get("field_semantics") if isinstance(spec.get("field_semantics"), dict) else {}
-        views[name] = {
-            "description": str(spec.get("description") or ""),
-            "fields": [str(field) for field in spec.get("fields") or []],
-            "row_grain": str(spec.get("row_grain") or ""),
-            "primary_keys": [str(item) for item in spec.get("primary_keys") or ()],
-            "time_grain": str(spec.get("time_grain") or ""),
-            "source_tools": [str(item) for item in spec.get("source_tools") or ()],
-            "freshness": str(spec.get("freshness") or ""),
-            "recommended_filters": [str(item) for item in spec.get("recommended_filters") or ()],
-            "safe_join_keys": [str(item) for item in spec.get("safe_join_keys") or ()],
-            "alias_of": str(spec.get("alias_of") or ""),
-            "field_semantics": _analysis_field_semantics_for_planner(field_semantics),
-        }
-    return views
-
-
-def _analysis_field_semantics_for_planner(field_semantics: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    allowed_keys = {
-        "unit",
-        "currency",
-        "aggregation",
-        "do_not",
-    }
-    out: dict[str, dict[str, Any]] = {}
-    for field, raw_meta in field_semantics.items():
-        if not isinstance(raw_meta, dict):
-            continue
-        if not _planner_field_semantics_keep(field):
-            continue
-        meta = {key: value for key, value in raw_meta.items() if key in allowed_keys and value not in (None, "", [], {})}
-        out[str(field)] = meta
-    return out
-
-
-def _planner_field_semantics_keep(field: Any) -> bool:
-    name = str(field or "").strip().lower()
-    if not name:
-        return False
-    return any(
-        token in name
-        for token in (
-            "rate",
-            "pnl",
-            "income",
-            "cash_secured",
-            "amount",
-            "premium",
-            "proceeds",
-        )
-    )
-
-
 ANALYSIS_CATALOG_TOOL = build_agent_tool(
     name="analysis_catalog",
-    description="Return the read-only Tool OS analysis view catalog and SQL rules.",
+    description=(
+        "List the read-only analysis views, their fields, source semantics, and allowed SQL rules. "
+        "Use this before analysis_query when the correct view or field names are not already known."
+    ),
     requires=("runtime_config",),
     capabilities=("analysis_catalog", "read_only"),
     input_schema={
-        "config_key": "us|hk",
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
         "config_path": "optional explicit config path",
         "view": "optional single view name",
         "views": {
@@ -4202,15 +4052,10 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
-    planner_notes=_ANALYSIS_CATALOG_PLANNER_NOTES,
-    planner_semantics=_ANALYSIS_CATALOG_PLANNER_SEMANTICS,
     output_contract={
         "schema_version": "analysis_catalog.output.v2",
-        "canonical_renderer": "analysis_catalog",
         # Catalog output is evidence for follow-up planning, not a final answer surface.
-        "answer_surface": "internal",
         "source_label": "OM read-only analysis workspace",
-        "guard_profile": "analysis_catalog",
         "primary_rows": "views",
         "row_count_field": "view_count",
         "fact_fields": [
@@ -4226,15 +4071,17 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
     name="analysis_query",
     description=(
         "Run a SELECT-only query against whitelisted in-memory OM analysis views for comparisons, "
-        "rankings, trends, breakdowns, and other open-ended analytical questions."
+        "rankings, trends, breakdowns, and other open-ended analytical questions. Supply either "
+        "SELECT/WITH SQL or one or more catalog view names. Inspect analysis_catalog first when view "
+        "or field names are uncertain."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("analysis_query", "read_only", "analysis_workspace"),
     input_schema={
-        "config_key": "us|hk",
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
         "config_path": "optional explicit config path",
         "data_config": "optional explicit data config path",
-        "sql": "required SELECT or WITH query over analysis_catalog views",
+        "sql": "SELECT or WITH query over analysis_catalog views; omit only when selecting view/views directly",
         "query": "alias for sql",
         "view": "optional single materialized analysis view when sql/query is omitted",
         "views": {
@@ -4242,7 +4089,12 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "items": {"type": "string"},
             "description": "optional materialized analysis views when sql/query is omitted",
         },
-        "limit": f"optional int, max {MAX_QUERY_LIMIT}",
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_QUERY_LIMIT,
+            "description": "Maximum rows returned",
+        },
         "account": "optional materialization account filter",
         "accounts": {
             "type": ["string", "array"],
@@ -4264,9 +4116,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
     },
     handler=_analysis_query_tool,
     pure_read=True,
-    safe_default_input={
-        "sql": "select 1 as ok from monthly_income_return_summary limit 0",
-    },
+    safe_default_input={},
     examples=(
         {
             "input": {
@@ -4278,8 +4128,6 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             }
         },
     ),
-    planner_notes=_ANALYSIS_QUERY_PLANNER_NOTES,
-    planner_semantics_resolver=_analysis_query_planner_semantics,
     output_contract=_ANALYSIS_OUTPUT_CONTRACT,
 )
 

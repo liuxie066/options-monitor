@@ -813,6 +813,7 @@ def test_spec_exposes_broker_as_public_field() -> None:
     spec = build_spec()
     query_tool = next(item for item in spec["tools"] if item["name"] == "query_cash_headroom")
     assert "broker" in query_tool["input_schema"]
+    assert "account" in query_tool["input_json_schema"].get("required", [])
     assert "market" not in query_tool["input_schema"]
     assert "data_config" in query_tool["input_schema"]
     assert "pm_config" not in query_tool["input_schema"]
@@ -1167,8 +1168,17 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     )
 
     assert listed["ok"] is True
+    assert listed["data"]["evidence_scope"] == {
+        "ledger_positions": "observed",
+        "broker_settlement": "not_observed",
+        "market_price": "not_observed",
+        "margin_state": "not_observed",
+    }
     assert listed["data"]["row_count"] == 1
     assert listed["data"]["rows"][0]["record_id"] == record_id
+    assert listed["data"]["rows"][0]["expiration_state"] == "expired"
+    assert listed["data"]["rows"][0]["state_warning"] == "expired_position_marked_open"
+    assert listed["data"]["rows"][0]["cash_secured_amount_role"] == "assignment_collateral"
     assert events["ok"] is True
     assert events["data"]["row_count"] == 1
     assert events["data"]["rows"][0]["symbol"] == "NVDA"
@@ -1916,6 +1926,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
         json.dumps(
             {
                 "assistant": {
+                    "copilot": {"enabled": True},
                     "context_window_messages": 6,
                     "default_market_scope": "us",
                     "llm": {
@@ -1961,7 +1972,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
     assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["planner"]["enabled"] is False
+    assert data["assistant_runtime"]["config"]["copilot"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
     assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
@@ -1970,18 +1981,6 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
     assert data["summary"]["assistant_enabled"] is True
     assert data["summary"]["assistant_latest_route"] == "agent_loop"
-
-
-def test_assistant_trace_agent_tool_reports_missing_store(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    out = run_tool("assistant_trace", {"audit_db": str(tmp_path / "missing.sqlite3"), "limit": 5})
-
-    assert out["ok"] is True
-    assert out["data"]["schema_version"] == "om-assistant-trace-v1"
-    assert out["data"]["trace_count"] == 0
-    assert out["warnings"] == ["audit_db_missing"]
-    assert "没有匹配的 Agent session" in out["data"]["response_text"]
 
 
 def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path: Path) -> None:

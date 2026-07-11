@@ -8,6 +8,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.audit import InboundAuditStore
+from src.application.copilot.contracts import AppResult
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
     build_feishu_ws_settings,
@@ -142,7 +143,7 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}}}), encoding="utf-8")
+    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}}}), encoding="utf-8")
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -166,13 +167,12 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_path": str(tmp_path / "config.us.json")})]
-    assert inbound_result["data"]["perception"]["source"] == "command"
-    assert inbound_result["data"]["perception"]["intent_name"] == "runtime_status"
-    assert inbound_result["meta"]["assistant"]["route"] == "command"
-    assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
+    assert inbound_result["data"]["control"]["intent_name"] == "runtime_status"
+    assert inbound_result["meta"]["assistant"]["route"] == "deterministic_control"
+    assert "llm" not in inbound_result["meta"]["assistant"]
 
 
-def test_feishu_ws_rejects_free_form_cashflow_question_without_tool_calls(tmp_path: Path) -> None:
+def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: Any, tmp_path: Path) -> None:
     replies: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
@@ -181,6 +181,7 @@ def test_feishu_ws_rejects_free_form_cashflow_question_without_tool_calls(tmp_pa
             {
                 "assistant": {
                     "enabled": True,
+                    "copilot": {"enabled": True},
                     "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
                 }
             }
@@ -191,6 +192,14 @@ def test_feishu_ws_rejects_free_form_cashflow_question_without_tool_calls(tmp_pa
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"unexpected": True})
+
+    copilot_calls: list[dict[str, Any]] = []
+
+    def _run_channel_request(**kwargs: Any) -> AppResult:
+        copilot_calls.append(dict(kwargs))
+        return AppResult(status="completed", user_response="结论：6月净现金流来自已实现收益和权利金。")
+
+    monkeypatch.setattr("src.application.assistant.router.run_channel_request", _run_channel_request)
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
@@ -211,16 +220,16 @@ def test_feishu_ws_rejects_free_form_cashflow_question_without_tool_calls(tmp_pa
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
-    assert out["ok"] is False
+    assert out["ok"] is True
     assert calls == []
+    assert copilot_calls[0]["user_message"] == "分析 lx 6月的净现金流明细"
     assert replies
-    assert "自由问答正在重建中" in replies[0]["text"]
-    assert inbound_result["error"]["code"] == "NATURAL_LANGUAGE_REBUILDING"
-    assert inbound_result["meta"]["assistant"]["route"] == "natural_language_rebuilding"
-    assert inbound_result["meta"]["assistant"]["llm"]["reason"] == "natural_language_rebuilding"
+    assert replies[0]["text"].startswith("结论：")
+    assert inbound_result["data"]["decision"]["reason"] == "copilot_freeform"
+    assert inbound_result["meta"]["assistant"]["route"] == "copilot"
 
 
-def test_feishu_ws_free_form_rebuild_error_does_not_read_conversation_context(
+def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -230,6 +239,7 @@ def test_feishu_ws_free_form_rebuild_error_does_not_read_conversation_context(
         json.dumps(
             {
                 "assistant": {
+                    "copilot": {"enabled": True},
                     "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
                 }
             }
@@ -241,6 +251,11 @@ def test_feishu_ws_free_form_rebuild_error_does_not_read_conversation_context(
         raise sqlite3.OperationalError("unable to open database file")
 
     monkeypatch.setattr(InboundAuditStore, "list_recent", _broken_list_recent)
+
+    monkeypatch.setattr(
+        "src.application.assistant.router.run_channel_request",
+        lambda **_kwargs: AppResult(status="completed", user_response="结论：系统运行正常。"),
+    )
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -272,12 +287,10 @@ def test_feishu_ws_free_form_rebuild_error_does_not_read_conversation_context(
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
-    assert out["ok"] is False
+    assert out["ok"] is True
     assert replies
-    assert "自由问答正在重建中" in replies[0]["text"]
-    assert inbound_result["error"]["code"] == "NATURAL_LANGUAGE_REBUILDING"
-    assert inbound_result["meta"]["assistant"]["route"] == "natural_language_rebuilding"
-    assert inbound_result["meta"]["assistant"]["context"] == {"provided": False}
+    assert replies[0]["text"] == "结论：系统运行正常。"
+    assert inbound_result["meta"]["assistant"]["route"] == "copilot"
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
@@ -440,8 +453,9 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
                         "queue_size": 25,
                     }
                 },
-                "assistant": {
-                    "context_window_messages": 9,
+                    "assistant": {
+                        "copilot": {"enabled": True},
+                        "context_window_messages": 9,
                     "default_market_scope": "us",
                     "llm": {
                         "provider": "openai",
@@ -478,7 +492,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
     assert settings.assistant_enabled is True
-    assert settings.assistant_planner_enabled is False
+    assert settings.assistant_copilot_enabled is True
     assert settings.assistant_context_window_messages == 9
     assert settings.assistant_llm.enabled is True
     assert settings.assistant_llm.provider == "openai"
@@ -503,7 +517,7 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
     )
 
     assert settings.assistant_enabled is True
-    assert settings.assistant_planner_enabled is False
+    assert settings.assistant_copilot_enabled is False
     assert settings.assistant_llm.enabled is False
 
 

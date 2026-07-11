@@ -9,9 +9,7 @@ from src.application.notification_perception_read import read_notification_perce
 
 _OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "notification_perception_read.output.v1",
-    "canonical_renderer": "notification_perception",
     "source_label": "OM tick audit assistant_perception events",
-    "guard_profile": "runtime_artifacts",
     "primary_rows": "events",
     "fact_fields": [
         "summary.total_count",

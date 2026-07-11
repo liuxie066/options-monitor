@@ -453,11 +453,14 @@ def test_monthly_income_diagnostics_marks_calculable_summary_ok() -> None:
 
     diag = report["diagnostics"][0]
     assert diag["status"] == "ok"
+    assert diag["income_record_status"] == "recorded"
+    assert diag["income_amount_status"] == "reported"
     assert diag["account"] == "lx"
     assert diag["month_range"] == {"month": "2026-05", "start": "2026-05-01", "end": "2026-05-31"}
-    assert diag["matched_lots_count"] == 1
+    assert diag["position_lot_snapshots_count"] == 1
+    assert diag["position_lot_snapshots_count"] == 1
     assert diag["premium_rows_count"] == 1
-    assert diag["cash_secured_available"] is True
+    assert diag["cash_secured_collateral_status"] == "reported"
     assert "income_rows" not in diag["missing_fields"]
     assert "cash_secured" not in diag["missing_fields"]
 
@@ -495,10 +498,13 @@ def test_monthly_income_diagnostics_explains_open_positions_without_month_income
     assert report["return_summary"] == []
     diag = report["diagnostics"][0]
     assert diag["status"] == "empty"
-    assert diag["matched_lots_count"] == 1
+    assert diag["income_record_status"] == "no_recorded_rows"
+    assert diag["income_amount_status"] == "not_reported"
+    assert diag["position_lot_snapshots_count"] == 1
+    assert diag["position_lot_snapshots_count"] == 1
     assert diag["closed_lots_count"] == 0
     assert diag["premium_rows_count"] == 0
-    assert diag["cash_secured_available"] is True
+    assert diag["cash_secured_collateral_status"] == "reported"
     assert {"income_rows", "closed_lots", "premium"}.issubset(set(diag["missing_fields"]))
 
 
@@ -541,7 +547,7 @@ def test_monthly_income_diagnostics_exposes_missing_cash_secured_and_conversion(
 
     diag = report["diagnostics"][0]
     assert diag["status"] == "incomplete"
-    assert diag["matched_lots_count"] == 1
+    assert diag["position_lot_snapshots_count"] == 1
     assert diag["premium_rows_count"] == 1
     assert "cash_secured" not in diag["missing_fields"]
     assert "currency_conversion" in diag["missing_fields"]
@@ -615,8 +621,8 @@ def test_monthly_income_diagnostics_distinguishes_cash_secured_conversion_missin
     assert diag["status"] == "incomplete"
     assert diag["closed_lots_count"] == 0
     assert diag["premium_rows_count"] == 2
-    assert diag["cash_secured_available"] is True
-    assert diag["cash_secured_conversion_missing"] is True
+    assert diag["cash_secured_collateral_status"] == "reported"
+    assert diag["cash_secured_collateral_conversion_missing"] is True
     assert diag["currency_conversion_missing"] is True
     assert diag["missing_cny_currencies"] == ["HKD", "USD"]
     assert "cash_secured" not in diag["missing_fields"]

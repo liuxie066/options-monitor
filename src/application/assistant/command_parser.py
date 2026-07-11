@@ -7,7 +7,7 @@ from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.capability_catalog import commands_by_intent, operation_target_intents
-from src.application.assistant.contracts import PerceptionResult
+from src.application.assistant.contracts import ControlCommand
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 
 
@@ -36,7 +36,7 @@ _CN_MONTHS = {
 }
 
 
-def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> PerceptionResult | None:
+def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> ControlCommand | None:
     raw = str(text or "").strip()
     if not raw.startswith("/"):
         return None
@@ -119,8 +119,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
 parse_agent_command = parse_assistant_command
 
 
-def _intent(name: str, arguments: dict[str, object] | None = None) -> PerceptionResult:
-    return PerceptionResult(intent_name=name, arguments=dict(arguments or {}), source="command", confidence=1.0)
+def _intent(name: str, arguments: dict[str, object] | None = None) -> ControlCommand:
+    return ControlCommand(intent_name=name, arguments=dict(arguments or {}), source="command", confidence=1.0)
 
 
 def _split_command(raw: str) -> list[str]:
@@ -133,13 +133,13 @@ def _split_command(raw: str) -> list[str]:
     return parts
 
 
-def _parse_positions(command: str, args: list[str], *, today: date) -> PerceptionResult:
+def _parse_positions(command: str, args: list[str], *, today: date) -> ControlCommand:
     raw = "持仓" if not args else f"持仓 {' '.join(args)}"
     query = parse_position_query_text(raw, today=today)
     return _intent("position_query", position_query_intent_arguments(query))
 
 
-def _parse_assigned_stock(command: str, args: list[str]) -> PerceptionResult:
+def _parse_assigned_stock(command: str, args: list[str]) -> ControlCommand:
     account: str | None = None
     status: str = "open"
     symbol: str | None = None
@@ -191,14 +191,14 @@ def _parse_manual_trade_preview_command(
     intent_name: str,
     action_prefix: str,
     hint: str,
-) -> PerceptionResult:
+) -> ControlCommand:
     if not args:
         raise _bad_arg(command, "", hint)
     raw_text = f"{action_prefix} {' '.join(args)}"
     return _intent(intent_name, {"raw_text": raw_text})
 
 
-def _parse_symbol_command(command: str, args: list[str]) -> PerceptionResult:
+def _parse_symbol_command(command: str, args: list[str]) -> ControlCommand:
     if not args:
         return _intent("symbol_list")
     action = args[0].lower()
@@ -268,7 +268,7 @@ def _symbol_edit_args(args: list[str]) -> dict[str, object]:
     return out
 
 
-def _parse_upgrade_command(command: str, args: list[str]) -> PerceptionResult:
+def _parse_upgrade_command(command: str, args: list[str]) -> ControlCommand:
     if len(args) > 2:
         raise _bad_arg(command, " ".join(args), "支持：/upgrade 或 /upgrade v<version>。")
     tokens = [arg for arg in args if arg.lower() not in {"now", "check"}]
@@ -283,7 +283,7 @@ def _parse_upgrade_command(command: str, args: list[str]) -> PerceptionResult:
     return _intent("upgrade_now", payload)
 
 
-def _parse_monitor_run_command(command: str, args: list[str]) -> PerceptionResult:
+def _parse_monitor_run_command(command: str, args: list[str]) -> ControlCommand:
     if not args:
         raise _bad_arg(command, "", "格式：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
     market: str | None = None
@@ -321,7 +321,7 @@ def _parse_monitor_run_command(command: str, args: list[str]) -> PerceptionResul
     return _intent("monitor_run_now", payload)
 
 
-def _parse_manual_trade_update_command(command: str, args: list[str]) -> PerceptionResult:
+def _parse_manual_trade_update_command(command: str, args: list[str]) -> ControlCommand:
     if not args:
         raise _bad_arg(command, "", "格式：/record-update <field>=<value> [operation_id]。")
     operation_id: str | None = None
@@ -344,7 +344,7 @@ def _parse_manual_trade_update_command(command: str, args: list[str]) -> Percept
     )
 
 
-def _parse_income(command: str, args: list[str], *, today: date) -> PerceptionResult:
+def _parse_income(command: str, args: list[str], *, today: date) -> ControlCommand:
     account: str | None = None
     month: str | None = None
     for arg in args:
@@ -379,7 +379,7 @@ def _parse_income(command: str, args: list[str], *, today: date) -> PerceptionRe
     return _intent("monthly_income_report", payload)
 
 
-def _parse_runs(command: str, args: list[str]) -> PerceptionResult:
+def _parse_runs(command: str, args: list[str]) -> ControlCommand:
     if not args:
         return _intent("runtime_runs", {"limit": 10})
     if len(args) != 1:
@@ -391,13 +391,13 @@ def _parse_runs(command: str, args: list[str]) -> PerceptionResult:
     return _intent("runtime_runs", {"limit": max(1, min(limit, 50))})
 
 
-def _parse_logs(command: str, args: list[str]) -> PerceptionResult:
+def _parse_logs(command: str, args: list[str]) -> ControlCommand:
     if len(args) != 1:
         raise _bad_arg(command, " ".join(args), "支持：/logs <run_id>。")
     return _intent("runtime_logs", {"run_id": args[0], "kind": "all", "lines": 50})
 
 
-def _parse_model_command(command: str, args: list[str]) -> PerceptionResult:
+def _parse_model_command(command: str, args: list[str]) -> ControlCommand:
     if not args:
         return _intent("model_list")
     action = args[0].lower()
@@ -418,7 +418,7 @@ def _parse_operation_command(
     *,
     target_map: dict[str, str],
     action_label: str,
-) -> PerceptionResult:
+) -> ControlCommand:
     if not args:
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",

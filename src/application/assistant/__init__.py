@@ -11,24 +11,17 @@ from src.application.assistant.capability_catalog import (
     operation_specs,
     operation_target_intents,
 )
-from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult, PerceptionResult, ToolCall
-from src.application.assistant.perception import PerceptionEngine
-from src.application.assistant.perception_trace import AssistantDecision, PerceptionCandidate, PerceptionTrace
+from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult, ControlCommand
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 
 __all__ = [
     "AssistantCapabilitySpec",
     "AssistantCommandSpec",
-    "AssistantDecision",
     "AssistantRequest",
     "AssistantSettings",
     "AssistantLlmSettings",
     "AssistantTurnResult",
-    "PerceptionCandidate",
-    "PerceptionEngine",
-    "PerceptionResult",
-    "PerceptionTrace",
-    "ToolCall",
+    "ControlCommand",
     "capability_catalog_text",
     "capability_catalog_payload",
     "capability_specs",

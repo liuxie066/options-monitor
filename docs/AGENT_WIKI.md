@@ -31,15 +31,10 @@ Entrypoint rule:
   read-first diagnostics.
 - Use `./om assistant handle` for local or remote messages. This is the
   Inbound Assistant surface.
-- Free-form natural-language execution is disabled by default. Non-slash,
-  non-permission messages return `NATURAL_LANGUAGE_REBUILDING` unless the
-  explicit `assistant.copilot.enabled` gate is enabled. That gate still requires
-  a scene allowlist in `assistant.copilot.channel_scenes` and explicit assistant
-  model configuration before a channel-ready scene can run. The current
-  channel-ready scenes are `operations_diagnostics` and
-  `monthly_income_attribution`.
-  `assistant.copilot.human_review=true` holds Host-backed channel answers for
-  manual review while retaining sanitized audit summaries.
+- Explicit commands and pending-operation replies use deterministic Control.
+  Every other message enters the single read-only `om_chat` Copilot Scene when
+  `assistant.copilot.enabled` is true. There is no business router, per-Scene
+  channel allowlist, planner fallback, or write-capable model path.
 
 For the canonical entry and layer boundaries, see
 [ARCHITECTURE.md](ARCHITECTURE.md) and [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
@@ -66,18 +61,15 @@ For live quality or runtime questions, start with existing state:
 
 Do not run tick, send notifications, mutate positions, sync Feishu, or deploy unless the user explicitly asks for that side effect.
 
-For Inbound Assistant route diagnosis, read the durable assistant trace instead
-of guessing from the final text:
+For explicit Control operation diagnosis, read the durable operation timeline:
 
 ```bash
-./om-agent run --tool assistant_trace --input-json '{"limit":10}'
+./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
 
-`assistant_trace` is a local Tool Gateway diagnostic for `./om assistant`
-sessions. Its useful fields are `capability_selection`, `progress`,
-`progress.blocked_by`, and `answer.clarification_request`. The compact
-`response_text` is redacted for operator reading; the JSON keeps structured
-diagnostic fields for tests and local debugging.
+Copilot sessions, runs, and model/tool events are owned by the Copilot Host
+store. Control audit rows must not be repackaged as synthetic Agent plans or
+evidence sessions.
 
 ## 3. Tool Selection
 
