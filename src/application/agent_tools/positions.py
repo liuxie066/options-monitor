@@ -11,7 +11,7 @@ _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "monthly_income_report.output.v1",
     "source_label": "OM 本地账本",
     "primary_rows": "summary",
-    "row_count_field": "row_count",
+    "row_count_field": "summary_count",
     "fact_fields": [
         "summary[].month",
         "summary[].account",
@@ -24,18 +24,24 @@ _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
         "diagnostics[].income_record_status",
         "diagnostics[].income_amount_status",
         "diagnostics[].position_lot_snapshots_count",
+        "coverage.diagnostic_scope_count",
+        "coverage.reported_scope_count",
+        "coverage.unreported_scope_count",
     ],
     "missing_data_fields": [
         "diagnostics[].income_amount_status",
         "diagnostics[].missing_fields",
         "diagnostics[].warnings",
     ],
+    "freshness_fields": ["freshness.kind", "freshness.market_quotes_included"],
+    "model_preview_fields": ["scope", "coverage", "summary", "return_summary", "diagnostics"],
 }
 
 _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
     **_MONTHLY_INCOME_OUTPUT_CONTRACT,
     "schema_version": "monthly_income_report.detail_output.v1",
     "primary_rows": "cashflow_rows",
+    "row_count_field": "",
     "fact_fields": [
         *_MONTHLY_INCOME_OUTPUT_CONTRACT["fact_fields"],
         "cashflow_rows[].month",
@@ -88,6 +94,8 @@ _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
         "evidence_scope.market_price",
         "evidence_scope.margin_state",
     ],
+    "freshness_fields": ["freshness.kind"],
+    "model_preview_fields": ["scope", "coverage", "evidence_scope", "rows", "bootstrap"],
 }
 
 _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -122,6 +130,7 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].quote_status",
         "assigned_stock_review_rows[].status",
     ],
+    "model_preview_fields": ["scope", "coverage", "freshness", "rows", "quote_refresh", "warnings"],
 }
 
 
@@ -227,6 +236,7 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     examples=({"input": {"config_key": "us", "account": "lx", "month": "2026-04"}},),
     output_contract={"schema_version": "monthly_income_report.output", "payload_dependent": True},
     output_contract_resolver=_monthly_income_output_contract,
+    copilot_input_fields=("config_key", "account", "broker", "month", "include_rows"),
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
@@ -285,6 +295,47 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     ),
     output_contract={"schema_version": "option_positions_read.output", "payload_dependent": True},
     output_contract_resolver=_option_positions_output_contract,
+    copilot_input_fields=(
+        "config_key", "action", "broker", "account", "status", "query", "limit",
+        "exp_within_days", "expiration_month", "expiration_exact", "expiration_before",
+        "expiration_after", "record_id", "symbol", "option_type", "side", "strike",
+        "exp", "stock_lot_id", "refresh_quotes", "as_of_ms",
+    ),
+    copilot_input_schema={
+        "type": "object",
+        "properties": {
+            "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
+            "action": {
+                "type": "string",
+                "enum": ["list", "events", "history", "inspect", "assigned-stock"],
+                "description": "Evidence surface to read",
+            },
+            "broker": {"type": "string", "description": "Optional broker name"},
+            "account": {"type": "string", "description": "Optional account label"},
+            "status": {
+                "type": "string",
+                "enum": ["open", "close", "all"],
+                "description": "Position status filter for action=list",
+            },
+            "query": {"type": "object", "description": "Structured list filter"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            "exp_within_days": {"type": "integer", "minimum": 0},
+            "expiration_month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+            "expiration_exact": {"type": "string", "format": "date"},
+            "expiration_before": {"type": "string", "format": "date"},
+            "expiration_after": {"type": "string", "format": "date"},
+            "record_id": {"type": "string"},
+            "symbol": {"type": "string"},
+            "option_type": {"type": "string", "enum": ["put", "call"]},
+            "side": {"type": "string", "enum": ["short", "long"]},
+            "strike": {"type": "number"},
+            "exp": {"type": "string", "format": "date"},
+            "stock_lot_id": {"type": "string"},
+            "refresh_quotes": {"type": "boolean"},
+            "as_of_ms": {"type": "integer"},
+        },
+        "additionalProperties": False,
+    },
 )
 
 TOOLS: tuple[AgentTool, ...] = (

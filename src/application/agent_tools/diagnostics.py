@@ -5,6 +5,27 @@ from typing import Any
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_OPERATION_TIMELINE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "operation_timeline.output.v1",
+    "source_label": "OM inbound operation and command audit stores",
+    "primary_rows": "timelines",
+    "row_count_field": "timeline_count",
+    "fact_fields": [
+        "audit_db_exists",
+        "timeline_count",
+        "timelines[].identity.operation_id",
+        "timelines[].operation.operation_type",
+        "timelines[].operation.created_at",
+        "timelines[].outcome.status",
+        "timelines[].action_lifecycle.phase",
+        "timelines[].action_lifecycle.verify_status",
+        "timelines[].warnings",
+        "warnings[]",
+    ],
+    "missing_data_fields": ["audit_db_exists", "warnings[]", "timelines[].warnings"],
+}
+
+
 _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "healthcheck.output.v1",
     "source_label": "OM 本地健康检查",
@@ -22,7 +43,7 @@ _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
 _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_status.output.v1",
     "source_label": "OM 本地 runtime_status",
-    "primary_rows": "summary",
+    "result_shape": "scalar",
     "fact_fields": [
         "summary.ok",
         "summary.latest_status",
@@ -34,6 +55,14 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "latest_run.path",
         "latest_scanned_run.path",
     ],
+    "freshness_fields": ["freshness.status", "freshness.latest_run_age_minutes", "freshness.max_run_age_minutes"],
+    "missing_data_fields": [
+        "summary.latest_status",
+        "summary.ledger_status",
+        "summary.projection_verify_ok",
+        "summary.service_upgrade_error",
+    ],
+    "model_preview_fields": ["summary", "freshness", "account_summary", "warnings"],
 }
 
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
@@ -104,7 +133,10 @@ def _operation_timeline_tool(
 
 HEALTHCHECK_TOOL = build_agent_tool(
     name="healthcheck",
-    description="Validate runtime config and summarize local readiness without sending notifications or writing remote data.",
+    description=(
+        "Run dependency and configuration readiness checks. Use for broad readiness diagnosis; use runtime_status "
+        "for the latest operational snapshot and runtime_logs only after a failing component is identified."
+    ),
     requires=("runtime_config", "sqlite_data_config", "opend"),
     capabilities=("diagnostics", "read_only"),
     input_schema={
@@ -129,11 +161,15 @@ HEALTHCHECK_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
     output_contract=_HEALTHCHECK_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "accounts", "timeout_sec", "include_service_status"),
 )
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
     name="runtime_status",
-    description="Summarize existing runtime output files without running pipelines or sending notifications.",
+    description=(
+        "Summarize current overall runtime health from existing artifacts. Use first for current status questions; "
+        "use runtime_runs for historical run selection and runtime_logs for detailed failure text."
+    ),
     requires=("runtime_config",),
     capabilities=("status", "read_only"),
     input_schema={
@@ -175,6 +211,9 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
     output_contract=_RUNTIME_STATUS_OUTPUT_CONTRACT,
+    copilot_input_fields=(
+        "config_key", "accounts", "run_id", "max_notification_chars", "max_run_age_minutes", "include_service_status"
+    ),
 )
 
 OPERATION_TIMELINE_TOOL = build_agent_tool(
@@ -203,6 +242,10 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
     examples=(
         {"input": {"limit": 10}},
         {"input": {"channel": "feishu", "sender_id": "ou_1", "operation_types": ["manual_open"], "limit": 10}},
+    ),
+    output_contract=_OPERATION_TIMELINE_OUTPUT_CONTRACT,
+    copilot_input_fields=(
+        "channel", "sender_id", "conversation_id", "operation_id", "operation_types", "statuses", "limit"
     ),
 )
 

@@ -86,6 +86,30 @@ _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_SCHEDULER_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "scheduler_status.output.v1",
+    "source_label": "OM scheduler config and local scheduler state",
+    "result_shape": "scalar",
+    "fact_fields": [
+        "decision.reason",
+        "decision.is_scan_window_open",
+        "decision.is_notify_window_open",
+        "decision.should_notify",
+        "decision.schedule_enabled",
+        "state.last_run_utc_for_account",
+        "state.last_notify_utc",
+        "state.last_notify_utc_for_account",
+        "filters.account",
+        "filters.schedule_key",
+        "filters.force",
+    ],
+    "freshness_fields": [
+        "state.last_run_utc_for_account",
+        "state.last_notify_utc",
+        "state.last_notify_utc_for_account",
+    ],
+}
+
 _SCALAR_SETTING_VALUE_SCHEMA: dict[str, Any] = {"type": ["string", "number", "integer", "boolean", "null"]}
 _MANAGE_SYMBOLS_SET_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -355,6 +379,7 @@ CONFIG_VALIDATE_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
     output_contract=_CONFIG_VALIDATE_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key",),
 )
 
 SCHEDULER_STATUS_TOOL = build_agent_tool(
@@ -375,6 +400,8 @@ SCHEDULER_STATUS_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "account": "lx"}},),
+    output_contract=_SCHEDULER_STATUS_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "schedule_key", "account", "force"),
 )
 
 SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
@@ -385,7 +412,12 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
-        "symbol": "required symbol, canonical code, or configured alias such as 泡泡玛特",
+        "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Symbol, canonical code, or configured alias such as 泡泡玛特",
+            "required": True,
+        },
         "strategy": "optional sell_put|sell_call|covered_call|combo_yield",
         "field": "optional field or dot path, for example max_strike or sell_put.max_strike",
     },
@@ -397,6 +429,7 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "symbol": "NVDA", "strategy": "sell_call"}},
     ),
     output_contract=_SYMBOL_CONFIG_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "symbol", "strategy", "field"),
 )
 
 SYMBOL_RESOLVE_TOOL = build_agent_tool(
@@ -407,17 +440,23 @@ SYMBOL_RESOLVE_TOOL = build_agent_tool(
     input_schema={
         "config_key": "optional us|hk; when present, include runtime-config symbol aliases",
         "config_path": "optional explicit config path",
-        "symbol": "required symbol, company name, option root, Futu code, or configured alias such as 泡泡玛特",
+        "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Symbol, company name, option root, Futu code, or configured alias such as 泡泡玛特",
+            "required": True,
+        },
     },
     handler=_symbol_resolve_tool,
     pure_read=True,
-    safe_default_input={"symbol": "NVDA"},
+    safe_default_input={},
     examples=(
         {"input": {"symbol": "泡泡玛特"}},
         {"input": {"symbol": "HK.09992"}},
         {"input": {"symbol": "NVDA"}},
     ),
     output_contract=_SYMBOL_RESOLVE_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "symbol"),
 )
 
 MANAGE_SYMBOLS_TOOL = build_agent_tool(
