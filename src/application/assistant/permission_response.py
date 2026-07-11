@@ -148,7 +148,7 @@ def _parse_permission_text(text: str) -> tuple[str, _PermissionFamily | None, st
     spaced = re.sub(r"\s+", " ", without_id).strip().lower()
 
     for action, cn, en in (("confirm", "确认", "confirm"), ("cancel", "取消", "cancel")):
-        if compact == cn or spaced == en:
+        if compact in {cn, f"{cn}执行"} or spaced == en:
             return action, None, operation_id
         for family in _FAMILIES:
             for alias in family.aliases:

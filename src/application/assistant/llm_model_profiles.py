@@ -80,6 +80,13 @@ def normalize_model_profile_name(name: str, *, path: str = "model profile name")
 
 def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     assistant = deepcopy(assistant_cfg if isinstance(assistant_cfg, dict) else {})
+    warnings: list[str] = []
+    copilot = assistant.get("copilot")
+    if isinstance(copilot, dict):
+        retired_keys = sorted(key for key in ("channel_scenes", "human_review") if key in copilot)
+        if retired_keys:
+            assistant["copilot"] = {key: value for key, value in copilot.items() if key not in retired_keys}
+            warnings.append(f"retired assistant.copilot keys omitted: {', '.join(retired_keys)}")
     models_raw = assistant.pop("models", None)
     active_model_raw = assistant.pop("active_model", None)
     copilot_enabled = _assistant_copilot_enabled(assistant)
@@ -89,12 +96,11 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
             "model_profiles_enabled": False,
             "active_model": None,
             "resolved_profile": None,
-            "warnings": [],
+            "warnings": warnings,
         }
 
     profiles = parse_model_profiles(models_raw)
     active_model = str(active_model_raw or "").strip()
-    warnings: list[str] = []
     if not active_model:
         if copilot_enabled:
             raise AgentToolError(

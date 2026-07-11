@@ -1329,7 +1329,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_assistant_request(
         AssistantRequest(
-            text="确认升级",
+            text="确认执行",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_confirm",
