@@ -7,6 +7,11 @@ from threading import Lock
 from typing import Any, Callable
 
 from src.application.copilot import tools as copilot_tools
+from src.application.copilot.control_handoff import (
+    CONTROL_PREVIEW_TOOL,
+    build_control_preview_request,
+    control_preview_tool_description,
+)
 from src.application.copilot.agent import ModelRunner
 from src.application.copilot.contracts import AppResult, ExecutionContract, SceneManifest, new_id
 from src.application.copilot.engine import run_engine
@@ -98,6 +103,7 @@ def run_contract(
     fixture_observations_loader: FixtureObservationLoader | None = None,
     host_store: CopilotHostStore | None = None,
     session_key: str | None = None,
+    control_preview_specs: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     run_id = new_id("run")
     if host_store is not None:
@@ -136,7 +142,10 @@ def run_contract(
             ),
         )
     try:
-        manifest = _manifest_with_tool_descriptions(build_scene_manifest(contract, run_id))
+        manifest = _manifest_with_tool_descriptions(
+            build_scene_manifest(contract, run_id),
+            control_preview_specs=control_preview_specs if contract.execution_environment == "channel" else (),
+        )
     except Exception:
         event_log.record("scene_preparation_failed", {"reason": "manifest_error"})
         return finish(
@@ -175,6 +184,12 @@ def run_contract(
         use_mock_observations=fixture_id is not None,
         fixture_id=fixture_id,
         is_cancelled=(lambda: bool((is_cancelled and is_cancelled()) or (host_store and host_store.is_cancel_requested(run_id)))),
+        control_tool_name=CONTROL_PREVIEW_TOOL if control_preview_specs and contract.execution_environment == "channel" else None,
+        build_control_request=lambda arguments, user_message: build_control_preview_request(
+            arguments,
+            user_message=user_message,
+            specs=control_preview_specs,
+        ),
     )
     result = AppResult(
         status=engine_result.status,
@@ -185,6 +200,7 @@ def run_contract(
         run_id=run_id,
         events=event_log.events,
         decision_trace=contract.decision_trace,
+        control_request=engine_result.control_request,
         ok=engine_result.status not in {"failed", "cancelled"},
     )
     admitted = admit_result_with_decision(result)
@@ -193,13 +209,20 @@ def run_contract(
     return finish(admitted.result)
 
 
-def _manifest_with_tool_descriptions(manifest: SceneManifest) -> SceneManifest:
+def _manifest_with_tool_descriptions(
+    manifest: SceneManifest,
+    *,
+    control_preview_specs: tuple[dict[str, Any], ...] = (),
+) -> SceneManifest:
+    descriptions = copilot_tools.tool_descriptions(
+        manifest.allowed_tools,
+        static_payloads=manifest.tool_static_payloads,
+    )
+    if control_preview_specs:
+        descriptions.append(control_preview_tool_description(control_preview_specs))
     return replace(
         manifest,
-        tool_descriptions=copilot_tools.tool_descriptions(
-            manifest.allowed_tools,
-            static_payloads=manifest.tool_static_payloads,
-        ),
+        tool_descriptions=descriptions,
     )
 
 

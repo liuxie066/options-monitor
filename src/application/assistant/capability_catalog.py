@@ -438,6 +438,14 @@ def operation_specs(*, action: str | None = None, target: str | None = None) -> 
     )
 
 
+def preview_operation_capabilities() -> tuple[dict[str, Any], ...]:
+    return tuple(
+        _spec_payload(spec)
+        for spec in COMMAND_SPECS
+        if spec.supported and spec.risk_level in {"preview_write", "preview_admin"} and spec.tool_name
+    )
+
+
 def operation_target_intents(action: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for spec in operation_specs(action=action):

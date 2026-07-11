@@ -2,9 +2,10 @@
 
 ## Purpose
 
-OM Copilot is the read-only conversational interface for operating and
+OM Copilot is the read-first conversational interface for operating and
 analyzing Options Monitor. Its job is to understand a free-form question,
-inspect the available OM data through tools, and return a useful conclusion.
+inspect the available OM data through tools, return a useful conclusion, and
+translate explicit state-change requests into deterministic Control previews.
 
 The architecture follows the working boundary used by Dayu:
 
@@ -20,10 +21,10 @@ The design optimizes for:
 
 - high-quality free-form answers;
 - one generic model/tool loop;
-- deterministic read-only enforcement;
+- deterministic read-tool enforcement and preview-only write handoff;
 - shared tool authority with `./om-agent`;
 - explicit failure and missing-data reporting;
-- deterministic write and administration flows outside Copilot.
+- deterministic confirmation, apply, and administration ownership in Control.
 
 ## Final Runtime Shape
 
@@ -33,23 +34,26 @@ CLI or channel UI
   -> Copilot Host
   -> generic Agent/Engine loop
   -> canonical pure-read OM tools
+  -> optional structured Control preview request
   -> model final text
   -> Host admission and event persistence
   -> UI rendering
 ```
 
-Explicit commands and writes use a separate path:
+Explicit commands and Copilot preview requests enter one deterministic path:
 
 ```text
 CLI or channel UI
-  -> explicit command / permission parser
+  -> explicit command / permission parser / validated Copilot preview request
   -> deterministic Control executor
   -> read tool, preview, confirm, cancel, or apply owner
   -> audited receipt
 ```
 
-The two paths meet only at the UI and canonical tool/operation owners. The
-Copilot model cannot enter the write path.
+The paths meet at a single structured preview handoff owned by the channel
+router. The Copilot model can request only catalog capabilities classified as
+`preview_write` or `preview_admin`; it cannot confirm, cancel, apply, or call a
+write owner directly.
 
 ## Dayu Alignment
 
@@ -80,14 +84,20 @@ The following rules are mandatory:
 - Host projects the toolset from the Scene; requests cannot supply tool names.
 - Agent uses native model tool calls and model final text.
 - Agent and Engine contain no OM task routing or strategy-specific branches.
-- Copilot can call only tools classified as pure read by the canonical registry.
-- Copilot cannot send notifications, mutate config, write positions or trades,
-  operate services, upgrade deployments, or call broker-facing write APIs.
+- Copilot can call only ordinary tools classified as pure read by the canonical
+  registry. Channel Host may additionally expose the generic
+  `request_control_preview` meta-tool.
+- Copilot cannot directly send notifications, mutate config, write positions or
+  trades, operate services, upgrade deployments, or call broker-facing write
+  APIs.
 - Tool metadata is owned by `agent_tool_registry.py` and `agent_tools/`.
 - `./om-agent` remains the external structured Tool Gateway. Copilot does not
   shell out to it.
-- Explicit commands, previews, confirmations, and writes remain outside
-  Copilot in the deterministic Control path.
+- Preview creation, pending-operation state, confirmation, cancellation, apply,
+  and readback remain owned by the deterministic Control path.
+- Current pending operations are injected from the operation store on every
+  channel turn; Control receipts are recorded in conversation history but are
+  never treated as executable state.
 - Missing, stale, partial, and failed observations must remain visible to the
   model and to the user.
 - There is no ordinary chat fallback when the model or OM evidence is
@@ -364,7 +374,7 @@ Agent-friendly quality should be fixed at the owning tool definition whenever
 possible. Internal Copilot and external `./om-agent` must not receive divergent
 semantics for the same tool.
 
-## Read-Only Safety
+## Direct Tool And Control Safety
 
 Safety is enforced structurally:
 
@@ -373,12 +383,16 @@ Safety is enforced structurally:
 3. Scene declares only read-only toolsets.
 4. Host projects only registry tools classified as pure read.
 5. Tool execution rechecks the run allowlist.
-6. Write-capable tools never appear in model tool schemas.
+6. Write-capable tools, confirmation intents, cancellation intents, and apply
+   handlers never appear in model tool schemas.
+7. Channel Host may expose one generic `request_control_preview` schema whose
+   capability enum is projected from the deterministic capability catalog.
+8. Router revalidates every returned preview request before invoking Control.
 
-This avoids relying on a natural-language write-intent classifier. A user can
-ask about a hypothetical trade, but the model still has no mutation capability.
-Requests that require an actual mutation must use an explicit command and the
-deterministic Control flow.
+This avoids relying on a natural-language write-intent classifier for safety. A
+user can ask about a hypothetical trade without causing a mutation. For an
+explicit supported state change, the model may request a preview, after which
+the existing pending-operation and confirmation flow is authoritative.
 
 ## Explicit Control
 
@@ -679,8 +693,8 @@ Exit evidence:
 
 - enter P5 only after the complete local P1 acceptance set passes;
 - finish removing planner/LLM-routing metadata from deterministic Control;
-- keep explicit commands, previews, confirmations, cancellations, and writes in
-  one audited deterministic Control path;
+- keep explicit commands plus Copilot-requested previews, confirmations,
+  cancellations, and writes in one audited deterministic Control path;
 - delete obsolete Assistant DTOs, stage traces, compatibility helpers, and
   modules only after caller/import audit proves they are unused;
 - rewrite architecture guards around the final invariants;
@@ -694,7 +708,8 @@ Exit evidence:
 
 Exit evidence:
 
-- all free-form channel text reaches Copilot and cannot mutate OM state;
+- all free-form channel text reaches Copilot; the model can request a preview
+  but cannot directly mutate OM state;
 - explicit operations remain deterministic and audited;
 - local and channel answers pass the fixed real-model acceptance set;
 - release, remote upgrade, and post-upgrade verification are complete.

@@ -8,8 +8,11 @@ import pytest
 from src.application.copilot import tools as copilot_tools
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, SceneManifest, new_id
+from src.application.copilot.control_handoff import CONTROL_PREVIEW_TOOL
+from src.application.assistant.capability_catalog import preview_operation_capabilities
 from src.application.copilot.host import record_session_turn, run_contract, session_messages
 from src.application.copilot.host_store import CopilotHostStore
+from src.application.copilot import channel_facade
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
@@ -93,6 +96,9 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "Treat an explicit `not_observed` evidence scope as a hard claim boundary" in definition["system_prompt"]
     assert "Tool success results are flat JSON business data" in definition["system_prompt"]
     assert "A short follow-up such as" in definition["system_prompt"]
+    assert "read-first options-monitor assistant" in definition["system_prompt"]
+    assert "request a deterministic Control preview" in definition["system_prompt"]
+    assert "never confirm, apply, or cancel" in definition["system_prompt"]
     assert "analysis_query" in manifest.allowed_tools
     assert "runtime_status" in manifest.allowed_tools
     assert "symbol_config_update" not in manifest.allowed_tools
@@ -331,6 +337,55 @@ def test_context_compaction_keeps_native_tool_call_pairs() -> None:
     assistant_index = next(index for index, item in enumerate(final_messages) if item.get("tool_calls"))
     assert final_messages[assistant_index + 1]["role"] == "tool"
     assert final_messages[assistant_index + 1]["tool_call_id"] == "context_1"
+    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 8_000
+
+
+def test_context_compaction_preserves_authoritative_system_context() -> None:
+    contract = _contract("总结上下文")
+    manifest = build_scene_manifest(contract, "run_context_authority")
+    manifest = replace(
+        manifest,
+        messages=[
+            *manifest.messages[:1],
+            {
+                "role": "system",
+                "content": (
+                    "Authoritative pending Control operations for this conversation. "
+                    'pending_operations=[{"operation_id":"in_upgrade","status":"previewed"}]'
+                ),
+            },
+            *manifest.messages[1:],
+        ],
+        limits={**manifest.limits, "max_context_chars": 8_000},
+    )
+    requests: list[ModelRequest] = []
+    turns = iter(
+        (
+            ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "context_authority_1"),)),
+            ModelTurn(text="结论：已保留待确认操作上下文。"),
+        )
+    )
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        return next(turns)
+
+    from src.application.copilot.engine import run_engine
+
+    result = run_engine(
+        manifest,
+        scene_input=contract.input,
+        record_event=lambda *_args: None,
+        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(name, payload),
+        call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
+        compact_observation=copilot_tools.compact_observation,
+        fixture_observations=lambda _fixture: [],
+        model_runner=model,
+    )
+
+    assert result.status == "answered"
+    final_messages = list(requests[-1].messages)
+    assert any("in_upgrade" in str(item.get("content") or "") for item in final_messages if item.get("role") == "system")
     assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 8_000
     assert result.status == "answered"
 
@@ -605,6 +660,112 @@ def test_non_read_tool_call_is_rejected_without_execution(monkeypatch) -> None:
     assert result.status == "answered"
 
 
+def test_channel_manifest_exposes_catalog_driven_control_preview_only() -> None:
+    captured: list[set[str]] = []
+    preview_specs = preview_operation_capabilities()
+
+    def model(request: ModelRequest) -> ModelTurn:
+        captured.append({str(item.get("name") or "") for item in request.tools})
+        return ModelTurn(text="结论：无需执行写操作。")
+
+    local_result = run_contract(_contract("检查运行状态"), model_runner=model)
+    channel_prepared = prepare_contract(_request("升级到最新版", environment="channel"), reference_year=2026)
+    assert not isinstance(channel_prepared, AppResult)
+    channel_result = run_contract(channel_prepared, model_runner=model, control_preview_specs=preview_specs)
+
+    assert local_result.status == "answered"
+    assert channel_result.status == "answered"
+    assert CONTROL_PREVIEW_TOOL not in captured[0]
+    assert CONTROL_PREVIEW_TOOL in captured[1]
+    assert {spec["intent_name"] for spec in preview_specs}
+    assert all(spec["risk_level"] in {"preview_write", "preview_admin"} for spec in preview_specs)
+    assert all(spec["operation_action"] not in {"confirm", "cancel"} for spec in preview_specs)
+
+
+def test_channel_control_preview_returns_structured_request_without_execution(monkeypatch) -> None:
+    executed = False
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        nonlocal executed
+        executed = True
+        return {"ok": True, "data": {}}
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        return ModelTurn(
+            tool_calls=(
+                _call(
+                    CONTROL_PREVIEW_TOOL,
+                    {"intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}},
+                ),
+            )
+        )
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    prepared = prepare_contract(_request("升级到 1.2.400", environment="channel"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
+
+    assert result.status == "control_requested"
+    assert result.control_request == {
+        "intent_name": "upgrade_now",
+        "arguments": {"target_version": "1.2.400"},
+        "source": "copilot_control_preview",
+        "confidence": 1.0,
+    }
+    assert executed is False
+
+
+@pytest.mark.parametrize("intent_name", ["upgrade_confirm", "manual_trade_confirm", "symbol_cancel"])
+def test_channel_control_preview_rejects_confirm_and_cancel_intents(intent_name: str) -> None:
+    calls = 0
+
+    def model(request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelTurn(
+                tool_calls=(
+                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": intent_name, "arguments": {}}),
+                )
+            )
+        error = json.loads(next(item for item in request.messages if item.get("role") == "tool")["content"])
+        assert error["error"] == "INVALID_ACTION"
+        return ModelTurn(text="结论：确认或取消必须由确定性权限流程处理。")
+
+    prepared = prepare_contract(_request("确认执行", environment="channel"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
+
+    assert result.status == "answered"
+    assert result.control_request is None
+
+
+def test_channel_control_preview_cannot_be_mixed_with_read_tools() -> None:
+    calls = 0
+
+    def model(request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelTurn(
+                tool_calls=(
+                    _call(CONTROL_PREVIEW_TOOL, {"intent_name": "upgrade_now", "arguments": {}}, "control_1"),
+                    _call("runtime_status", {"config_key": "us"}, "read_1"),
+                )
+            )
+        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
+        assert len(tool_messages) == 1
+        assert json.loads(tool_messages[0]["content"])["error"] == "INVALID_ACTION"
+        return ModelTurn(text="结论：写操作预览需要单独请求。")
+
+    prepared = prepare_contract(_request("检查状态并升级", environment="channel"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    result = run_contract(prepared, model_runner=model, control_preview_specs=preview_operation_capabilities())
+
+    assert result.status == "answered"
+    assert result.control_request is None
+
+
 def test_host_preserves_conversation_context() -> None:
     context = (
         {"role": "user", "content": "分析7月收益"},
@@ -614,6 +775,75 @@ def test_host_preserves_conversation_context() -> None:
     assert not isinstance(prepared, AppResult)
     manifest = build_scene_manifest(prepared, "run_context")
     assert manifest.messages[-3:] == [*context, {"role": "user", "content": "结论呢"}]
+
+
+def test_channel_injects_authoritative_pending_snapshot_after_history(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+
+    def fake_run(prepared, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = prepared.input["messages"]
+        return AppResult(status="answered", user_response="结论：请明确要修改哪条预览。")
+
+    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    store.record_session_turn(
+        "wechat:conversation-1",
+        "升级到最新版",
+        "旧历史：升级预览等待确认。",
+        max_messages=10,
+    )
+    result = channel_facade.run_channel_request(
+        user_message="改成 1.2.400",
+        config_key="us",
+        assistant_config_path=str(tmp_path / "assistant.json"),
+        channel="wechat",
+        sender_id="ou_1",
+        conversation_id="conversation-1",
+        host_db_path=str(store.path),
+        control_context=(
+            {
+                "operation_id": "in_upgrade",
+                "operation_type": "upgrade_now",
+                "status": "previewed",
+                "summary": "升级到最新版",
+            },
+        ),
+    )
+
+    assert result.status == "answered"
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[-2]["role"] == "system"
+    assert "Authoritative pending Control operations" in messages[-2]["content"]
+    assert '"operation_id": "in_upgrade"' in messages[-2]["content"]
+    assert messages[-1] == {"role": "user", "content": "改成 1.2.400"}
+
+
+def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+
+    def fake_run(prepared, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = prepared.input["messages"]
+        return AppResult(status="answered", user_response="结论：当前没有待确认操作。")
+
+    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    result = channel_facade.run_channel_request(
+        user_message="刚才那个还在吗",
+        config_key="us",
+        assistant_config_path=str(tmp_path / "assistant.json"),
+        channel="wechat",
+        sender_id="ou_1",
+        conversation_id="conversation-empty",
+        host_db_path=str(tmp_path / "copilot.sqlite3"),
+        control_context=(),
+    )
+
+    assert result.status == "answered"
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert "pending_operations=[]" in messages[-2]["content"]
 
 
 def test_session_store_keeps_bounded_recent_messages() -> None:

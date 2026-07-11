@@ -15,6 +15,7 @@ FixtureLoader = Callable[[str | None], list[dict[str, Any]]]
 EventRecorder = Callable[[str, dict[str, Any], str | None], None]
 Clock = Callable[[], float]
 CancellationChecker = Callable[[], bool]
+ControlRequestBuilder = Callable[[dict[str, Any], str], tuple[dict[str, Any] | None, str | None]]
 
 OBSERVATION_PAGE_CHARS = 12_000
 DEFAULT_MAX_CONTEXT_CHARS = 96_000
@@ -38,6 +39,8 @@ def run_engine(
     fixture_id: str | None = None,
     clock: Clock | None = None,
     is_cancelled: CancellationChecker | None = None,
+    control_tool_name: str | None = None,
+    build_control_request: ControlRequestBuilder | None = None,
 ) -> AgentRunResult:
     if model_runner is None:
         return AgentRunResult(
@@ -143,6 +146,42 @@ def run_engine(
             continue
 
         _append_assistant_tool_calls(state, turn.text, turn.tool_calls)
+        control_calls = [call for call in turn.tool_calls if control_tool_name and call.name == control_tool_name]
+        if control_calls:
+            if len(control_calls) != 1 or len(turn.tool_calls) != 1 or build_control_request is None:
+                for call in control_calls:
+                    _append_tool_observation(
+                        state,
+                        call,
+                        _error_observation(
+                            call.name,
+                            "INVALID_ACTION",
+                            "control preview must be the only action in a model turn",
+                        ),
+                        record_event,
+                    )
+                consecutive_failed_batches += 1
+                continue
+            call = control_calls[0]
+            control_request, control_error = build_control_request(
+                dict(call.arguments),
+                str(scene_input.get("user_message") or ""),
+            )
+            if control_error or control_request is None:
+                _append_tool_observation(
+                    state,
+                    call,
+                    _error_observation(call.name, "INVALID_ACTION", control_error or "invalid control preview request"),
+                    record_event,
+                )
+                consecutive_failed_batches += 1
+                continue
+            record_event(
+                "control_preview_requested",
+                {"intent_name": control_request.get("intent_name")},
+                None,
+            )
+            return AgentRunResult(status="control_requested", control_request=control_request)
         batch_ok = False
         for call in turn.tool_calls:
             if state.tool_calls >= max_tool_calls:
@@ -298,15 +337,17 @@ def _bounded_messages(
     system = [item for item in copied if str(item.get("role") or "") == "system"]
     conversation = [item for item in copied if str(item.get("role") or "") != "system"]
     groups = _message_groups(conversation)
-    fixed = system[:1]
+    fixed = system
     notice = {
         "role": "system",
         "content": "Earlier conversation and tool details were compacted to stay within the model context budget.",
     }
-    budget = max(1_000, effective_chars - _message_chars([*fixed, notice]))
+    budget = max(0, effective_chars - _message_chars([*fixed, notice]) - 256)
     kept: list[list[dict[str, Any]]] = []
     used = 0
     for group in reversed(groups):
+        if budget <= 0:
+            break
         size = _message_chars(group)
         if kept and used + size > budget:
             break
@@ -340,19 +381,29 @@ def _message_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]
 
 def _clip_group(group: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
     if len(group) > 1:
-        compacted = [dict(group[0])]
-        per_tool_chars = max(512, max_chars // max(1, len(group) - 1))
-        for message in group[1:]:
-            item = dict(message)
-            try:
-                payload = json.loads(str(item.get("content") or "{}"))
-            except Exception:
-                payload = {}
-            if isinstance(payload, dict):
-                payload = _compact_json_value(payload, max_chars=per_tool_chars)
-                payload["context_compacted"] = True
-                item["content"] = json.dumps(payload, ensure_ascii=False, default=str)
-            compacted.append(item)
+        tool_count = max(1, len(group) - 1)
+        assistant_chars = _message_chars([dict(group[0])])
+        per_tool_chars = max(64, (max_chars - assistant_chars - 64 * tool_count) // tool_count)
+
+        def compact(per_tool: int) -> list[dict[str, Any]]:
+            compacted = [dict(group[0])]
+            for message in group[1:]:
+                item = dict(message)
+                try:
+                    payload = json.loads(str(item.get("content") or "{}"))
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict):
+                    payload = _compact_json_value(payload, max_chars=per_tool)
+                    payload["context_compacted"] = True
+                    item["content"] = json.dumps(payload, ensure_ascii=False, default=str)
+                compacted.append(item)
+            return compacted
+
+        compacted = compact(per_tool_chars)
+        while _message_chars(compacted) > max_chars and per_tool_chars > 64:
+            per_tool_chars = max(64, per_tool_chars - max(32, _message_chars(compacted) - max_chars))
+            compacted = compact(per_tool_chars)
         return compacted
     item = dict(group[0])
     content = str(item.get("content") or "")

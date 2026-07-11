@@ -56,6 +56,7 @@ class AgentRunResult:
     status: str
     text: str = ""
     error: dict[str, Any] | None = None
+    control_request: dict[str, Any] | None = None
 
 
 __all__ = [
