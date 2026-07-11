@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.384 - 2026-07-11
+
+### Changed
+- Standardized Copilot-visible tool schemas, defaults, required fields, output contracts, evidence scope, coverage, freshness, missing-data semantics, and recoverable error observations across all pure-read tools.
+- Hid internal paths and compatibility-only inputs from the Copilot model while preserving the complete `./om-agent` execution contracts.
+- Made production Copilot evaluation require read evidence without hardcoding a specific business tool, allowing the Agent to choose the strongest available read-only evidence path.
+
+### Fixed
+- Preserved contract-prioritized facts during observation compaction instead of truncating results by dictionary insertion order.
+- Corrected runtime-run, close-advice, monthly-detail, and required-symbol contracts that could misclassify valid evidence or generate invalid model calls.
+
 ## 1.2.383 - 2026-07-11
 
 ### Changed
