@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.386 - 2026-07-11
+
+### Added
+- Added a contract-level option trade lifecycle analysis view derived from canonical trade events without introducing a review-specific tool.
+- Added production Copilot evaluation metadata, evidence-health checks, tool-efficiency metrics, and importable 0..2 human review scores.
+
+### Changed
+- Reused successful identical read observations within one Agent run while preserving transient-error retries and trace provenance.
+- Exposed required information for manual open and close previews so the Agent asks for missing fields before requesting deterministic Control.
+
+### Fixed
+- Prevented incomplete manual opening requests from creating confirmable pending operations.
+- Made production evaluation report the actual configured provider and model instead of assuming DeepSeek.
+
 ## 1.2.385 - 2026-07-11
 
 ### Changed

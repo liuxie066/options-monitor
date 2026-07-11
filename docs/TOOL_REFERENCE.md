@@ -664,7 +664,7 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 - `analysis_query` 在内存 SQLite 中执行单条 SELECT/CTE，只能读取白名单 view，
   用于对比、排名、趋势、组成、分组、差额、收益率差、排障等开放式问题。
 - 这是通用工具，不是收益专用 API。view 覆盖收益、现金流、已实现明细、
-  指派正股生命周期、option exposure、trade events、策略配置、候选过滤诊断、
+  指派正股生命周期、option exposure、trade events、按合约聚合的交易生命周期、策略配置、候选过滤诊断、
   close advice、runtime 状态和 quote freshness。
 
 关键约束：
@@ -682,8 +682,8 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
   `evidence.aggregation_policy`、`evidence.diagnostics` 等证据。
 - 输出包含 `columns`、`rows`、`cell_refs`、`views_used`、`source_label` 和
   `fallback_text`。`cell_refs` 和 `evidence` 是只读查询结果的结构化证据。
-- 当前 Inbound Assistant 不会自动为开放式自然语言调用 `analysis_query` 或合成答案；
-  这些 view 同时作为 Tool Gateway、显式命令和本地 Copilot v2 只读 scene 的证据基础。
+- 单一 `om_chat` Copilot Agent 可以根据开放式问题自主调用 `analysis_catalog` 和
+  `analysis_query` 并综合答案；这些 view 同时也是 Tool Gateway 和显式命令的证据基础。
 - 对诊断 view，`evidence.diagnostics` 会区分 observed rejection、
   no matching rows、diagnostic missing、empty artifact、read error、runtime
   skip/failure、quote freshness gap 等状态；缺失或无匹配诊断不能被回答成
@@ -695,7 +695,8 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
   `assigned_stock_position_pnl`、`assigned_stock_sale_events`
 - P1 exposure/归因/配置：
   `open_option_exposure`、`expiration_risk_buckets`、
-  `symbol_income_attribution`、`strategy_config_by_symbol_account`
+  `symbol_income_attribution`、`strategy_config_by_symbol_account`、
+  `option_trade_lifecycle`
 - P2 诊断：
   `candidate_filter_diagnostics`、`close_advice_snapshot`、
   `runtime_tick_status`、`quote_freshness`
@@ -712,8 +713,8 @@ P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 
 当前约束：
 - 显式工具调用仍必须遵守 SELECT-only、白名单 view、只读 artifact 读取和数据新鲜度
   边界。
-- 不新增硬编码自然语言触发、业务模板或隐式 follow-up 规则；自然语言任务由
-  `./om copilot run|eval` 的 Service 选择声明式 scene，再由 Host 限定只读工具。
+- 不新增硬编码自然语言触发、业务模板或隐式 follow-up 规则；所有自然语言任务进入
+  单一 `om_chat` Scene，由 Host 限定只读工具和 Control preview 能力。
 - 当 `analysis_query` preflight 返回 `UNKNOWN_COLUMN` / `UNKNOWN_VIEW` 且包含
   catalog 建议时，Copilot Agent 可以在 Host 预算内用建议字段或建议 view 做只读修复
   查询；原失败 observation 保留在 Copilot event log，正常回执不展示内部 SQL 修复细节。

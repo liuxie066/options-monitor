@@ -19,6 +19,7 @@ if str(BASE_DIR) not in sys.path:
 from src.application.agent_tool_registry import pure_read_tool_names
 from src.application.assistant.capability_catalog import preview_operation_capabilities
 from src.application.copilot.channel_facade import run_channel_request
+from src.application.copilot.model_config import load_assistant_llm_config
 from src.application.research.redaction import redact_value
 
 
@@ -82,6 +83,7 @@ def main() -> int:
     parser.add_argument("--config-key", choices=("us", "hk"), default="us")
     parser.add_argument("--runtime-root")
     parser.add_argument("--output")
+    parser.add_argument("--review-input", help="JSON object keyed by eval case name with 0..2 human scores")
     args = parser.parse_args()
 
     previous_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
@@ -93,6 +95,7 @@ def main() -> int:
                 assistant_config=args.assistant_config,
                 config_key=args.config_key,
                 host_db=str(Path(temp_dir) / "host.sqlite3"),
+                human_reviews=_load_human_reviews(args.review_input),
             )
     finally:
         if args.runtime_root:
@@ -104,10 +107,16 @@ def main() -> int:
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)
-    return 0 if payload["structural_pass"] else 1
+    return 0 if payload["structural_pass"] and payload.get("answer_quality_pass") is not False else 1
 
 
-def run_eval(*, assistant_config: str, config_key: str, host_db: str) -> dict[str, Any]:
+def run_eval(
+    *,
+    assistant_config: str,
+    config_key: str,
+    host_db: str,
+    human_reviews: dict[str, dict[str, int]] | None = None,
+) -> dict[str, Any]:
     allowed = set(pure_read_tool_names())
     results: list[dict[str, Any]] = []
     started_at = _now_iso()
@@ -155,6 +164,9 @@ def run_eval(*, assistant_config: str, config_key: str, host_db: str) -> dict[st
             not in {"manual_trade_confirm", "manual_trade_cancel"}
         )
         read_observation_used = any(tool in allowed or tool in HOST_READ_ACTIONS for tool in tool_names)
+        evidence_checks = _evidence_checks(case, events, response)
+        human_review = _human_review_for_case(case.name, human_reviews)
+        human_score = _human_review_score(human_review)
         checks = {
             "answered_or_safe_control": (result.status == "answered" and bool(response)) or valid_control_preview,
             "read_observation_used": not case.requires_read_observation or read_observation_used,
@@ -179,20 +191,31 @@ def run_eval(*, assistant_config: str, config_key: str, host_db: str) -> dict[st
                 "termination_reason": _termination_reason(events, result.status),
                 "failure_owner": _failure_owner(events, result),
                 "tool_names": tool_names,
+                "tool_metrics": _tool_metrics(events),
                 "checks": checks,
+                "evidence_checks": evidence_checks,
                 "structural_pass": all(checks.values()),
-                "human_review": _empty_human_review(),
+                "evidence_pass": all(evidence_checks.values()),
+                "human_review": human_review,
+                "human_score": human_score,
+                "answer_quality_pass": None if human_score is None else human_score >= 10,
                 "events": events,
             }
         )
+    reviewed = [item for item in results if item["human_score"] is not None]
+    answer_quality_pass = None if not reviewed else all(bool(item["answer_quality_pass"]) for item in reviewed)
     return {
-        "schema_version": "om.copilot.p1_eval.v2",
+        "schema_version": "om.copilot.p1_eval.v3",
         "started_at": started_at,
         "finished_at": _now_iso(),
         "elapsed_seconds": round(time.monotonic() - eval_started, 3),
         "config_key": config_key,
+        "runtime_version": _runtime_version(),
+        "model": _model_metadata(assistant_config),
         "structural_pass": all(item["structural_pass"] for item in results),
-        "answer_quality_review": "pending_human_review",
+        "evidence_pass": all(item["evidence_pass"] for item in results),
+        "answer_quality_pass": answer_quality_pass,
+        "answer_quality_review": "pending_human_review" if not reviewed else "reviewed",
         "review_contract": {
             "scale": "0..2",
             "dimensions": list(_empty_human_review()),
@@ -227,9 +250,14 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
         "termination_reason": "runner_exception",
         "failure_owner": "provider_or_runtime",
         "tool_names": [],
+        "tool_metrics": _tool_metrics([]),
         "checks": checks,
+        "evidence_checks": {"successful_observation": False, "evidence_limits_acknowledged": True},
         "structural_pass": False,
+        "evidence_pass": False,
         "human_review": _empty_human_review(),
+        "human_score": None,
+        "answer_quality_pass": None,
         "events": [],
     }
 
@@ -243,6 +271,102 @@ def _empty_human_review() -> dict[str, int | None]:
         "actionability": None,
         "conversation_continuity": None,
     }
+
+
+def _load_human_reviews(path: str | None) -> dict[str, dict[str, int]] | None:
+    if not str(path or "").strip():
+        return None
+    payload = json.loads(Path(str(path)).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit("--review-input must contain a JSON object keyed by case name")
+    reviews: dict[str, dict[str, int]] = {}
+    dimensions = set(_empty_human_review())
+    for case_name, raw in payload.items():
+        if not isinstance(raw, dict):
+            raise SystemExit(f"review for {case_name} must be an object")
+        review: dict[str, int] = {}
+        for dimension in dimensions:
+            value = raw.get(dimension)
+            if not isinstance(value, int) or isinstance(value, bool) or value not in {0, 1, 2}:
+                raise SystemExit(f"review {case_name}.{dimension} must be 0, 1, or 2")
+            review[dimension] = value
+        reviews[str(case_name)] = review
+    return reviews
+
+
+def _human_review_for_case(
+    case_name: str,
+    reviews: dict[str, dict[str, int]] | None,
+) -> dict[str, int | None]:
+    if not reviews or case_name not in reviews:
+        return _empty_human_review()
+    return {key: reviews[case_name][key] for key in _empty_human_review()}
+
+
+def _human_review_score(review: dict[str, int | None]) -> int | None:
+    values = list(review.values())
+    return None if any(value is None for value in values) else sum(int(value) for value in values)
+
+
+def _model_metadata(assistant_config: str) -> dict[str, Any]:
+    raw, error = load_assistant_llm_config(config_path=assistant_config, require_config=True)
+    if raw is None:
+        return {"configured": False, "error": error or "model_not_configured"}
+    return {
+        "configured": True,
+        "provider": str(raw.get("provider") or ""),
+        "model": str(raw.get("model") or ""),
+        "base_url_configured": bool(str(raw.get("base_url") or "").strip()),
+        "api_key_env": str(raw.get("api_key_env") or ""),
+        "timeout_seconds": raw.get("timeout_seconds"),
+    }
+
+
+def _runtime_version() -> str:
+    path = BASE_DIR / "VERSION"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else "unknown"
+
+
+def _tool_metrics(events: list[dict[str, Any]]) -> dict[str, int]:
+    calls = [event for event in events if event["type"] == "tool_call"]
+    signatures = {
+        json.dumps(
+            [event["payload"].get("tool_name"), event["payload"].get("tool_input")],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        for event in calls
+    }
+    results = [event for event in events if event["type"] in {"tool_result", "recovered_tool_result"}]
+    return {
+        "tool_call_count": len(calls),
+        "unique_tool_call_count": len(signatures),
+        "duplicate_tool_call_count": max(0, len(calls) - len(signatures)),
+        "continuation_call_count": sum(event["payload"].get("tool_name") == "__read_observation__" for event in calls),
+        "tool_result_count": len(results),
+        "failed_tool_result_count": sum(event["payload"].get("ok") is False for event in results),
+    }
+
+
+def _evidence_checks(case: EvalCase, events: list[dict[str, Any]], response: str) -> dict[str, bool]:
+    results = [event["payload"] for event in events if event["type"] in {"tool_result", "recovered_tool_result"}]
+    successful = [item for item in results if item.get("ok") is not False]
+    limits_present = any(_observation_has_limits(item) for item in results)
+    return {
+        "successful_observation": not case.requires_read_observation or bool(successful),
+        "evidence_limits_acknowledged": not limits_present or _mentions_evidence_limit(response),
+    }
+
+
+def _observation_has_limits(payload: dict[str, Any]) -> bool:
+    text = json.dumps(payload, ensure_ascii=False, default=str).lower()
+    return any(marker in text for marker in ('"status": "partial"', '"missing_data":', '"warnings":'))
+
+
+def _mentions_evidence_limit(response: str) -> bool:
+    normalized = "".join(str(response or "").split()).lower()
+    return any(marker in normalized for marker in ("缺少", "缺失", "无法", "未提供", "不包含", "仅", "口径"))
 
 
 def _termination_reason(events: list[dict[str, Any]], status: str) -> str:
