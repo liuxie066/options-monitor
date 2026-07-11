@@ -3,43 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.application.llm_provider_registry import provider_spec
+
 
 DEFAULT_LLM_API_KEY_ENV = "OM_LLM_API_KEY"
 DEFAULT_LLM_CONFIDENCE_MIN = 0.75
-DEFAULT_LLM_TIMEOUT_SECONDS = 20
-DEFAULT_LLM_MAX_OUTPUT_TOKENS = 512
+DEFAULT_LLM_TIMEOUT_SECONDS = 90
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
 
 
 @dataclass(frozen=True)
-class PlannerSettings:
-    enabled: bool = False
-
-    def public_payload(self) -> dict[str, Any]:
-        return {"enabled": bool(self.enabled)}
-
-
-@dataclass(frozen=True)
-class FreeformRuntimeSettings:
-    enabled: bool = False
-
-    def public_payload(self) -> dict[str, Any]:
-        return {"enabled": bool(self.enabled)}
-
-
-@dataclass(frozen=True)
 class CopilotSettings:
     enabled: bool = False
-    channel_scenes: tuple[str, ...] = ()
-    human_review: bool = False
 
     def public_payload(self) -> dict[str, Any]:
-        return {
-            "enabled": bool(self.enabled),
-            "channel_scenes": list(self.channel_scenes),
-            "human_review": bool(self.human_review),
-        }
+        return {"enabled": bool(self.enabled)}
 
 
 @dataclass(frozen=True)
@@ -71,49 +51,20 @@ class AssistantSettings:
     enabled: bool | None = None
     context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     default_market_scope: str = DEFAULT_MARKET_SCOPE
-    freeform_runtime: FreeformRuntimeSettings = FreeformRuntimeSettings()
     copilot: CopilotSettings = CopilotSettings()
-    planner: PlannerSettings = PlannerSettings()
     llm: AssistantLlmSettings = AssistantLlmSettings()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enabled", self.enabled is not False)
 
-    @property
-    def llm_enabled(self) -> bool:
-        return False
-
-    @property
-    def agent_loop_enabled(self) -> bool:
-        return False
-
-    @property
-    def freeform_runtime_enabled(self) -> bool:
-        return False
-
-    @property
-    def planner_enabled(self) -> bool:
-        return False
-
     @classmethod
     def from_runtime_config(cls, cfg: dict[str, Any]) -> "AssistantSettings":
         assistant_cfg = _dict(cfg.get("assistant"))
         enabled = _assistant_enabled(assistant_cfg)
-        planner_cfg = _dict(assistant_cfg.get("planner"))
-        agent_loop_cfg = _dict(assistant_cfg.get("agent_loop"))
         copilot_cfg = _dict(assistant_cfg.get("copilot"))
-        configured_freeform_runtime = FreeformRuntimeSettings(
-            enabled=_bool(
-                agent_loop_cfg.get("enabled") if "enabled" in agent_loop_cfg else planner_cfg.get("enabled"),
-                default=False,
-            )
-        )
         configured_copilot = CopilotSettings(
             enabled=_bool(copilot_cfg.get("enabled"), default=False),
-            channel_scenes=_string_tuple(copilot_cfg.get("channel_scenes")),
-            human_review=_bool(copilot_cfg.get("human_review"), default=False),
         )
-        configured_planner = PlannerSettings(enabled=configured_freeform_runtime.enabled)
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
             enabled=enabled,
@@ -124,10 +75,8 @@ class AssistantSettings:
                 maximum=20,
             ),
             default_market_scope=_market_scope(assistant_cfg.get("default_market_scope")),
-            freeform_runtime=configured_freeform_runtime,
             copilot=configured_copilot,
-            planner=configured_planner,
-            llm=_llm_settings(llm_cfg, enabled=bool(enabled)),
+            llm=_llm_settings(llm_cfg, enabled=bool(enabled and configured_copilot.enabled)),
         )
 
     def public_payload(self) -> dict[str, Any]:
@@ -135,9 +84,7 @@ class AssistantSettings:
             "enabled": bool(self.enabled),
             "context_window_messages": int(self.context_window_messages),
             "default_market_scope": self.default_market_scope,
-            "freeform_runtime": {**self.freeform_runtime.public_payload(), "execution_enabled": False},
             "copilot": self.copilot.public_payload(),
-            "planner": self.planner.public_payload(),
             "llm": self.llm.public_payload(),
         }
 
@@ -166,27 +113,18 @@ def _market_scope(value: Any) -> str:
     return DEFAULT_MARKET_SCOPE
 
 
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    values: list[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text and text not in values:
-            values.append(text)
-    return tuple(values)
-
-
 def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSettings:
     provider = str(llm_cfg.get("provider") or "").strip()
     model = str(llm_cfg.get("model") or "").strip()
+    spec = provider_spec(provider)
+    default_api_key_env = spec.default_api_key_env if spec is not None else DEFAULT_LLM_API_KEY_ENV
+    raw_api_key_env = llm_cfg.get("api_key_env")
     return AssistantLlmSettings(
         enabled=bool(enabled and provider and model),
         provider=provider,
         base_url=str(llm_cfg.get("base_url") or "").strip(),
         model=model,
-        api_key_env=str(llm_cfg.get("api_key_env") or DEFAULT_LLM_API_KEY_ENV).strip()
-        or DEFAULT_LLM_API_KEY_ENV,
+        api_key_env=default_api_key_env if raw_api_key_env is None else str(raw_api_key_env).strip(),
         confidence_min=_float(llm_cfg.get("confidence_min"), default=DEFAULT_LLM_CONFIDENCE_MIN),
         timeout_seconds=_int(
             llm_cfg.get("timeout_seconds"),

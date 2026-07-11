@@ -639,17 +639,17 @@ bash scripts/install_agent_plugin.sh
 ./om assistant model current
 ```
 
-Slash 只读查询会直接执行；非 slash、非确认类自然语言默认返回 `NATURAL_LANGUAGE_REBUILDING`，不会自动调用工具或降级成普通 LLM 回复。显式设置 `assistant.copilot.enabled=true` 后，自由文本只会进入 Copilot channel gate；当前没有 channel-ready scene，因此返回受控 `not_ready`，仍不调用旧 planner 或工具。写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`/record-expiry <富途通知>`、`设置 09898 covered call min strike 85`。`./om-agent` 是 Tool Gateway，不是 OM 自己的 Agent；`./om assistant handle` 是受控 Inbound Assistant 消息入口，不是自由问答 Copilot。当前架构边界以 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 为准，能力边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
+显式命令和 pending-operation 回复进入确定性 Control；其他文本在 `assistant.copilot.enabled=true` 时进入唯一的只读 `om_chat` Copilot Scene。Copilot 通过 Host 投影的纯读工具自由完成模型/工具循环，不能进入确认、写配置、写仓位/交易、通知、服务控制或升级路径。链路保留 sender allowlist、message_id 幂等和 SQLite audit。当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`/record-expiry <富途通知>`、`设置 09898 covered call min strike 85`。`./om-agent` 是外部 Agent 使用的 Tool Gateway，不是 OM 自己的 Agent。架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，能力边界见 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)，渠道契约见 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
-本地 Copilot v2 自由问答入口只用于本地/eval 只读验证，覆盖诊断、收益归因和当前暴露；当前不直接接飞书、微信或 Hermes 渠道：
+本地 Copilot 自由问答和 deterministic eval 使用同一个 `om_chat` Scene：
 
 ```bash
 ./om copilot run --text "NVDA 为什么没有通过筛选" --config-key us
-./om copilot eval --scene current_option_exposure --fixture current_option_exposure_model_ready --text "当前期权风险暴露集中在哪些标的" --model-action-json-file tests/fixtures/copilot/current_option_exposure_model_action.json
-./om copilot eval --scene monthly_income_attribution --fixture june_income_attribution_basic --text "6月收益主要来自哪里" --model-action-json-file tests/fixtures/copilot/june_income_attribution_model_action.json
+./om copilot eval --fixture current_option_exposure_model_ready --text "当前期权风险暴露集中在哪些标的" --model-turn-json-file tests/fixtures/copilot/current_option_exposure_model_turns.json
+./om copilot eval --fixture june_income_attribution_basic --text "6月收益主要来自哪里" --model-turn-json-file tests/fixtures/copilot/june_income_attribution_model_turns.json
 ```
 
-`run` 会读取本地只读工具证据；没有显式模型配置时，不会降级成普通聊天。`eval` 只消费固定 fixture 或显式 eval-only model action，用来回归 answer-quality 边界。
+`run` 会读取本地只读工具证据；没有显式模型配置时，不会降级成普通聊天。`eval` 只消费固定 fixture 或显式 eval-only model turn，用来回归 answer-quality 边界。
 
 离线复盘（`./om research`）与 Inbound Assistant 是分开的模块，也不暴露为 `./om-agent` tool。它只做本地证据收集、Shadow Replay dataset 维护和 Strategy Lab 只读实验；需要写本地 artifact 时必须显式加 `--write`，不会改 runtime config、交易状态或通知。详细命令见 [docs/SHADOW_REPLAY_RUNBOOK.md](docs/SHADOW_REPLAY_RUNBOOK.md) 和 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
 

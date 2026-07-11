@@ -29,7 +29,7 @@ def assistant_turn_result_from_response(
 ) -> AssistantTurnResult:
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
     meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
-    result_data = _action_result_data(data)
+    result_data = _control_result_data(data)
     trace = {"route": route}
     copilot_trace = copilot_trace_from_response_data(data)
     if copilot_trace:
@@ -47,8 +47,6 @@ def assistant_turn_result_from_response(
         permission_request=data.get("permission_request") if isinstance(data.get("permission_request"), dict) else None,
         operation_id=_turn_identifier(data, "operation_id", "resolved_operation_id"),
         command_id=_turn_identifier(data, "command_id"),
-        tool_calls=(),
-        evidence=result_data.get("evidence_bundle") if isinstance(result_data.get("evidence_bundle"), dict) else {},
         trace=trace,
         data=dict(data),
         meta=dict(meta),
@@ -56,7 +54,7 @@ def assistant_turn_result_from_response(
 
 
 def copilot_trace_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
-    result_data = _action_result_data(data)
+    result_data = _control_result_data(data)
     copilot = result_data.get("copilot") if isinstance(result_data.get("copilot"), dict) else {}
     if not copilot:
         return {}
@@ -72,7 +70,7 @@ def copilot_trace_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def copilot_events_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
-    result_data = _action_result_data(data)
+    result_data = _control_result_data(data)
     summary = result_data.get("copilot_events") if isinstance(result_data.get("copilot_events"), dict) else {}
     if not summary:
         return {}
@@ -90,9 +88,9 @@ def copilot_events_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in out.items() if value not in (None, "", [], 0)}
 
 
-def _action_result_data(data: dict[str, Any]) -> dict[str, Any]:
-    action = data.get("action") if isinstance(data.get("action"), dict) else {}
-    result = action.get("result") if isinstance(action.get("result"), dict) else {}
+def _control_result_data(data: dict[str, Any]) -> dict[str, Any]:
+    control = data.get("control") if isinstance(data.get("control"), dict) else {}
+    result = control.get("result") if isinstance(control.get("result"), dict) else {}
     result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
     return dict(result_data)
 

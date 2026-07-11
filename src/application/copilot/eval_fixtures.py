@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.copilot.tools import TOOL_VIEWS
-
-
 MODEL_SYNTHESIS_REQUIRED_FIXTURES = {
     "candidate_filter_diagnostics_model_ready",
     "close_advice_notification_diagnostics_model_ready",
@@ -217,11 +214,4 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
 
 
 def _with_tool_view_context(item: dict[str, Any]) -> dict[str, Any]:
-    tool_name = str(item.get("tool_name") or "").strip()
-    view = TOOL_VIEWS.get(tool_name)
-    if view is None:
-        return item
-    context = dict(view.evidence_context)
-    if isinstance(item.get("evidence_context"), dict):
-        context.update(item["evidence_context"])
-    return {**item, "evidence_context": context}
+    return dict(item)

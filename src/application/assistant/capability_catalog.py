@@ -14,8 +14,6 @@ class AssistantCommandSpec:
     display_name: str
     arguments: tuple[str, ...] = ()
     read_only: bool = True
-    llm_allowed: bool = True
-    llm_visible: bool = True
     supported: bool = True
     risk_level: str | None = None
     examples: tuple[str, ...] = ()
@@ -24,7 +22,6 @@ class AssistantCommandSpec:
     operation_target: str | None = None
     operation_target_aliases: tuple[str, ...] = ()
     kind: str | None = None
-    planner_allowed: bool | None = None
     direct_executable: bool | None = None
     requires_pending: bool | None = None
     requires_confirm: bool | None = None
@@ -35,20 +32,6 @@ AgentCommandSpec = AssistantCommandSpec
 
 
 COMMAND_CATALOG_SCHEMA_VERSION = "om-assistant-command-catalog-v1"
-LLM_CAPABILITY_MANIFEST_SCHEMA_VERSION = "om-llm-capability-manifest-v1"
-LLM_PLANNER_PREVIEW_INTENTS = frozenset(
-    {
-        "manual_trade_open",
-        "manual_trade_close",
-        "manual_assignment",
-        "manual_expiry",
-        "manual_trade_update",
-        "symbol_edit",
-        "model_use",
-        "upgrade_now",
-        "monitor_run_now",
-    }
-)
 
 ACCOUNT_VALUES = ("lx", "sy")
 
@@ -61,14 +44,11 @@ def _spec_from_binding(binding: AssistantToolBinding) -> AssistantCommandSpec:
         display_name=binding.display_name,
         arguments=binding.arguments,
         read_only=binding.read_only,
-        llm_allowed=binding.llm_allowed,
-        llm_visible=binding.llm_visible,
         supported=binding.supported,
         risk_level=binding.risk_level,
         examples=binding.examples,
         summary=binding.summary,
         kind=binding.kind,
-        planner_allowed=binding.planner_allowed,
         direct_executable=binding.direct_executable,
         requires_pending=binding.requires_pending,
         requires_confirm=binding.requires_confirm,
@@ -88,7 +68,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="切换模型",
         arguments=("model_profile",),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=("/model use <name>",),
         summary="preview switching assistant.active_model",
@@ -102,7 +81,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="确认交易记录",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/confirm trade [operation_id]", "确认记录"),
         summary="confirm a pending manual trade preview",
@@ -117,7 +95,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="取消交易记录",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/cancel trade [operation_id]", "取消记录"),
         summary="cancel a pending manual trade preview",
@@ -132,7 +109,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="记录开仓",
         arguments=("raw_text", "account"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=(
             "记录开仓",
@@ -150,7 +126,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="记录平仓",
         arguments=("raw_text", "account"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=(
             "记录平仓",
@@ -168,7 +143,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="记录被指派",
         arguments=("raw_text", "account"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=(
             "期权被指派通知",
@@ -185,7 +159,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="记录到期失效",
         arguments=("raw_text", "account"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=(
             "期权到期失效通知",
@@ -203,7 +176,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="修改待确认交易",
         arguments=("operation_id", "operation_resolution", "updates"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=("/record-update <field>=<value> [operation_id]",),
         summary="update a pending manual trade preview",
@@ -217,7 +189,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="确认监控变更",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/confirm symbol [operation_id]", "确认监控"),
         summary="confirm a pending symbol preview",
@@ -232,7 +203,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="取消监控变更",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/cancel symbol [operation_id]", "取消监控"),
         summary="cancel a pending symbol preview",
@@ -247,7 +217,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="增加监控标的",
         arguments=("symbol", "sell_put_enabled", "sell_call_enabled"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=("/symbol add <symbol> [put|call]",),
         summary="preview adding a monitored symbol",
@@ -261,7 +230,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="修改监控标的",
         arguments=("symbol", "set", "ensure_use"),
         read_only=False,
-        llm_allowed=True,
         risk_level="preview_write",
         examples=("/symbol edit <symbol> <field>=<value>",),
         summary="preview editing covered-call or sell-put monitored-symbol settings",
@@ -275,7 +243,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="删除监控标的",
         arguments=("symbol",),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_write",
         examples=("/symbol remove <symbol>",),
         summary="preview removing a monitored symbol",
@@ -289,7 +256,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="确认升级",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/confirm upgrade [operation_id]", "确认升级"),
         summary="confirm a pending upgrade preview",
@@ -304,7 +270,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="取消升级",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/cancel upgrade [operation_id]", "取消升级"),
         summary="cancel a pending upgrade preview",
@@ -319,7 +284,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="确认模型切换",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/confirm model [operation_id]", "确认模型"),
         summary="confirm a pending assistant model switch",
@@ -334,7 +298,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="取消模型切换",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/cancel model [operation_id]", "取消模型"),
         summary="cancel a pending assistant model switch",
@@ -349,7 +312,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="立即升级",
         arguments=("target_version",),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_admin",
         examples=("/upgrade", "/upgrade v<version>"),
         summary="preview a software upgrade operation",
@@ -363,7 +325,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="确认执行监控",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/confirm monitor-run [operation_id]", "确认运行监控"),
         summary="confirm a pending monitor tick run preview",
@@ -378,7 +339,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="取消执行监控",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
-        llm_allowed=False,
         risk_level="confirm_write",
         examples=("/cancel monitor-run [operation_id]", "取消运行监控"),
         summary="cancel a pending monitor tick run preview",
@@ -393,7 +353,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="执行一次监控",
         arguments=("market", "accounts", "symbols", "timeout_seconds"),
         read_only=False,
-        llm_allowed=False,
         risk_level="preview_admin",
         examples=("/monitor-run hk", "跑一次港股监控", "单独跑一次 PDD 的监控"),
         summary="preview running one guarded tick-cron monitor cycle",
@@ -419,9 +378,7 @@ def command_catalog_payload() -> dict[str, Any]:
             "capability_count": len(specs),
             "slash_command_count": len({command for spec in COMMAND_SPECS for command in spec.commands}),
             "read_only_count": sum(1 for item in specs if item["read_only"]),
-            "llm_allowed_count": sum(1 for item in specs if item["llm_executable"]),
-            "llm_executable_count": sum(1 for item in specs if item["llm_executable"]),
-            "llm_recognizable_count": sum(1 for item in specs if item["llm_recognizable"]),
+            "direct_executable_count": sum(1 for item in specs if item["direct_executable"]),
             "write_command_count": sum(1 for item in specs if not item["read_only"]),
             "write_capability_count": sum(1 for item in specs if not item["read_only"]),
         },
@@ -441,33 +398,26 @@ def capability_catalog_payload() -> dict[str, Any]:
 def capability_catalog_text(payload: dict[str, Any] | None = None) -> str:
     catalog = payload if payload is not None else command_catalog_payload()
     capabilities = list(catalog.get("capabilities") or [])
-    executable = [item for item in capabilities if item.get("llm_executable")]
-    recognizable = [item for item in capabilities if item.get("llm_recognizable") and not item.get("llm_executable")]
-    non_executable = [item for item in capabilities if not item.get("llm_recognizable")]
+    reads = [item for item in capabilities if item.get("kind") in {"read", "local"}]
+    previews = [item for item in capabilities if item.get("kind") == "preview"]
+    applies = [item for item in capabilities if item.get("kind") == "apply"]
 
     lines = [
-        "Inbound capabilities",
+        "Deterministic Control capabilities",
         "",
-        "LLM executable read-only capabilities:",
+        "Read and local commands:",
     ]
-    lines.extend(_capability_text_line(item) for item in executable)
+    lines.extend(_capability_text_line(item) for item in reads)
     lines.extend([
         "",
-        "LLM recognizable but not executable capabilities:",
+        "Preview commands:",
     ])
-    lines.extend(_capability_text_line(item) for item in recognizable)
+    lines.extend(_capability_text_line(item) for item in previews)
     lines.extend([
         "",
-        "Known capabilities not recognizable by LLM:",
+        "Confirm and cancel commands:",
     ])
-    lines.extend(_capability_text_line(item) for item in non_executable)
-    lines.extend([
-        "",
-        (
-            "Rule: LLM may identify llm_recognizable=true capabilities. The deterministic "
-            "reasoning layer decides whether a recognized capability is executable."
-        ),
-    ])
+    lines.extend(_capability_text_line(item) for item in applies)
     return "\n".join(lines)
 
 
@@ -499,66 +449,6 @@ def operation_target_intents(action: str) -> dict[str, str]:
     return out
 
 
-def llm_executable_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if _is_llm_executable_spec(spec))
-
-
-def llm_recognizable_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if _is_llm_recognizable_spec(spec))
-
-
-def llm_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
-    return llm_recognizable_specs()
-
-
-def llm_planner_preview_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if is_llm_planner_preview_spec(spec))
-
-
-def llm_planner_preview_intent_names() -> list[str]:
-    return sorted(spec.intent_name for spec in llm_planner_preview_specs())
-
-
-def is_llm_planner_preview_spec(spec: AssistantCommandSpec) -> bool:
-    return bool(_planner_allowed(spec) and _kind(spec) == "preview")
-
-
-def planner_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec))
-
-
-def planner_read_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec) and _kind(spec) == "read")
-
-
-def planner_preview_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec) and _kind(spec) == "preview")
-
-
-def llm_executable_intent_names() -> list[str]:
-    return sorted(spec.intent_name for spec in llm_executable_specs())
-
-
-def llm_recognizable_intent_names() -> list[str]:
-    return sorted(spec.intent_name for spec in llm_recognizable_specs())
-
-
-def llm_capability_manifest() -> dict[str, Any]:
-    capabilities = [
-        _spec_payload(spec)
-        for spec in COMMAND_SPECS
-        if spec.llm_visible
-    ]
-    return {
-        "schema_version": LLM_CAPABILITY_MANIFEST_SCHEMA_VERSION,
-        "intent_field_semantics": "The JSON `intent` field is the OM capability_id.",
-        "routing_rule": "Choose only capabilities where llm_recognizable is true. The reasoning layer will reject recognized but unsupported capabilities without downgrading them.",
-        "llm_executable_intents": llm_executable_intent_names(),
-        "llm_recognizable_intents": llm_recognizable_intent_names(),
-        "capabilities": capabilities,
-    }
-
-
 def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
     kind = _kind(spec)
     return {
@@ -570,12 +460,7 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "display_name": spec.display_name,
         "arguments": list(spec.arguments),
         "read_only": bool(spec.read_only),
-        "llm_allowed": bool(spec.llm_allowed),
-        "llm_visible": bool(spec.llm_visible),
         "supported": bool(spec.supported),
-        "llm_recognizable": _is_llm_recognizable_spec(spec),
-        "llm_executable": _is_llm_executable_spec(spec),
-        "planner_allowed": _planner_allowed(spec),
         "direct_executable": _direct_executable(spec),
         "requires_pending": _requires_pending(spec),
         "requires_confirm": _requires_confirm(spec),
@@ -587,29 +472,6 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "operation_target_aliases": list(spec.operation_target_aliases),
         "usage_patterns": list(spec.examples),
     }
-
-
-def _is_llm_executable_spec(spec: AssistantCommandSpec) -> bool:
-    return bool(spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None and _direct_executable(spec))
-
-
-def _is_llm_recognizable_spec(spec: AssistantCommandSpec) -> bool:
-    return bool((spec.read_only and spec.llm_allowed) or _is_llm_preview_recognizable_spec(spec))
-
-
-def _is_llm_preview_recognizable_spec(spec: AssistantCommandSpec) -> bool:
-    return bool(
-        spec.intent_name == "symbol_edit"
-        and spec.llm_allowed
-        and not spec.read_only
-        and spec.risk_level == "preview_write"
-        and spec.operation_action == "preview"
-        and spec.operation_target == "symbol"
-        and spec.supported
-        and spec.tool_name == "inbound.symbols"
-    )
-
-
 def _kind(spec: AssistantCommandSpec) -> str:
     if spec.kind:
         return spec.kind
@@ -623,23 +485,6 @@ def _kind(spec: AssistantCommandSpec) -> str:
     if spec.operation_action in {"confirm", "cancel"} or risk == "confirm_write":
         return "apply"
     return "preview" if not spec.read_only else "read"
-
-
-def _planner_allowed(spec: AssistantCommandSpec) -> bool:
-    if spec.planner_allowed is not None:
-        return bool(spec.planner_allowed)
-    kind = _kind(spec)
-    if not spec.supported or spec.tool_name is None:
-        return False
-    if kind == "read":
-        return bool(spec.llm_allowed and spec.read_only)
-    if kind == "preview":
-        return bool(
-            spec.intent_name in LLM_PLANNER_PREVIEW_INTENTS
-            and spec.risk_level in {"preview_write", "preview_admin"}
-            and spec.operation_action == "preview"
-        )
-    return False
 
 
 def _direct_executable(spec: AssistantCommandSpec) -> bool:
@@ -670,10 +515,10 @@ def _capability_text_line(item: dict[str, Any]) -> str:
     commands = ", ".join(_unique(item.get("commands") or ())) or "-"
     usage = " | ".join(_unique(item.get("usage_patterns") or item.get("examples") or ())[:3]) or "-"
     arguments = ", ".join(_unique(item.get("arguments") or ())) or "-"
-    executable = "true" if item.get("llm_executable") else "false"
+    executable = "true" if item.get("direct_executable") else "false"
     return (
         f"- {item.get('capability_id')} ({item.get('display_name')}): risk={item.get('risk_level')} "
-        f"llm_executable={executable} commands={commands} args={arguments} usage={usage}"
+        f"direct_executable={executable} commands={commands} args={arguments} usage={usage}"
     )
 
 

@@ -1,69 +1,28 @@
-# Inbound Assistant Control
+# Inbound Control
 
-Inbound Assistant is the channel-facing command surface for Feishu and WeChat.
-It is not the Tool Gateway and it is not a free-form autonomous agent.
-
-## Runtime Boundary
+`./om assistant handle` is the common application entry for local, Feishu, and
+WeChat messages. It has two mutually exclusive paths:
 
 ```text
-Feishu / WeChat message
--> channel adapter
--> ./om assistant handle
--> sender allowlist
--> command parser or permission-response parser
--> tool execution or pending-operation update
--> rendered reply
--> audit/session/operation store
+explicit protocol -> deterministic Control
+all other text    -> read-only Copilot
 ```
 
-Current behavior:
+## Control Boundary
 
-- slash commands execute deterministic command contracts;
-- permission replies operate on pending previews;
-- unsupported natural-language text returns `NATURAL_LANGUAGE_REBUILDING` by
-  default;
-- if `assistant.copilot.enabled=true` is explicitly configured, unsupported
-  natural-language text enters the Copilot channel gate, but a scene still must
-  be channel-ready and explicitly allowlisted in
-  `assistant.copilot.channel_scenes`; `operations_diagnostics` and
-  `monthly_income_attribution` are channel-ready in the current slice, and
-  channel execution still requires
-  explicit assistant model configuration before any tool call;
-- Copilot channel execution admits one run per channel conversation in the
-  current service process. A concurrent same-conversation request returns
-  controlled `not_ready` instead of starting a second analysis run;
-- Host-backed Copilot channel runs persist a sanitized event summary in inbound
-  audit so success and failure can be inspected without storing raw tool data;
-- unsupported text does not call old planner tools, does not synthesize an
-  answer through generic chat, and does not fall back to generic LLM chat.
+Control owns:
 
-## Supported Inputs
+- sender allowlist and message-id idempotency;
+- slash commands and unambiguous pending-operation replies;
+- deterministic read command payloads;
+- write previews, confirm/cancel, apply, and readback receipts;
+- `control_json` audit records and operation timelines.
 
-Use `/help` as the user-facing catalog. The stable categories are:
+Control does not infer business intent from free text, select tools for natural
+language questions, or synthesize analytical conclusions.
 
-- status and diagnostics: `/status`, `/health`, `/trace`;
-- read operations: `/income`, `/positions`, `/cash`, model/config inspection;
-- write previews: symbol/trade/upgrade commands that create pending operations,
-  including `/record-expiry <富途期权到期失效通知>`;
-- confirmation flow: `/confirm ...`, `/cancel ...`, and bound channel replies.
-
-Channel wrappers should call only `./om assistant handle` or the equivalent
-application service. They must not import parser, policy, or tool modules
-directly.
-
-## Read Operations
-
-Read operations are deterministic tool calls selected by explicit command
-syntax. Tool implementations and metadata live under `src/application/agent_tools`
-and are collected by `agent_tool_registry`.
-
-Read commands may include a default `config_key` supplied by the channel
-settings. Missing upstream data must be reported explicitly; the assistant must
-not invent facts to fill a report.
-
-## Write Operations
-
-Write-capable requests use preview and confirmation:
+Read commands execute canonical tools from `agent_tool_registry`. Write-capable
+commands use:
 
 ```text
 explicit command
@@ -74,59 +33,77 @@ explicit command
 -> readback receipt
 ```
 
-The preview does not mutate live config, positions, trade events, notifications,
-or broker-facing state. Confirmation is required before an apply path runs.
+No model can enter the apply path.
+
 When one expiry notice contains multiple contracts, `/record-expiry` creates one
-pending operation per contract. Confirm the whole notice with
-the plain reply `确认` (the conversation resolves its unique `command_id`), use
-`/confirm trade <command_id>` as an explicit fallback, or confirm individual contracts with
-`/confirm trade <operation_id>`.
+pending operation per contract. Confirm the whole notice with the plain reply
+`确认` (the conversation resolves its unique `command_id`), use
+`/confirm trade <command_id>` as an explicit fallback, or confirm individual
+contracts with `/confirm trade <operation_id>`.
+
+## Copilot Boundary
+
+Messages that are not explicit Control protocol enter Copilot when both
+`assistant.enabled` and `assistant.copilot.enabled` are true.
+
+Copilot uses:
+
+```text
+Channel UI -> Copilot Service -> Host -> om_chat Agent -> pure-read tools
+```
+
+There is one generic Scene. Service does not classify income, positions,
+diagnostics, symbols, strategies, or monthly reviews. Host projects only
+canonical pure-read tools and owns run/session/event lifecycle. Copilot never
+receives write-capable tools and has no generic-chat or fixed-tool fallback.
 
 ## Reply Contract
 
-Channel adapters may send the rendered `response_text` even when the inbound
-result is not successful or not ready. For example,
-`NATURAL_LANGUAGE_REBUILDING` is an assistant error but should still reply to
-the user with the rebuilding message; explicit Copilot gate `not_ready` should
-also reply with its controlled not-ready text.
+Channel adapters render the returned `AssistantTurnResult.response_text`.
 
-Permission-denied handling remains special:
+- Control replies may include deterministic results, preview requests, or
+  permission errors.
+- Copilot replies contain the model's final answer or an explicit runtime/data
+  failure.
+- Unauthorized-sender behavior remains channel-policy dependent.
 
-- unauthorized senders may stay silent depending on channel policy;
-- allowed senders receive deterministic command results or explicit errors.
+Channel adapters must not import command parsers, tool implementations, or
+Copilot internals directly.
 
 ## Configuration
 
-Relevant assistant config:
+```yaml
+assistant:
+  enabled: true
+  copilot:
+    enabled: true
+  active_model: deepseek-default
+```
 
-- `assistant.enabled`: enables the command surface;
-- `assistant.default_market_scope`: default market for commands that need one;
-- `assistant.context_window_messages`: retained for trace/session context and
-  future rebuild work;
-- `assistant.copilot.enabled`: disabled-by-default entry into the Copilot
-  channel gate;
-- `assistant.copilot.channel_scenes`: explicit channel scene allowlist; only
-  `operations_diagnostics` and `monthly_income_attribution` are channel-ready
-  in the current slice;
-- `assistant.copilot.human_review`: when true, Host-backed Copilot channel
-  answers are held for manual review; the audit keeps the sanitized Copilot
-  trace/event summary, but the channel reply does not expose the model answer;
-- `assistant.llm`, `assistant.models`, `assistant.active_model`: model config and
-  diagnostics only in the current runtime.
+`assistant.models` defines model profiles. Generated
+`resolved/config.assistant.json` must be rebuilt after authoring changes.
+Planner flags, task profiles, per-business Scene allowlists, and
+`assistant.agent_loop` are not supported runtime controls.
 
-For compatibility, `assistant.agent_loop.enabled` may still be present in older
-configs. It is accepted as a no-op compatibility field and does not enable
-free-form natural-language execution.
+## Diagnostics
 
-## Current Non-Goals
+```bash
+./om assistant commands --format text
+./om assistant capabilities
+./om assistant llm-check
+./om-agent run --tool operation_timeline --input-json '{"limit":10}'
+```
+
+Copilot Host persists real sessions, runs, and model/tool events. Control audit
+rows must not be repackaged as synthetic Agent plans, evidence bundles, or
+verifier traces.
+
+## Non-Goals
 
 Do not add:
 
-- hardcoded business-question templates for free-form questions;
-- parallel tool registries;
-- channel-specific business routing;
-- generic LLM fallback answers;
-- automatic write execution from natural language.
-
-The next free-form task system should be rebuilt deliberately as a separate
-design, with evals and evidence contracts first.
+- hardcoded business-question routing;
+- task-specific answer templates;
+- a second tool registry;
+- ordinary LLM fallback without tools;
+- natural-language writes.

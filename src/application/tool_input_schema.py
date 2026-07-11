@@ -156,9 +156,22 @@ def validate_tool_input_payload(
     raise AgentToolError(
         code="INPUT_ERROR",
         message=f"{tool_name} input does not match tool schema at {path}: expected {expected}",
-        hint="Use the tool manifest input_json_schema / planner input_schema and retry with valid structured arguments.",
+        hint=_schema_repair_hint(first),
         details={"tool_name": tool_name, "schema_errors": errors[:10]},
     )
+
+
+def _schema_repair_hint(error: Mapping[str, Any]) -> str:
+    path = str(error.get("path") or "<root>")
+    expected = str(error.get("expected") or "valid input")
+    actual = str(error.get("actual") or "invalid value")
+    if expected == "required property" or actual == "missing":
+        return f"Add `{path}` using the type and meaning described in the tool schema, then retry."
+    if expected == "declared property" or actual == "unexpected property":
+        return f"Remove unsupported field `{path}` and retry using only fields declared by the tool schema."
+    if expected.startswith("one of "):
+        return f"Set `{path}` to {expected} and retry."
+    return f"Set `{path}` to {expected} instead of {actual}, then retry."
 
 
 def _explicit_json_schema(value: dict[str, Any]) -> dict[str, Any]:

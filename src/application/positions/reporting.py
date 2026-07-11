@@ -622,23 +622,26 @@ def _build_monthly_income_diagnostics(
             if currency_conversion_missing:
                 missing_fields.add("currency_conversion")
 
-            status = "ok" if _return_row_is_calculable(return_row) else ("empty" if (month_key, account) not in summary_keys else "incomplete")
+            has_income_row = (month_key, account) in summary_keys
+            status = "ok" if _return_row_is_calculable(return_row) else ("empty" if not has_income_row else "incomplete")
             diagnostics.append(
                 {
                     "account": account,
                     "month": diag_month,
                     "month_range": _month_range_payload(diag_month),
                     "status": status,
+                    "income_record_status": "recorded" if has_income_row else "no_recorded_rows",
+                    "income_amount_status": "reported" if has_income_row else "not_reported",
                     "calculation_method": calculation_method,
                     "matched_trade_events_count": matched_events_count,
-                    "matched_lots_count": matched_lots_count,
+                    "position_lot_snapshots_count": matched_lots_count,
                     "closed_lots_count": closed_lots_count,
                     "premium_rows_count": premium_rows_count,
-                    "cash_secured_available": cash_secured_available,
-                    "cash_secured_conversion_missing": cash_secured_conversion_missing,
+                    "cash_secured_collateral_status": "reported" if cash_secured_available else "not_reported",
+                    "cash_secured_collateral_conversion_missing": cash_secured_conversion_missing,
                     "currency_conversion_missing": currency_conversion_missing,
                     "missing_cny_currencies": sorted(currency for currency in missing_cny_currencies if currency),
-                    "cash_secured_by_ccy": cash_by_ccy,
+                    "cash_secured_collateral_by_ccy": cash_by_ccy,
                     "missing_fields": sorted(missing_fields),
                     "warnings": [str(item) for item in warnings if str(item).strip()],
                 }

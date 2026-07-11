@@ -79,6 +79,8 @@ def _assistant_settings(
 
     del config_key, config_path
     assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
+    if not assistant_explicit:
+        return AssistantSettings()
     assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
     del assistant_path
     if assistant_cfg:
@@ -88,7 +90,6 @@ def _assistant_settings(
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
             copilot=configured.copilot,
-            planner=configured.planner,
             llm=configured.llm,
         )
 

@@ -107,6 +107,18 @@ def pure_read_tool_names() -> frozenset[str]:
     )
 
 
+def pure_read_toolsets() -> dict[str, tuple[str, ...]]:
+    return {
+        module.__name__.rsplit(".", 1)[-1]: tuple(
+            definition.name
+            for definition in _module_tools(module)
+            if definition.enabled and definition.is_pure_read()
+        )
+        for module in AGENT_TOOL_MODULES
+        if any(definition.enabled and definition.is_pure_read() for definition in _module_tools(module))
+    }
+
+
 def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, Any]:
     if write_tools_enabled is None:
         write_tools_enabled = _write_tools_enabled_from_env()
@@ -148,5 +160,6 @@ __all__ = [
     "build_agent_spec",
     "get_tool_definition",
     "pure_read_tool_names",
+    "pure_read_toolsets",
     "tool_names",
 ]

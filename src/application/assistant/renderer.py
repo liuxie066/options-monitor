@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, cast
 
 from src.application.assistant.capability_catalog import command_help_text
-from src.application.assistant.contracts import PerceptionResult
+from src.application.assistant.contracts import ControlCommand
 
 
 HELP_TEXT = command_help_text()
@@ -16,7 +16,7 @@ def render_canonical_tool_result(*, renderer_key: str, data: dict[str, Any], too
     return renderer(data, tool_result) if renderer is not None else ""
 
 
-def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
+def render_inbound_text(*, intent: ControlCommand | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
     if error:
         message = str(error.get("message") or "").strip()
         hint = str(error.get("hint") or "").strip()
@@ -985,7 +985,7 @@ def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:
         lines.append(
             "匹配事件："
             f"{int(diag.get('matched_trade_events_count') or 0)}，"
-            f"持仓 lot：{int(diag.get('matched_lots_count') or 0)}，"
+            f"持仓 lot：{int(diag.get('position_lot_snapshots_count', diag.get('matched_lots_count')) or 0)}，"
             f"已平仓 lot：{int(diag.get('closed_lots_count') or 0)}，"
             f"权利金行：{int(diag.get('premium_rows_count') or 0)}。"
             )

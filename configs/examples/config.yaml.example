@@ -39,7 +39,7 @@ markets:
 assistant:
   enabled: true
   context_window_messages: 8
-  planner:
+  copilot:
     enabled: true
   active_model: deepseek-default
   models:
@@ -49,24 +49,24 @@ assistant:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       confidence_min: 0.75
-      timeout_seconds: 20
-      max_output_tokens: 512
+      timeout_seconds: 90
+      max_output_tokens: 2048
     kimi-code:
       provider: kimi-code
       base_url: "https://api.kimi.com/coding/v1"
       model: kimi-for-coding
       api_key_env: KIMI_API_KEY
       confidence_min: 0.75
-      timeout_seconds: 20
-      max_output_tokens: 512
+      timeout_seconds: 90
+      max_output_tokens: 2048
     openai-default:
       provider: openai
       base_url: ""
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       confidence_min: 0.75
-      timeout_seconds: 20
-      max_output_tokens: 512
+      timeout_seconds: 90
+      max_output_tokens: 2048
 
 inbound:
   feishu_ws:

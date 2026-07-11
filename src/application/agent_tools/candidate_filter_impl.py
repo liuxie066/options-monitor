@@ -75,6 +75,7 @@ def candidate_filter_explain_tool(
 
     status_counts = Counter(str(row.get("status") or "") for row in matching)
     function_counts = Counter(str(row.get("function") or "") for row in matching)
+    evidence_status = "available" if matching else ("trace_files_missing" if not trace_paths else "no_matching_rows")
     return (
         {
             "symbol": symbol,
@@ -85,6 +86,8 @@ def candidate_filter_explain_tool(
                 "account": account or None,
                 "account_semantics": "scan_scope",
             },
+            "evidence_status": evidence_status,
+            "conclusion_status": "supported" if matching else "indeterminate",
             "trace_count": len(matching),
             "status_counts": dict(status_counts),
             "function_counts": dict(function_counts),

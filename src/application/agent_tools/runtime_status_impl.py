@@ -22,6 +22,7 @@ from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
 from src.application.service_drift import service_drift_status
 from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.trades.account_mapping import resolve_trade_intake_config
 
 
@@ -564,14 +565,17 @@ def _assistant_runtime_summary(
             "path": mask_path(path),
             "loaded": bool(cfg),
             "enabled": bool(settings.enabled),
-            "planner": settings.planner.public_payload(),
+            "copilot": settings.copilot.public_payload(),
             "context_window_messages": int(settings.context_window_messages),
             "default_market_scope": settings.default_market_scope,
         },
         "llm": {
             **settings.llm.public_payload(),
             "endpoint_url": endpoint_url,
-            "api_key_configured": bool(env.get(settings.llm.api_key_env)),
+            "api_key_configured": (
+                not provider_requires_api_key(settings.llm.provider)
+                or bool(env.get(settings.llm.api_key_env))
+            ),
             "env_file": mask_path(env.env_file) if env.env_file is not None else None,
             "env_file_loaded": bool(env.env_file_loaded),
         },
@@ -2332,14 +2336,12 @@ def runtime_status_tool(
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
     assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
     data["summary"]["assistant_enabled"] = bool(assistant_config_summary.get("enabled"))
-    assistant_freeform = (
-        assistant_config_summary.get("freeform_runtime")
-        if isinstance(assistant_config_summary.get("freeform_runtime"), dict)
+    assistant_copilot = (
+        assistant_config_summary.get("copilot")
+        if isinstance(assistant_config_summary.get("copilot"), dict)
         else {}
     )
-    data["summary"]["assistant_agent_loop_enabled"] = False
-    data["summary"]["assistant_freeform_runtime_enabled"] = bool(assistant_freeform.get("execution_enabled"))
-    data["summary"]["assistant_planner_enabled"] = False
+    data["summary"]["assistant_copilot_enabled"] = bool(assistant_copilot.get("enabled"))
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")

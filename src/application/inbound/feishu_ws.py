@@ -62,8 +62,7 @@ class FeishuWsSettings:
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
     assistant_enabled: bool = True
-    assistant_freeform_runtime_enabled: bool = False
-    assistant_planner_enabled: bool = False
+    assistant_copilot_enabled: bool = False
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     assistant_default_market_scope: str = ""
     assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
@@ -103,8 +102,7 @@ class FeishuWsSettings:
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
             "assistant_enabled": bool(self.assistant_enabled),
-            "assistant_freeform_runtime_enabled": bool(self.assistant_freeform_runtime_enabled),
-            "assistant_planner_enabled": bool(self.assistant_planner_enabled),
+            "assistant_copilot_enabled": bool(self.assistant_copilot_enabled),
             "assistant_context_window_messages": int(self.assistant_context_window_messages),
             "assistant_default_market_scope": self.assistant_default_market_scope,
             "assistant_llm": self.assistant_llm.public_payload(),
@@ -159,8 +157,7 @@ def build_feishu_ws_settings(
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
         assistant_enabled=bool(assistant_settings.enabled),
-        assistant_freeform_runtime_enabled=bool(assistant_settings.freeform_runtime_enabled),
-        assistant_planner_enabled=bool(assistant_settings.planner_enabled),
+        assistant_copilot_enabled=bool(assistant_settings.copilot.enabled),
         assistant_context_window_messages=assistant_settings.context_window_messages,
         assistant_default_market_scope=assistant_settings.default_market_scope,
         assistant_llm=assistant_settings.llm,

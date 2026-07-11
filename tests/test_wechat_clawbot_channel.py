@@ -7,6 +7,15 @@ from types import SimpleNamespace
 from typing import Any
 
 
+def _write_minimal_assistant_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config.assistant.json"
+    config_path.write_text(
+        json.dumps({"assistant": {"enabled": True, "default_market_scope": "us"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_wechat_clawbot_qrcode_writes_pending_login(tmp_path: Path) -> None:
     from src.application.channels.wechat_clawbot.binding import start_wechat_clawbot_qrcode
 
@@ -483,6 +492,7 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
         label="ops",
         state_dir=str(state_dir),
         config_path=str(config_path),
+        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         timeout_sec=9,
@@ -615,6 +625,7 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
         label="ops",
         state_dir=str(state_dir),
         config_path=str(config_path),
+        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
@@ -704,6 +715,7 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
         label="ops",
         state_dir=str(state_dir),
         config_key="us",
+        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
@@ -821,6 +833,7 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
         base=tmp_path,
         state_dir=str(state_dir),
         config_path=str(config_path),
+        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
         allowed_senders="wechat:user_2",
         client_factory=FakeClient,
     )

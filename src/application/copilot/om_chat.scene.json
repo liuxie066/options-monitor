@@ -1,0 +1,39 @@
+{
+  "scene": "om_chat",
+  "version": "v1",
+  "description": "General read-only options-monitor copilot",
+  "prompt_fragments": [
+    "prompts/base_behavior.md",
+    "prompts/financial_fact_rules.md",
+    "prompts/tool_rules.md",
+    "prompts/om_chat.md"
+  ],
+  "tool_selection": {
+    "mode": "toolsets",
+    "names": [
+      "analysis",
+      "candidate",
+      "close_advice",
+      "config",
+      "diagnostics",
+      "materialization",
+      "notification_perception",
+      "notifications",
+      "positions",
+      "runtime"
+    ]
+  },
+  "runtime": {
+    "max_iterations": 16,
+    "max_tool_calls": 12,
+    "max_consecutive_failed_tool_batches": 3,
+    "timeout_seconds": 180,
+    "final_answer_reserve_seconds": 45,
+    "max_context_chars": 96000,
+    "max_context_tokens": 24000
+  },
+  "conversation": {
+    "enabled": true,
+    "max_messages": 20
+  }
+}

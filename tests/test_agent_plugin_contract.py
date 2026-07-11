@@ -33,7 +33,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_logs" in tool_names
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
-    assert "assistant_trace" in tool_names
+    assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
@@ -80,13 +80,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
-    assistant_trace = next(item for item in spec["tools"] if item["name"] == "assistant_trace")
-    assert assistant_trace["risk_level"] == "read_only"
-    assert assistant_trace["requires_confirm"] is False
-    assert assistant_trace["safe_default_input"] == {"limit": 10}
-    assert "session_id" in assistant_trace["input_schema"]
-    assert "command_id" in assistant_trace["input_schema"]
-    assert "include_snapshot" in assistant_trace["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
@@ -145,6 +138,9 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert candidate_filter_explain["risk_level"] == "read_only"
     assert candidate_filter_explain["requires_confirm"] is False
     assert "symbol" in candidate_filter_explain["input_schema"]
+    assert candidate_filter_explain["safe_default_input"] == {}
+    assert candidate_filter_explain["input_json_schema"]["required"] == ["symbol"]
+    assert candidate_filter_explain["input_json_schema"]["properties"]["config_key"]["enum"] == ["us", "hk"]
 
 
 def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
@@ -186,7 +182,6 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "runtime_logs",
         "notification_perception_read",
         "operation_timeline",
-        "assistant_trace",
     } <= migrated_names
     for name in migrated_names:
         definition = get_tool_definition(name)
@@ -195,7 +190,7 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
     assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
 
 
-def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
+def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> None:
     from src.application.agent_tool_registry import get_tool_definition
     from src.application.tool_execution import build_tool_manifest as build_spec
 
@@ -210,63 +205,40 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
         "schema_version": "option_positions_read.output",
         "payload_dependent": True,
     }
-    assert tools["runtime_status"]["output_contract"]["canonical_renderer"] == "runtime_status"
-    assert tools["healthcheck"]["output_contract"]["canonical_renderer"] == "healthcheck"
-    assert tools["runtime_runs"]["output_contract"]["canonical_renderer"] == "runtime_runs"
-    assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
-    assert tools["notification_perception_read"]["output_contract"]["canonical_renderer"] == "notification_perception"
-    assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
-    assistant_trace_fields = tools["assistant_trace"]["output_contract"]["fact_fields"]
-    assert "traces[].capability_selection.selected_tools[]" in assistant_trace_fields
-    assert "traces[].compact_trace.selected_capability" in assistant_trace_fields
-    assert "traces[].compact_trace.model_turns.tool_call_count" in assistant_trace_fields
-    assert "traces[].compact_trace.tool_observations[].tool_name" in assistant_trace_fields
-    assert "traces[].compact_trace.evidence_gaps[].suggested_tool" in assistant_trace_fields
-    assert "traces[].compact_trace.stop_reason" in assistant_trace_fields
-    assert "traces[].compact_trace.answer_route" in assistant_trace_fields
-    assert "traces[].progress.next_action" in assistant_trace_fields
-    assert "traces[].progress.blocked_by[].tool_name" in assistant_trace_fields
-    assert "traces[].answer.clarification_request.questions[].slot" in assistant_trace_fields
-    assert tools["config_validate"]["output_contract"]["canonical_renderer"] == "config_validate"
-    assert tools["symbol_resolve"]["output_contract"]["canonical_renderer"] == "symbol_resolve"
     assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"
     assert "canonical_symbol" in tools["symbol_resolve"]["output_contract"]["fact_fields"]
-    assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
     assert "strategies" in tools["symbol_config_read"]["output_contract"]["model_preview_fields"]
-    assert "strategies" in tools["symbol_config_read"]["evidence_contract"]["model_preview_fields"]
     assert tools["query_cash_headroom"]["risk_level"] == "read_only"
     assert tools["query_cash_headroom"]["side_effects"] == []
-    assert tools["query_cash_headroom"]["output_contract"]["canonical_renderer"] == "cash_headroom"
-    assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
-    assert tools["analysis_catalog"]["output_contract"]["canonical_renderer"] == "analysis_catalog"
-    assert tools["analysis_catalog"]["output_contract"]["answer_surface"] == "internal"
     assert "view_names[]" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
     assert "investigation_recipes[].name" not in tools["analysis_catalog"]["output_contract"]["fact_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None
     positions_contract = positions.resolve_output_contract({"action": "list"})
-    assert positions_contract["canonical_renderer"] == "position_rows"
     assert positions_contract["stable_order"] == "expiration_asc_missing_last"
     assert "rows[].contracts_open" in positions_contract["fact_fields"]
+
+    income = get_tool_definition("monthly_income_report")
+    assert income is not None
+    income_contract = income.resolve_output_contract({})
+    assert "diagnostics[].income_amount_status" in income_contract["fact_fields"]
+    assert "diagnostics[].position_lot_snapshots_count" in income_contract["fact_fields"]
+    assert "diagnostics[].missing_fields" in income_contract["missing_data_fields"]
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
-    assert assigned_stock_contract["canonical_renderer"] == "assigned_stock_lifecycle"
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
     assert "rows[].quote_status" in assigned_stock_contract["freshness_fields"]
     assert "quote_refresh.missing_symbols" in assigned_stock_contract["missing_data_fields"]
     list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
-    assert list_wrapped_assigned_stock_contract["canonical_renderer"] == "assigned_stock_lifecycle"
-    assert positions.resolve_answer_policy({"action": ["assigned-stock"]}) == "facts_then_analysis"
+    assert list_wrapped_assigned_stock_contract == assigned_stock_contract
 
     income = get_tool_definition("monthly_income_report")
     assert income is not None
     detail_contract = income.resolve_output_contract({"include_rows": True})
-    assert detail_contract["canonical_renderer"] == "monthly_income"
-    assert detail_contract["guard_profile"] == "income_rows"
     assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
 
 
-def test_agent_tool_manifest_exposes_p1_annotations_and_evidence_contract() -> None:
+def test_agent_tool_manifest_exposes_runtime_annotations_without_answer_pipeline_metadata() -> None:
     from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
@@ -281,20 +253,10 @@ def test_agent_tool_manifest_exposes_p1_annotations_and_evidence_contract() -> N
     }
     assert runtime_status["input_schema_version"] == "om-tool-input-v1"
     assert runtime_status["output_schema"] == {}
-    assert runtime_status["evidence_contract"]["source_label"] == "OM 本地 runtime_status"
-    assert runtime_status["evidence_contract"]["canonical_renderer"] == "runtime_status"
-    assert "output_contract" in runtime_status["verifiers"]
-    assert "numeric" in runtime_status["verifiers"]
-
-    monthly_income = tools["monthly_income_report"]
-    assert monthly_income["evidence_contract"] == {
-        "schema_version": "monthly_income_report.output",
-        "payload_dependent": True,
-    }
-    assert monthly_income["verifiers"] == ["schema", "output_contract"]
-    symbol_resolve = tools["symbol_resolve"]
-    assert symbol_resolve["evidence_contract"]["result_shape"] == "scalar"
-    assert "canonical_symbol" in symbol_resolve["evidence_contract"]["fact_fields"]
+    for tool in tools.values():
+        assert "answer_policy" not in tool
+        assert "evidence_contract" not in tool
+        assert "verifiers" not in tool
 
 
 def test_agent_registry_collects_domain_tool_modules() -> None:
@@ -337,7 +299,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "query_cash_headroom" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
-    assert "assistant_trace" in PURE_READ_TOOLS
+    assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
     assert "research" not in PURE_READ_TOOLS
@@ -449,6 +411,30 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert out["schema_version"] == "1.0"
+
+
+def test_agent_tool_system_exit_becomes_config_error(monkeypatch) -> None:
+    from dataclasses import replace
+
+    import src.application.tool_execution as tool_execution
+
+    definition = tool_execution.get_tool_definition("runtime_status")
+    assert definition is not None
+
+    def reject_config(_ctx, _payload):
+        raise SystemExit("[CONFIG_ERROR] retired assistant fields")
+
+    monkeypatch.setattr(
+        tool_execution,
+        "get_tool_definition",
+        lambda name: replace(definition, handler=reject_config) if name == "runtime_status" else None,
+    )
+
+    out = tool_execution.execute_tool("runtime_status", {"config_key": "us"})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
+    assert "retired assistant fields" in out["error"]["message"]
 
 
 def test_agent_tool_execution_rejects_nested_symbol_set_before_handler() -> None:

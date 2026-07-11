@@ -111,7 +111,7 @@ def _starter_yaml_payload(
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "planner": {
+            "copilot": {
                 "enabled": True,
             },
             "active_model": "deepseek-default",
@@ -122,8 +122,8 @@ def _starter_yaml_payload(
                     "model": "deepseek-chat",
                     "api_key_env": "DEEPSEEK_API_KEY",
                     "confidence_min": 0.75,
-                    "timeout_seconds": 20,
-                    "max_output_tokens": 512,
+                    "timeout_seconds": 90,
+                    "max_output_tokens": 2048,
                 },
                 "openai-default": {
                     "provider": "openai",
@@ -131,8 +131,8 @@ def _starter_yaml_payload(
                     "model": "gpt-5.2",
                     "api_key_env": "OM_LLM_API_KEY",
                     "confidence_min": 0.75,
-                    "timeout_seconds": 20,
-                    "max_output_tokens": 512,
+                    "timeout_seconds": 90,
+                    "max_output_tokens": 2048,
                 },
             },
         },
