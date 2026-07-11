@@ -656,6 +656,35 @@ assistant:
         resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
+def test_yaml_assistant_config_omits_retired_copilot_keys(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+assistant:
+  enabled: true
+  copilot:
+    enabled: true
+    channel_scenes: [operations_diagnostics]
+    human_review: false
+""",
+    )
+
+    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+    assert cfg["assistant"]["copilot"] == {"enabled": True}
+    assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [
+        "retired assistant.copilot keys omitted: channel_scenes, human_review"
+    ]
+
+
 def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
