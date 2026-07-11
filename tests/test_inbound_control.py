@@ -10,7 +10,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant import router as assistant_router
+from src.application.assistant import inbound_service
 from src.application.assistant.capability_catalog import command_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
@@ -22,7 +22,7 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
-from src.application.assistant.router import handle_assistant_request
+from src.application.assistant.inbound_service import handle_assistant_request
 from src.application.copilot.contracts import AppResult
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.assistant.runtime import handle_assistant_turn
@@ -32,7 +32,7 @@ from src.application.assistant.settings import AssistantSettings
 def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
     return AssistantTurnResult(
         response_text=response_text,
-        render_route="router",
+        render_route="deterministic_control",
         ok=True,
         status="ok",
         data={"response_text": response_text},
@@ -74,7 +74,7 @@ def test_copilot_write_request_hands_off_to_deterministic_control_preview(
         control_arguments["raw_text"] = text
 
     monkeypatch.setattr(
-        assistant_router,
+        inbound_service,
         "run_channel_request",
         lambda **_kwargs: AppResult(
             status="control_requested",
@@ -112,7 +112,7 @@ def test_copilot_write_request_hands_off_to_deterministic_control_preview(
             ok=True,
         )
 
-    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
     out = handle_assistant_request(
         AssistantRequest(
             text=text,
@@ -170,7 +170,7 @@ def test_copilot_receives_current_conversation_pending_context(
         return AppResult(status="answered", user_response="需要明确修改哪一条预览。", ok=True)
 
     monkeypatch.setattr(InboundOperationStore, "list_pending_operations", fake_list)
-    monkeypatch.setattr(assistant_router, "run_channel_request", fake_run_channel_request)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_run_channel_request)
     out = handle_assistant_request(
         AssistantRequest(
             text="把刚才那个改一下",
@@ -196,7 +196,7 @@ def test_copilot_receives_current_conversation_pending_context(
 def test_copilot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     executed = False
     monkeypatch.setattr(
-        assistant_router,
+        inbound_service,
         "run_channel_request",
         lambda **_kwargs: AppResult(
             status="control_requested",
@@ -213,7 +213,7 @@ def test_copilot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.M
         executed = True
         raise AssertionError("control executor must not run")
 
-    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
     out = handle_assistant_request(
         AssistantRequest(
             text="请直接确认升级",
@@ -237,7 +237,7 @@ def test_control_receipt_storage_failure_does_not_mask_preview(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        assistant_router,
+        inbound_service,
         "run_channel_request",
         lambda **_kwargs: AppResult(
             status="control_requested",
@@ -269,9 +269,9 @@ def test_control_receipt_storage_failure_does_not_mask_preview(
             ok=True,
         )
 
-    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
     monkeypatch.setattr(
-        assistant_router,
+        inbound_service,
         "record_channel_turn",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("context store unavailable")),
     )

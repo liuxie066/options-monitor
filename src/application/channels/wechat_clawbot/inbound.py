@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import shlex
@@ -45,6 +46,7 @@ from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT
 from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.conversation_scope import wechat_window_conversation_id
+from src.application.copilot.host_store import CopilotHostStore
 from src.infrastructure.io_utils import utc_now
 
 
@@ -341,6 +343,7 @@ def poll_wechat_clawbot_once(
     base_url = str(state.get("base_url") or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL
     cursor_before = str(state.get("get_updates_buf") or "")
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
+    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client)
     response = client.get_updates(get_updates_buf=cursor_before)
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
     messages = extract_messages(response)
@@ -384,6 +387,7 @@ def poll_wechat_clawbot_once(
                 client=client,
                 reply_enabled=reply_enabled,
                 max_reply_chars=max_reply_chars,
+                audit_db=audit_db,
             )
             _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
             reply_binding_refresh = _refresh_bound_context_from_reply(
@@ -449,6 +453,7 @@ def poll_wechat_clawbot_once(
             "cursor_after": cursor_after or cursor_before,
             "cursor_updated": cursor_updated,
             "keepalive": keepalive_status,
+            "outbox_retry": outbox_retry,
             "results": results,
         },
         error=None if all_ok else {"code": "INBOUND_PROCESSING_FAILED", "message": "one or more WeChat ClawBot inbound messages failed"},
@@ -827,6 +832,7 @@ def _maybe_reply(
     client: WechatClawbotClient,
     reply_enabled: bool,
     max_reply_chars: int,
+    audit_db: str | None = None,
 ) -> dict[str, Any]:
     decision = decide_inbound_reply(
         inbound,
@@ -840,14 +846,25 @@ def _maybe_reply(
     context_token = message_context_token(message)
     if not to_user_id or not context_token:
         return {"attempted": True, "ok": False, "reason": "missing_reply_context"}
+    outbox, delivery_key, outbox_state = _prepare_reply_outbox(
+        audit_db=audit_db,
+        command_id=_inbound_command_id(decision.inbound_result),
+        message=message,
+        text=decision.text,
+    )
+    if outbox_state is not None:
+        return outbox_state
     try:
         api_response = client.send_text_message(
             to_user_id=to_user_id,
             context_token=context_token,
             text=decision.text,
             group_id=message_group_id(message) or None,
+            client_id=_outbox_client_id(delivery_key),
         )
     except Exception as exc:
+        if outbox is not None and delivery_key:
+            outbox.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
         return {
             "attempted": True,
             "ok": False,
@@ -855,14 +872,106 @@ def _maybe_reply(
             "error": f"{type(exc).__name__}: {exc}",
         }
     outbound_message_id = _extract_message_id(api_response)
+    ok = _response_success(api_response)
+    if outbox is not None and delivery_key:
+        if ok:
+            outbox.mark_reply_delivered(delivery_key)
+        else:
+            outbox.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response", retryable=True)
     return {
         "attempted": True,
-        "ok": _response_success(api_response),
-        "reason": decision.send_reason if _response_success(api_response) else "reply_failed",
+        "ok": ok,
+        "reason": decision.send_reason if ok else "reply_failed",
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
         "api_response": api_response,
+        **({"delivery_key": delivery_key} if delivery_key else {}),
     }
+
+
+def _prepare_reply_outbox(
+    *,
+    audit_db: str | None,
+    command_id: str | None,
+    message: dict[str, Any],
+    text: str,
+) -> tuple[CopilotHostStore | None, str | None, dict[str, Any] | None]:
+    if not str(audit_db or "").strip():
+        return None, None, None
+    key_source = str(command_id or message_id(message) or "").strip()
+    if not key_source:
+        return None, None, None
+    delivery_key = f"wechat:{key_source}"
+    store = CopilotHostStore(str(audit_db))
+    record = store.enqueue_reply(
+        delivery_key=delivery_key,
+        channel="wechat",
+        payload={
+            "to_user_id": message_user_id(message),
+            "context_token": message_context_token(message),
+            "group_id": message_group_id(message) or None,
+            "text": text,
+        },
+    )
+    status = str(record.get("status") or "")
+    if status == "delivered":
+        return store, delivery_key, {
+            "attempted": False,
+            "ok": True,
+            "reason": "idempotent_replay",
+            "delivery_key": delivery_key,
+        }
+    claimed = store.claim_reply(delivery_key=delivery_key)
+    if claimed is None:
+        return store, delivery_key, {
+            "attempted": False,
+            "ok": status not in {"terminal_failed"},
+            "reason": "reply_pending" if status != "terminal_failed" else "reply_terminal_failed",
+            "delivery_key": delivery_key,
+        }
+    return store, delivery_key, None
+
+
+def _retry_pending_wechat_reply(
+    *,
+    audit_db: str | None,
+    client: WechatClawbotClient,
+) -> dict[str, Any]:
+    if not str(audit_db or "").strip():
+        return {"attempted": False, "reason": "outbox_disabled"}
+    store = CopilotHostStore(str(audit_db))
+    record = store.claim_reply(channel="wechat")
+    if record is None:
+        return {"attempted": False, "reason": "outbox_empty"}
+    delivery_key = str(record.get("delivery_key") or "")
+    try:
+        payload = json.loads(str(record.get("payload_json") or "{}"))
+        api_response = client.send_text_message(
+            to_user_id=str(payload.get("to_user_id") or ""),
+            context_token=str(payload.get("context_token") or ""),
+            text=str(payload.get("text") or ""),
+            group_id=str(payload.get("group_id") or "").strip() or None,
+            client_id=_outbox_client_id(delivery_key),
+        )
+        ok = _response_success(api_response)
+    except Exception as exc:
+        store.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+        return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
+    if ok:
+        store.mark_reply_delivered(delivery_key)
+    else:
+        store.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response", retryable=True)
+    return {
+        "attempted": True,
+        "ok": ok,
+        "reason": "sent" if ok else "reply_failed",
+        "delivery_key": delivery_key,
+    }
+
+
+def _outbox_client_id(delivery_key: str | None) -> str | None:
+    key = str(delivery_key or "").strip()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] if key else None
 
 
 def _record_reply_receipt(

@@ -120,3 +120,19 @@ def to_payload(result: AppResult, *, include_events: bool = False) -> dict[str, 
         payload.pop("events", None)
     payload["ok"] = bool(result.ok)
     return payload
+
+
+def contract_to_payload(contract: ExecutionContract) -> dict[str, Any]:
+    return asdict(contract)
+
+
+def contract_from_payload(payload: dict[str, Any]) -> ExecutionContract:
+    return ExecutionContract(
+        contract_id=str(payload.get("contract_id") or ""),
+        request_id=str(payload.get("request_id") or ""),
+        scene_name=str(payload.get("scene_name") or ""),
+        execution_environment=str(payload.get("execution_environment") or ""),
+        input=dict(payload.get("input") or {}),
+        policy=dict(payload.get("policy") or {}),
+        decision_trace=dict(payload.get("decision_trace") or {}),
+    )

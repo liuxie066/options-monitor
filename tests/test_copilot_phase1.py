@@ -8,7 +8,11 @@ import pytest
 from src.application.copilot import tools as copilot_tools
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, CopilotScope, SceneManifest, new_id
-from src.application.copilot.control_handoff import CONTROL_PREVIEW_TOOL
+from src.application.copilot.control_handoff import (
+    CONTROL_PREVIEW_TOOL,
+    build_control_preview_request,
+    control_preview_tool_description,
+)
 from src.application.assistant.capability_catalog import preview_operation_capabilities
 from src.application.copilot.host import record_session_turn, run_contract, session_messages
 from src.application.copilot.host_store import CopilotHostStore
@@ -680,6 +684,28 @@ def test_channel_manifest_exposes_catalog_driven_control_preview_only() -> None:
     assert {spec["intent_name"] for spec in preview_specs}
     assert all(spec["risk_level"] in {"preview_write", "preview_admin"} for spec in preview_specs)
     assert all(spec["operation_action"] not in {"confirm", "cancel"} for spec in preview_specs)
+
+
+def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> None:
+    preview_specs = preview_operation_capabilities()
+    definition = control_preview_tool_description(preview_specs)
+
+    assert set(definition["input_schema"]["properties"]["intent_name"]["enum"]) == {
+        str(spec["intent_name"])
+        for spec in preview_specs
+    }
+    for spec in preview_specs:
+        arguments = {str(name): "test" for name in spec.get("arguments") or ()}
+        request, error = build_control_preview_request(
+            {"intent_name": spec["intent_name"], "arguments": arguments},
+            user_message="测试写操作预览",
+            specs=preview_specs,
+        )
+
+        assert error is None
+        assert request is not None
+        assert request["intent_name"] == spec["intent_name"]
+        assert request["source"] == "copilot_control_preview"
 
 
 def test_channel_control_preview_returns_structured_request_without_execution(monkeypatch) -> None:

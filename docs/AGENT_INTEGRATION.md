@@ -155,11 +155,15 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
 tool and not a shell bridge. It performs sender allowlist checks, message
 idempotency, and SQLite audit. Explicit commands and pending-operation replies
-enter deterministic Control; every other message enters the single read-only
-`om_chat` Copilot Scene when `assistant.copilot.enabled` is true. Copilot needs
-an explicit assistant model configuration and cannot enter confirm, cancel,
-apply, notification, config-write, ledger/trade, broker-write, service-control,
-or upgrade paths.
+enter deterministic Control; every other message enters the single read-first
+`om_chat` Copilot Scene when `assistant.copilot.enabled` is true. Copilot gets
+canonical pure-read tools and may request one validated deterministic Control
+preview; it cannot confirm, cancel, apply, or receive direct notification,
+config-write, ledger/trade, broker-write, service-control, or upgrade tools.
+
+The Host persists structured conversation memory, durable runs, cancellation,
+safe pure-read resume, coarse progress events, and an idempotent reply outbox.
+These are Host governance mechanisms, not additional business-routing layers.
 
 Remote channels require:
 

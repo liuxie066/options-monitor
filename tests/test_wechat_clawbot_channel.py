@@ -660,6 +660,64 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert receipt["api_response"] == {"ret": 91, "errmsg": "context expired"}
 
 
+def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.inbound import (
+        _outbox_client_id,
+        _prepare_reply_outbox,
+        _retry_pending_wechat_reply,
+    )
+    from src.application.copilot.host_store import CopilotHostStore
+
+    database = tmp_path / "audit.sqlite3"
+    message = {
+        "from_user_id": "user_1",
+        "group_id": "group_1",
+        "context_token": "ctx_1",
+        "message_id": "msg_1",
+    }
+    store, delivery_key, state = _prepare_reply_outbox(
+        audit_db=str(database),
+        command_id="cmd_1",
+        message=message,
+        text="结论：运行正常。",
+    )
+    assert store is not None
+    assert delivery_key == "wechat:cmd_1"
+    assert state is None
+    assert store.mark_reply_failed(delivery_key, error="temporary", retryable=True, retry_after_seconds=0)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE copilot_reply_outbox SET next_attempt_at = '2000-01-01T00:00:00+00:00' WHERE delivery_key = ?",
+            (delivery_key,),
+        )
+
+    sends: list[dict[str, object]] = []
+
+    class FakeClient:
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            sends.append(dict(kwargs))
+            return {"ret": 0, "data": {"message_id": "reply_1"}}
+
+    first_retry = _retry_pending_wechat_reply(audit_db=str(database), client=FakeClient())
+    second_retry = _retry_pending_wechat_reply(audit_db=str(database), client=FakeClient())
+
+    assert first_retry["ok"] is True
+    assert first_retry["delivery_key"] == delivery_key
+    assert second_retry == {"attempted": False, "reason": "outbox_empty"}
+    assert sends == [
+        {
+            "to_user_id": "user_1",
+            "context_token": "ctx_1",
+            "text": "结论：运行正常。",
+            "group_id": "group_1",
+            "client_id": _outbox_client_id(delivery_key),
+        }
+    ]
+    record = CopilotHostStore(database).list_replies()[0]
+    assert record["status"] == "delivered"
+    assert record["attempt_count"] == 2
+
+
 def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import build_response
     from src.application.assistant.audit import InboundAuditStore

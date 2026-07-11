@@ -45,6 +45,9 @@ def record_session_turn(
     assistant_message: str,
     *,
     host_store: CopilotHostStore | None = None,
+    tool_uses: tuple[dict[str, Any], ...] = (),
+    warnings: tuple[str, ...] = (),
+    errors: tuple[str, ...] = (),
 ) -> None:
     if host_store is not None:
         host_store.record_session_turn(
@@ -52,6 +55,9 @@ def record_session_turn(
             user_message,
             assistant_message,
             max_messages=conversation_max_messages(),
+            tool_uses=tool_uses,
+            warnings=warnings,
+            errors=errors,
         )
         return
     with _SESSION_LOCK:
@@ -95,6 +101,26 @@ def session_run_slot(
             _RUNNING_SESSIONS.discard(session_key)
 
 
+@contextmanager
+def host_lane_slot(
+    lane: str,
+    *,
+    host_store: CopilotHostStore | None,
+    limit: int,
+    ttl_seconds: int,
+):
+    if host_store is None:
+        yield True
+        return
+    lease_id = new_id("lane")
+    entered = host_store.acquire_lane(lane, lease_id, limit=limit, ttl_seconds=ttl_seconds)
+    try:
+        yield entered
+    finally:
+        if entered:
+            host_store.release_lane(lane, lease_id)
+
+
 def run_contract(
     contract: ExecutionContract,
     *,
@@ -104,14 +130,16 @@ def run_contract(
     host_store: CopilotHostStore | None = None,
     session_key: str | None = None,
     control_preview_specs: tuple[dict[str, Any], ...] = (),
+    resumed_from: str | None = None,
+    recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     run_id = new_id("run")
     if host_store is not None:
         host_store.start_run(
             run_id,
-            request_id=contract.request_id,
-            contract_id=contract.contract_id,
+            contract=contract,
             session_key=session_key,
+            resumed_from=resumed_from,
         )
     event_log = CopilotEventLog(run_id, sink=host_store.append_event if host_store is not None else None)
     finish = lambda result: _finalize(event_log, result, host_store=host_store)
@@ -190,10 +218,14 @@ def run_contract(
             user_message=user_message,
             specs=control_preview_specs,
         ),
+        recovered_observations=recovered_observations,
     )
     result = AppResult(
         status=engine_result.status,
-        user_response=engine_result.text,
+        user_response=(
+            engine_result.text
+            or ("Copilot 运行已取消。" if engine_result.status == "cancelled" else "")
+        ),
         error=engine_result.error,
         request_id=contract.request_id,
         contract_id=contract.contract_id,
@@ -255,4 +287,4 @@ def _finalize(
     return finalized
 
 
-__all__ = ["record_session_turn", "run_contract", "session_messages", "session_run_slot"]
+__all__ = ["host_lane_slot", "record_session_turn", "run_contract", "session_messages", "session_run_slot"]

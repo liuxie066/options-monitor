@@ -103,7 +103,7 @@ def _turn_render_route(*, response: dict[str, Any], route: str, data: dict[str, 
     status = str(data.get("status") or "").strip()
     if status in {"needs_user_input", "clarify", "clarification"}:
         return "clarification"
-    return route or "router"
+    return route or "unknown"
 
 
 def _turn_identifier(data: dict[str, Any], *keys: str) -> str | None:

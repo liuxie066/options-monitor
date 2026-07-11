@@ -65,6 +65,7 @@ def build_model_runner(
         last_error: Exception | None = None
         sleeper = sleep_fn or time.sleep
         for attempt in range(1, settings.max_attempts + 1):
+            _raise_if_cancelled(request)
             try:
                 if provider_api_kind(settings.provider) == "chat_completions":
                     raw = _call_chat_completion(
@@ -73,14 +74,16 @@ def build_model_runner(
                         request,
                         create_chat_completion_fn,
                     )
+                    _raise_if_cancelled(request)
                     return replace(_parse_chat_completion(raw), attempt_count=attempt)
                 raw = _call_response(settings, api_key, request, create_response_fn)
+                _raise_if_cancelled(request)
                 return replace(_parse_response(raw), attempt_count=attempt)
             except Exception as exc:
                 last_error = exc
                 if attempt >= settings.max_attempts or not _is_transient_model_error(exc):
                     break
-                sleeper(min(1.0, 0.25 * (2 ** (attempt - 1))))
+                _cancellable_sleep(min(1.0, 0.25 * (2 ** (attempt - 1))), request, sleeper)
         assert last_error is not None
         try:
             setattr(last_error, "attempt_count", attempt)
@@ -339,6 +342,25 @@ def _is_transient_model_error(exc: Exception) -> bool:
     name = type(exc).__name__.lower()
     text = str(exc).lower()
     return any(token in name or token in text for token in ("timeout", "network", "connection", "temporar"))
+
+
+def _raise_if_cancelled(request: ModelRequest) -> None:
+    if request.is_cancelled and request.is_cancelled():
+        error = RuntimeError("model request cancelled")
+        setattr(error, "cancelled", True)
+        raise error
+
+
+def _cancellable_sleep(seconds: float, request: ModelRequest, sleeper: Callable[[float], None]) -> None:
+    if request.is_cancelled is None:
+        sleeper(max(0.0, float(seconds)))
+        return
+    remaining = max(0.0, float(seconds))
+    while remaining > 0:
+        _raise_if_cancelled(request)
+        interval = min(0.1, remaining)
+        sleeper(interval)
+        remaining -= interval
 
 
 def _arguments(value: Any) -> dict[str, Any]:

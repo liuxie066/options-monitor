@@ -25,6 +25,7 @@ from src.application.channels.reply_decision import (
     permission_denied_message as _permission_denied_message,
     permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
 )
+from src.application.copilot.host_store import CopilotHostStore
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
@@ -202,6 +203,7 @@ def handle_feishu_ws_event(
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
 ) -> dict[str, Any]:
+    outbox_retry = _retry_pending_feishu_reply(settings=settings, reply_fn=reply_fn)
     inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
@@ -226,6 +228,7 @@ def handle_feishu_ws_event(
             "inbound": inbound,
             "reaction": reaction_status,
             "reply": reply_status,
+            "outbox_retry": outbox_retry,
         },
         error=inbound.get("error") if not bool(inbound.get("ok", False)) else None,
     )
@@ -377,23 +380,70 @@ def _maybe_reply(
     if not message_id:
         return {"attempted": True, "ok": False, "reason": "missing_message_id"}
     command_id = _inbound_command_id(decision.inbound_result)
+    outbox: CopilotHostStore | None = None
+    delivery_key: str | None = None
+    if str(settings.audit_db or "").strip() and command_id:
+        outbox = CopilotHostStore(str(settings.audit_db))
+        delivery_key = f"feishu:{command_id}"
+        record = outbox.enqueue_reply(
+            delivery_key=delivery_key,
+            channel="feishu",
+            payload={
+                "message_id": message_id,
+                "text": decision.text,
+                "reply_in_thread": settings.reply_in_thread,
+            },
+        )
+        if str(record.get("status") or "") == "delivered":
+            return {
+                "attempted": False,
+                "ok": True,
+                "reason": "idempotent_replay",
+                "delivery_key": delivery_key,
+            }
+        if outbox.claim_reply(delivery_key=delivery_key) is None:
+            status = str(record.get("status") or "")
+            return {
+                "attempted": False,
+                "ok": status != "terminal_failed",
+                "reason": "reply_pending" if status != "terminal_failed" else "reply_terminal_failed",
+                "delivery_key": delivery_key,
+            }
     try:
         api_response = reply_fn(
             app_id=settings.app_id,
             app_secret=settings.app_secret,
             message_id=message_id,
             text=decision.text,
-            uuid=command_id,
+            uuid=delivery_key or command_id,
             reply_in_thread=settings.reply_in_thread,
         )
     except Exception as exc:
+        if outbox is not None and delivery_key:
+            outbox.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
         return {
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    if not _reply_api_success(api_response):
+        if outbox is not None and delivery_key:
+            outbox.mark_reply_failed(
+                delivery_key,
+                error="channel returned an unsuccessful response",
+                retryable=True,
+            )
+        return {
+            "attempted": True,
+            "ok": False,
+            "reason": "reply_failed",
+            "api_response": api_response,
+            **({"delivery_key": delivery_key} if delivery_key else {}),
+        }
     outbound_message_id = _reply_api_message_id(api_response)
+    if outbox is not None and delivery_key:
+        outbox.mark_reply_delivered(delivery_key)
     return {
         "attempted": True,
         "ok": True,
@@ -401,6 +451,47 @@ def _maybe_reply(
         "message_id": message_id,
         "outbound_message_id": outbound_message_id,
         "api_response": api_response,
+        **({"delivery_key": delivery_key} if delivery_key else {}),
+    }
+
+
+def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn) -> dict[str, Any]:
+    if not str(settings.audit_db or "").strip():
+        return {"attempted": False, "reason": "outbox_disabled"}
+    store = CopilotHostStore(str(settings.audit_db))
+    record = store.claim_reply(channel="feishu")
+    if record is None:
+        return {"attempted": False, "reason": "outbox_empty"}
+    delivery_key = str(record.get("delivery_key") or "")
+    try:
+        import json
+
+        payload = json.loads(str(record.get("payload_json") or "{}"))
+        api_response = reply_fn(
+            app_id=settings.app_id,
+            app_secret=settings.app_secret,
+            message_id=str(payload.get("message_id") or ""),
+            text=str(payload.get("text") or ""),
+            uuid=delivery_key,
+            reply_in_thread=bool(payload.get("reply_in_thread")),
+        )
+    except Exception as exc:
+        store.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+        return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
+    if not _reply_api_success(api_response):
+        store.mark_reply_failed(
+            delivery_key,
+            error="channel returned an unsuccessful response",
+            retryable=True,
+        )
+        return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
+    store.mark_reply_delivered(delivery_key)
+    return {
+        "attempted": True,
+        "ok": True,
+        "reason": "sent",
+        "delivery_key": delivery_key,
+        "outbound_message_id": _reply_api_message_id(api_response),
     }
 
 
@@ -474,6 +565,12 @@ def _reply_api_message_id(api_response: Any) -> str | None:
         result.get("id"),
         result.get("client_msg_id"),
     )
+
+
+def _reply_api_success(api_response: Any) -> bool:
+    response = _dict(api_response)
+    code = response.get("code")
+    return not isinstance(code, int) or code == 0
 
 
 def _message_id_from_inbound_data(data: dict[str, Any]) -> str | None:

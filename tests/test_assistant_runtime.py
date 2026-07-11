@@ -24,7 +24,7 @@ def _request(tmp_path: Path, text: str, *, message_id: str = "m_runtime") -> Ass
 
 
 def test_freeform_turn_goes_directly_to_copilot(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant import router
+    from src.application.assistant import inbound_service
 
     captured: list[dict[str, Any]] = []
 
@@ -32,7 +32,7 @@ def test_freeform_turn_goes_directly_to_copilot(monkeypatch, tmp_path: Path) -> 
         captured.append(dict(kwargs))
         return AppResult(status="answered", user_response="7 月收益主要来自权利金。")
 
-    monkeypatch.setattr(router, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
     result = handle_assistant_turn(
         _request(tmp_path, "7月收益"),
         allowed_senders="u_runtime",
@@ -47,7 +47,7 @@ def test_freeform_turn_goes_directly_to_copilot(monkeypatch, tmp_path: Path) -> 
 
 
 def test_followup_text_is_not_reparsed_as_a_business_intent(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant import router
+    from src.application.assistant import inbound_service
 
     captured: list[str] = []
 
@@ -55,7 +55,7 @@ def test_followup_text_is_not_reparsed_as_a_business_intent(monkeypatch, tmp_pat
         captured.append(str(kwargs["user_message"]))
         return AppResult(status="answered", user_response="结论是收益集中于两个标的。")
 
-    monkeypatch.setattr(router, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
     result = handle_assistant_turn(
         _request(tmp_path, "结论呢", message_id="m_followup"),
         allowed_senders="u_runtime",
@@ -86,7 +86,7 @@ def test_slash_command_keeps_deterministic_control_path(tmp_path: Path) -> None:
 
 
 def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_path: Path) -> None:
-    from src.application.assistant import router
+    from src.application.assistant import inbound_service
 
     calls = 0
 
@@ -95,7 +95,7 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
         calls += 1
         return AppResult(status="answered", user_response="第一次回答。")
 
-    monkeypatch.setattr(router, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
     request = _request(tmp_path, "最近有哪些风险？", message_id="m_duplicate")
     settings = AssistantSettings(copilot=CopilotSettings(enabled=True))
     first = handle_assistant_turn(request, allowed_senders="u_runtime", settings=settings)
