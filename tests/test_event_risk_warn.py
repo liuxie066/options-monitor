@@ -49,6 +49,82 @@ def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
         assert out.iloc[0]["reject_stage_candidate"] == "EVENT_WARN"
 
 
+def test_sell_put_event_risk_reject_removes_candidate_and_records_reject(tmp_path: Path) -> None:
+    _add_repo_to_syspath()
+    from src.application.scan_sell_put import run_sell_put_scan
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "contract_symbol": "AAPL_PUT",
+                "currency": "USD",
+                "dte": 30,
+                "strike": 95,
+                "spot": 100,
+                "bid": 1.0,
+                "ask": 1.2,
+                "last_price": 1.1,
+                "mid": 1.1,
+                "open_interest": 100,
+                "volume": 50,
+                "implied_volatility": 0.3,
+                "delta": -0.2,
+                "multiplier": 100,
+            }
+        ]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+    output = tmp_path / "sell_put_candidates.csv"
+
+    out = run_sell_put_scan(
+        symbols=["AAPL"],
+        input_root=tmp_path,
+        output=output,
+        min_annualized_net_return=0.01,
+        min_net_income=1,
+        min_open_interest=1,
+        min_volume=1,
+        event_risk_cfg={
+            "enabled": True,
+            "mode": "reject",
+            "as_of_date": "2026-04-01",
+            "snapshot": {
+                "symbols": {
+                    "AAPL": {
+                        "source_status": "ok",
+                        "events": [{"type": "earnings", "date": "2026-05-01"}],
+                    }
+                }
+            },
+        },
+        quiet=True,
+    )
+
+    assert out.empty
+    reject_log = pd.read_csv(output.with_name("sell_put_candidates_reject_log.csv"))
+    assert list(reject_log["reject_rule"]) == ["event_risk_reject"]
+
+    trace_path = output.with_name("candidate_filter_trace.jsonl")
+    trace_rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    matching = [row for row in trace_rows if row.get("contract_symbol") == "AAPL_PUT"]
+    assert [row["status"] for row in matching] == ["rejected"]
+    assert [row["rule"] for row in matching] == ["risk_event_reject"]
+
+
+def test_event_risk_mode_rejects_unknown_value() -> None:
+    import pytest
+
+    _add_repo_to_syspath()
+    from src.application.event_risk_filter import normalize_event_risk_cfg
+
+    with pytest.raises(ValueError, match="event_risk.mode must be one of"):
+        normalize_event_risk_cfg({"mode": "drop"})
+
+
 def test_event_risk_uses_current_position_window() -> None:
     from tempfile import TemporaryDirectory
 

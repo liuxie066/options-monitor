@@ -709,8 +709,6 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "delta",
         "gamma",
         "data_quality_flags",
-        "optimizer_tier",
-        "optimizer_reason",
     )
     out = {key: _normalize_public_value(key, row.get(key)) for key in keys if row.get(key) not in (None, "")}
     canonical = _row_symbol(row)

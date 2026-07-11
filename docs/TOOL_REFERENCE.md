@@ -762,8 +762,6 @@ om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","acco
 - 输出 deterministic exit state：`profit_capture`、`risk_exit`、`take_profit`、`salvage`、`let_expire`、`hold`、`not_evaluable`
 - 收益增强腿会输出专用动作：`close_put_keep_call`、`hold_put_keep_call`、`sell_call_take_profit`、`hold_call_as_convexity` 等
 - `not_evaluable` 行会进入待补数据链路，不会被当成已定价建议
-- `optimizer_switch` 是 advisory-only redeploy 建议，必须携带 `alternative_symbol` / `alternative_contract_symbol` / `alternative_source_path` 等替代候选证据；没有候选报告证据时不会产生换仓建议
-
 示例：
 
 ```bash

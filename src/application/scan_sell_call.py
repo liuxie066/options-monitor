@@ -87,7 +87,6 @@ from src.application.candidate_models import CandidateBaseValues, CandidateContr
 
 
 COVERED_CALL_DISPLAY = strategy_display_name(STRATEGY_COVERED_CALL)
-SHARES_MIN_ERROR = f"shares 必须至少 100，{COVERED_CALL_DISPLAY} 才有意义。"
 
 
 def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> CandidateContractInput:
@@ -339,9 +338,6 @@ def run_sell_call_scan(
     quiet: bool = False,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
-    if shares < 100:
-        raise ValueError(SHARES_MIN_ERROR)
-
     threshold = validate_min_annualized_net_premium_return(
         min_annualized_net_return,
         source="--min-annualized-net-return",
@@ -471,10 +467,7 @@ def main(argv: list[str] | None = None) -> int:
             quiet=args.quiet,
         )
     except ValueError as e:
-        msg = str(e)
-        if msg == SHARES_MIN_ERROR:
-            raise SystemExit(msg)
-        raise SystemExit(f"[ARG_ERROR] {msg}")
+        raise SystemExit(f"[ARG_ERROR] {e}")
 
     return 0
 

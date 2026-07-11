@@ -138,6 +138,37 @@ def test_candidate_engine_stage0_rejects_missing_and_mismatched_input() -> None:
     assert rejects[1]["threshold"] == "put"
 
 
+def test_candidate_engine_stage0_rejects_non_finite_and_crossed_quotes() -> None:
+    from domain.domain.engine import evaluate_candidate_input
+
+    base = {
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-06-18",
+        "dte": 30,
+        "spot": 150,
+        "strike": 140,
+        "mid": 2.35,
+        "multiplier": 100,
+    }
+
+    non_finite = evaluate_candidate_input(
+        {**base, "bid": float("inf"), "ask": 2.4},
+        mode="put",
+    )
+    assert non_finite["accepted"] is False
+    assert non_finite["rejects"][0]["reason"] == "input_invalid"
+    assert non_finite["rejects"][0]["threshold"] == ["bid"]
+
+    crossed = evaluate_candidate_input(
+        {**base, "bid": 2.5, "ask": 2.4},
+        mode="put",
+    )
+    assert crossed["accepted"] is False
+    assert crossed["rejects"][0]["reason"] == "input_invalid"
+    assert crossed["rejects"][0]["threshold"] == "ask >= bid"
+
+
 def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
     from domain.domain.engine import STAGE_HARD_CONSTRAINTS, evaluate_candidate_hard_constraints
 

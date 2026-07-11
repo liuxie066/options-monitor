@@ -17,6 +17,7 @@ from typing import Callable, Iterable
 
 from src.application.config_profiles import deep_merge
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+from domain.domain.candidate_defaults import resolve_event_risk_config
 from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
@@ -26,6 +27,7 @@ from src.application.yield_enhancement_config import (
     wants_yield_enhancement_separate,
 )
 from src.application.symbol_mutations import normalize_symbol_read
+from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_net_income',
@@ -56,15 +58,8 @@ def _resolve_pipeline_symbol_max_workers(cfg: dict, symbol_count: int) -> int:
 
 
 def _extract_event_risk_cfg(side_cfg: dict) -> dict:
-    default = {"enabled": True, "mode": "warn"}
     raw = side_cfg.get("event_risk")
-    if not isinstance(raw, dict):
-        return default
-    out = dict(default)
-    out.update(raw)
-    out["enabled"] = bool(out.get("enabled", True))
-    out["mode"] = str(out.get("mode") or "warn").strip().lower() or "warn"
-    return out
+    return resolve_event_risk_config(raw if isinstance(raw, dict) else None)
 
 
 def _apply_event_snapshot_path(item: dict, snapshot_path: str | None) -> dict:
@@ -166,6 +161,7 @@ def resolve_watchlist_item_runtime_config(
     resolved['_global_sell_call_event_risk'] = _extract_event_risk_cfg(
         _resolve_profile_side_cfg(item, profiles, 'sell_call'),
     )
+    validate_resolved_watchlist_item_runtime_config(resolved)
     return resolved
 
 

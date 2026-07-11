@@ -19,10 +19,6 @@ def is_high_priority_notification(text: str) -> bool:
     return bool(re.search(r"(?m)^重点:\s*$", text or ""))
 
 
-OPTIMIZER_SWITCH_LABEL = "强烈建议平仓换仓"
-OPTIMIZER_CLOSE_LABEL = "建议平仓"
-OPTIMIZER_SWITCH_TAG = " 🔄"
-OPTIMIZER_CLOSE_TAG = " ⚠️"
 SELL_PUT_ACTION_LABEL = strategy_action_label(STRATEGY_SELL_PUT)
 SELL_PUT_SECTION_LABEL = strategy_section_label(STRATEGY_SELL_PUT)
 COVERED_CALL_ACTION_LABEL = strategy_action_label(STRATEGY_COVERED_CALL)
@@ -51,58 +47,6 @@ def _looks_like_option_candidate_line(text: str) -> bool:
     if not s:
         return False
     return bool(_ISO_EXPIRY_RE.search(s) or _COMPACT_EXPIRY_RE.search(s) or _OPTION_STRIKE_RE.search(s))
-
-
-def _is_optimizer_detail_line(line: str) -> bool:
-    return str(line or "").strip().startswith("- 优化器:")
-
-
-def _next_nonblank_line(lines: list[str], idx: int) -> str:
-    for item in lines[idx + 1:]:
-        if str(item or "").strip():
-            return str(item)
-    return ""
-
-
-def _is_optimizer_close_line(line: str, next_line: str) -> bool:
-    stripped = str(line or "").rstrip()
-    return (
-        OPTIMIZER_CLOSE_LABEL in stripped
-        and OPTIMIZER_SWITCH_LABEL not in stripped
-        and _is_optimizer_detail_line(next_line)
-    )
-
-
-def _highlight_optimizer_lines(text: str) -> str:
-    if not text:
-        return text
-    out_lines: list[str] = []
-    raw_lines = text.splitlines()
-    for idx, ln in enumerate(raw_lines):
-        stripped = ln.rstrip()
-        if OPTIMIZER_SWITCH_LABEL in stripped and not stripped.endswith(OPTIMIZER_SWITCH_TAG):
-            out_lines.append(stripped + OPTIMIZER_SWITCH_TAG)
-        elif _is_optimizer_close_line(stripped, _next_nonblank_line(raw_lines, idx)) and not stripped.endswith(
-            OPTIMIZER_CLOSE_TAG
-        ):
-            out_lines.append(stripped + OPTIMIZER_CLOSE_TAG)
-        else:
-            out_lines.append(ln)
-    return "\n".join(out_lines)
-
-
-def count_optimizer_actions(text: str) -> tuple[int, int]:
-    if not text:
-        return (0, 0)
-    switch_n = 0
-    close_n = 0
-    raw_lines = text.splitlines()
-    for idx, ln in enumerate(raw_lines):
-        if OPTIMIZER_SWITCH_LABEL in ln:
-            switch_n += 1
-        elif _is_optimizer_close_line(ln, _next_nonblank_line(raw_lines, idx)):
-            close_n += 1
-    return (switch_n, close_n)
 
 
 def _is_covered_call_line(text: str) -> bool:
@@ -232,7 +176,6 @@ def build_account_message(
     put_n = sum(1 for ln in kept if _is_sell_put_line(ln))
     call_n = sum(1 for ln in kept if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in kept if _is_yield_enhancement_line(ln))
-    switch_n, close_n = count_optimizer_actions(result.notification_text)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
@@ -245,12 +188,9 @@ def build_account_message(
     counts_line = f"- {SELL_PUT_SECTION_LABEL} {put_n} / {COVERED_CALL_SECTION_LABEL} {call_n}"
     if enhancement_n > 0:
         counts_line += f" / Combo Yield {enhancement_n}"
-    if switch_n > 0 or close_n > 0:
-        counts_line += f" / 优化器 换仓{switch_n} 平仓{close_n}"
     lines.append(counts_line)
     lines.append('')
     body = annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip()
-    body = _highlight_optimizer_lines(body)
     lines.append(body)
     lines.append('')
 
@@ -452,14 +392,12 @@ def build_account_message_compact(
 
     text = result.notification_text.strip()
     body = annotate_notification(result.account, text + '\n').strip()
-    body = _highlight_optimizer_lines(body)
     candidate_raw, _reject_raw, close_raw = _split_monitor_sections(body)
     candidate_lines = _compact_candidate_lines(candidate_raw)
     close_lines, close_action_n, close_gap_n = _compact_close_lines(close_raw)
     put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
     call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
-    switch_n, close_n = count_optimizer_actions(text)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
@@ -473,8 +411,6 @@ def build_account_message_compact(
     if close_gap_n > 0:
         overview_parts.append(f"待补 {close_gap_n}")
     lines.append(f"状态：{' · '.join(overview_parts)}")
-    if switch_n > 0 or close_n > 0:
-        lines.append(f"优化器：换仓 {switch_n} · 平仓 {close_n}")
     lines.append('')
 
     lines.append("候选")

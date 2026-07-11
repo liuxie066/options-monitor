@@ -181,6 +181,53 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
         assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
 
 
+def test_scan_sell_call_uses_contract_multiplier_for_share_capacity(tmp_path: Path) -> None:
+    _add_repo_to_syspath()
+    from src.application.scan_sell_call import run_sell_call_scan
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "SMALL",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "dte": 30,
+                "contract_symbol": "SMALL_CALL",
+                "multiplier": 10,
+                "currency": "USD",
+                "strike": 110.0,
+                "spot": 100.0,
+                "bid": 1.0,
+                "ask": 1.2,
+                "last_price": 1.1,
+                "mid": 1.1,
+                "open_interest": 100,
+                "volume": 50,
+                "implied_volatility": 0.3,
+                "delta": 0.2,
+            }
+        ]
+    ).to_csv(parsed / "SMALL_required_data.csv", index=False)
+
+    out = run_sell_call_scan(
+        symbols=["SMALL"],
+        input_root=tmp_path,
+        output=tmp_path / "sell_call_candidates.csv",
+        avg_cost=90.0,
+        shares=10,
+        min_annualized_net_return=0.01,
+        min_net_income=1,
+        min_open_interest=1,
+        min_volume=1,
+        quiet=True,
+    )
+
+    assert list(out["contract_symbol"]) == ["SMALL_CALL"]
+    assert int(out.iloc[0]["covered_contracts_available"]) == 1
+
+
 def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
     _add_repo_to_syspath()
     from src.application.scan_sell_call import run_sell_call_scan
