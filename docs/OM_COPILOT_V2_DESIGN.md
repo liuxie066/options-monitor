@@ -378,9 +378,19 @@ python3 scripts/copilot_p1_eval.py \
 ```
 
 The output contract is `om.copilot.p1_eval.v3`. Structural, evidence, and
-human answer-quality results are separate gates. Human scores can be supplied
-with `--review-input`; a reviewed case passes at 10/12 or higher. The report
-records the model actually configured at runtime and must not assume a provider.
+human answer-quality results are separate gates. Human review applies to the
+exact saved report without rerunning the model:
+
+```bash
+python3 scripts/copilot_p1_eval.py \
+  --review-report /tmp/om-copilot-p1.json \
+  --review-input /tmp/om-copilot-p1-review.json \
+  --output /tmp/om-copilot-p1-reviewed.json
+```
+
+The review input must contain every report case and all six 0..2 dimensions;
+a reviewed case passes at 10/12 or higher. The report records the model actually
+configured at runtime and must not assume a provider.
 
 ## Delivery Phases
 
