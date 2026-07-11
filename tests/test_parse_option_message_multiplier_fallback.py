@@ -50,3 +50,17 @@ def test_parse_futu_us_fill_infers_usd_when_currency_missing(monkeypatch) -> Non
     assert out["ok"] is True
     assert out["parsed"]["symbol"] == "PLTR"
     assert out["parsed"]["currency"] == "USD"
+
+
+def test_parse_futu_us_fill_uses_symbol_currency_with_hong_kong_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.parse_option_message.resolve_multiplier_with_source",
+        lambda **_kwargs: (100, "cache"),
+    )
+    msg = "【成交提醒】成功卖出1张$PDD 260626 78.00P$，成交价格：1.43，2026/06/12 01:06:23 (香港)。【富途证券(香港)】 sy"
+
+    out = parse_option_message_text(msg, accounts=["lx", "sy"])
+
+    assert out["ok"] is True
+    assert out["parsed"]["symbol"] == "PDD"
+    assert out["parsed"]["currency"] == "USD"

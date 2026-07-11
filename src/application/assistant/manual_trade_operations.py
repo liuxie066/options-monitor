@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
 
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
@@ -982,12 +983,18 @@ def render_manual_trade_response(
     fields = cast(dict[str, Any], raw_fields) if isinstance(raw_fields, dict) else {}
     if operation_type == "manual_open":
         title = "交易记录预览已更新：开仓" if status == "updated" else ("交易记录预览：开仓" if status == "previewed" else "交易已写入 OM 本地账本：开仓")
+        raw_currency = normalize_currency(args.get("currency"))
+        final_currency = str(fields.get("currency") or raw_currency or "-")
+        currency_text = f"币种：{final_currency}"
+        if raw_currency and raw_currency != final_currency:
+            currency_text += f"（原始 {raw_currency}，已按{fields.get('symbol') or args.get('symbol') or '标的'}自动修正）"
         lines = [
             title,
             f"账户：{fields.get('account') or args.get('account') or '-'}",
             f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
             f"方向：{fields.get('side') or args.get('side') or '-'} {fields.get('option_type') or args.get('option_type') or '-'}",
             f"数量：{args.get('contracts') or '-'} 张",
+            currency_text,
         ]
     elif operation_type == "manual_close":
         title = "交易记录预览已更新：平仓" if status == "updated" else ("交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓")

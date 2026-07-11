@@ -864,6 +864,46 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "verify=verified_applied" in timeline_out["data"]["response_text"]
 
 
+def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/record-open sy PDD short put strike 78 exp 2026-06-26 1张 premium 1.43 multiplier 100 currency:HKD",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_currency_repair",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["arguments"]["currency"] == "HKD"
+    assert preview["data"]["preview"]["fields"]["currency"] == "USD"
+    assert "币种：USD（原始 HKD，已按PDD自动修正）" in preview["data"]["response_text"]
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_currency_repair_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert ledger_repository.SQLiteOptionPositionsRepository(sqlite_path).list_trade_events()[0]["currency"] == "USD"
+
+
 def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3344,14 +3384,17 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "accounts": ["lx", "sy"],
                         "net_return_rate": 0.071619,
                         "net_income_by_ccy": {"HKD": 50291.0, "USD": 890.0},
+                        "net_return_rate_by_ccy": {"HKD": 0.071, "USD": 0.08},
                         "net_income_cny": 57295.0,
                         "cash_secured_cny": 800000.0,
                         "annualized_basis_days": 31,
                         "annualized_net_return_rate": 0.843096,
                         "premium_income_by_ccy": {"HKD": 60331.0, "USD": 890.0},
+                        "premium_return_rate_by_ccy": {"HKD": 0.085, "USD": 0.08},
                         "premium_income_cny": 62263.0,
                         "premium_return_rate": 0.077829,
                         "realized_pnl_by_ccy": {"HKD": 16159.0, "USD": 0.0},
+                        "realized_return_rate_by_ccy": {"HKD": 0.0228, "USD": 0.0},
                         "realized_pnl_cny": 17167.0,
                         "realized_return_rate": 0.021459,
                     }
@@ -3362,6 +3405,7 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "account": "lx",
                         "net_return_rate": 0.1316,
                         "net_income_by_ccy": {"HKD": 32525.0},
+                        "net_return_rate_by_ccy": {"HKD": 0.1316},
                         "net_income_cny": 35842.0,
                         "cash_secured_cny": 272355.0,
                     },
@@ -3370,6 +3414,7 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "account": "sy",
                         "net_return_rate": 0.0406,
                         "net_income_by_ccy": {"HKD": 17766.0, "USD": 890.0},
+                        "net_return_rate_by_ccy": {"HKD": 0.039, "USD": 0.08},
                         "net_income_cny": 21453.0,
                         "cash_secured_cny": 527645.0,
                     },
@@ -3378,10 +3423,10 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
         ),
     )
 
-    assert text.startswith("收益统计完成（OM 本地账本）：\n全部账户 2026-05 收益摘要")
-    assert "净现金流：CNY 57,295（HKD 50,291 + USD 890） | 现金流率 7.16%" in text
-    assert "分账户：\n- lx：净现金流 CNY 35,842（HKD 32,525） | 现金流率 13.16%" in text
-    assert "口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。" in text
+    assert text.startswith("收益统计完成（OM 本地账本）：\n全部账户 2026-05 收益摘要（按币种）")
+    assert "净现金流：HKD 50,291 + USD 890 | 现金流率 HKD 7.10%，USD 8.00%" in text
+    assert "分账户：\n- lx：净现金流 HKD 32,525 | 现金流率 HKD 13.16%" in text
+    assert "口径：金额和收益率按原币分别列示，不跨币种合并。" in text
 
 
 def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> None:
