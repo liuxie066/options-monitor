@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import resolve_pending_operation_or_raise
 from src.application.assistant.operation_status_text import operation_candidate_hint
 from src.application.assistant.operation_store import InboundOperationStore
@@ -96,7 +96,7 @@ def parse_permission_response(
     *,
     request: AssistantRequest,
     store: InboundOperationStore,
-) -> PerceptionResult | None:
+) -> ControlCommand | None:
     parsed = _parse_permission_text(text)
     if parsed is None:
         return None
@@ -127,7 +127,7 @@ def parse_permission_response(
         store=store,
     )
     intent_name = resolved_family.confirm_intent if action == "confirm" else resolved_family.cancel_intent
-    return PerceptionResult(
+    return ControlCommand(
         intent_name=intent_name,
         arguments={
             "operation_id": resolved_operation_id,
@@ -135,13 +135,6 @@ def parse_permission_response(
         },
         source="permission_response",
         confidence=1.0,
-        evidence={
-            "permission_response": {
-                "action": action,
-                "family": resolved_family.key,
-                "operation_id": resolved_operation_id,
-            }
-        },
     )
 
 

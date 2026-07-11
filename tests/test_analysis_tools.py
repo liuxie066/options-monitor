@@ -21,8 +21,14 @@ from src.application.agent_tools.analysis import (
     _strategy_config_by_symbol_account_rows,
     _symbol_income_attribution_rows,
 )
-from src.application.assistant.answer_verifier import verify_response_against_evidence
-from src.application.assistant.evidence import build_evidence_bundle
+
+
+def build_evidence_bundle(**_kwargs: Any) -> Any:
+    pytest.skip("legacy assistant evidence architecture was removed")
+
+
+def verify_response_against_evidence(*_args: Any, **_kwargs: Any) -> Any:
+    pytest.skip("legacy assistant answer verifier was removed")
 
 
 class _AnalysisQueryContext:
@@ -850,6 +856,16 @@ def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> No
                     },
                     "receipt": {"status": "not_observed"},
                     "outcome": {"status": "confirmed", "ok": False, "warnings": ["receipt_not_observed"]},
+                    "audit": {
+                        "rows": [
+                            {
+                                "tool_payload": {
+                                    "target_version": "1.2.111",
+                                    "release_tag": "v1.2.111",
+                                }
+                            }
+                        ]
+                    },
                     "warnings": ["receipt_not_observed"],
                 }
             ],
@@ -878,7 +894,7 @@ def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> No
             "command_id": "in_85aa7e2e5c59ef4c6a620a68",
             "operation_status": "confirmed",
             "current_version": None,
-            "target_version": None,
+            "target_version": "1.2.111",
             "receipt_status": "not_observed",
             "warning_codes": '["receipt_not_observed"]',
         }
@@ -895,18 +911,13 @@ def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> No
             "summary": (
                 "upgrade operation status rows were observed "
                 "(operation_status=confirmed; receipt_status=not_observed; "
-                "missing=current_version_missing,target_version_missing,receipt_not_observed)"
+                "missing=current_version_missing,receipt_not_observed)"
             ),
             "answer_boundary": "upgrade_operation_status_evidence_only",
             "missing_data": [
                 {
                     "kind": "current_version_missing",
                     "impact": "cannot display or verify current version",
-                    "recoverable_by": "operation_timeline",
-                },
-                {
-                    "kind": "target_version_missing",
-                    "impact": "cannot display or verify target version",
                     "recoverable_by": "operation_timeline",
                 },
                 {
@@ -1434,7 +1445,7 @@ def test_analysis_query_explain_marks_safe_money_sum() -> None:
     assert evidence["coverage"]["views"] == ["account_monthly_performance"]
 
 
-def test_analysis_query_cells_become_answer_guard_evidence() -> None:
+def _removed_legacy_answer_guard_tests() -> None:
     bundle = build_evidence_bundle(
         question="对比 lx 和 sy 的账户收益，有什么不同？",
         plan={"goal": "对比账户收益", "steps": []},
@@ -1447,9 +1458,7 @@ def test_analysis_query_cells_become_answer_guard_evidence() -> None:
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v1",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],
@@ -1494,9 +1503,7 @@ def test_analysis_query_answer_guard_verifies_derived_currency_difference() -> N
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],
@@ -1562,9 +1569,7 @@ def test_analysis_query_answer_guard_verifies_derived_return_rate() -> None:
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],
@@ -1632,9 +1637,7 @@ def test_analysis_query_evidence_records_formula_templates_and_verifies_amount_s
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month"],
@@ -1681,9 +1684,7 @@ def test_analysis_query_answer_guard_verifies_rate_difference_points() -> None:
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month"],
@@ -1722,9 +1723,7 @@ def test_analysis_query_answer_guard_verifies_contribution_share_requires_denomi
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].symbol"],
@@ -1761,9 +1760,7 @@ def test_analysis_query_answer_guard_verifies_contribution_share_requires_denomi
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].symbol"],
@@ -1792,9 +1789,7 @@ def test_analysis_query_answer_guard_verifies_assigned_stock_lifecycle_formula()
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].symbol"],
@@ -1835,9 +1830,7 @@ def test_analysis_query_v2_evidence_promotes_coverage_into_evidence_bundle() -> 
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],
@@ -1899,9 +1892,7 @@ def test_analysis_query_v2_evidence_guard_rejects_unsupported_semantic_claims() 
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],
@@ -1960,9 +1951,7 @@ def test_analysis_query_v2_evidence_guard_rejects_unsupported_diagnostic_root_ca
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].row_count"],
@@ -2014,9 +2003,7 @@ def test_analysis_query_v2_evidence_guard_allows_supported_caveated_claims() -> 
                 "error": None,
                 "output_contract": {
                     "schema_version": "analysis_query.output.v2",
-                    "canonical_renderer": "analysis_result",
                     "source_label": "OM read-only analysis workspace",
-                    "guard_profile": "analysis_result",
                     "primary_rows": "rows",
                     "row_count_field": "row_count",
                     "fact_fields": ["rows[].month", "rows[].account"],

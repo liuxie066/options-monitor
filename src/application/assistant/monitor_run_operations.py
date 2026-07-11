@@ -11,7 +11,7 @@ from domain.domain.symbol_identity import symbol_market
 from src.application.account_config import accounts_from_config, normalize_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
     build_action_lifecycle,
     build_cancelled_operation_response,
@@ -35,7 +35,7 @@ _OUTPUT_LIMIT = 4000
 
 
 def handle_monitor_run_operation(
-    intent: PerceptionResult,
+    intent: ControlCommand,
     request: AssistantRequest,
     *,
     command_id: str,

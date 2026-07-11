@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.379 - 2026-07-11
+
+### Added
+- Added a production-side Copilot P1 evaluation harness with fixed free-form questions, read-only tool assertions, scope checks, and sanitized result capture.
+- Added the single `om_chat` Scene prompt pack and persistent Host session/run/event storage for the Service + Host + Agent runtime.
+
+### Changed
+- Rebuilt inbound free-form handling around one generic read-only Copilot Agent loop while keeping explicit commands and confirmed writes in deterministic Control.
+- Unified model access, tool projection, result admission, channel audit, and follow-up context around the new Copilot runtime.
+
+### Removed
+- Removed the legacy Assistant perception, reasoning, evidence, verifier, task-contract, and session pipeline, together with task-specific Copilot routing and projection modules.
+
+### Fixed
+- Preserved explicit UI scope over model-generated tool arguments, converted tool exits into recoverable observations, rejected leaked tool protocol, and aligned required tool inputs with their implementations.
+
 ## 1.2.378 - 2026-07-10
 
 ### Added

@@ -45,9 +45,8 @@ for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.
 
-`./om copilot ...` is the local/eval entry for Copilot v2 read-only
-answer-quality work. It is part of the human CLI surface, not the Tool Gateway
-manifest and not the Inbound Assistant channel path:
+`./om copilot ...` is the local/eval entry for the read-only Copilot. It is part
+of the human CLI surface, not the Tool Gateway manifest:
 
 ```text
 ./om copilot run|eval
@@ -58,24 +57,12 @@ manifest and not the Inbound Assistant channel path:
    and admits the final AppResult
 ```
 
-Current Copilot v2 answer-quality rollout is local/eval first for analysis
-scenes; `operations_diagnostics` and `monthly_income_attribution` are
-channel-ready in the current slice.
-Channel adapters must not
-call the Host or Agent directly. By default, free-form channel text
-continues to return `NATURAL_LANGUAGE_REBUILDING`. If
-`assistant.copilot.enabled` is explicitly set to `true`, the Inbound Assistant
-routes free-form text through a narrow Copilot channel facade. The facade only
-executes a channel-ready scene when that scene is explicitly allowlisted in
-`assistant.copilot.channel_scenes` and an explicit assistant model configuration
-is available; otherwise it returns a controlled `not_ready` result and does not
-call tools. It also limits concurrent Copilot analysis to one run per channel
-conversation in the current service process; a second same-conversation run
-returns `not_ready` before Host execution. Host-backed channel runs persist a
-sanitized Copilot event summary in the existing inbound audit record; full raw
-`AppEvent` payloads remain outside channel audit. If
-`assistant.copilot.human_review=true`, Host-backed channel answers are held for
-manual review while the sanitized audit/event summary is retained.
+The same Service, Host, Scene, Agent, and pure-read tool projection serve local
+and channel questions. Channel adapters call the Copilot channel facade rather
+than Host or Agent directly. There is one Scene, `om_chat`; no per-question
+Scene selection or channel Scene allowlist exists. Host-backed channel runs
+persist their session, run, and event lifecycle in the Copilot Host store and a
+sanitized summary in the inbound audit record.
 
 ## Research, Shadow Replay, And Strategy Lab
 
@@ -128,18 +115,18 @@ Strategy Lab = strategy evolution product surface
 
 ## Inbound Flow
 
-Remote chat control intentionally separates channel transport from Inbound
-control. The current CLI namespace remains `./om assistant ...`, and the
-current implementation path remains `src/application/assistant/...`:
+Remote messages intentionally separate channel transport from application
+execution. The current CLI namespace remains `./om assistant ...`:
 
 ```text
 Feishu / future channels
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
 -> sender allowlist / idempotency
--> command parser or pending-operation permission parser
--> deterministic reasoning/action/rendering
--> audit / session / operation persistence
+-> explicit command or pending-operation reply?
+   -> deterministic Control
+   otherwise -> Copilot Service -> Host -> om_chat Agent
+-> audit / operation persistence
 -> channel reply
 ```
 
@@ -148,69 +135,41 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
-`AssistantRequest`, the audit row, conversation context, pending-operation
-store, and durable operator trace in the inbound SQLite tables form the current
-Inbound Assistant boundary. They are not a separate runtime service or a second
-pending-operation store.
-Protocol command parsing, bound permission responses, sender allowlist checks,
-SQLite audit, preview/confirm operations, and user-facing rendering are owned by
-`src.application.assistant`.
+`AssistantRequest`, the inbound audit row, and the pending-operation store form
+the deterministic Control boundary. Protocol command parsing, bound permission
+responses, sender allowlist checks, previews, confirmations, applies, and
+operation receipts are owned by `src.application.assistant`.
 
-The current implementation path still contains files named `runtime.py`,
-`router.py`, `perception.py`, `reasoning.py`, `action.py`, and
-`observation.py`; those are implementation handles inside one Inbound Assistant
-control plane, not separate product runtime layers. `assistant.mode` is retired
-and unsupported. `assistant.agent_loop.enabled` is accepted only as a legacy
-no-op compatibility field; it does not enable free-form execution.
+Every message that is not explicit Control protocol enters the read-only
+Copilot path. Copilot Service prepares the execution contract, Host owns
+session/run/event governance and the `om_chat` Scene, and Agent/Engine own the
+generic model/tool loop. The model can use only canonical pure-read tools. It
+cannot enter preview, confirmation, notification, config-write, ledger/trade,
+broker-write, service-control, or upgrade paths.
 
-LLM providers are configuration/diagnostic surfaces only in the current
-runtime. Free-form natural-language execution is disabled by default:
-non-slash, non-permission messages return `NATURAL_LANGUAGE_REBUILDING`,
-perform no tool calls, and do not fall back to a generic planner or ordinary
-LLM chat. The optional `assistant.copilot.enabled` gate only routes free-form
-text into the Copilot Service boundary. `operations_diagnostics` and
-`monthly_income_attribution` are channel-ready in the current slice; channel
-execution requires `assistant.copilot.channel_scenes` to explicitly allowlist
-the selected scene and explicit assistant model configuration. Missing readiness, scene allowlist,
-or model configuration returns `not_ready` before any tool call.
-Deterministic OM tools own facts, and write actions remain behind
-preview/confirm gates.
+There is no business intent router, multi-Scene catalog, planner fallback,
+evidence pipeline, or synthetic Assistant Agent session. Missing model
+configuration or unavailable evidence produces an explicit Copilot failure; it
+does not fall back to ordinary chat or deterministic business templates.
 
-Model selection is a control-plane concern. `config.yaml` may define multiple
+Model selection is a startup/configuration concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
 `config build-assistant` resolves that into one flat `assistant.llm` in
-`config.assistant.json`. Runtime, router, perception, reasoning, action, and
-tool execution must not depend on model profiles or choose models per message.
+`config.assistant.json`. Control and tool execution do not choose models per
+message.
 
-Inbound uses one explicit command/permission contract. Slash commands enter
-through the ProtocolGate command parser and never call LLM. Bound confirm/cancel phrases
-such as `确认升级` enter PermissionResponseGate only when they match an
-existing pending operation in the same sender/channel/conversation scope.
-All other non-slash natural language is rejected with
-`NATURAL_LANGUAGE_REBUILDING` unless the disabled-by-default Copilot gate is
-explicitly enabled. Deterministic code is limited to protocol parsing,
-permission binding, explicit command payload construction, tool execution,
-validators, renderers, operation apply boundaries, and the narrow Copilot
-channel facade; it must not recover natural-language business intent through
-unrelated command fallback.
+Inbound uses one explicit command/permission contract. Slash commands never call
+the model. Bound confirm/cancel phrases such as `确认升级` enter the permission
+path only when they match an existing pending operation in the same
+sender/channel/conversation scope. All other text enters Copilot. Deterministic
+code must not recover natural-language business intent through unrelated command
+fallback.
 Any preview-write result can only enter an existing pending-operation path.
 Confirm, cancel, apply, notifications, direct config writes, ledger/trade
 writes, and service operations remain outside model authority.
 
-```text
-Perceive   -> AssistantRequest / channel context
-Understand -> PerceptionResult or NATURAL_LANGUAGE_REBUILDING
-Decide     -> ReasoningResolution / permission decision
-Act        -> ActionResult / ToolResult / PendingOperation
-Observe    -> ObservationResponse / audited reply
-```
-
-ProtocolGate and PermissionResponseGate emit `PerceptionResult`. Tool-name
-selection, config-scoped payload construction, capability support, safety class
-validation, and confirmation requirements are owned by
-`src.application.assistant.reasoning`. Execution is owned by
-`src.application.assistant.action`, and response shaping is owned by
-`src.application.assistant.observation`.
+Control emits one `ControlExecution`; Copilot emits one Host-owned `AppResult`.
+Neither path recreates perception/reasoning/action/observation stages.
 
 ## Runtime Tick Flow
 

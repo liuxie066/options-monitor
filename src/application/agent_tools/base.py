@@ -11,9 +11,7 @@ ToolHandlerResult = tuple[dict[str, Any], list[str], dict[str, Any]]
 ToolHandler = Callable[["AgentToolContext", dict[str, Any]], ToolHandlerResult]
 InputValidator = Callable[[dict[str, Any]], None]
 WriteRequestPredicate = Callable[[dict[str, Any]], bool]
-AnswerPolicyResolver = Callable[[dict[str, Any]], str | None]
 OutputContractResolver = Callable[[dict[str, Any]], dict[str, Any] | None]
-PlannerSemanticsResolver = Callable[[dict[str, Any]], dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -49,7 +47,6 @@ class AgentToolContext:
     get_exchange_rates: Callable[..., Any]
     build_notification: Callable[..., str]
     collect_operation_timeline: Callable[..., dict[str, Any]]
-    collect_assistant_trace: Callable[..., dict[str, Any]]
     check_version_update: Callable[..., dict[str, Any]]
     update_local_version: Callable[..., dict[str, Any]]
     collect_runtime_runs: Callable[..., dict[str, Any]]
@@ -92,13 +89,8 @@ class AgentTool:
     examples: tuple[dict[str, Any], ...] = ()
     write_request_predicate: WriteRequestPredicate | None = field(default=None, repr=False, compare=False)
     input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
-    answer_policy: str = "default"
-    answer_policy_resolver: AnswerPolicyResolver | None = field(default=None, repr=False, compare=False)
     output_contract: dict[str, Any] = field(default_factory=dict)
     output_contract_resolver: OutputContractResolver | None = field(default=None, repr=False, compare=False)
-    planner_notes: tuple[str, ...] = ()
-    planner_semantics: dict[str, Any] = field(default_factory=dict)
-    planner_semantics_resolver: PlannerSemanticsResolver | None = field(default=None, repr=False, compare=False)
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -126,7 +118,7 @@ class AgentTool:
             tool_name=self.name,
             payload=payload,
             schema=schema,
-            enforce_required=False,
+            enforce_required=True,
         )
         if self.input_validator is not None:
             self.input_validator(payload)
@@ -144,26 +136,12 @@ class AgentTool:
             additional_properties=True,
         )
 
-    def resolve_answer_policy(self, payload: dict[str, Any]) -> str:
-        if self.answer_policy_resolver is not None:
-            resolved = self.answer_policy_resolver(payload)
-            if resolved:
-                return str(resolved)
-        return self.answer_policy
-
     def resolve_output_contract(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.output_contract_resolver is not None:
             resolved = self.output_contract_resolver(payload)
             if isinstance(resolved, dict) and resolved:
                 return deepcopy(resolved)
         return deepcopy(self.output_contract)
-
-    def resolve_planner_semantics(self, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self.planner_semantics_resolver is not None:
-            resolved = self.planner_semantics_resolver(dict(context or {}))
-            if isinstance(resolved, dict) and resolved:
-                return deepcopy(resolved)
-        return deepcopy(self.planner_semantics)
 
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
@@ -185,12 +163,7 @@ class AgentTool:
             "requires_env": list(self.requires_env),
             "safe_default_input": dict(self.safe_default_input),
             "examples": deepcopy(list(self.examples)),
-            "answer_policy": self.answer_policy,
             "output_contract": output_contract,
-            "evidence_contract": _manifest_evidence_contract(output_contract),
-            "verifiers": _manifest_verifiers(self, output_contract),
-            "planner_notes": list(self.planner_notes),
-            "planner_semantics": self.resolve_planner_semantics({}),
         }
 
 
@@ -202,42 +175,6 @@ def _manifest_annotations(tool: AgentTool) -> dict[str, bool]:
         "idempotent": bool(tool.read_only and not tool.side_effects and not tool.requires_confirm),
         "open_world": bool(tool.requires_env or risk_level in {"preview_admin", "remote_admin"}),
     }
-
-
-def _manifest_evidence_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
-    if not output_contract:
-        return {}
-    evidence_keys = {
-        "schema_version",
-        "payload_dependent",
-        "source_label",
-        "canonical_renderer",
-        "guard_profile",
-        "result_shape",
-        "primary_rows",
-        "row_count_field",
-        "fact_fields",
-        "freshness_fields",
-        "missing_data_fields",
-        "calculation_fields",
-        "model_preview_fields",
-    }
-    return {key: deepcopy(value) for key, value in output_contract.items() if key in evidence_keys}
-
-
-def _manifest_verifiers(tool: AgentTool, output_contract: dict[str, Any]) -> list[str]:
-    verifiers: list[str] = ["schema"]
-    if output_contract:
-        verifiers.append("output_contract")
-    if output_contract.get("freshness_fields"):
-        verifiers.append("freshness")
-    if output_contract.get("missing_data_fields"):
-        verifiers.append("missing_data")
-    if output_contract.get("fact_fields"):
-        verifiers.append("numeric")
-    if tool.requires_confirm or tool.resolved_risk_level() in {"preview_write", "preview_admin"}:
-        verifiers.append("receipt")
-    return list(dict.fromkeys(verifiers))
 
 
 def build_agent_tool(
@@ -259,13 +196,8 @@ def build_agent_tool(
     examples: tuple[dict[str, Any], ...] = (),
     write_request_predicate: WriteRequestPredicate | None = None,
     input_validator: InputValidator | None = None,
-    answer_policy: str = "default",
-    answer_policy_resolver: AnswerPolicyResolver | None = None,
     output_contract: dict[str, Any] | None = None,
     output_contract_resolver: OutputContractResolver | None = None,
-    planner_notes: tuple[str, ...] = (),
-    planner_semantics: dict[str, Any] | None = None,
-    planner_semantics_resolver: PlannerSemanticsResolver | None = None,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -289,13 +221,8 @@ def build_agent_tool(
         examples=examples,
         write_request_predicate=write_request_predicate,
         input_validator=input_validator,
-        answer_policy=answer_policy,
-        answer_policy_resolver=answer_policy_resolver,
         output_contract=deepcopy(output_contract or {}),
         output_contract_resolver=output_contract_resolver,
-        planner_notes=planner_notes,
-        planner_semantics=deepcopy(planner_semantics or {}),
-        planner_semantics_resolver=planner_semantics_resolver,
     )
 
 
@@ -344,7 +271,6 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.scan_scheduler import decide as scheduler_decide
     from src.application.scan_scheduler import read_state as read_scheduler_state
     from src.application.assistant.operation_diagnostics import collect_operation_timeline
-    from src.application.assistant.session_store import collect_assistant_trace
     from src.application.version_check import check_version_update, update_local_version
     from domain.domain.fetch_source import resolve_symbol_fetch_source
     from domain.domain.ledger.position_fields import normalize_account
@@ -441,7 +367,6 @@ def build_default_agent_tool_context() -> AgentToolContext:
         get_exchange_rates=_get_exchange_rates,
         build_notification=build_notification,
         collect_operation_timeline=collect_operation_timeline,
-        collect_assistant_trace=collect_assistant_trace,
         check_version_update=check_version_update,
         update_local_version=update_local_version,
         collect_runtime_runs=collect_runtime_runs,

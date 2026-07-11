@@ -73,7 +73,6 @@ def _assistant_settings_for_cli(
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
             copilot=configured.copilot,
-            planner=configured.planner,
             llm=configured.llm,
         )
     return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
@@ -98,7 +97,7 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_commands.add_argument("--format", choices=("json", "text"), default="json")
     assistant_capabilities = assistant_sub.add_parser(
         "capabilities",
-        help="list supported assistant capabilities and LLM routing surface",
+        help="list deterministic Control capabilities",
     )
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
     assistant_memory = assistant_sub.add_parser("memory", help="manage assistant memory proposals")
@@ -329,7 +328,7 @@ def _check_assistant_model_profile(
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "planner": {"enabled": True},
+            "copilot": {"enabled": True},
             "llm": profile.llm_config(),
         }
     }

@@ -13,7 +13,7 @@ from src.application.config_validator import validate_config
 from src.application.config_yaml import RESOLVED_KEY, load_yaml_config_file
 from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_freshness import GENERATED_KEY, infer_runtime_config_market
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -35,7 +35,7 @@ SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def handle_symbol_operation(
-    intent: PerceptionResult,
+    intent: ControlCommand,
     request: AssistantRequest,
     *,
     command_id: str,

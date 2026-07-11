@@ -360,6 +360,21 @@ def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Pat
     assert meta["source_files"][0]["path"] == str(trace_path.resolve())
 
 
+def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+
+    data, warnings, _meta = candidate_filter_explain_tool(
+        {"runtime_root": str(tmp_path / "runtime"), "symbol": "NVDA"},
+        repo_base=lambda: tmp_path / "repo",
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    assert data["trace_count"] == 0
+    assert data["evidence_status"] == "trace_files_missing"
+    assert data["conclusion_status"] == "indeterminate"
+    assert any(item.startswith("no_trace_files:") for item in warnings)
+
+
 def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(tmp_path: Path) -> None:
     from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (

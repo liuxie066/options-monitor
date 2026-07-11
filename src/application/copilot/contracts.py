@@ -59,6 +59,7 @@ class CopilotRequest:
     source_entry: str
     user_message: str
     explicit_scope: CopilotScope = field(default_factory=CopilotScope)
+    context_messages: tuple[dict[str, Any], ...] = ()
     execution_environment: str = "local"
     debug_overrides: dict[str, Any] = field(default_factory=dict)
 
@@ -72,35 +73,6 @@ class ExecutionContract:
     input: dict[str, Any]
     policy: dict[str, Any]
     decision_trace: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class CapabilityHintDefinition:
-    capability: str
-    activation_terms: tuple[tuple[str, ...], ...] = ()
-    activation_reason: str | None = None
-    required_scope: tuple[str, ...] = ()
-    tools: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class SceneDefinition:
-    name: str
-    capabilities: tuple[str, ...]
-    required_scope: tuple[str, ...]
-    allowed_tools: tuple[str, ...]
-    environments: tuple[str, ...]
-    phase_readiness: str
-    requires_answer_synthesis: bool = False
-    requires_recommendations: bool = False
-    allow_mock_observations: bool = False
-    mock_environments: tuple[str, ...] = ()
-    fixture_ids: tuple[str, ...] = ()
-    capability_hints: tuple[CapabilityHintDefinition, ...] = ()
-    task_guidance: tuple[str, ...] = ()
-    answer_dimensions: tuple[str, ...] = ()
-    tool_static_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
-    output_schema: dict[str, Any] = field(default_factory=lambda: {"type": "AnswerReport"})
 
 
 @dataclass(frozen=True)
@@ -128,20 +100,10 @@ class AppEvent:
 
 
 @dataclass(frozen=True)
-class AnswerReport:
-    conclusion: str
-    attempted_checks: list[str] = field(default_factory=list)
-    findings: list[dict[str, Any]] = field(default_factory=list)
-    recommendations: list[dict[str, Any]] = field(default_factory=list)
-    missing_data: list[str] = field(default_factory=list)
-    evidence_refs: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
 class AppResult:
     status: str
     user_response: str = ""
-    answer_report: AnswerReport | None = None
+    error: dict[str, Any] | None = None
     request_id: str | None = None
     contract_id: str | None = None
     run_id: str | None = None

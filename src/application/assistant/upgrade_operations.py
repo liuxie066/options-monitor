@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -40,7 +40,7 @@ _FINAL_RECEIPT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 
 
 def handle_upgrade_operation(
-    intent: PerceptionResult,
+    intent: ControlCommand,
     request: AssistantRequest,
     *,
     command_id: str,

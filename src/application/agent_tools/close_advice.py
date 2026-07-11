@@ -7,9 +7,7 @@ from src.application.agent_tools.base import AgentTool, AgentToolContext, build_
 
 _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "close_advice_read.output.v1",
-    "canonical_renderer": "position_exit_analysis",
     "source_label": "OM 本地 Close Advice 报告",
-    "guard_profile": "position_exit_analysis",
     "primary_rows": "rows",
     "row_count_field": "row_count",
     "fact_fields": [
@@ -49,13 +47,20 @@ def _close_advice_read_tool(
 
 CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     name="close_advice_read",
-    description="Read existing close-advice report rows and filter them without refreshing market data or writing reports.",
+    description=(
+        "Read and filter the latest existing close-advice report without refreshing market data or writing reports. "
+        "Treat the returned run/source timestamp as the data freshness boundary."
+    ),
     requires=("local_close_advice_report",),
     capabilities=("close_advice", "position_exit_analysis", "read_only"),
     input_schema={
-        "config_key": "us|hk",
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
         "config_path": "optional explicit config path",
-        "market_scope": "optional us|hk|all close-advice market filter; all searches cross-market reports",
+        "market_scope": {
+            "type": "string",
+            "enum": ["us", "hk", "all"],
+            "description": "Optional close-advice market filter; all searches cross-market reports",
+        },
         "query": "optional object with account, symbol, option_type, side, strike, expiration, limit",
         "run_id": "optional output_runs run id",
         "runs_root": "optional output_runs root",
@@ -67,7 +72,6 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
-    answer_policy="facts_then_analysis",
     output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
 )
 

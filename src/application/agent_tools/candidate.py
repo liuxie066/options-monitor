@@ -17,9 +17,7 @@ from src.application.symbol_aliases import symbol_aliases_from_config
 
 _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_filter_explain.output.v1",
-    "canonical_renderer": "candidate_filter_explain",
     "source_label": "OM candidate filter trace",
-    "guard_profile": "candidate_filter",
     "primary_rows": "functions",
     "row_count_field": "trace_count",
     "fact_fields": [
@@ -28,6 +26,8 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
         "raw_symbol",
         "scope.account",
         "scope.account_semantics",
+        "evidence_status",
+        "conclusion_status",
         "trace_count",
         "status_counts",
         "function_counts",
@@ -47,6 +47,8 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
         "functions[].events[].message",
     ],
     "missing_data_fields": [
+        "evidence_status",
+        "conclusion_status",
         "trace_count",
     ],
 }
@@ -123,49 +125,27 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     ),
 )
 
-_CANDIDATE_FILTER_PLANNER_NOTES: tuple[str, ...] = (
-    "Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.",
-    "symbol can be canonical, Chinese name, Futu code, or alias such as 泡泡玛特; the tool resolves it before matching trace rows.",
-    "account is optional scan/run scope only, not business semantics for symbol identity.",
-    "For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.",
-)
-
-_CANDIDATE_FILTER_PLANNER_SEMANTICS: dict[str, Any] = {
-    "data_source": "candidate_filter_trace.jsonl artifacts discovered from runtime root/latest output_runs",
-    "answer_capabilities": {
-        "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
-        "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
-        "read_only": "does not run scans, fetch market data, send notifications, or write reports",
-    },
-    "scope_semantics": {
-        "account": "scan/run scope only; omit to search all account trace artifacts in scope",
-        "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
-        "run_id omitted": "searches runtime last-run pointer, recent output_runs, and shared trace fallbacks; pass run_id when a specific run is required",
-    },
-    "not_promised": [
-        "inferring root cause when trace rows are missing",
-        "rerunning candidate scans",
-        "aggregated rule comparisons across runs",
-    ],
-    "answer_rules": [
-        "If trace_count is zero, say the candidate diagnostic is missing and cannot determine the exact filtering parameter.",
-        "Use rule, metric_value, threshold, status, stage, contract_symbol, expiration, and strike from tool events as evidence.",
-        "Do not present account as symbol identity or business ownership.",
-    ],
-}
-
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     description=(
         "Explain why a symbol was rejected, post-filtered, accepted, or not observed across candidate "
-        "filter functions from existing trace rows."
+        "filter functions from existing trace rows. When conclusion_status is indeterminate, the trace "
+        "does not support a rejection reason or prove that the symbol was not processed."
     ),
     requires=("candidate_filter_trace",),
     capabilities=("candidate_filter_trace", "filter_explain", "read_only"),
     input_schema={
-        "symbol": "required canonical symbol, company name, or alias, for example NVDA, 0700.HK, or 泡泡玛特",
-        "config_key": "optional us|hk; when present, include runtime-config symbol aliases",
-        "config_path": "optional explicit config path; system-injected for Inbound planner calls",
+        "symbol": {
+            "type": "string",
+            "required": True,
+            "description": "Canonical symbol, company name, or alias, for example NVDA, 0700.HK, or 泡泡玛特",
+        },
+        "config_key": {
+            "type": "string",
+            "enum": ["us", "hk"],
+            "description": "Optional market config; when present, include runtime-config symbol aliases",
+        },
+        "config_path": "optional explicit config path",
         "runtime_root": "optional explicit runtime root; defaults from config_path, OM_RUNTIME_ROOT, service profile, and repo root",
         "account": "optional scan-scope account label; not part of symbol identity",
         "function": (
@@ -184,19 +164,21 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "run_dir": "optional explicit output_runs/<run_id> directory",
         "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
         "trace_path": "optional explicit candidate_filter_trace.jsonl path",
-        "trace_paths": "optional list of trace jsonl paths",
+        "trace_paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional list of candidate_filter_trace.jsonl paths",
+        },
     },
     handler=_candidate_filter_explain_tool,
     pure_read=True,
-    safe_default_input={"symbol": "NVDA"},
+    safe_default_input={},
     examples=(
         {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
         {"input": {"run_id": "20260514T100000Z", "symbol": "泡泡玛特"}},
         {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
-    planner_notes=_CANDIDATE_FILTER_PLANNER_NOTES,
-    planner_semantics=_CANDIDATE_FILTER_PLANNER_SEMANTICS,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

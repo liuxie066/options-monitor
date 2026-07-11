@@ -41,9 +41,9 @@ Use existing assistant naming:
 | Name | Meaning |
 |---|---|
 | `assistant_memory` | read-only long-term memory source |
-| `assistant_trace` | audit surface for explicit proposal commands |
+| `operation_timeline` | audit surface for explicit Control operations |
+| Copilot Host store | sessions, runs, and model/tool events for free-form Copilot |
 | `session_memory` | future short-term summarization surface, not implemented |
-| `EvidenceBundle` | tool evidence surface; memory is not evidence |
 
 Do not introduce product terms for memory journals or decision logs unless a
 specific later feature needs them.

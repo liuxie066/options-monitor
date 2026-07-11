@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 711 (`src`: 422, `domain`: 52, `scripts`: 7, `tests`: 230)
-- Internal import edges: 3736 total, 1752 production/script edges excluding tests
+- Python files scanned: 691 (`src`: 399, `domain`: 52, `scripts`: 8, `tests`: 232)
+- Internal import edges: 3650 total, 1689 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,23 +33,23 @@ flowchart LR
   storage["domain.storage"]
   application -->|228| domain
   application -->|2| domain_services
-  application -->|107| infrastructure
+  application -->|103| infrastructure
   application -->|34| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|1| domain
-  interfaces -->|114| application
+  interfaces -->|113| application
   interfaces -->|2| domain
-  scripts -->|2| application
+  scripts -->|5| application
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1374| application
+  tests -->|1349| application
   tests -->|291| domain
   tests -->|2| domain_services
-  tests -->|93| infrastructure
-  tests -->|180| interfaces
-  tests -->|8| scripts
+  tests -->|94| infrastructure
+  tests -->|179| interfaces
+  tests -->|10| scripts
   tests -->|18| storage
 ```
 
@@ -58,14 +58,14 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 228 |
-| interfaces | application | 114 |
-| application | infrastructure | 107 |
+| interfaces | application | 113 |
+| application | infrastructure | 103 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
+| scripts | application | 5 |
 | application | domain_services | 2 |
 | interfaces | domain | 2 |
 | domain_services | storage | 2 |
-| scripts | application | 2 |
 | scripts | storage | 2 |
 | infrastructure | domain | 1 |
 | storage | domain | 1 |
@@ -75,12 +75,12 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1374 |
+| tests | application | 1349 |
 | tests | domain | 291 |
-| tests | interfaces | 180 |
-| tests | infrastructure | 93 |
+| tests | interfaces | 179 |
+| tests | infrastructure | 94 |
 | tests | storage | 18 |
-| tests | scripts | 8 |
+| tests | scripts | 10 |
 | tests | domain_services | 2 |
 
 ## Compressed Production Package Graph
@@ -90,14 +90,14 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 119 |
-| src.interfaces | src.application | 94 |
-| src.application | src.infrastructure | 77 |
+| src.interfaces | src.application | 93 |
+| src.application | src.infrastructure | 73 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
 | src.application.positions | src.application | 18 |
 | src.application | src.application.multi_tick | 17 |
-| src.application | src.application.settings | 17 |
 | src.application | domain.domain.engine | 16 |
+| src.application | src.application.settings | 16 |
 | src.application.research | src.application | 16 |
 | src.application.ledger | domain.domain | 15 |
 | src.application.multi_tick | src.application | 14 |
@@ -124,6 +124,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application.settings | 4 |
 | src.interfaces | src.application.ledger | 4 |
 | src.interfaces | src.application.trades | 4 |
+| scripts | src.application | 4 |
 | src.application | src.application.trades | 3 |
 | src.interfaces | src.application.positions | 3 |
 | src.interfaces | src.application.research | 3 |
@@ -133,7 +134,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.multi_tick | domain.storage | 2 |
 | src.application.trades | src.application.positions | 2 |
 | domain.services | domain.storage | 2 |
-| scripts | src.application | 2 |
 | scripts | domain.storage | 2 |
 | src.application.inbound | domain.domain | 1 |
 | src.application.inbound | src.application.settings | 1 |
@@ -175,19 +175,19 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 84 |
+| src.application.agent_tool_contracts | 75 |
 | src.infrastructure.io_utils | 43 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 38 |
-| src.application.agent_tool_config | 29 |
-| src.application.assistant.contracts | 27 |
+| src.application.agent_tool_config | 28 |
 | src.application.config_loader | 26 |
-| src.application.settings | 25 |
+| src.application.settings | 24 |
 | src.application.ledger.api | 23 |
 | src.application.account_config | 21 |
 | domain.domain.trade_contract_identity | 20 |
 | src.application.runtime_cli_format | 20 |
 | domain.domain.engine | 18 |
+| src.application.assistant.contracts | 18 |
 | src.application.shadow_replay.common | 18 |
 | domain.storage.repositories | 17 |
 
@@ -195,7 +195,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
-| src.application.agent_tools.base | 32 |
+| src.application.agent_tools.base | 31 |
 | src.application.multi_account_tick | 26 |
 | src.application.channels.wechat_clawbot.inbound | 23 |
 | src.interfaces.cli.main | 23 |
@@ -204,12 +204,12 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.queries | 20 |
 | src.application.multi_tick.required_data_prefetch | 20 |
 | src.application.pipeline_runtime | 20 |
-| src.application.agent_tools.runtime_status_impl | 18 |
+| src.application.agent_tools.runtime_status_impl | 19 |
 | src.application.sell_put_steps | 17 |
 | src.application.trades.auto_intake | 17 |
 | src.application.account_run | 16 |
-| src.application.assistant.runtime | 16 |
 | src.application.assistant.symbol_operations | 16 |
+| src.application.assistant.inbound_control | 15 |
 
 ## Reading
 

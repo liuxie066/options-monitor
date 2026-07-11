@@ -9,23 +9,19 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.capability_catalog import command_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
     AssistantTurnResult,
-    PERCEPTION_RESULT_SCHEMA_VERSION,
-    REASONING_RESOLUTION_SCHEMA_VERSION,
-    PerceptionResult,
-    ToolCall,
+    ControlCommand,
 )
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
-from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
 from src.application.assistant.runtime import handle_assistant_turn
-from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings
 
 
@@ -133,8 +129,8 @@ def _runtime_cfg(data_config_ref: str, *, market: str = "us") -> dict:
     }
 
 
-def _read_intent(intent_name: str, arguments: dict[str, Any] | None = None) -> PerceptionResult:
-    return PerceptionResult(intent_name=intent_name, arguments=dict(arguments or {}), source="test")
+def _read_intent(intent_name: str, arguments: dict[str, Any] | None = None) -> ControlCommand:
+    return ControlCommand(intent_name=intent_name, arguments=dict(arguments or {}), source="test")
 
 
 def _enable_inbound_trade_write(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,7 +175,7 @@ def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
         """
 assistant:
   enabled: true
-  planner:
+  copilot:
     enabled: true
   active_model: openai-default
   models:
@@ -199,7 +195,7 @@ assistant:
             {
                 "assistant": {
                     "enabled": True,
-                    "planner": {"enabled": True},
+                    "copilot": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "base_url": "https://api.openai.com/v1",
@@ -223,7 +219,6 @@ assistant:
 def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     assert parse_assistant_command("/status").intent_name == "runtime_status"
     assert parse_assistant_command("/health").intent_name == "healthcheck"
-    assert parse_deterministic_text("/pending").intent_name == "pending_operations"
     assert parse_assistant_command("/pending").intent_name == "pending_operations"
 
     for text in (
@@ -236,12 +231,7 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
         "查看监控标的",
         "现在泡泡玛特 sell put的max strike是多少？",
     ):
-        try:
-            parse_deterministic_text(text)
-        except AgentToolError as err:
-            assert err.code == "NEEDS_CLARIFICATION"
-        else:
-            raise AssertionError(f"{text} should not be routed by deterministic read parsing")
+        assert parse_assistant_command(text) is None
 
     positions = parse_assistant_command("/positions sy")
     assert positions.intent_name == "position_query"
@@ -290,14 +280,6 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
 
 
-def test_inbound_parser_requires_clarification_for_unknown_command() -> None:
-    with pytest.raises(AgentToolError) as exc:
-        parse_deterministic_text("查一下")
-
-    assert exc.value.code == "NEEDS_CLARIFICATION"
-    assert "自然语言请求不能通过 deterministic parser 处理" in exc.value.message
-
-
 def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None:
     _config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
 
@@ -315,8 +297,8 @@ def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None
     )
 
     assert out["ok"] is True
-    assert out["data"]["perception"]["intent_name"] == "model_list"
-    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.model"
+    assert out["data"]["control"]["intent_name"] == "model_list"
+    assert out["data"]["control"]["tool_name"] == "inbound.model"
     assert out["data"]["summary"]["active_model"] == "openai-default"
     assert {item["name"] for item in out["data"]["models"]} == {"openai-default", "deepseek-default"}
     assert "当前模型：openai-default" in out["data"]["response_text"]
@@ -379,11 +361,11 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
     assert denied.reason == "sender_not_allowed"
 
     with pytest.raises(AgentToolError) as exc:
-        enforce_tool_allowed(ToolCall(tool_name="scan_opportunities", payload={"config_key": "us"}))
+        enforce_tool_allowed("scan_opportunities")
 
     assert exc.value.code == "PERMISSION_DENIED"
     with pytest.raises(AgentToolError) as close_exc:
-        enforce_tool_allowed(ToolCall(tool_name="get_close_advice", payload={"config_key": "us"}))
+        enforce_tool_allowed("get_close_advice")
 
     assert close_exc.value.code == "PERMISSION_DENIED"
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
@@ -546,10 +528,10 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "未写入账本" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["diagnostics"]["raw_symbol"] == "NVDA"
     assert preview["data"]["payload"]["diagnostics"]["multiplier_source"] == "payload"
-    assert preview["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.manual_trade"
-    assert preview["data"]["reasoning"]["safety_class"] == "write_preview"
-    assert preview["data"]["reasoning"]["requires_confirmation"] is True
-    assert preview["data"]["reasoning"]["intent_name"] == "manual_trade_open"
+    assert preview["data"]["control"]["tool_name"] == "inbound.manual_trade"
+    assert preview["data"]["control"]["safety_class"] == "write_preview"
+    assert preview["data"]["control"]["requires_confirmation"] is True
+    assert preview["data"]["control"]["intent_name"] == "manual_trade_open"
 
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_assistant_request(
@@ -569,26 +551,26 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert confirmed["data"]["operation_resolution"] == "explicit"
     assert confirmed["data"]["resolved_operation_id"] == operation_id
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
-    assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.manual_trade"
-    assert confirmed["data"]["reasoning"]["safety_class"] == "write_apply"
-    assert confirmed["data"]["reasoning"]["requires_confirmation"] is False
-    assert confirmed["data"]["reasoning"]["intent_name"] == "manual_trade_confirm"
+    assert confirmed["data"]["control"]["tool_name"] == "inbound.manual_trade"
+    assert confirmed["data"]["control"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["control"]["requires_confirmation"] is False
+    assert confirmed["data"]["control"]["intent_name"] == "manual_trade_confirm"
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
     with sqlite3.connect(audit_db) as conn:
         rows = conn.execute(
             """
-            SELECT message_id, reasoning_json
+            SELECT message_id, control_json
             FROM inbound_command_audit
             WHERE message_id IN ('msg_open_preview', 'msg_open_confirm')
             ORDER BY id
             """
         ).fetchall()
-    audit_plans = {row[0]: json.loads(row[1]) for row in rows}
-    assert audit_plans["msg_open_preview"]["reason"] == "write_preview_operation"
-    assert "记录开仓 sy NVDA" in audit_plans["msg_open_preview"]["arguments"]["raw_text"]
-    assert audit_plans["msg_open_confirm"]["reason"] == "confirmed_write_operation"
-    assert audit_plans["msg_open_confirm"]["arguments"] == {
+    audit_controls = {row[0]: json.loads(row[1]) for row in rows}
+    assert audit_controls["msg_open_preview"]["reason"] == "write_preview_operation"
+    assert "记录开仓 sy NVDA" in audit_controls["msg_open_preview"]["payload"]["raw_text"]
+    assert audit_controls["msg_open_confirm"]["reason"] == "confirmed_write_operation"
+    assert audit_controls["msg_open_confirm"]["payload"] == {
         "operation_id": operation_id,
         "operation_resolution": "permission_response",
     }
@@ -779,7 +761,7 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
             "parser": "rule",
             "intent_name": "manual_trade_open",
             "tool_name": "inbound.manual_trade",
-            "reasoning": {"safety_class": "write_preview", "requires_confirmation": True},
+            "control": {"safety_class": "write_preview", "requires_confirmation": True},
             "decision": "executed",
             "result_ok": True,
             "response": {
@@ -806,7 +788,7 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
             "parser": "rule",
             "intent_name": "manual_trade_confirm",
             "tool_name": "inbound.manual_trade",
-            "reasoning": {"safety_class": "write_apply", "requires_confirmation": False},
+            "control": {"safety_class": "write_apply", "requires_confirmation": False},
             "decision": "executed",
             "result_ok": True,
             "response": {
@@ -842,7 +824,7 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
             "parser": "rule",
             "intent_name": "pending_operations",
             "tool_name": "inbound.pending",
-            "reasoning": {"safety_class": "read_only", "requires_confirmation": False},
+            "control": {"safety_class": "read", "requires_confirmation": False},
             "decision": "executed",
             "result_ok": True,
             "response": {"ok": True, "data": {"pending_count": 0, "response_text": "none"}},
@@ -1228,9 +1210,9 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
     trade_id = trade_preview["data"]["operation_id"]
     assert pending["ok"] is True
-    assert pending["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.pending"
-    assert pending["data"]["reasoning"]["read_only"] is True
-    assert pending["data"]["reasoning"]["tool_call"]["payload"]["conversation_id"] == "feishu:chat_a:ou_1"
+    assert pending["data"]["control"]["tool_name"] == "inbound.pending"
+    assert pending["data"]["control"]["safety_class"] == "read"
+    assert pending["data"]["control"]["payload"]["conversation_id"] == "feishu:chat_a:ou_1"
     assert pending["data"]["pending_count"] == 1
     assert pending["data"]["pending_operations"][0]["operation_id"] == trade_id
     assert "当前待确认：1 条" in pending["data"]["response_text"]
@@ -1339,9 +1321,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert preview["data"]["response_text"].startswith("升级预览：立即升级")
     assert "未执行升级" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
-    assert preview["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.upgrade"
-    assert preview["data"]["reasoning"]["safety_class"] == "admin_preview"
-    assert preview["data"]["reasoning"]["requires_confirmation"] is True
+    assert preview["data"]["control"]["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["control"]["safety_class"] == "admin_preview"
+    assert preview["data"]["control"]["requires_confirmation"] is True
     assert calls[-1]["check"] is True
 
     operation_id = preview["data"]["operation_id"]
@@ -1365,9 +1347,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert "目标版本：1.2.111" in confirmed["data"]["response_text"]
     assert "当前版本：-" not in confirmed["data"]["response_text"]
     assert "目标版本：-" not in confirmed["data"]["response_text"]
-    assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.upgrade"
-    assert confirmed["data"]["reasoning"]["safety_class"] == "write_apply"
-    assert confirmed["data"]["reasoning"]["requires_confirmation"] is False
+    assert confirmed["data"]["control"]["tool_name"] == "inbound.upgrade"
+    assert confirmed["data"]["control"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["control"]["requires_confirmation"] is False
     assert all("confirm" not in call for call in calls if "check" not in call)
 
     worker = upgrade_operations.run_confirmed_upgrade_operation(
@@ -1469,35 +1451,10 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert cancelled["data"]["preview"]["summary"]["target_version"] == "1.2.111"
     assert len(calls) == 1
 
-    trace = collect_assistant_trace(audit_db=str(audit_db), command_id=operation_id)
-    assert trace["trace_count"] == 2
-    entry = trace["traces"][0]
-    assert entry["identity"]["command_id"] == operation_id
-    assert entry["task"]["state"] == "done"
-    assert entry["task"]["goal"] == "升级预览：1.2.110 -> 1.2.111 status dry_run"
-    assert entry["answer"]["response_status"] == "cancelled"
-    assert entry["permission_state"]["pending_operation_ids"] == []
-    assert entry["permission_state"]["operation_status"] == "cancelled"
-    tool = entry["tools"][0]
-    assert tool["tool_name"] == "inbound.upgrade"
-    assert tool["payload"]["operation_id"] == operation_id
-    assert tool["payload"]["operation_type"] == "upgrade_now"
-    assert tool["payload"]["status"] == "cancelled"
-    assert tool["postcheck"]["status"] == "pass"
-    assert any(item["hook"] == "operation_readback" and item["status"] == "pass" for item in tool["hook_results"])
-    preview_entry = trace["traces"][1]
-    assert preview_entry["identity"]["command_id"] == operation_id
-    assert preview_entry["task"]["state"] == "waiting_for_permission"
-    assert preview_entry["answer"]["response_status"] == "preview"
-    assert preview_entry["permission_state"]["pending_operation_ids"] == [operation_id]
-    trace_text = trace["response_text"]
-    assert "任务：升级预览：1.2.110 -> 1.2.111 status dry_run" in trace_text
-    assert "工具：读取OM 本地操作回执（ok，1 行）" in trace_text
-    assert "最终：cancelled（operation readback）" in trace_text
-    assert "post/operation_readback=pass/cancelled" in trace_text
-    assert "inbound.upgrade" not in trace_text
-    assert "runtime_root" not in trace_text
-    assert str(tmp_path) not in trace_text
+    audit_rows = InboundAuditStore(audit_db).list_recent(conversation_id="feishu:chat_a:ou_1", limit=5)
+    controls = [json.loads(str(row.get("control_json") or "{}")) for row in audit_rows]
+    assert any(item.get("intent_name") == "upgrade_cancel" for item in controls)
+    assert any(item.get("intent_name") == "upgrade_now" for item in controls)
 
 
 def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallbacks(
@@ -2910,38 +2867,24 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         row = conn.execute(
             """
             SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id, conversation_id,
-                   perception_json, reasoning_json
+                   control_json
             FROM inbound_command_audit
             """
         ).fetchone()
 
     assert row[:7] == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
-    perception = json.loads(row[7])
-    reasoning = json.loads(row[8])
-    assert perception == {
-        "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
-        "intent_name": "monthly_income_report",
-        "arguments": {"account": "sy", "month": "2026-05"},
-        "source": "command",
-        "confidence": 1.0,
-        "evidence": {},
-    }
-    assert reasoning == {
-        "schema_version": REASONING_RESOLUTION_SCHEMA_VERSION,
-        "status": "supported",
-        "intent_name": "monthly_income_report",
-        "arguments": {"account": "sy", "month": "2026-05"},
-        "safety_class": "read",
-        "action_kind": "tool",
-        "tool_call": {
-            "tool_name": "monthly_income_report",
-            "payload": {"config_key": "us", "account": "sy", "month": "2026-05"},
-        },
-        "read_only": True,
-        "requires_confirmation": False,
-        "reason": "read_only_capability",
-        "message": None,
-    }
+    control = json.loads(row[7])
+    assert control["status"] == "supported"
+    assert control["intent_name"] == "monthly_income_report"
+    assert control["safety_class"] == "read"
+    assert control["action_kind"] == "tool"
+    assert control["reason"] == "read_only_capability"
+    assert control["tool_name"] == "monthly_income_report"
+    assert control["payload"] == {"config_key": "us", "account": "sy", "month": "2026-05"}
+    assert control["response_text"] == first["data"]["response_text"]
+    assert control["executed"] is True
+    assert control["ok"] is True
+    assert control["requires_confirmation"] is False
 
 
 def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path: Path) -> None:
@@ -2986,38 +2929,21 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
             """
-            SELECT perception_json, reasoning_json, tool_payload_json
+            SELECT control_json, tool_payload_json
             FROM inbound_command_audit
             WHERE message_id = 'msg_positions'
             """
         ).fetchone()
-    perception = json.loads(row[0])
-    reasoning = json.loads(row[1])
-    tool_payload = json.loads(row[2])
-    assert perception == {
-        "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
-        "intent_name": "position_query",
-        "arguments": {"status": "open", "limit": 50},
-        "source": "command",
-        "confidence": 1.0,
-        "evidence": {},
-    }
-    assert reasoning == {
-        "schema_version": REASONING_RESOLUTION_SCHEMA_VERSION,
-        "status": "supported",
-        "intent_name": "position_query",
-        "arguments": {"status": "open", "limit": 50},
-        "safety_class": "read",
-        "action_kind": "tool",
-        "tool_call": {
-            "tool_name": "option_positions_read",
-            "payload": {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}},
-        },
-        "read_only": True,
-        "requires_confirmation": False,
-        "reason": "read_only_capability",
-        "message": None,
-    }
+    control = json.loads(row[0])
+    tool_payload = json.loads(row[1])
+    assert control["status"] == "supported"
+    assert control["intent_name"] == "position_query"
+    assert control["safety_class"] == "read"
+    assert control["action_kind"] == "tool"
+    assert control["tool_name"] == "option_positions_read"
+    assert control["payload"] == {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}
+    assert control["reason"] == "read_only_capability"
+    assert control["requires_confirmation"] is False
     assert tool_payload == {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}
 
 
@@ -3061,7 +2987,7 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
     assert rows[1][2] == 0
 
 
-def test_inbound_audit_schema_uses_perception_reasoning_action_observation(tmp_path: Path) -> None:
+def test_inbound_audit_schema_uses_single_control_record(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 
     out = handle_assistant_request(
@@ -3080,9 +3006,16 @@ def test_inbound_audit_schema_uses_perception_reasoning_action_observation(tmp_p
     assert out["ok"] is True
     with sqlite3.connect(audit_db) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(inbound_command_audit)").fetchall()}
-    assert {"perception_json", "reasoning_json", "action_json", "observation_json"} <= columns
-    assert "semantic_frame_json" not in columns
-    assert "tool_plan_json" not in columns
+    assert "control_json" in columns
+    for removed_column in (
+        "semantic_frame_json",
+        "tool_plan_json",
+        "perception_json",
+        "reasoning_json",
+        "action_json",
+        "observation_json",
+    ):
+        assert removed_column not in columns
 
 
 def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
@@ -3858,7 +3791,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
         "enabled": True,
-        "planner": {"enabled": True},
+        "copilot": {"enabled": True},
         "context_window_messages": 7,
         "default_market_scope": "us",
         "llm": {
@@ -3905,7 +3838,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
-    assert settings.planner.enabled is True
+    assert settings.copilot.enabled is True
     assert settings.context_window_messages == 7
     assert settings.llm.enabled is True
     assert settings.llm.provider == "openai"
@@ -3924,7 +3857,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     payload = {
@@ -3960,7 +3893,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
-    assert settings.planner.enabled is False
+    assert settings.copilot.enabled is False
     assert settings.context_window_messages == 5
 
 
@@ -3989,6 +3922,8 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
         return _assistant_turn_response()
 
     monkeypatch.setattr(cli, "handle_assistant_turn", _handle)
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text("{}", encoding="utf-8")
 
     rc = cli.main(
         [
@@ -4006,6 +3941,8 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
             "feishu:oc_1:ou_1",
             "--config-key",
             "us",
+            "--assistant-config",
+            str(assistant_config_path),
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
         ]
@@ -4023,6 +3960,7 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
             conversation_id="feishu:oc_1:ou_1",
             config_key="us",
             audit_db=str(tmp_path / "audit.sqlite3"),
+            assistant_config_path=str(assistant_config_path),
         )
     ]
 
@@ -4036,7 +3974,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
         "enabled": True,
-        "planner": {"enabled": True},
+        "copilot": {"enabled": True},
         "context_window_messages": 6,
         "default_market_scope": "us",
         "llm": {
@@ -4088,7 +4026,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assert settings.llm.max_output_tokens == 771
 
 
-def test_assistant_cli_handle_uses_planner_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_uses_copilot_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -4096,7 +4034,7 @@ def test_assistant_cli_handle_uses_planner_disabled_config(monkeypatch, capsys, 
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     seen = []
@@ -4128,7 +4066,7 @@ def test_assistant_cli_handle_uses_planner_disabled_config(monkeypatch, capsys, 
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
-    assert settings.planner.enabled is False
+    assert settings.copilot.enabled is False
     assert settings.context_window_messages == 4
 
 

@@ -137,11 +137,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "context_window_messages": 8,
             "copilot": {
                 "enabled": False,
-                "channel_scenes": [],
-                "human_review": False,
-            },
-            "planner": {
-                "enabled": False,
             },
             "llm": {
                 "provider": "",
@@ -149,8 +144,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "model": "",
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
+                "timeout_seconds": 90,
+                "max_output_tokens": 2048,
             },
         },
         "inbound": {

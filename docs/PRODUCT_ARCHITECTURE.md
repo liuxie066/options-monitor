@@ -188,11 +188,11 @@ system defaults
   -> tool_execution
   -> application use cases
 
-Feishu / Inbound
-  -> inbound
-  -> inbound perception / reasoning / action
-  -> tool_execution
-  -> application use cases
+Feishu / WeChat / Inbound
+  -> channel adapter
+  -> explicit command or permission response -> deterministic Control
+  -> all other text -> Copilot Service -> Host -> Agent
+  -> canonical application tools and use cases
 ```
 
 边界：
