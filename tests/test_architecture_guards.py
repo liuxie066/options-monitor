@@ -643,8 +643,8 @@ def test_copilot_uses_model_final_text_without_application_answer_renderer() -> 
 def test_copilot_design_does_not_define_recommendation_output_schema() -> None:
     design_text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
 
-    assert "the generic OM analyst system prompt" in design_text
-    assert "monthly review templates" in design_text
+    assert "Prompt fragments define general behavior only" in design_text
+    assert "Question-specific prompts, tool lists, and renderers are prohibited" in design_text
     assert "answer_dimensions" not in design_text
     assert "basis_refs" not in design_text
 
@@ -713,53 +713,38 @@ def test_phase2_design_requires_non_review_lanes_before_monthly_benchmark() -> N
 
 def test_design_phases_keep_real_answer_quality_as_the_cutover_gate() -> None:
     text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    phases = [
-        "### P0: Stabilize The Rebuild Baseline",
-        "### P1: Prove The Real Vertical Slice",
-        "### P2: Repair Canonical Tool Contracts From P1 Failures",
-        "### P3: Repair The Generic Agent Loop From P1 Failures",
-        "### P4: Repair Scene And Prompt Behavior From P1 Failures",
-        "### P5: Collapse Control, Cut Over, And Release",
-    ]
-
-    positions = [text.index(phase) for phase in phases]
-    assert positions == sorted(positions)
     for token in (
-        "one `om_chat` Scene",
-        "P1 is a hard quality gate",
-        "no benchmark-specific branch, Scene, or answer template",
-        "model-visible success results do not require nested `ok/value/data` decoding",
+        "| P1 | Production answer-quality baseline |",
+        "P1 is the gate for P7 and P8",
+        "No benchmark may become runtime routing, a dedicated Scene, or an answer template",
+        "converts canonical results into flat Agent-friendly observations",
     ):
         assert token in text
 
 
 def test_answer_quality_phase_does_not_make_benchmarks_runtime_capabilities() -> None:
     text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    phase_text = text.split("### P4: Repair Scene And Prompt Behavior From P1 Failures", 1)[1].split(
-        "### P5: Collapse Control, Cut Over, And Release",
-        1,
-    )[0]
+    phase_text = text.split("## Evaluation", 1)[1].split("## Delivery Phases", 1)[0]
 
-    assert "tune only when the trace proves" in phase_text
-    assert "no question-specific prompt, tool list, or renderer exists" in phase_text
+    assert "No benchmark may become runtime routing" in phase_text
     assert "monthly_option_review" not in phase_text
     assert "monthly review template" not in phase_text
 
 
 def test_copilot_evals_cover_broad_free_form_question_families() -> None:
     design_text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
-    evaluation = design_text.split("## Evaluation", 1)[1].split("## Implementation Phases", 1)[0]
+    evaluation = design_text.split("## Evaluation", 1)[1].split("## Delivery Phases", 1)[0]
 
     for question_family in (
-        "monthly income and attribution",
-        "current option exposure and concentration",
-        "recent option-operation review",
-        "candidate-filter diagnosis",
-        "notification/close-advice diagnosis",
-        "follow-up questions such as `结论呢`",
+        "income and attribution follow-up",
+        "exposure concentration",
+        "option-operation review",
+        "candidate diagnosis",
+        "close-advice notification diagnosis",
+        "conclusion follow-up",
     ):
         assert question_family in evaluation
-    assert "No individual benchmark becomes a runtime capability or Scene." in evaluation
+    assert "No benchmark may become runtime routing, a dedicated Scene, or an answer template." in evaluation
 
 
 def test_tool_contracts_do_not_carry_planner_routing_metadata() -> None:
@@ -939,17 +924,18 @@ def test_assistant_runtime_no_longer_owns_perception() -> None:
     assert not (ROOT / "src" / "application" / "assistant" / "perception_trace.py").exists()
 
 
-def test_assistant_router_uses_single_explicit_control_execution() -> None:
-    router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
+def test_assistant_inbound_service_uses_single_explicit_control_execution() -> None:
+    inbound_text = (ROOT / "src" / "application" / "assistant" / "inbound_service.py").read_text(encoding="utf-8")
     control_text = (ROOT / "src" / "application" / "assistant" / "inbound_control.py").read_text(encoding="utf-8")
     contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(encoding="utf-8")
 
-    assert "execute_explicit_control(" in router_text
-    assert '"control": control.public_payload()' in router_text
-    assert "resolve_reasoning(" not in router_text
-    assert "perform_action(" not in router_text
-    assert "build_observation(" not in router_text
-    assert "frame_planner" not in router_text
+    assert not (ROOT / "src" / "application" / "assistant" / "router.py").exists()
+    assert "execute_explicit_control(" in inbound_text
+    assert '"control": control.public_payload()' in inbound_text
+    assert "resolve_reasoning(" not in inbound_text
+    assert "perform_action(" not in inbound_text
+    assert "build_observation(" not in inbound_text
+    assert "frame_planner" not in inbound_text
     assert "class ControlExecution" in control_text
     assert "def execute_explicit_control(" in control_text
     assert "class ControlCommand" in contracts_text
@@ -965,6 +951,15 @@ def test_assistant_router_uses_single_explicit_control_execution() -> None:
         assert "is_manual_trade_operation_intent" not in module_text
         assert "is_symbol_operation_intent" not in module_text
         assert "is_upgrade_operation_intent" not in module_text
+
+
+def test_assistant_turn_result_has_no_retired_router_fallback() -> None:
+    turn_result_text = (ROOT / "src" / "application" / "assistant" / "turn_result.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'route or "router"' not in turn_result_text
+    assert 'route or "unknown"' in turn_result_text
 
 
 def test_assistant_does_not_recreate_derived_agent_session_trace() -> None:
@@ -1139,7 +1134,7 @@ def test_legacy_provider_planner_runtime_is_removed() -> None:
     assert provider_offenders == {}
 
 
-def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
+def test_runtime_inbound_service_and_control_do_not_know_model_profiles() -> None:
     forbidden = (
         "active_model",
         "models",
@@ -1148,7 +1143,7 @@ def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
     )
     checked = [
         ROOT / "src" / "application" / "assistant" / "runtime.py",
-        ROOT / "src" / "application" / "assistant" / "router.py",
+        ROOT / "src" / "application" / "assistant" / "inbound_service.py",
         ROOT / "src" / "application" / "assistant" / "inbound_control.py",
     ]
     offenders: dict[str, list[str]] = {}
@@ -1226,7 +1221,7 @@ def test_inbound_transport_does_not_import_assistant_control_plane_details() -> 
         "src.application.assistant.llm_reply",
         "src.application.assistant.llm_translator",
         "src.application.assistant.deterministic_commands",
-        "src.application.assistant.router",
+        "src.application.assistant.inbound_service",
     )
     offenders: list[str] = []
     for path in sorted((ROOT / "src" / "application" / "inbound").glob("*.py")):
@@ -1369,11 +1364,11 @@ def test_copilot_host_owns_session_serialization_and_context() -> None:
 
 
 def test_freeform_channel_bypasses_legacy_perception_pipeline() -> None:
-    router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
+    inbound_text = (ROOT / "src" / "application" / "assistant" / "inbound_service.py").read_text(encoding="utf-8")
     runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
 
-    assert "if command is None:" in router_text
-    assert "_copilot_response(" in router_text
+    assert "if command is None:" in inbound_text
+    assert "_copilot_response(" in inbound_text
     assert "PerceptionEngine" not in runtime_text
     assert not (ROOT / "src" / "application" / "assistant" / "perception.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "perception_trace.py").exists()

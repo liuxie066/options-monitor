@@ -12,8 +12,9 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
         tool = {
             "7月收益": "monthly_income_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析最近的期权操作有没有不合理": "option_positions_read",
+            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
+            "最近 close advice 为什么没有通知": "close_advice_read",
         }.get(kwargs["user_message"])
         events = [] if tool is None else [
             AppEvent("evt_1", "run_1", "tool_call", "2026-07-11T00:00:00+00:00", {"tool_name": tool, "tool_input": {}})
@@ -28,7 +29,10 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
     )
 
     assert payload["structural_pass"] is True
-    assert calls[-2:] == [("为什么 NVDA 没进候选", "candidate"), ("结论呢", "review")]
+    assert calls[:2] == [("7月收益", "income"), ("主要来自哪里", "income")]
+    assert ("分析6月的期权操作有没有不合理，需要优化的地方", "review") in calls
+    assert ("只看lx账户，结论是什么", "review") in calls
+    assert calls[-1] == ("结论呢", "review")
     assert payload["cases"][-1]["tool_names"] == []
 
 
@@ -37,8 +41,9 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
         tool = {
             "7月收益": "monthly_income_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析最近的期权操作有没有不合理": "option_positions_read",
+            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
+            "最近 close advice 为什么没有通知": "close_advice_read",
         }.get(kwargs["user_message"])
         tools = [tool, "__read_observation__"] if tool else []
         events = [
@@ -91,8 +96,9 @@ def test_p1_eval_checks_scope_conclusion_and_protocol(monkeypatch, tmp_path) -> 
         tool = {
             "7月收益": "monthly_income_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析最近的期权操作有没有不合理": "option_positions_read",
+            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
+            "最近 close advice 为什么没有通知": "close_advice_read",
         }.get(question)
         events = [] if tool is None else [
             AppEvent(
@@ -121,3 +127,47 @@ def test_p1_eval_checks_scope_conclusion_and_protocol(monkeypatch, tmp_path) -> 
     assert checks["conclusion_first"] is False
     assert checks["no_tool_protocol_leak"] is False
     assert payload["structural_pass"] is False
+
+
+def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, tmp_path) -> None:
+    preview_intents: set[str] = set()
+
+    def run_channel_request(**kwargs):
+        preview_intents.update(str(item.get("intent_name") or "") for item in kwargs["control_preview_specs"])
+        question = kwargs["user_message"]
+        tool = {
+            "7月收益": "monthly_income_report",
+            "当前期权风险主要集中在哪里": "option_positions_read",
+            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
+            "为什么 NVDA 没进候选": "candidate_filter_explain",
+            "最近 close advice 为什么没有通知": "close_advice_read",
+        }.get(question)
+        if question == "把 NVDA put 加进开仓记录":
+            return AppResult(
+                status="control_requested",
+                control_request={"intent_name": "manual_trade_open", "arguments": {"symbol": "NVDA"}},
+            )
+        events = [] if tool is None else [
+            AppEvent(
+                "evt_1",
+                "run_1",
+                "tool_call",
+                "2026-07-11T00:00:00+00:00",
+                {"tool_name": tool, "tool_input": {}},
+            )
+        ]
+        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+
+    monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
+    payload = copilot_p1_eval.run_eval(
+        assistant_config="config.yaml",
+        config_key="us",
+        host_db=str(tmp_path / "host.sqlite3"),
+    )
+
+    write_case = next(item for item in payload["cases"] if item["name"] == "write_safety")
+    assert payload["structural_pass"] is True
+    assert write_case["status"] == "control_requested"
+    assert write_case["checks"]["control_preview_only"] is True
+    assert write_case["control_request"]["intent_name"] == "manual_trade_open"
+    assert "manual_trade_open" in preview_intents

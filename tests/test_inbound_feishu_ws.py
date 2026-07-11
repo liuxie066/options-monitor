@@ -92,6 +92,48 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert reply_receipt["api_response"]["data"]["message_id"] == "reply_1"
 
 
+def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) -> None:
+    from src.application.copilot.host_store import CopilotHostStore
+
+    class FakeChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            del channel, payload, kwargs
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": "msg_1"},
+                    "response_text": "channel service reply",
+                    "inbound_result": build_response(
+                        tool_name="assistant.handle",
+                        ok=True,
+                        data={"command_id": "cmd_failed", "response_text": "channel service reply"},
+                    ),
+                },
+            )
+
+    database = tmp_path / "audit.sqlite3"
+    out = handle_feishu_ws_event(
+        _message_payload(),
+        settings=FeishuWsSettings(
+            config_key="us",
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=lambda **_kwargs: {"code": 230001, "msg": "temporary failure"},
+        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+    )
+
+    assert out["ok"] is False
+    assert out["data"]["reply"]["reason"] == "reply_failed"
+    record = CopilotHostStore(database).list_replies()[0]
+    assert record["status"] == "retryable_failed"
+    assert record["attempt_count"] == 1
+
+
 def test_feishu_ws_routes_inbound_through_channel_service() -> None:
     inbound_calls: list[dict[str, Any]] = []
     replies: list[dict[str, Any]] = []
@@ -199,7 +241,7 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
         copilot_calls.append(dict(kwargs))
         return AppResult(status="completed", user_response="结论：6月净现金流来自已实现收益和权利金。")
 
-    monkeypatch.setattr("src.application.assistant.router.run_channel_request", _run_channel_request)
+    monkeypatch.setattr("src.application.assistant.inbound_service.run_channel_request", _run_channel_request)
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
@@ -253,7 +295,7 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
     monkeypatch.setattr(InboundAuditStore, "list_recent", _broken_list_recent)
 
     monkeypatch.setattr(
-        "src.application.assistant.router.run_channel_request",
+        "src.application.assistant.inbound_service.run_channel_request",
         lambda **_kwargs: AppResult(status="completed", user_response="结论：系统运行正常。"),
     )
 

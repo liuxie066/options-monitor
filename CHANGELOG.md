@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 1.2.382 - 2026-07-11
+
+### Added
+- Added Host-owned structured conversation memory with bounded compaction, stale-write protection, and current Control context precedence.
+- Added durable Copilot run state, safe read-only resume, cancellation, iteration identity, usage metrics, coarse progress, concurrency leases, and persistent reply outboxes for WeChat and Feishu.
+- Added production-side Copilot P1 v2 evaluation cases for free-form analysis, follow-up continuity, missing-data honesty, and safe Control preview requests.
+
+### Changed
+- Simplified the free-form runtime to one `om_chat` Service + Host + Agent path backed by canonical pure-read tools and deterministic Control previews.
+- Made channel delivery retryable and idempotent with stable provider request identifiers and stale-delivery claim recovery.
+- Replaced the retired Assistant router boundary with the deterministic inbound service while retaining Control, permission, audit, and operation lifecycle ownership.
+
+### Removed
+- Removed the obsolete `src/application/assistant/router.py` compatibility boundary and its retired Router naming fallback.
+
+### Fixed
+- Preserved successful read observations across safe resume without replaying Control previews or writes.
+- Classified provider and tool-protocol failures in Trace, preserved malformed tool arguments for recovery, and prevented progress events from leaking model or tool data.
+- Treated Feishu business error responses as retryable delivery failures instead of successful replies.
+
 ## 1.2.381 - 2026-07-11
 
 ### Changed

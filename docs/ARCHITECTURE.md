@@ -147,9 +147,9 @@ session/run/event governance and the `om_chat` Scene, and Agent/Engine own the
 generic model/tool loop. The model can use canonical pure-read tools and, on
 channel runs, one generic Control-preview meta-tool. It cannot receive or call
 confirmation, cancellation, apply, notification, config-write, ledger/trade,
-broker-write, service-control, or upgrade handlers directly. Router validates a
-preview request against the deterministic capability catalog before Control
-creates the pending operation.
+broker-write, service-control, or upgrade handlers directly. The deterministic
+Inbound service validates a preview request against the capability catalog
+before Control creates the pending operation.
 
 Control receipts are stored as conversation context for follow-ups. Each turn
 also receives a fresh current-conversation pending snapshot from the operation

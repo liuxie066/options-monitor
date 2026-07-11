@@ -29,6 +29,9 @@ class ModelRequest:
     tools: tuple[dict[str, Any], ...]
     force_finish: bool = False
     timeout_seconds: int | None = None
+    is_cancelled: Callable[[], bool] | None = None
+    iteration_id: str | None = None
+    context_hash: str | None = None
 
 
 ModelRunner = Callable[[ModelRequest], ModelTurn]
@@ -49,6 +52,8 @@ class AgentState:
     continuation_count: int = 0
     compaction_count: int = 0
     model_retry_count: int = 0
+    token_usage: dict[str, int] = field(default_factory=dict)
+    current_iteration_id: str | None = None
 
 
 @dataclass(frozen=True)
