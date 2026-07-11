@@ -11,6 +11,7 @@ VALID_STATUSES = {
     "refused",
     "not_ready",
     "failed",
+    "control_requested",
 }
 
 TOOL_PROTOCOL_MARKERS = (
@@ -33,7 +34,7 @@ def admit_result_with_decision(result: AppResult) -> AdmissionDecision:
     response = str(result.user_response or "").strip()
     if result.status not in VALID_STATUSES:
         return _reject(result, "invalid_status")
-    if result.status != "failed" and not response:
+    if result.status not in {"failed", "control_requested"} and not response:
         return _reject(result, "empty_result")
     if result.status == "answered" and any(marker in response for marker in TOOL_PROTOCOL_MARKERS):
         return _reject(result, "unparsed_tool_protocol")

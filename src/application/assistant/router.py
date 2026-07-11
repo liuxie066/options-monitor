@@ -8,12 +8,13 @@ from src.application.agent_tool_contracts import AgentToolError, build_error_pay
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.command_parser import parse_assistant_command
+from src.application.assistant.capability_catalog import preview_operation_capabilities
 from src.application.assistant.inbound_control import ControlExecution, ExecuteToolFn, execute_explicit_control
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.renderer import render_inbound_text
-from src.application.copilot.channel_facade import run_channel_request
+from src.application.copilot.channel_facade import record_channel_turn, run_channel_request
 from src.application.copilot.contracts import AppResult
 from src.application.tool_execution import execute_tool
 
@@ -88,15 +89,42 @@ def handle_assistant_request(
             parse_command_fn=parse_command_fn,
         )
         if command is None:
-            response = _copilot_response(normalized_request, command_id=command_id, audit_db=store.path)
-            decision = "copilot"
+            copilot_result = _run_copilot(normalized_request, command_id=command_id, audit_db=store.path)
+            if copilot_result.control_request:
+                command = _control_command_from_copilot(copilot_result.control_request)
+                control = execute_explicit_control(
+                    command,
+                    request=normalized_request,
+                    command_id=command_id,
+                    operation_store=InboundOperationStore(store.path),
+                    execute_tool_fn=execute_tool_fn,
+                )
+                response = _success_response(
+                    command_id=command_id,
+                    request=normalized_request,
+                    control=control,
+                    sender_decision=sender_decision.public_payload(),
+                    audit_db=store.path,
+                )
+                data = response.get("data") if isinstance(response.get("data"), dict) else {}
+                data["copilot"] = _copilot_result_payload(copilot_result)
+                response["data"] = data
+                decision = _decision_for_control(control)
+            else:
+                response = _copilot_response(
+                    normalized_request,
+                    command_id=command_id,
+                    audit_db=store.path,
+                    result=copilot_result,
+                )
+                decision = "copilot"
             return _record_and_return(
                 store=store,
                 request=normalized_request,
                 command_id=command_id,
                 created_at=created_at,
-                command=None,
-                control=None,
+                command=command,
+                control=control,
                 decision=decision,
                 response=response,
             )
@@ -155,8 +183,13 @@ def _parse_command(
     return None
 
 
-def _copilot_response(request: AssistantRequest, *, command_id: str, audit_db: Any) -> dict[str, Any]:
-    result = run_channel_request(
+def _run_copilot(request: AssistantRequest, *, command_id: str, audit_db: Any) -> AppResult:
+    pending = InboundOperationStore(audit_db).list_pending_operations(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+    )
+    return run_channel_request(
         user_message=request.text,
         config_key=request.config_key,
         request_id=command_id,
@@ -165,7 +198,19 @@ def _copilot_response(request: AssistantRequest, *, command_id: str, audit_db: A
         sender_id=request.sender_id,
         conversation_id=request.conversation_id,
         host_db_path=str(audit_db),
+        control_preview_specs=preview_operation_capabilities(),
+        control_context=tuple(dict(item) for item in pending),
     )
+
+
+def _copilot_response(
+    request: AssistantRequest,
+    *,
+    command_id: str,
+    audit_db: Any,
+    result: AppResult | None = None,
+) -> dict[str, Any]:
+    result = result or _run_copilot(request, command_id=command_id, audit_db=audit_db)
     return build_response(
         tool_name="copilot.chat",
         ok=bool(result.ok),
@@ -177,6 +222,26 @@ def _copilot_response(request: AssistantRequest, *, command_id: str, audit_db: A
             "copilot": _copilot_result_payload(result),
         },
         meta={"audit_db": mask_path(audit_db)},
+    )
+
+
+def _control_command_from_copilot(value: dict[str, Any]) -> ControlCommand:
+    intent_name = str(value.get("intent_name") or "").strip()
+    arguments = value.get("arguments")
+    if not intent_name or not isinstance(arguments, dict):
+        raise AgentToolError(code="INVALID_ACTION", message="Copilot control preview request is invalid")
+    allowed = {str(item["intent_name"]): item for item in preview_operation_capabilities()}
+    spec = allowed.get(intent_name)
+    if spec is None:
+        raise AgentToolError(code="INVALID_ACTION", message="Copilot requested a non-preview control capability")
+    unknown = sorted(str(key) for key in arguments if str(key) not in set(spec.get("arguments") or ()))
+    if unknown:
+        raise AgentToolError(code="INVALID_ACTION", message="Copilot control preview contains unsupported arguments")
+    return ControlCommand(
+        intent_name=intent_name,
+        arguments=dict(arguments),
+        source="copilot_control_preview",
+        confidence=1.0,
     )
 
 
@@ -247,6 +312,21 @@ def _record_and_return(
     response: dict[str, Any],
     error_code: str | None = None,
 ) -> dict[str, Any]:
+    receipt = _control_receipt_message(control=control, response=response)
+    if receipt:
+        try:
+            record_channel_turn(
+                channel=request.channel,
+                sender_id=request.sender_id,
+                conversation_id=request.conversation_id,
+                host_db_path=str(store.path),
+                user_message=request.text,
+                assistant_message=receipt,
+            )
+        except Exception:
+            meta = dict(response.get("meta") or {})
+            meta["control_context_recorded"] = False
+            response["meta"] = meta
     store.record_result(
         {
             "command_id": command_id,
@@ -269,6 +349,23 @@ def _record_and_return(
         }
     )
     return response
+
+
+def _control_receipt_message(*, control: ControlExecution | None, response: dict[str, Any]) -> str:
+    if control is None or control.action_kind != "operation":
+        return ""
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    receipt = {
+        "type": "control_receipt",
+        "intent_name": control.intent_name,
+        "operation_id": data.get("operation_id"),
+        "operation_type": data.get("operation_type"),
+        "status": data.get("status") or control.status,
+        "requires_confirmation": bool(control.requires_confirmation),
+        "arguments": dict(control.payload),
+        "response_text": str(data.get("response_text") or control.response_text or ""),
+    }
+    return "Control receipt (authoritative):\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _duplicate_response(existing: dict[str, Any]) -> dict[str, Any]:

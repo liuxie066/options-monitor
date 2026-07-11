@@ -10,6 +10,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
+from src.application.assistant import router as assistant_router
 from src.application.assistant.capability_catalog import command_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
@@ -17,10 +18,13 @@ from src.application.assistant.contracts import (
     AssistantTurnResult,
     ControlCommand,
 )
+from src.application.assistant.operation_store import InboundOperationStore
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
+from src.application.copilot.contracts import AppResult
+from src.application.copilot.host_store import CopilotHostStore
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 
@@ -34,6 +38,258 @@ def _assistant_turn_response(response_text: str = "状态查询完成。") -> As
         data={"response_text": response_text},
         meta={"assistant": {"route": "command"}},
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "intent_name", "arguments"),
+    [
+        ("升级到 1.2.400", "upgrade_now", {"target_version": "1.2.400"}),
+        (
+            "把 NVDA 的 sell put 最大行权价改为 95",
+            "symbol_edit",
+            {"symbol": "NVDA", "set": {"sell_put.max_strike": 95}},
+        ),
+        (
+            "记录开仓 sy NVDA short put strike 100 exp 2026-08-21 1张 premium 2.5",
+            "manual_trade_open",
+            {},
+        ),
+        (
+            "记录平仓 sy NVDA short put strike 100 exp 2026-08-21 1张 premium 0.5",
+            "manual_trade_close",
+            {},
+        ),
+    ],
+)
+def test_copilot_write_request_hands_off_to_deterministic_control_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    text: str,
+    intent_name: str,
+    arguments: dict[str, Any],
+) -> None:
+    seen: list[ControlCommand] = []
+    control_arguments = dict(arguments)
+    if intent_name.startswith("manual_trade_"):
+        control_arguments["raw_text"] = text
+
+    monkeypatch.setattr(
+        assistant_router,
+        "run_channel_request",
+        lambda **_kwargs: AppResult(
+            status="control_requested",
+            control_request={
+                "intent_name": intent_name,
+                "arguments": control_arguments,
+                "source": "copilot_control_preview",
+                "confidence": 1.0,
+            },
+            ok=True,
+        ),
+    )
+
+    def fake_execute(command: ControlCommand, **_kwargs: Any):
+        from src.application.assistant.inbound_control import ControlExecution
+
+        seen.append(command)
+        return ControlExecution(
+            status="preview_required",
+            intent_name=command.intent_name,
+            safety_class="admin_preview" if command.intent_name == "upgrade_now" else "write_preview",
+            action_kind="operation",
+            reason="confirmation_required",
+            tool_name="inbound.preview",
+            result={
+                "data": {
+                    "status": "previewed",
+                    "operation_id": "op_test",
+                    "operation_type": intent_name,
+                    "response_text": "预览已生成，等待确认。",
+                }
+            },
+            response_text="预览已生成，等待确认。",
+            requires_confirmation=True,
+            ok=True,
+        )
+
+    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    out = handle_assistant_request(
+        AssistantRequest(
+            text=text,
+            sender_id="ou_1",
+            channel="wechat",
+            message_id=f"msg_{intent_name}",
+            conversation_id="wechat:chat_a:ou_1",
+            config_key="us",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        allowed_senders="wechat:ou_1",
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["control"]["requires_confirmation"] is True
+    assert out["data"]["copilot"]["status"] == "control_requested"
+    assert len(seen) == 1
+    assert seen[0].intent_name == intent_name
+    assert seen[0].arguments == control_arguments
+    assert seen[0].source == "copilot_control_preview"
+    messages = CopilotHostStore(tmp_path / "audit.sqlite3").session_messages("wechat:wechat:chat_a:ou_1")
+    assert messages[-2] == {"role": "user", "content": text}
+    assert messages[-1]["role"] == "assistant"
+    assert '"type": "control_receipt"' in messages[-1]["content"]
+    assert '"operation_id": "op_test"' in messages[-1]["content"]
+    assert '"status": "previewed"' in messages[-1]["content"]
+
+
+def test_copilot_receives_current_conversation_pending_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    pending = [
+        {
+            "operation_id": "in_upgrade",
+            "operation_type": "upgrade_now",
+            "status": "previewed",
+            "summary": "升级到 1.2.400",
+        },
+        {
+            "operation_id": "in_trade",
+            "operation_type": "manual_open",
+            "status": "previewed",
+            "summary": "sy NVDA 100P 1张",
+        },
+    ]
+
+    def fake_list(self, **kwargs: Any):  # type: ignore[no-untyped-def]
+        captured.append({"scope": kwargs})
+        return pending
+
+    def fake_run_channel_request(**kwargs: Any) -> AppResult:
+        captured.append(dict(kwargs))
+        return AppResult(status="answered", user_response="需要明确修改哪一条预览。", ok=True)
+
+    monkeypatch.setattr(InboundOperationStore, "list_pending_operations", fake_list)
+    monkeypatch.setattr(assistant_router, "run_channel_request", fake_run_channel_request)
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="把刚才那个改一下",
+            sender_id="ou_1",
+            channel="wechat",
+            message_id="msg_pending_context",
+            conversation_id="wechat:chat_context:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        allowed_senders="wechat:ou_1",
+        parse_command_fn=lambda _text, _now_fn: None,
+    )
+
+    assert out["ok"] is True
+    assert captured[0]["scope"] == {
+        "channel": "wechat",
+        "sender_id": "ou_1",
+        "conversation_id": "wechat:chat_context:ou_1",
+    }
+    assert captured[1]["control_context"] == tuple(pending)
+
+
+def test_copilot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    executed = False
+    monkeypatch.setattr(
+        assistant_router,
+        "run_channel_request",
+        lambda **_kwargs: AppResult(
+            status="control_requested",
+            control_request={
+                "intent_name": "upgrade_confirm",
+                "arguments": {"operation_id": "op_test"},
+            },
+            ok=True,
+        ),
+    )
+
+    def fake_execute(*_args: Any, **_kwargs: Any):
+        nonlocal executed
+        executed = True
+        raise AssertionError("control executor must not run")
+
+    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="请直接确认升级",
+            sender_id="ou_1",
+            channel="wechat",
+            message_id="msg_model_confirm_attempt",
+            conversation_id="wechat:chat_a:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        allowed_senders="wechat:ou_1",
+        parse_command_fn=lambda _text, _now_fn: None,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INVALID_ACTION"
+    assert executed is False
+
+
+def test_control_receipt_storage_failure_does_not_mask_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        assistant_router,
+        "run_channel_request",
+        lambda **_kwargs: AppResult(
+            status="control_requested",
+            control_request={"intent_name": "upgrade_now", "arguments": {}},
+            ok=True,
+        ),
+    )
+
+    def fake_execute(command: ControlCommand, **_kwargs: Any):
+        from src.application.assistant.inbound_control import ControlExecution
+
+        return ControlExecution(
+            status="preview_required",
+            intent_name=command.intent_name,
+            safety_class="admin_preview",
+            action_kind="operation",
+            reason="confirmation_required",
+            tool_name="inbound.upgrade",
+            result={
+                "data": {
+                    "status": "previewed",
+                    "operation_id": "in_upgrade",
+                    "operation_type": "upgrade_now",
+                    "response_text": "升级预览已生成。",
+                }
+            },
+            response_text="升级预览已生成。",
+            requires_confirmation=True,
+            ok=True,
+        )
+
+    monkeypatch.setattr(assistant_router, "execute_explicit_control", fake_execute)
+    monkeypatch.setattr(
+        assistant_router,
+        "record_channel_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("context store unavailable")),
+    )
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="升级到最新版",
+            sender_id="ou_1",
+            channel="wechat",
+            message_id="msg_context_store_failure",
+            conversation_id="wechat:chat_a:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        allowed_senders="wechat:ou_1",
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["status"] == "previewed"
+    assert out["meta"]["control_context_recorded"] is False
 
 
 def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -555,6 +811,12 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert confirmed["data"]["control"]["safety_class"] == "write_apply"
     assert confirmed["data"]["control"]["requires_confirmation"] is False
     assert confirmed["data"]["control"]["intent_name"] == "manual_trade_confirm"
+    session = CopilotHostStore(audit_db).session_messages("feishu:feishu:ou_1")
+    confirmed_receipt = json.loads(session[-1]["content"].split("\n", 1)[1])
+    assert confirmed_receipt["operation_id"] == operation_id
+    assert confirmed_receipt["status"] == confirmed["data"]["status"]
+    assert confirmed_receipt["requires_confirmation"] is False
+    assert InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1") == []
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
     with sqlite3.connect(audit_db) as conn:
@@ -1450,6 +1712,16 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert cancelled["data"]["preview"]["summary"]["current_version"] == "1.2.110"
     assert cancelled["data"]["preview"]["summary"]["target_version"] == "1.2.111"
     assert len(calls) == 1
+    session = CopilotHostStore(audit_db).session_messages("feishu:feishu:chat_a:ou_1")
+    cancelled_receipt = json.loads(session[-1]["content"].split("\n", 1)[1])
+    assert cancelled_receipt["operation_id"] == operation_id
+    assert cancelled_receipt["status"] == "cancelled"
+    assert cancelled_receipt["requires_confirmation"] is False
+    assert InboundOperationStore(audit_db).list_pending_operations(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+    ) == []
 
     audit_rows = InboundAuditStore(audit_db).list_recent(conversation_id="feishu:chat_a:ou_1", limit=5)
     controls = [json.loads(str(row.get("control_json") or "{}")) for row in audit_rows]

@@ -45,7 +45,8 @@ for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.
 
-`./om copilot ...` is the local/eval entry for the read-only Copilot. It is part
+`./om copilot ...` is the local/eval entry for the read-only Copilot. Channel
+Copilot is read-first and may request deterministic Control previews. Both are part
 of the human CLI surface, not the Tool Gateway manifest:
 
 ```text
@@ -140,12 +141,19 @@ the deterministic Control boundary. Protocol command parsing, bound permission
 responses, sender allowlist checks, previews, confirmations, applies, and
 operation receipts are owned by `src.application.assistant`.
 
-Every message that is not explicit Control protocol enters the read-only
+Every message that is not explicit Control protocol enters the read-first
 Copilot path. Copilot Service prepares the execution contract, Host owns
 session/run/event governance and the `om_chat` Scene, and Agent/Engine own the
-generic model/tool loop. The model can use only canonical pure-read tools. It
-cannot enter preview, confirmation, notification, config-write, ledger/trade,
-broker-write, service-control, or upgrade paths.
+generic model/tool loop. The model can use canonical pure-read tools and, on
+channel runs, one generic Control-preview meta-tool. It cannot receive or call
+confirmation, cancellation, apply, notification, config-write, ledger/trade,
+broker-write, service-control, or upgrade handlers directly. Router validates a
+preview request against the deterministic capability catalog before Control
+creates the pending operation.
+
+Control receipts are stored as conversation context for follow-ups. Each turn
+also receives a fresh current-conversation pending snapshot from the operation
+store, so stale or compacted chat history cannot become operation authority.
 
 There is no business intent router, multi-Scene catalog, planner fallback,
 evidence pipeline, or synthetic Assistant Agent session. Missing model
