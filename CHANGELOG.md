@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.388 - 2026-07-12
+
+### Changed
+- Made Covered Call capacity use each option contract's actual multiplier instead of a hardcoded 100-share threshold.
+
+### Removed
+- Removed the retired Close Advice optimizer layer, its redeploy tiers, configuration, notification formatting, and model-visible fields.
+
+### Fixed
+- Rejected non-finite and crossed option quotes before Sell Put or Covered Call strategy evaluation.
+- Made `event_risk.mode=reject` remove candidates and record canonical rejection traces, while rejecting unknown event-risk modes.
+- Prevented underwriting from comparing USD or HKD income directly with CNY thresholds when exchange rates are unavailable.
+- Tightened opening-strategy numeric, boolean, DTE, event-mode, and merged-template configuration validation.
+
 ## 1.2.387 - 2026-07-11
 
 ### Fixed

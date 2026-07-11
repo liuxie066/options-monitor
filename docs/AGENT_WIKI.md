@@ -226,8 +226,6 @@ For an explicit local dataset, use `./om research shadow-replay build --run-id <
 
 Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, spread, and concentration buckets before proposing filter or ranking changes.
 
-For close/redeploy review, use existing `close_advice` output instead of creating a parallel optimizer. Treat `optimizer_switch` as advisory-only and require explicit alternative candidate evidence in the row, including `alternative_symbol`, `alternative_contract_symbol`, and `alternative_source_path`.
-
 ### Tick Runtime
 
 - Orchestration spine: `src/application/multi_account_tick.py`
@@ -316,7 +314,6 @@ Core domain functions:
 def evaluate_close_advice(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
 def evaluate_short_vol_close_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
 def evaluate_long_call_convexity_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
-def evaluate_close_optimizer(inp: CloseAdviceInput, cfg: CloseOptimizerConfig) -> dict[str, Any]: ...
 ```
 
 Keep scoring, thesis checks, and exit-state policy in the domain layer. The

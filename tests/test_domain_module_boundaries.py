@@ -59,7 +59,6 @@ def test_agent_wiki_references_current_architecture_symbols() -> None:
         ),
         "domain.domain.close_advice": (
             "evaluate_close_advice",
-            "evaluate_close_optimizer",
         ),
         "src.application.multi_account_tick": ("run_tick",),
     }

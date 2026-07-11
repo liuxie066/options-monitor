@@ -9,6 +9,7 @@ import pandas as pd
 from domain.domain.engine import (
     CANDIDATE_REJECT_REASON_RULE_MAP,
     CandidateScoreWeights,
+    build_candidate_decision,
     evaluate_candidate_hard_constraints,
     evaluate_candidate_return_floor,
     evaluate_candidate_risk_filter,
@@ -17,6 +18,7 @@ from domain.domain.engine import (
 from domain.domain.engine import (
     empty_reject_log_dataframe,
 )
+from domain.domain.candidate_defaults import normalize_event_risk_mode
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
@@ -345,37 +347,55 @@ def run_candidate_scan(
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate:
                 rows.append(candidate)
-                trace_rows.append(
-                    build_candidate_filter_trace_row(
-                        run_id=trace_scope.get("run_id"),
-                        account=trace_scope.get("account"),
-                        symbol=candidate.get("symbol") or contract.symbol,
-                        function=trace_function,
-                        mode=config.mode,
-                        strategy_family=config.strategy_family,
-                        strategy_profile=config.strategy_profile,
-                        status="accepted",
-                        stage="stage4_ranking",
-                        rule="candidate_accepted",
-                        metric_value=annualized_return,
-                        threshold=config.min_annualized_net_return,
-                        contract_symbol=candidate.get("contract_symbol") or contract.contract_symbol,
-                        expiration=candidate.get("expiration") or contract.expiration,
-                        strike=candidate.get("strike") or contract.strike,
-                        message="candidate passed scan filters",
-                        evidence_path=out_path.name,
-                        config_values=config_values,
-                        replay_fields=_contract_replay_fields(
-                            contract,
-                            base_values,
-                            candidate,
-                            annualized_return=annualized_return,
-                        ),
-                    )
-                )
 
     out = pd.DataFrame(rows)
-    reject_log = pd.DataFrame(reject_rows)
+    if not out.empty:
+        out = deps.annotate_event_risk_fn(out, base_dir, event_risk_cfg)
+        event_mode = normalize_event_risk_mode((event_risk_cfg or {}).get("mode"))
+        if event_mode == "reject":
+            kept_rows: list[dict[str, Any]] = []
+            out_columns = list(out.columns)
+            for candidate in out.to_dict("records"):
+                if not bool(candidate.get("event_flag")):
+                    kept_rows.append(candidate)
+                    continue
+                event_decision = evaluate_candidate_risk_filter(
+                    build_candidate_decision(
+                        mode=config.mode,
+                        symbol=str(candidate.get("symbol") or ""),
+                        contract_symbol=str(candidate.get("contract_symbol") or ""),
+                        accepted=True,
+                        normalized_input=candidate,
+                    ),
+                    event_flag=True,
+                    event_mode=event_mode,
+                )
+                annualized_return = deps.annualized_return_value_fn(candidate)
+                replay_fields = build_candidate_replay_fields(
+                    candidate,
+                    annualized_return=annualized_return,
+                )
+                reject_rows.extend(
+                    _decision_reject_log_rows(
+                        decision=event_decision,
+                        reject_stage=config.reject_stage,
+                        replay_fields=replay_fields,
+                    )
+                )
+                trace_rows.extend(
+                    build_candidate_filter_trace_rows_from_decision(
+                        decision=event_decision,
+                        function=trace_function,
+                        status="rejected",
+                        reject_stage=config.reject_stage,
+                        evidence_path=reject_out_path.name,
+                        config_values=config_values,
+                        output_path=out_path,
+                        replay_fields=replay_fields,
+                    )
+                )
+            out = pd.DataFrame(kept_rows, columns=out_columns)
+
     if not out.empty:
         ranked_rows = rank_candidate_rows(
             out.to_dict("records"),
@@ -383,9 +403,38 @@ def run_candidate_scan(
             score_weights=config.score_weights,
         )
         out = pd.DataFrame(ranked_rows)
-        out = deps.annotate_event_risk_fn(out, base_dir, event_risk_cfg)
         if "_strategy_score" in out.columns:
             out = out.drop(columns=["_strategy_score"])
+        for candidate in out.to_dict("records"):
+            annualized_return = deps.annualized_return_value_fn(candidate)
+            trace_rows.append(
+                build_candidate_filter_trace_row(
+                    run_id=trace_scope.get("run_id"),
+                    account=trace_scope.get("account"),
+                    symbol=candidate.get("symbol"),
+                    function=trace_function,
+                    mode=config.mode,
+                    strategy_family=config.strategy_family,
+                    strategy_profile=config.strategy_profile,
+                    status="accepted",
+                    stage="stage4_ranking",
+                    rule="candidate_accepted",
+                    metric_value=annualized_return,
+                    threshold=config.min_annualized_net_return,
+                    contract_symbol=candidate.get("contract_symbol"),
+                    expiration=candidate.get("expiration"),
+                    strike=candidate.get("strike"),
+                    message="candidate passed scan filters",
+                    evidence_path=out_path.name,
+                    config_values=config_values,
+                    replay_fields=build_candidate_replay_fields(
+                        candidate,
+                        annualized_return=annualized_return,
+                    ),
+                )
+            )
+
+    reject_log = pd.DataFrame(reject_rows)
 
     if out.empty:
         pd.DataFrame(columns=config.empty_output_columns).to_csv(out_path, index=False)

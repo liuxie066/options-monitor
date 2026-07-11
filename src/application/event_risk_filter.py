@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from domain.domain.candidate_defaults import normalize_event_risk_mode
 from src.application.events.annotator import annotate_candidates_with_event_snapshot
 from src.application.events.source_yfinance import EventSourceError, fetch_symbol_events_yfinance
 from src.application.events.store import EventStore
@@ -21,8 +22,7 @@ def normalize_event_risk_cfg(cfg: dict | None) -> dict:
     if isinstance(cfg, dict):
         out.update(cfg)
     out["enabled"] = bool(out.get("enabled", True))
-    mode = str(out.get("mode") or "warn").strip().lower()
-    out["mode"] = mode or "warn"
+    out["mode"] = normalize_event_risk_mode(out.get("mode"))
     return out
 
 
