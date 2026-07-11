@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.383 - 2026-07-11
+
+### Changed
+- Required evaluative Copilot answers to provide a supported judgment, key good and bad points, and actionable recommendations instead of stopping at a data summary.
+
+### Fixed
+- Added an explicit `--runtime-root` input to the production Copilot P1 evaluation and restored the prior process environment after each run.
+
 ## 1.2.382 - 2026-07-11
 
 ### Added

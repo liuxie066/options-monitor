@@ -91,6 +91,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
         "prompts/om_chat.md",
     ]
     assert "Make the first non-empty line `结论：...`" in definition["system_prompt"]
+    assert "give a supported judgment" in definition["system_prompt"]
+    assert "Do not stop at a sufficient data" in definition["system_prompt"]
     assert "Moneyness requires an observed underlying price" in definition["system_prompt"]
     assert "Treat non-empty runtime context fields as fixed scope" in definition["system_prompt"]
     assert "do not print tool-call syntax as text" in definition["system_prompt"]
