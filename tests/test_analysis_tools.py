@@ -17,6 +17,7 @@ from src.application.agent_tools.analysis import (
     _expiration_risk_bucket_rows,
     _execute_select,
     _open_option_exposure_rows,
+    _option_trade_lifecycle_rows,
     _query_explain_and_evidence,
     _strategy_config_by_symbol_account_rows,
     _symbol_income_attribution_rows,
@@ -1337,6 +1338,93 @@ def test_open_option_exposure_and_expiration_buckets_are_derived_from_position_r
     assert buckets[0]["position_count"] == 1
     assert buckets[0]["contracts_open"] == 2.0
     assert buckets[0]["cash_secured_amount"] == 20000.0
+
+
+def test_option_trade_lifecycle_groups_open_and_close_events() -> None:
+    rows = _option_trade_lifecycle_rows(
+        [
+            {
+                "trade_time_beijing": "2026-06-01 10:00:00",
+                "account": "lx",
+                "symbol": "NVDA",
+                "position_effect": "OPEN",
+                "side": "sell",
+                "option_type": "put",
+                "contracts": 2,
+                "strike": 100,
+                "expiration_ymd": "2026-07-17",
+                "currency": "USD",
+            },
+            {
+                "trade_time_beijing": "2026-06-15 10:00:00",
+                "account": "lx",
+                "symbol": "NVDA",
+                "position_effect": "CLOSE",
+                "side": "buy",
+                "option_type": "put",
+                "contracts": 1,
+                "strike": 100,
+                "expiration_ymd": "2026-07-17",
+                "currency": "USD",
+            },
+        ]
+    )
+
+    assert rows == [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "position_side": "short",
+            "option_type": "put",
+            "strike": 100,
+            "expiration_ymd": "2026-07-17",
+            "currency": "USD",
+            "first_trade_time": "2026-06-01 10:00:00",
+            "last_trade_time": "2026-06-15 10:00:00",
+            "open_contracts": 2.0,
+            "close_contracts": 1.0,
+            "net_contracts": 1.0,
+            "event_count": 2,
+            "lifecycle_status": "open",
+        }
+    ]
+
+
+def test_option_trade_lifecycle_matches_buy_open_with_sell_close() -> None:
+    rows = _option_trade_lifecycle_rows(
+        [
+            {
+                "trade_time_beijing": "2026-06-01 10:00:00",
+                "account": "lx",
+                "symbol": "NVDA",
+                "position_effect": "open",
+                "side": "buy",
+                "option_type": "call",
+                "contracts": 1,
+                "strike": 120,
+                "expiration_ymd": "2026-08-21",
+                "currency": "USD",
+            },
+            {
+                "trade_time_beijing": "2026-06-20 10:00:00",
+                "account": "lx",
+                "symbol": "NVDA",
+                "position_effect": "close",
+                "side": "sell",
+                "option_type": "call",
+                "contracts": 1,
+                "strike": 120,
+                "expiration_ymd": "2026-08-21",
+                "currency": "USD",
+            },
+        ]
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["position_side"] == "long"
+    assert rows[0]["open_contracts"] == 1.0
+    assert rows[0]["close_contracts"] == 1.0
+    assert rows[0]["lifecycle_status"] == "closed"
 
 
 def test_symbol_income_attribution_groups_detail_rows_by_symbol_component() -> None:

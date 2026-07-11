@@ -599,7 +599,7 @@ def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
     assert "到期风险" in result.user_response
 
 
-def test_identical_repeated_call_is_returned_to_model_as_error(monkeypatch) -> None:
+def test_identical_repeated_call_reuses_successful_observation(monkeypatch) -> None:
     calls: list[dict] = []
 
     def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
@@ -612,7 +612,10 @@ def test_identical_repeated_call_is_returned_to_model_as_error(monkeypatch) -> N
             return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "call_1"),))
         if len(tool_messages) == 1:
             return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "call_2"),))
-        assert json.loads(tool_messages[-1]["content"])["error"] == "DUPLICATE_TOOL_CALL"
+        reused = json.loads(tool_messages[-1]["content"])
+        assert reused["status"] == "healthy"
+        assert reused["reused"] is True
+        assert reused["reused_from_ref"] == "obs_1"
         return ModelTurn(text="重复检查没有必要，已有状态显示运行正常。")
 
     monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
@@ -620,6 +623,7 @@ def test_identical_repeated_call_is_returned_to_model_as_error(monkeypatch) -> N
 
     assert len(calls) == 1
     assert result.status == "answered"
+    assert any(event.type == "tool_result_reused" for event in result.events)
 
 
 def test_identical_call_can_retry_once_after_transient_tool_error(monkeypatch) -> None:

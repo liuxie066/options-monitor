@@ -8,14 +8,17 @@ CONTROL_PREVIEW_TOOL = "request_control_preview"
 def control_preview_tool_description(specs: tuple[dict[str, Any], ...]) -> dict[str, Any]:
     capability_lines = [
         f"{spec['intent_name']}: {spec.get('summary') or spec.get('display_name')}; "
-        f"arguments={', '.join(spec.get('arguments') or ()) or 'none'}"
+        f"arguments={', '.join(spec.get('arguments') or ()) or 'none'}; "
+        f"required_information={', '.join(spec.get('required_information') or ()) or 'none'}"
         for spec in specs
     ]
     return {
         "name": CONTROL_PREVIEW_TOOL,
         "description": (
             "Request a deterministic preview for a user-requested state change. "
-            "This never applies a write and must not be used for confirm/cancel replies. Available capabilities: "
+            "This never applies a write and must not be used for confirm/cancel replies. "
+            "If required_information is missing, ask the user for it instead of calling this tool. "
+            "Available capabilities: "
             + " | ".join(capability_lines)
         ),
         "input_schema": {

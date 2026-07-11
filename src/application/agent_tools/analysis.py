@@ -171,6 +171,24 @@ OPEN_OPTION_EXPOSURE_FIELDS: tuple[str, ...] = (
 )
 
 
+OPTION_TRADE_LIFECYCLE_FIELDS: tuple[str, ...] = (
+    "account",
+    "symbol",
+    "position_side",
+    "option_type",
+    "strike",
+    "expiration_ymd",
+    "currency",
+    "first_trade_time",
+    "last_trade_time",
+    "open_contracts",
+    "close_contracts",
+    "net_contracts",
+    "event_count",
+    "lifecycle_status",
+)
+
+
 EXPIRATION_RISK_BUCKET_FIELDS: tuple[str, ...] = (
     "account",
     "expiration_bucket",
@@ -970,6 +988,17 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "recommended_filters": ("account", "symbol", "currency", "expiration_ymd"),
         "safe_join_keys": ("account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
     },
+    "option_trade_lifecycle": {
+        "description": "option trade events grouped into one contract lifecycle per account and contract identity",
+        "fields": OPTION_TRADE_LIFECYCLE_FIELDS,
+        "row_grain": "account + symbol + position_side + option_type + strike + expiration",
+        "primary_keys": ("account", "symbol", "position_side", "option_type", "strike", "expiration_ymd"),
+        "source_tools": ("option_positions_read",),
+        "semantic_source": "option_positions_read.events grouped by contract identity",
+        "freshness": "snapshot",
+        "recommended_filters": ("account", "symbol", "currency", "lifecycle_status", "expiration_ymd"),
+        "safe_join_keys": ("account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
+    },
     "symbol_strategy_config": {
         "description": "monitored symbol strategy config flattened for analysis",
         "fields": (
@@ -1015,7 +1044,7 @@ _POSITION_SOURCE_VIEWS: set[str] = {
     "open_option_exposure",
     "expiration_risk_buckets",
 }
-_EVENT_SOURCE_VIEWS: set[str] = {"trade_events"}
+_EVENT_SOURCE_VIEWS: set[str] = {"trade_events", "option_trade_lifecycle"}
 _CONFIG_SOURCE_VIEWS: set[str] = {
     "symbol_strategy_config",
     "strategy_config_by_symbol_account",
@@ -1580,6 +1609,7 @@ def _materialize_views(
         "strategy_replay_read_surface": _normalize_rows(strategy_replay_rows),
         "position_lots": _normalize_rows(position_data.get("rows")),
         "trade_events": _normalize_rows(event_data.get("rows")),
+        "option_trade_lifecycle": _normalize_rows(_option_trade_lifecycle_rows(event_data.get("rows"))),
         "symbol_strategy_config": _normalize_rows(symbol_rows),
     }
     return {view_name: rows for view_name, rows in materialized.items() if view_name in requested}
@@ -1819,6 +1849,81 @@ def _open_option_exposure_rows(value: Any) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _option_trade_lifecycle_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    grouped: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]] = {}
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        account = str(raw.get("account") or "").strip()
+        symbol = str(raw.get("symbol") or "").strip()
+        effect = str(raw.get("position_effect") or "").strip().lower()
+        position_side = _trade_event_position_side(raw.get("side"), effect)
+        option_type = str(raw.get("option_type") or "").strip().lower()
+        strike = str(raw.get("strike") or "").strip()
+        expiration = str(raw.get("expiration_ymd") or raw.get("expiration") or "").strip()
+        currency = str(raw.get("currency") or "").strip().upper()
+        if not account or not symbol or not option_type or not expiration:
+            continue
+        key = (account, symbol, position_side, option_type, strike, expiration, currency)
+        row = grouped.setdefault(
+            key,
+            {
+                "account": account,
+                "symbol": symbol,
+                "position_side": position_side,
+                "option_type": option_type,
+                "strike": raw.get("strike"),
+                "expiration_ymd": expiration,
+                "currency": currency,
+                "first_trade_time": None,
+                "last_trade_time": None,
+                "open_contracts": 0.0,
+                "close_contracts": 0.0,
+                "net_contracts": 0.0,
+                "event_count": 0,
+                "lifecycle_status": "unknown",
+            },
+        )
+        trade_time = str(raw.get("trade_time_beijing") or raw.get("trade_time") or "").strip()
+        if trade_time:
+            current_first = str(row.get("first_trade_time") or "")
+            current_last = str(row.get("last_trade_time") or "")
+            row["first_trade_time"] = trade_time if not current_first or trade_time < current_first else current_first
+            row["last_trade_time"] = trade_time if not current_last or trade_time > current_last else current_last
+        contracts = abs(float(_float_or_none(raw.get("contracts")) or 0.0))
+        if effect in {"open", "open_position", "opening"}:
+            row["open_contracts"] = _round_public_float(float(row["open_contracts"]) + contracts)
+        elif effect in {"close", "close_position", "closing", "expire", "expired", "assignment", "assigned"}:
+            row["close_contracts"] = _round_public_float(float(row["close_contracts"]) + contracts)
+        row["event_count"] = int(row["event_count"]) + 1
+    rows: list[dict[str, Any]] = []
+    for row in grouped.values():
+        net = _round_public_float(max(0.0, float(row["open_contracts"]) - float(row["close_contracts"])))
+        row["net_contracts"] = net
+        row["lifecycle_status"] = "open" if net > 0 else ("closed" if row["close_contracts"] else "unknown")
+        rows.append(row)
+    return sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("account") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("expiration_ymd") or ""),
+            float(_float_or_none(item.get("strike")) or 0.0),
+        ),
+    )
+
+
+def _trade_event_position_side(side: Any, effect: str) -> str:
+    normalized = str(side or "").strip().lower()
+    if normalized in {"long", "short"}:
+        return normalized
+    if effect in {"close", "close_position", "closing", "expire", "expired", "assignment", "assigned"}:
+        return "long" if normalized in {"sell", "sold"} else ("short" if normalized in {"buy", "bought"} else normalized)
+    return "long" if normalized in {"buy", "bought"} else ("short" if normalized in {"sell", "sold"} else normalized)
 
 
 def _option_strategy_and_risk(*, side: str, option_type: str) -> tuple[str, str]:

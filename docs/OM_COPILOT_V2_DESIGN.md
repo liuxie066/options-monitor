@@ -353,7 +353,9 @@ The fixed set covers:
 - conclusion follow-up.
 
 Each case captures all events, run identity, elapsed time, termination reason,
-failure owner, selected tools, final answer, and six human-review dimensions:
+failure owner, selected tools, actual provider/model/runtime version, tool-call
+and continuation metrics, evidence-health checks, final answer, and six
+human-review dimensions:
 
 - intent fulfillment;
 - factual accuracy;
@@ -375,12 +377,17 @@ python3 scripts/copilot_p1_eval.py \
   --output /tmp/om-copilot-p1.json
 ```
 
+The output contract is `om.copilot.p1_eval.v3`. Structural, evidence, and
+human answer-quality results are separate gates. Human scores can be supplied
+with `--review-input`; a reviewed case passes at 10/12 or higher. The report
+records the model actually configured at runtime and must not assume a provider.
+
 ## Delivery Phases
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | P0 | Stable rebuild baseline | Focused tests, guards, dependency graph, and diff checks pass. |
-| P1 | Production answer-quality baseline | Production DeepSeek produces sanitized v2 traces and human scores. |
+| P1 | Production answer-quality baseline | The configured production model produces sanitized v3 traces and human scores. |
 | P2 | Structured memory | Follow-up scope survives compaction; stale writes and malformed summaries are safe. |
 | P3 | Durable run control | Interrupted reads resume safely and cancellation stops further work. |
 | P4 | Trace/model protocol | Iteration identity, usage, termination, and failure categories are persisted. |

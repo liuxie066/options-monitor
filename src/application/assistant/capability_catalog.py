@@ -25,6 +25,7 @@ class AssistantCommandSpec:
     direct_executable: bool | None = None
     requires_pending: bool | None = None
     requires_confirm: bool | None = None
+    required_information: tuple[str, ...] = ()
 
 
 AssistantCapabilitySpec = AssistantCommandSpec
@@ -118,6 +119,16 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         summary="preview a manual opening trade record",
         operation_action="preview",
         operation_target="trade",
+        required_information=(
+            "account",
+            "symbol",
+            "side",
+            "option_type",
+            "contracts",
+            "strike",
+            "expiration_ymd",
+            "premium_per_share",
+        ),
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_close",
@@ -135,6 +146,11 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         summary="preview a manual closing trade record",
         operation_action="preview",
         operation_target="trade",
+        required_information=(
+            "record_id or full contract identity",
+            "contracts_to_close",
+            "close_price",
+        ),
     ),
     AssistantCommandSpec(
         intent_name="manual_assignment",
@@ -478,6 +494,7 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "operation_action": spec.operation_action,
         "operation_target": spec.operation_target,
         "operation_target_aliases": list(spec.operation_target_aliases),
+        "required_information": list(spec.required_information),
         "usage_patterns": list(spec.examples),
     }
 def _kind(spec: AssistantCommandSpec) -> str:

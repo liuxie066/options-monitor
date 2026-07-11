@@ -233,3 +233,79 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
     assert write_case["checks"]["control_preview_only"] is True
     assert write_case["control_request"]["intent_name"] == "manual_trade_open"
     assert "manual_trade_open" in preview_intents
+
+
+def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "config.assistant.json"
+    config.write_text(
+        '{"assistant":{"enabled":true,"llm":{"provider":"openai","model":"gpt-test",'
+        '"api_key_env":"TEST_KEY","timeout_seconds":45}}}',
+        encoding="utf-8",
+    )
+
+    def run_channel_request(**kwargs):
+        events = [
+            AppEvent(
+                "evt_1",
+                "run_1",
+                "tool_call",
+                "2026-07-11T00:00:00+00:00",
+                {"tool_name": "analysis_query", "tool_input": {"config_key": "us"}},
+            ),
+            AppEvent(
+                "evt_2",
+                "run_1",
+                "tool_result",
+                "2026-07-11T00:00:01+00:00",
+                {"tool_name": "analysis_query", "ok": True, "status": "complete"},
+            ),
+        ]
+        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+
+    monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
+    payload = copilot_p1_eval.run_eval(
+        assistant_config=str(config),
+        config_key="us",
+        host_db=str(tmp_path / "host.sqlite3"),
+    )
+
+    assert payload["schema_version"] == "om.copilot.p1_eval.v3"
+    assert payload["runtime_version"]
+    assert payload["model"]["provider"] == "openai"
+    assert payload["model"]["model"] == "gpt-test"
+    assert payload["answer_quality_pass"] is None
+    assert payload["cases"][0]["tool_metrics"]["tool_call_count"] == 1
+    assert payload["cases"][0]["evidence_pass"] is True
+
+
+def test_p1_eval_applies_complete_human_review_scores(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        copilot_p1_eval,
+        "run_channel_request",
+        lambda **kwargs: AppResult(status="answered", user_response="结论：测试回答"),
+    )
+    scores = {dimension: 2 for dimension in copilot_p1_eval._empty_human_review()}
+    reviews = {case.name: dict(scores) for case in copilot_p1_eval.CASES}
+
+    payload = copilot_p1_eval.run_eval(
+        assistant_config="missing.json",
+        config_key="us",
+        host_db=str(tmp_path / "host.sqlite3"),
+        human_reviews=reviews,
+    )
+
+    assert payload["answer_quality_review"] == "reviewed"
+    assert payload["answer_quality_pass"] is True
+    assert all(case["human_score"] == 12 for case in payload["cases"])
+
+
+def test_p1_eval_rejects_incomplete_human_review(tmp_path) -> None:
+    path = tmp_path / "reviews.json"
+    path.write_text('{"july_income":{"intent_fulfillment":2}}', encoding="utf-8")
+
+    try:
+        copilot_p1_eval._load_human_reviews(str(path))
+    except SystemExit as exc:
+        assert "must be 0, 1, or 2" in str(exc)
+    else:
+        raise AssertionError("incomplete review must fail")
