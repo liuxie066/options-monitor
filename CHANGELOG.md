@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.380 - 2026-07-11
+
+### Added
+- Enabled natural-language upgrade, monitored-symbol configuration, manual option lifecycle, model-switch, and guarded monitor-run requests to create deterministic Control previews without exposing confirmation or apply tools to the model.
+- Added authoritative pending-operation context and structured Control receipts so follow-up edits, confirmations, cancellations, and compacted conversations retain the correct operation scope.
+
+### Changed
+- Updated the single `om_chat` Scene from strictly read-only to read-first: ordinary tools remain pure-read while supported mutations use the existing preview -> pending -> confirm -> apply Control flow.
+
+### Fixed
+- Preserved runtime scope and pending-operation context during context compaction, rejected forged confirmation or cancellation requests at the router boundary, and prevented context-storage failures from masking successful Control results.
+- Removed retired Copilot channel-scene and human-review configuration keys during upgrade migration.
+
 ## 1.2.379 - 2026-07-11
 
 ### Added
