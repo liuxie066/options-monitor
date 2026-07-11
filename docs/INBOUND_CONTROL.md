@@ -5,7 +5,8 @@ WeChat messages. It has two mutually exclusive paths:
 
 ```text
 explicit protocol -> deterministic Control
-all other text    -> read-only Copilot
+all other text    -> read-first Copilot
+                     -> optional validated Control preview request
 ```
 
 ## Control Boundary
@@ -49,13 +50,22 @@ Messages that are not explicit Control protocol enter Copilot when both
 Copilot uses:
 
 ```text
-Channel UI -> Copilot Service -> Host -> om_chat Agent -> pure-read tools
+Channel UI -> Copilot Service -> Host -> om_chat Agent
+                                      -> pure-read tools
+                                      -> request_control_preview
+                                         -> deterministic Control preview
 ```
 
 There is one generic Scene. Service does not classify income, positions,
 diagnostics, symbols, strategies, or monthly reviews. Host projects only
-canonical pure-read tools and owns run/session/event lifecycle. Copilot never
-receives write-capable tools and has no generic-chat or fixed-tool fallback.
+canonical pure-read tools and owns run/session/event lifecycle. The model never
+receives write, confirm, cancel, or apply tools. Its only state-change surface
+is a generic preview request projected from the Control capability catalog.
+
+After Control returns, the router writes a structured receipt to Copilot session
+history. Before every later channel turn it injects the current conversation's
+pending-operation summaries from the operation store. The operation store, not
+chat history, remains authoritative for confirmation and cancellation.
 
 ## Reply Contract
 

@@ -55,6 +55,7 @@ def run_prepared_contract(
     model_turn_json: str | None = None,
     host_store: CopilotHostStore | None = None,
     session_key: str | None = None,
+    control_preview_specs: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     model_runner, model_error = _resolve_model_runner(
         model_config_json=model_config_json,
@@ -70,6 +71,7 @@ def run_prepared_contract(
         fixture_observations_loader=fixture_observations,
         host_store=host_store,
         session_key=session_key,
+        control_preview_specs=control_preview_specs,
     )
 
 

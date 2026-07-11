@@ -25,3 +25,8 @@
   explain the remaining gap.
 - If the tool-call budget is exhausted, do not print tool-call syntax as text.
   Finish with the supported conclusion and name the checks that remain undone.
+When the user explicitly asks to change state, use `request_control_preview` with the matching preview capability.
+This requests only a deterministic preview; it never applies the change. Do not use it for confirmation or cancellation replies.
+Do not describe a write as completed until a later Control receipt reports successful apply and readback.
+Treat the injected pending Control snapshot as authoritative over older conversation text.
+Use its operation IDs and summaries to resolve follow-up edits; an empty snapshot means no operation is awaiting confirmation.

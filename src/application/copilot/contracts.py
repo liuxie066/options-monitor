@@ -109,6 +109,7 @@ class AppResult:
     run_id: str | None = None
     events: list[AppEvent] = field(default_factory=list)
     decision_trace: dict[str, Any] = field(default_factory=dict)
+    control_request: dict[str, Any] | None = None
     ok: bool = True
 
 

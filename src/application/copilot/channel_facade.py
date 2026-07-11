@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import date
+from typing import Any
 
 from src.application.copilot.contracts import (
     AppResult,
@@ -27,6 +29,8 @@ def run_channel_request(
     sender_id: str | None = None,
     conversation_id: str | None = None,
     host_db_path: str | None = None,
+    control_preview_specs: tuple[dict[str, object], ...] = (),
+    control_context: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     year = reference_year or date.today().year
     model_gate = _channel_model_gate(assistant_config_path)
@@ -61,7 +65,10 @@ def run_channel_request(
             user_message=user_message,
             config_key=config_key,
             request_id=request_id,
-            context_messages=session_messages(session_key, host_store=host_store),
+            context_messages=_context_messages(
+                session_messages(session_key, host_store=host_store),
+                control_context=control_context,
+            ),
         )
         try:
             prepared = prepare_contract(request, reference_year=year)
@@ -75,6 +82,7 @@ def run_channel_request(
                 assistant_config_path=assistant_config_path,
                 host_store=host_store,
                 session_key=session_key,
+                control_preview_specs=control_preview_specs,
             )
         except Exception:
             result = _channel_run_failed(prepared)
@@ -86,6 +94,39 @@ def run_channel_request(
                 host_store=host_store,
             )
         return result
+
+
+def record_channel_turn(
+    *,
+    channel: str | None,
+    sender_id: str | None,
+    conversation_id: str | None,
+    host_db_path: str | None,
+    user_message: str,
+    assistant_message: str,
+) -> None:
+    session_key = _channel_session_key(channel=channel, sender_id=sender_id, conversation_id=conversation_id)
+    host_store = CopilotHostStore(host_db_path) if str(host_db_path or "").strip() else None
+    record_session_turn(session_key, user_message, assistant_message, host_store=host_store)
+
+
+def _context_messages(
+    messages: tuple[dict[str, Any], ...],
+    *,
+    control_context: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    snapshot = json.dumps(list(control_context), ensure_ascii=False, sort_keys=True, default=str)
+    return (
+        *messages,
+        {
+            "role": "system",
+            "content": (
+                "Authoritative pending Control operations for this conversation, refreshed from the operation store. "
+                "These are previews only, not proof of execution. Treat this snapshot as newer than chat history. "
+                f"pending_operations={snapshot}"
+            ),
+        },
+    )
 
 
 def _channel_model_gate(assistant_config_path: str | None) -> str | None:
@@ -160,4 +201,4 @@ def _channel_run_failed(contract: ExecutionContract) -> AppResult:
     )
 
 
-__all__ = ["run_channel_request"]
+__all__ = ["record_channel_turn", "run_channel_request"]
