@@ -189,7 +189,7 @@ def _annualized_return(row: dict[str, Any], *, mode: str) -> float | None:
 
 
 def _net_income_for_threshold(row: dict[str, Any]) -> float | None:
-    return _first_float(row, "net_income_cny", "net_income", "net_credit")
+    return _first_float(row, "net_income_cny")
 
 
 def _vol_edge(row: dict[str, Any]) -> tuple[float | None, float | None]:

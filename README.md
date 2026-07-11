@@ -528,8 +528,6 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 `close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的开仓策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。它回答的是“这张仓位开仓时的 thesis 现在还成立吗”，不是“按当前配置重新评价这张旧仓位”。
 
-`optimizer_switch` 必须带有本地候选报告中的替代候选身份字段，例如 `alternative_symbol`、`alternative_contract_symbol`、`alternative_expiration` 和 `alternative_source_path`；没有明确替代候选时不能把“换仓”当作可执行建议。
-
 当前支持的退出语义：
 
 - 普通 Sell Put / Covered Call：`close`、`hold`、`not_evaluable`

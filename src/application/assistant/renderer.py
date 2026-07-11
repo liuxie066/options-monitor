@@ -1579,7 +1579,7 @@ def _close_action_label(value: Any) -> str:
 
 
 def _close_advice_reason(row: dict[str, Any]) -> str:
-    for key in ("reason", "short_vol_reason", "optimizer_reason"):
+    for key in ("reason", "short_vol_reason"):
         value = _value(row.get(key))
         if value != "-":
             return value

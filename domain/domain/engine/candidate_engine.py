@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -24,6 +25,7 @@ CANDIDATE_STAGE_ORDER: tuple[str, ...] = (
 )
 
 REJECT_INPUT_MISSING = "input_missing"
+REJECT_INPUT_INVALID = "input_invalid"
 REJECT_HARD_DTE = "hard_dte"
 REJECT_HARD_STRIKE = "hard_strike"
 REJECT_HARD_CAPACITY_PUT = "hard_capacity_put"
@@ -38,6 +40,7 @@ REJECT_RISK_EVENT_REJECT = "risk_event_reject"
 
 CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_INPUT_MISSING,
+    REJECT_INPUT_INVALID,
     REJECT_HARD_DTE,
     REJECT_HARD_STRIKE,
     REJECT_HARD_CAPACITY_PUT,
@@ -53,6 +56,7 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
 
 LEGACY_REJECT_RULE_REASON_MAP: dict[str, str] = {
     "input_missing": REJECT_INPUT_MISSING,
+    "input_invalid": REJECT_INPUT_INVALID,
     "dte": REJECT_HARD_DTE,
     "strike": REJECT_HARD_STRIKE,
     "put_cash_capacity": REJECT_HARD_CAPACITY_PUT,
@@ -68,6 +72,7 @@ LEGACY_REJECT_RULE_REASON_MAP: dict[str, str] = {
 
 LEGACY_REJECT_RULE_STAGE_MAP: dict[str, str] = {
     "input_missing": STAGE_INPUT_NORMALIZATION,
+    "input_invalid": STAGE_INPUT_NORMALIZATION,
     "dte": STAGE_HARD_CONSTRAINTS,
     "strike": STAGE_HARD_CONSTRAINTS,
     "put_cash_capacity": STAGE_HARD_CONSTRAINTS,
@@ -167,9 +172,24 @@ def _coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except Exception:
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _non_finite_numeric_fields(raw: dict[str, Any]) -> list[str]:
+    fields: list[str] = []
+    for field in NUMERIC_INPUT_FIELDS:
+        if field not in raw or _is_missing(raw.get(field)) or isinstance(raw.get(field), bool):
+            continue
+        try:
+            parsed = float(raw.get(field))
+        except Exception:
+            continue
+        if not math.isfinite(parsed):
+            fields.append(field)
+    return fields
 
 
 def _bounded(value: float, *, low: float = 0.0, high: float = 1.0) -> float:
@@ -617,6 +637,7 @@ def evaluate_candidate_input(
     mode_norm = normalize_strategy_mode(mode)
     src = raw if isinstance(raw, dict) else {}
     normalized = _normalize_candidate_input_row(src, mode=mode_norm)
+    invalid_numeric_fields = _non_finite_numeric_fields(src)
 
     required = list(COMMON_CRITICAL_FIELDS)
     if extra_required_fields:
@@ -625,8 +646,34 @@ def evaluate_candidate_input(
             if f and f not in required:
                 required.append(f)
 
-    missing = [field for field in required if _is_missing(normalized.get(field))]
+    missing = [
+        field
+        for field in required
+        if field not in invalid_numeric_fields and _is_missing(normalized.get(field))
+    ]
     rejects: list[dict[str, Any]] = []
+    if invalid_numeric_fields:
+        rejects.append(
+            build_candidate_reject(
+                stage=STAGE_INPUT_NORMALIZATION,
+                reason=REJECT_INPUT_INVALID,
+                message=f"non-finite numeric fields: {', '.join(invalid_numeric_fields)}",
+                threshold=invalid_numeric_fields,
+            )
+        )
+
+    bid = _coerce_float(src.get("bid"))
+    ask = _coerce_float(src.get("ask"))
+    if bid is not None and ask is not None and ask < bid:
+        rejects.append(
+            build_candidate_reject(
+                stage=STAGE_INPUT_NORMALIZATION,
+                reason=REJECT_INPUT_INVALID,
+                message="ask below bid",
+                metric_value={"bid": bid, "ask": ask},
+                threshold="ask >= bid",
+            )
+        )
     if missing:
         rejects.append(
             build_candidate_reject(

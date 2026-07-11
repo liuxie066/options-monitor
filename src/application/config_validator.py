@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ from domain.domain import (
     normalize_notification_provider,
 )
 from domain.domain.fetch_source import normalize_fetch_source
+from domain.domain.candidate_defaults import EVENT_RISK_MODES
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import provider_requires_api_key, supported_llm_providers
@@ -123,23 +125,29 @@ def warn(msg: str):
     print(f"[CONFIG_WARN] {msg}", file=sys.stderr)
 
 
-def validate_positive_number(value, path: str):
+def _finite_number(value, path: str, *, expected: str = "a number") -> float:
+    if isinstance(value, bool):
+        die(f'{path} must be {expected}')
     try:
-        if float(value) <= 0:
-            die(f'{path} must be > 0')
+        parsed = float(value)
     except Exception:
-        die(f'{path} must be a number')
+        die(f'{path} must be {expected}')
+    if not math.isfinite(parsed):
+        die(f'{path} must be a finite number')
+    return parsed
+
+
+def validate_positive_number(value, path: str):
+    if _finite_number(value, path) <= 0:
+        die(f'{path} must be > 0')
 
 
 def validate_positive_integer(value, path: str):
-    try:
-        parsed = int(value)
-        if float(value) != float(parsed):
-            die(f'{path} must be an integer')
-        if parsed <= 0:
-            die(f'{path} must be > 0')
-    except Exception:
+    numeric = _finite_number(value, path, expected="an integer")
+    if not numeric.is_integer():
         die(f'{path} must be an integer')
+    if int(numeric) <= 0:
+        die(f'{path} must be > 0')
 
 
 def validate_rate_limit_object(raw: dict, path: str):
@@ -151,45 +159,33 @@ def validate_rate_limit_object(raw: dict, path: str):
 
 
 def validate_non_negative_integer(value, path: str):
-    try:
-        parsed = int(value)
-        if float(value) != float(parsed):
-            die(f'{path} must be an integer')
-        if parsed < 0:
-            die(f'{path} must be >= 0')
-    except Exception:
+    numeric = _finite_number(value, path, expected="an integer")
+    if not numeric.is_integer():
         die(f'{path} must be an integer')
+    if int(numeric) < 0:
+        die(f'{path} must be >= 0')
 
 
 def _validate_optional_non_negative_number(cfg: dict, key: str, path: str):
     if key not in cfg or cfg.get(key) is None:
         return
-    try:
-        if float(cfg.get(key)) < 0:
-            die(f'{path}.{key} must be >= 0')
-    except Exception:
-        die(f'{path}.{key} must be a number')
+    if _finite_number(cfg.get(key), f'{path}.{key}') < 0:
+        die(f'{path}.{key} must be >= 0')
 
 
 def _validate_optional_positive_number(cfg: dict, key: str, path: str):
     if key not in cfg or cfg.get(key) is None:
         return
-    try:
-        if float(cfg.get(key)) <= 0:
-            die(f'{path}.{key} must be > 0')
-    except Exception:
-        die(f'{path}.{key} must be a number')
+    if _finite_number(cfg.get(key), f'{path}.{key}') <= 0:
+        die(f'{path}.{key} must be > 0')
 
 
 def _validate_optional_unit_interval_number(cfg: dict, key: str, path: str):
     if key not in cfg or cfg.get(key) is None:
         return
-    try:
-        value = float(cfg.get(key))
-        if value < 0 or value > 1:
-            die(f'{path}.{key} must be between 0 and 1')
-    except Exception:
-        die(f'{path}.{key} must be a number')
+    value = _finite_number(cfg.get(key), f'{path}.{key}')
+    if value < 0 or value > 1:
+        die(f'{path}.{key} must be between 0 and 1')
 
 
 def _validate_optional_bool(cfg: dict, key: str, path: str):
@@ -339,6 +335,20 @@ def _validate_score_weights(cfg: dict, path: str) -> None:
 
 
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
+    _validate_optional_bool(cfg, 'enabled', path)
+    if 'strategy_profile' in cfg:
+        die(f'{path}.strategy_profile has been removed; use {path}.strategy')
+    if 'pricing' in cfg:
+        die(f'{path}.pricing has been removed; put opening thresholds directly on {path}')
+    if 'premium_score_cap' in cfg:
+        die(f'{path}.premium_score_cap is not a supported opening config field')
+    _validate_optional_dte_window(cfg, path)
+    _validate_optional_strike_bounds(cfg, path)
+    for key in ('min_open_interest', 'min_volume', 'max_spread_ratio', 'min_net_income'):
+        _validate_optional_non_negative_number(cfg, key, path)
+    for key in ('min_annualized_net_return', 'min_annualized_net_premium_return'):
+        _validate_optional_unit_interval_number(cfg, key, path)
+
     strategy = None
     if 'strategy' in cfg and cfg.get('strategy') is not None:
         strategy = str(cfg.get('strategy') or '').strip().lower()
@@ -353,6 +363,10 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
         if not isinstance(event_risk, dict):
             die(f'{path}.event_risk must be an object')
         _validate_optional_bool(event_risk, 'enabled', f'{path}.event_risk')
+        if 'mode' in event_risk and event_risk.get('mode') is not None:
+            mode = str(event_risk.get('mode') or '').strip().lower()
+            if mode not in EVENT_RISK_MODES:
+                die(f"{path}.event_risk.mode must be one of: {', '.join(sorted(EVENT_RISK_MODES))}")
     short_vol = cfg.get('short_vol')
     if short_vol is not None:
         die(
@@ -375,6 +389,24 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     concentration = cfg.get('concentration')
     if concentration is not None:
         die(f'{path}.concentration has been removed from opening config; manage assignment exposure outside candidate scan')
+
+
+def validate_resolved_watchlist_item_runtime_config(item: dict) -> None:
+    if not isinstance(item, dict):
+        die('resolved watchlist item must be an object')
+    symbol = str(item.get('symbol') or 'UNKNOWN')
+    for side in ('sell_put', 'sell_call'):
+        side_cfg = item.get(side) or {}
+        if not isinstance(side_cfg, dict):
+            die(f'{symbol}.{side} must be an object after template merge')
+        _validate_score_weights(side_cfg, f'{symbol}.{side}')
+        _validate_opening_strategy_config(side_cfg, f'{symbol}.{side}')
+        if side == 'sell_call':
+            _validate_optional_positive_number(
+                side_cfg,
+                'min_strike_cost_multiplier',
+                f'{symbol}.{side}',
+            )
 
 
 def _use_list(item: dict) -> list[str]:
@@ -432,11 +464,8 @@ def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
     if not isinstance(values, list) or not values:
         die(f'{path}.{key} must be a non-empty array')
     for index, value in enumerate(values):
-        try:
-            if float(value) < 0:
-                die(f'{path}.{key}[{index}] must be >= 0')
-        except Exception:
-            die(f'{path}.{key}[{index}] must be a number')
+        if _finite_number(value, f'{path}.{key}[{index}]') < 0:
+            die(f'{path}.{key}[{index}] must be >= 0')
 
 
 def _validate_optional_strike_bounds(cfg: dict, path: str):
@@ -447,11 +476,8 @@ def _validate_optional_strike_bounds(cfg: dict, path: str):
     if max_strike is not None:
         _validate_optional_positive_number(cfg, 'max_strike', path)
     if (min_strike is not None) and (max_strike is not None):
-        try:
-            if float(min_strike) > float(max_strike):
-                die(f'{path}.min_strike > {path}.max_strike')
-        except Exception:
-            die(f'{path}.min_strike/max_strike must be numbers')
+        if _finite_number(min_strike, f'{path}.min_strike') > _finite_number(max_strike, f'{path}.max_strike'):
+            die(f'{path}.min_strike > {path}.max_strike')
 
 
 def _validate_optional_dte_window(cfg: dict, path: str):
@@ -551,11 +577,8 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         min_delta = call_leg.get('min_delta')
         max_delta = call_leg.get('max_delta')
         if (min_delta is not None) and (max_delta is not None):
-            try:
-                if float(min_delta) > float(max_delta):
-                    die(f'{path}.call.min_delta > {path}.call.max_delta')
-            except Exception:
-                die(f'{path}.call.min_delta/max_delta must be numbers')
+            if _finite_number(min_delta, f'{path}.call.min_delta') > _finite_number(max_delta, f'{path}.call.max_delta'):
+                die(f'{path}.call.min_delta > {path}.call.max_delta')
 
 
 def _validate_hhmm(value, path: str) -> None:
@@ -776,6 +799,8 @@ def validate_config(cfg: dict):
     if isinstance(close_advice, dict):
         if 'strategy' in close_advice or 'strategy_profile' in close_advice:
             die('close_advice.strategy is not supported; close_advice uses sell_put/sell_call strategy')
+        if 'optimizer' in close_advice:
+            die('close_advice.optimizer has been removed')
         quote_source = str(close_advice.get('quote_source') or '').strip().lower()
         if quote_source and quote_source not in {'auto', 'required_data'}:
             die('close_advice.quote_source must be auto or required_data')
@@ -798,22 +823,19 @@ def validate_config(cfg: dict):
         for key in ('max_spread_ratio', 'strong_remaining_annualized_max', 'medium_remaining_annualized_max'):
             if key not in close_advice or close_advice.get(key) is None:
                 continue
-            try:
-                if float(close_advice.get(key)) < 0:
-                    die(f'close_advice.{key} must be >= 0')
-            except Exception:
-                die(f'close_advice.{key} must be a number')
+            if _finite_number(close_advice.get(key), f'close_advice.{key}') < 0:
+                die(f'close_advice.{key} must be >= 0')
 
     alert_policy = cfg.get('alert_policy')
     if alert_policy is not None and not isinstance(alert_policy, (dict, str)):
         die('alert_policy must be an object or a path string')
     if isinstance(alert_policy, dict):
         if 'change_annual_threshold' in alert_policy and alert_policy.get('change_annual_threshold') is not None:
-            try:
-                if float(alert_policy.get('change_annual_threshold')) < 0:
-                    die('alert_policy.change_annual_threshold must be >= 0')
-            except Exception:
-                die('alert_policy.change_annual_threshold must be a number')
+            if _finite_number(
+                alert_policy.get('change_annual_threshold'),
+                'alert_policy.change_annual_threshold',
+            ) < 0:
+                die('alert_policy.change_annual_threshold must be >= 0')
         for sub_key, allowed_keys in (
             ('sell_put', {'high_annual', 'high_spread_max', 'medium_annual'}),
             ('sell_call', {'high_annual', 'high_total', 'medium_annual'}),
@@ -828,11 +850,8 @@ def validate_config(cfg: dict):
                     die(f'alert_policy.{sub_key}.{k} is not a supported key; use one of: {", ".join(sorted(allowed_keys))}')
                 if v is None:
                     continue
-                try:
-                    if float(v) < 0:
-                        die(f'alert_policy.{sub_key}.{k} must be >= 0')
-                except Exception:
-                    die(f'alert_policy.{sub_key}.{k} must be a number')
+                if _finite_number(v, f'alert_policy.{sub_key}.{k}') < 0:
+                    die(f'alert_policy.{sub_key}.{k} must be >= 0')
 
     account_settings = cfg.get('account_settings') or {}
     if account_settings and not isinstance(account_settings, dict):
@@ -1053,14 +1072,14 @@ def validate_config(cfg: dict):
                     die(f"{sym}.sell_put enabled but missing {k}")
             if sp['min_dte'] > sp['max_dte']:
                 die(f"{sym}.sell_put min_dte > max_dte")
-            if ('min_strike' in sp) and (sp['min_strike'] is not None) and (float(sp['min_strike']) <= 0):
+            if ('min_strike' in sp) and (sp['min_strike'] is not None) and (_finite_number(sp['min_strike'], f'{sym}.sell_put.min_strike') <= 0):
                 die(f"{sym}.sell_put min_strike must be > 0; use null or omit it instead of 0")
-            if ('max_strike' in sp) and (sp['max_strike'] is not None) and (float(sp['max_strike']) <= 0):
+            if ('max_strike' in sp) and (sp['max_strike'] is not None) and (_finite_number(sp['max_strike'], f'{sym}.sell_put.max_strike') <= 0):
                 die(f"{sym}.sell_put max_strike must be > 0")
             if (
                 ('min_strike' in sp) and (sp['min_strike'] is not None)
                 and ('max_strike' in sp) and (sp['max_strike'] is not None)
-                and (float(sp['min_strike']) > float(sp['max_strike']))
+                and (_finite_number(sp['min_strike'], f'{sym}.sell_put.min_strike') > _finite_number(sp['max_strike'], f'{sym}.sell_put.max_strike'))
             ):
                 die(f"{sym}.sell_put min_strike > max_strike")
             if ('min_strike' in sp) and (sp.get('max_strike') is None):
@@ -1102,14 +1121,14 @@ def validate_config(cfg: dict):
 
             if sc['min_dte'] > sc['max_dte']:
                 die(f"{sym}.sell_call min_dte > max_dte")
-            if ('min_strike' in sc) and (sc['min_strike'] is not None) and (float(sc['min_strike']) <= 0):
+            if ('min_strike' in sc) and (sc['min_strike'] is not None) and (_finite_number(sc['min_strike'], f'{sym}.sell_call.min_strike') <= 0):
                 die(f"{sym}.sell_call min_strike must be > 0")
-            if ('max_strike' in sc) and (sc['max_strike'] is not None) and (float(sc['max_strike']) <= 0):
+            if ('max_strike' in sc) and (sc['max_strike'] is not None) and (_finite_number(sc['max_strike'], f'{sym}.sell_call.max_strike') <= 0):
                 die(f"{sym}.sell_call max_strike must be > 0 when set")
             if (
                 ('min_strike' in sc) and (sc['min_strike'] is not None)
                 and ('max_strike' in sc) and (sc['max_strike'] is not None)
-                and (float(sc['min_strike']) > float(sc['max_strike']))
+                and (_finite_number(sc['min_strike'], f'{sym}.sell_call.min_strike') > _finite_number(sc['max_strike'], f'{sym}.sell_call.max_strike'))
             ):
                 die(f"{sym}.sell_call min_strike > max_strike")
             if ('max_strike' in sc) and (sc.get('min_strike') is None):

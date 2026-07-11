@@ -396,3 +396,25 @@ def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() 
     assert resolved['_global_sell_put_liquidity'] == {'min_net_income': 100, 'min_open_interest': 50}
     assert resolved['_global_sell_call_liquidity'] == {'min_volume': 12}
     assert resolved['_global_sell_put_event_risk'] == {'enabled': True, 'mode': 'warn'}
+
+
+def test_resolve_watchlist_item_runtime_config_revalidates_merged_dte_window() -> None:
+    import pytest
+
+    from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
+
+    def _apply_profiles(item: dict, profiles: dict) -> dict:
+        merged = dict(profiles["put_base"])
+        merged["sell_put"] = {**merged["sell_put"], **item["sell_put"]}
+        return {**item, **merged}
+
+    with pytest.raises(SystemExit, match="min_dte > .*max_dte"):
+        resolve_watchlist_item_runtime_config(
+            item={
+                "symbol": "NVDA",
+                "use": ["put_base"],
+                "sell_put": {"enabled": True, "max_dte": 30},
+            },
+            profiles={"put_base": {"sell_put": {"min_dte": 60}}},
+            apply_profiles_fn=_apply_profiles,
+        )

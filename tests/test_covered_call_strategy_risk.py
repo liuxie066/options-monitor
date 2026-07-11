@@ -168,6 +168,28 @@ def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> N
     assert "annualized_return_below_min" in trace
 
 
+def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
+    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_call_candidates.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame([_candidate()])
+
+    filtered = enrich_and_filter_covered_call_underwriting(
+        df_labeled=df,
+        symbol="NVDA",
+        sell_call_cfg={"strategy": "insurance_underwriting"},
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
+    assert "net_income_missing" in trace
+
+
 def test_covered_call_underwriting_ranking_prefers_premium_edge_then_upside_margin(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

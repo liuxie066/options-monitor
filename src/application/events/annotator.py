@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from domain.domain.candidate_defaults import normalize_event_risk_mode
 from domain.domain.expiration_dates import expiration_business_today
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.events.source_yfinance import to_date_str
@@ -117,8 +118,7 @@ def _normalize_event_risk_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(cfg, dict):
         out.update(cfg)
     out["enabled"] = bool(out.get("enabled", True))
-    mode = str(out.get("mode") or "warn").strip().lower()
-    out["mode"] = mode or "warn"
+    out["mode"] = normalize_event_risk_mode(out.get("mode"))
     return out
 
 

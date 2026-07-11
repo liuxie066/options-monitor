@@ -199,6 +199,28 @@ def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Pa
     assert "event_risk_within_expiry" in trace
 
 
+def test_enrich_and_filter_sell_put_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame([_candidate(net_income_cny=None)])
+
+    filtered = enrich_and_filter_sell_put_underwriting(
+        df_labeled=df,
+        symbol="NVDA",
+        sell_put_cfg={"strategy": "insurance_underwriting"},
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
+    assert "net_income_missing" in trace
+
+
 def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_concentration(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

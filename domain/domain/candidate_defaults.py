@@ -21,6 +21,7 @@ DEFAULT_EVENT_RISK_CONFIG = {
     "enabled": True,
     "mode": "warn",
 }
+EVENT_RISK_MODES = {"warn", "reject"}
 
 DEFAULT_SELL_PUT_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
 DEFAULT_SELL_CALL_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
@@ -83,9 +84,16 @@ def resolve_event_risk_config(raw: dict | None) -> dict[str, Any]:
         src.update(raw)
     out = {
         "enabled": bool(src.get("enabled", DEFAULT_EVENT_RISK_CONFIG["enabled"])),
-        "mode": str(src.get("mode") or DEFAULT_EVENT_RISK_CONFIG["mode"]),
+        "mode": normalize_event_risk_mode(src.get("mode")),
     }
     for key in ("snapshot_path", "snapshot"):
         if key in src:
             out[key] = src[key]
     return out
+
+
+def normalize_event_risk_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_EVENT_RISK_CONFIG["mode"]).strip().lower()
+    if mode not in EVENT_RISK_MODES:
+        raise ValueError(f"event_risk.mode must be one of: {', '.join(sorted(EVENT_RISK_MODES))}")
+    return mode

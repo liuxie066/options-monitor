@@ -22,6 +22,39 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def test_validate_config_rejects_removed_close_advice_optimizer() -> None:
+    cfg = {
+        "symbols": [{"symbol": "NVDA"}],
+        "close_advice": {"optimizer": {"enabled": True}},
+    }
+
+    with pytest.raises(SystemExit, match="close_advice.optimizer has been removed"):
+        validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("side_cfg", "message"),
+    [
+        ({"enabled": "false"}, "enabled must be a boolean"),
+        ({"min_open_interest": True}, "min_open_interest must be a number"),
+        ({"min_dte": 7.5}, "min_dte must be an integer"),
+        ({"min_annualized_net_return": float("inf")}, "must be a finite number"),
+        ({"event_risk": {"mode": "drop"}}, "event_risk.mode must be one of"),
+        ({"pricing": {}}, "pricing has been removed"),
+        ({"strategy_profile": "return_first"}, "strategy_profile has been removed"),
+        ({"premium_score_cap": 1.5}, "premium_score_cap is not a supported"),
+    ],
+)
+def test_validate_config_rejects_invalid_opening_strategy_fields(side_cfg: dict, message: str) -> None:
+    cfg = {
+        "symbols": [{"symbol": "NVDA"}],
+        "templates": {"put_base": {"sell_put": side_cfg}},
+    }
+
+    with pytest.raises(SystemExit, match=message):
+        validate_config(cfg)
+
+
 def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     user_path = _write_json(
         tmp_path / "user.us.json",
