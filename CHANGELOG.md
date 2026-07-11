@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.387 - 2026-07-11
+
+### Fixed
+- Added an offline `--review-report` mode so human quality scores attach to the exact P1 report that was reviewed instead of rerunning the model and scoring different answers.
+- Required the review case set to exactly match the existing report before calculating the answer-quality gate.
+
 ## 1.2.386 - 2026-07-11
 
 ### Added

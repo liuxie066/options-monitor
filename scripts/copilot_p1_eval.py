@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -79,35 +80,79 @@ HOST_READ_ACTIONS = frozenset({"__read_observation__"})
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the production-side OM Copilot P1 read-only evaluation.")
-    parser.add_argument("--assistant-config", required=True)
+    parser.add_argument("--assistant-config")
     parser.add_argument("--config-key", choices=("us", "hk"), default="us")
     parser.add_argument("--runtime-root")
     parser.add_argument("--output")
     parser.add_argument("--review-input", help="JSON object keyed by eval case name with 0..2 human scores")
+    parser.add_argument("--review-report", help="Apply review scores to an existing P1 report without rerunning the model")
     args = parser.parse_args()
 
-    previous_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
-    try:
-        if args.runtime_root:
-            os.environ["OM_RUNTIME_ROOT"] = args.runtime_root
-        with tempfile.TemporaryDirectory(prefix="om-copilot-p1-") as temp_dir:
-            payload = run_eval(
-                assistant_config=args.assistant_config,
-                config_key=args.config_key,
-                host_db=str(Path(temp_dir) / "host.sqlite3"),
-                human_reviews=_load_human_reviews(args.review_input),
-            )
-    finally:
-        if args.runtime_root:
-            if previous_runtime_root is None:
-                os.environ.pop("OM_RUNTIME_ROOT", None)
-            else:
-                os.environ["OM_RUNTIME_ROOT"] = previous_runtime_root
+    human_reviews = _load_human_reviews(args.review_input)
+    if args.review_report:
+        if human_reviews is None:
+            parser.error("--review-report requires --review-input")
+        payload = apply_human_reviews(_load_report(args.review_report), human_reviews)
+    else:
+        if not args.assistant_config:
+            parser.error("--assistant-config is required unless --review-report is used")
+        previous_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
+        try:
+            if args.runtime_root:
+                os.environ["OM_RUNTIME_ROOT"] = args.runtime_root
+            with tempfile.TemporaryDirectory(prefix="om-copilot-p1-") as temp_dir:
+                payload = run_eval(
+                    assistant_config=args.assistant_config,
+                    config_key=args.config_key,
+                    host_db=str(Path(temp_dir) / "host.sqlite3"),
+                    human_reviews=human_reviews,
+                )
+        finally:
+            if args.runtime_root:
+                if previous_runtime_root is None:
+                    os.environ.pop("OM_RUNTIME_ROOT", None)
+                else:
+                    os.environ["OM_RUNTIME_ROOT"] = previous_runtime_root
     text = json.dumps(redact_value(payload), ensure_ascii=False, indent=2, default=str)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)
     return 0 if payload["structural_pass"] and payload.get("answer_quality_pass") is not False else 1
+
+
+def _load_report(path: str) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("cases"), list):
+        raise SystemExit("--review-report must contain a P1 report object with cases")
+    return payload
+
+
+def apply_human_reviews(
+    payload: dict[str, Any],
+    human_reviews: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    reviewed = copy.deepcopy(payload)
+    cases = reviewed.get("cases")
+    if not isinstance(cases, list):
+        raise SystemExit("review report cases must be a list")
+    case_names = {str(case.get("name") or "") for case in cases if isinstance(case, dict)}
+    review_names = set(human_reviews)
+    if review_names != case_names:
+        missing = sorted(case_names - review_names)
+        unknown = sorted(review_names - case_names)
+        raise SystemExit(f"review cases must exactly match report cases; missing={missing}, unknown={unknown}")
+    for case in cases:
+        if not isinstance(case, dict):
+            raise SystemExit("review report cases must contain objects")
+        name = str(case.get("name") or "")
+        human_review = _human_review_for_case(name, human_reviews)
+        human_score = _human_review_score(human_review)
+        case["human_review"] = human_review
+        case["human_score"] = human_score
+        case["answer_quality_pass"] = bool(human_score is not None and human_score >= 10)
+    reviewed["answer_quality_review"] = "reviewed"
+    reviewed["answer_quality_pass"] = all(bool(case["answer_quality_pass"]) for case in cases)
+    return reviewed
 
 
 def run_eval(
