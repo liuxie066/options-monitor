@@ -3349,11 +3349,13 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
                         "cash_secured_cny": 530385.93,
                         "annualized_basis_days": 19,
                         "annualized_net_return_rate": 1.3074,
+                        "annualized_realized_return_rate": -0.0255,
                         "premium_income_by_ccy": {"USD": 5100.0},
                         "premium_income_cny": 36800.0,
                         "premium_return_rate": 0.0697,
                         "realized_pnl_by_ccy": {"USD": -100.0},
                         "realized_pnl_cny": -702.77,
+                        "realized_return_rate": -0.001325,
                     }
                 ],
             },
@@ -3361,11 +3363,11 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
     )
 
     assert "lx 2026-05 收益摘要" in text
-    assert "净现金流：CNY 36,097（USD 5,000） | 现金流率 6.81%" in text
-    assert "年化：130.74%（按净现金流，19 天）" in text
-    assert "权利金：CNY 36,800（USD 5,100） | 权利金率 6.97%" in text
-    assert "已实现PnL：CNY -703（USD -100） | 已实现率 -" in text
-    assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
+    assert "已实现期权 PnL（毛）：CNY -703（USD -100） | 收益率 -0.13% | 年化 -2.55%（19 天）" in text
+    assert "开仓权利金（活动）：CNY 36,800（USD 5,100） | 活动率 6.97%" in text
+    assert "期权现金流（兼容口径）：CNY 36,097（USD 5,000） | 现金流率 6.81%" in text
+    assert "主指标为已实现期权 PnL（毛，未扣手续费" in text
+    assert "接货本金是现金转为正股，不是亏损" in text
 
 
 def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> None:
@@ -3397,6 +3399,7 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "realized_return_rate_by_ccy": {"HKD": 0.0228, "USD": 0.0},
                         "realized_pnl_cny": 17167.0,
                         "realized_return_rate": 0.021459,
+                        "annualized_realized_return_rate": 0.25267,
                     }
                 ],
                 "return_summary": [
@@ -3408,6 +3411,10 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "net_return_rate_by_ccy": {"HKD": 0.1316},
                         "net_income_cny": 35842.0,
                         "cash_secured_cny": 272355.0,
+                        "realized_pnl_by_ccy": {"HKD": 10000.0},
+                        "realized_return_rate_by_ccy": {"HKD": 0.0405},
+                        "realized_pnl_cny": 11016.0,
+                        "realized_return_rate": 0.0405,
                     },
                     {
                         "month": "2026-05",
@@ -3417,6 +3424,10 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
                         "net_return_rate_by_ccy": {"HKD": 0.039, "USD": 0.08},
                         "net_income_cny": 21453.0,
                         "cash_secured_cny": 527645.0,
+                        "realized_pnl_by_ccy": {"HKD": 6159.0, "USD": 0.0},
+                        "realized_return_rate_by_ccy": {"HKD": 0.0135, "USD": 0.0},
+                        "realized_pnl_cny": 6151.0,
+                        "realized_return_rate": 0.0117,
                     },
                 ],
             },
@@ -3424,9 +3435,11 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
     )
 
     assert text.startswith("收益统计完成（OM 本地账本）：\n全部账户 2026-05 收益摘要（按币种）")
-    assert "净现金流：HKD 50,291 + USD 890 | 现金流率 HKD 7.10%，USD 8.00%" in text
-    assert "分账户：\n- lx：净现金流 HKD 32,525 | 现金流率 HKD 13.16%" in text
-    assert "口径：金额和收益率按原币分别列示，不跨币种合并。" in text
+    assert "已实现期权 PnL（毛）：HKD 16,159 + USD 0 | 收益率 HKD 2.28%，USD 0.00%" in text
+    assert "开仓权利金（活动）：HKD 60,331 + USD 890 | 活动率 HKD 8.50%，USD 8.00%" in text
+    assert "期权现金流（兼容口径）：HKD 50,291 + USD 890 | 现金流率 HKD 7.10%，USD 8.00%" in text
+    assert "分账户：\n- lx：已实现期权 PnL（毛） HKD 10,000 | 收益率 HKD 4.05%" in text
+    assert "金额和收益率按原币分别列示，不跨币种合并" in text
 
 
 def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> None:
@@ -3456,6 +3469,7 @@ def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> No
                         "cash_secured_cny": 451822.630243,
                         "annualized_basis_days": 1,
                         "annualized_net_return_rate": 5.19468,
+                        "annualized_realized_return_rate": 3.52736,
                         "premium_income_by_ccy": {"HKD": 0.0},
                         "premium_income_cny": 0.0,
                         "premium_return_rate": 0.0,
@@ -3468,10 +3482,58 @@ def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> No
         ),
     )
 
-    assert "净现金流：CNY 6,430（HKD 7,416） | 现金流率 1.42%" in text
-    assert "已实现PnL：CNY 4,367（HKD 5,036） | 已实现率 0.97%" in text
-    assert "年化：519.47%（按净现金流，1 天，短周期仅参考）" in text
-    assert "提示：净现金流包含 long option 成本回收约 HKD 2,380，交易盈利看已实现PnL" in text
+    assert "已实现期权 PnL（毛）：CNY 4,367（HKD 5,036） | 收益率 0.97% | 年化 352.74%（1 天，短周期仅参考）" in text
+    assert "期权现金流（兼容口径）：CNY 6,430（HKD 7,416） | 现金流率 1.42%" in text
+    assert (
+        "提示：期权现金流（兼容口径）包含 long option 成本回收约 HKD 2,380，"
+        "交易盈利看已实现期权 PnL（毛）"
+    ) in text
+
+
+def test_inbound_monthly_income_renderer_separates_assigned_stock_pnl_and_quote_risk() -> None:
+    intent = _read_intent("monthly_income_report", {"month": "2026-06"})
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "all",
+                        "cash_secured_cny": 500000.0,
+                        "realized_pnl_by_ccy": {"HKD": 10000.0},
+                        "realized_pnl_cny": 9200.0,
+                        "realized_return_rate": 0.0184,
+                    }
+                ],
+                "assigned_stock_sale_rows": [
+                    {"currency": "HKD", "assigned_stock_realized_pnl": 4720.0},
+                    {"currency": "HKD", "assigned_stock_realized_pnl": -1480.0},
+                ],
+                "assignment_lifecycle_rows": [
+                    {
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "quote_status": "fresh",
+                        "assigned_stock_unrealized_pnl": 1250.0,
+                    },
+                    {
+                        "symbol": "0700.HK",
+                        "currency": "HKD",
+                        "quote_status": "missing_quote",
+                        "assigned_stock_unrealized_pnl": None,
+                    },
+                ],
+            },
+        ),
+    )
+
+    assert "指派正股（独立于期权 PnL）：" in text
+    assert "本月正股卖出已实现：HKD 3,240" in text
+    assert "当前正股浮盈亏：USD 1,250" in text
+    assert "行情缺口：0700.HK，无法完整计算当前正股浮盈亏。" in text
 
 
 def test_inbound_monthly_income_renderer_does_not_cap_return_summary_rows() -> None:
@@ -3602,8 +3664,8 @@ def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_miss
     assert "本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率" in text
     assert "当前持仓缺少现金担保金额" not in text
     assert "账本缺少已平仓/close 数据" not in text
-    assert "净现金流：HKD 22,751 + USD 2,400" in text
-    assert "权利金：HKD 23,735 + USD 2,400" in text
+    assert "期权现金流（兼容口径）：HKD 22,751 + USD 2,400" in text
+    assert "开仓权利金（活动）：HKD 23,735 + USD 2,400" in text
     assert "现金担保：HKD 377,500 + USD 29,745" not in text
     assert "原币权利金收益率：HKD 6.29%，USD 8.07%" in text
 

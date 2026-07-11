@@ -8,19 +8,27 @@ from src.application.agent_tools.base import AgentTool, AgentToolContext, build_
 
 
 _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
-    "schema_version": "monthly_income_report.output.v1",
+    "schema_version": "monthly_income_report.output.v2",
     "source_label": "OM 本地账本",
-    "primary_rows": "summary",
-    "row_count_field": "summary_count",
+    "primary_rows": "return_summary",
     "fact_fields": [
-        "summary[].month",
-        "summary[].account",
-        "summary[].currency",
-        "summary[].net_cashflow_gross",
         "return_summary[].month",
         "return_summary[].account",
+        "return_summary[].realized_pnl_cny",
+        "return_summary[].realized_pnl_by_ccy",
+        "return_summary[].realized_return_rate",
+        "return_summary[].annualized_realized_return_rate",
+        "return_summary[].premium_income_cny",
+        "return_summary[].premium_income_by_ccy",
+        "return_summary[].premium_return_rate",
+        "return_summary[].cash_secured_cny",
+        "return_summary[].cash_secured_by_ccy",
         "return_summary[].net_income_cny",
+        "return_summary[].net_income_by_ccy",
         "return_summary[].net_return_rate",
+        "return_summary[].annualized_net_return_rate",
+        "summary[].net_cashflow_gross",
+        "summary[].assignment_stock_net_cashflow_gross",
         "diagnostics[].income_record_status",
         "diagnostics[].income_amount_status",
         "diagnostics[].position_lot_snapshots_count",
@@ -39,9 +47,7 @@ _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
     **_MONTHLY_INCOME_OUTPUT_CONTRACT,
-    "schema_version": "monthly_income_report.detail_output.v1",
-    "primary_rows": "cashflow_rows",
-    "row_count_field": "",
+    "schema_version": "monthly_income_report.detail_output.v2",
     "fact_fields": [
         *_MONTHLY_INCOME_OUTPUT_CONTRACT["fact_fields"],
         "cashflow_rows[].month",
@@ -204,9 +210,14 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
 MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     name="monthly_income_report",
     description=(
-        "Return monthly option income statistics by cashflow, realized PnL, and open-basis attribution "
-        "from the local ledger without running market data or notification workflows. Use YYYY-MM for "
-        "a requested month; omit account to aggregate every available account while preserving currency. "
+        "Return monthly option performance and cashflow statistics from the local ledger without running "
+        "market data or notification workflows. For 'how much profit' use return_summary.realized_pnl_* and "
+        "realized_return_rate as the primary option metrics; they are gross before fees and exclude assigned-stock "
+        "market PnL. premium_income_* is sell-open premium activity, not additional profit, and must not be added "
+        "to realized_pnl_*. net_income_* is a legacy option-cashflow metric that removes assignment-stock settlement "
+        "cashflows; it is not profit or PnL. Likewise net_return_rate and annualized_net_return_rate are legacy "
+        "cashflow ratios, not investment returns. Use YYYY-MM for a requested month; omit account to aggregate "
+        "every available account while preserving currency. "
         "When diagnostics.income_amount_status is not_reported, the ledger has not reported a numeric "
         "income amount for that scope; empty rows must not be interpreted as zero income. "
         "diagnostics.position_lot_snapshots_count counts ledger lot snapshots only; it does not "

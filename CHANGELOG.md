@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.385 - 2026-07-11
+
+### Changed
+- Made gross realized option PnL and its return rate the primary monthly performance metrics; kept sell-open premium as an activity metric and `net_income` as a legacy option-cashflow compatibility field that excludes assignment-stock settlement principal.
+- Separated assigned-stock realized/unrealized PnL and missing-quote risk from option PnL, while clarifying that assignment principal is an asset conversion rather than a loss.
+- Added tool-contract semantics and query warnings that prevent premium, realized PnL, legacy cashflow, and non-additive component rows from being mislabeled or summed together.
+
 ## 1.2.384 - 2026-07-11
 
 ### Changed

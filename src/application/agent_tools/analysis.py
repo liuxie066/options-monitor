@@ -52,17 +52,18 @@ ALLOWED_SQL_FUNCTIONS = {
 RETURN_SUMMARY_FIELDS: tuple[str, ...] = (
     "month",
     "account",
+    "realized_pnl_cny",
+    "realized_pnl_by_ccy",
+    "realized_return_rate",
+    "annualized_realized_return_rate",
+    "premium_income_cny",
+    "premium_income_by_ccy",
+    "premium_return_rate",
     "cash_secured_cny",
     "cash_secured_by_ccy",
     "net_income_cny",
     "net_income_by_ccy",
-    "realized_pnl_cny",
-    "realized_pnl_by_ccy",
-    "premium_income_cny",
-    "premium_income_by_ccy",
     "net_return_rate",
-    "realized_return_rate",
-    "premium_return_rate",
     "annualized_net_return_rate",
     "annualized_basis_days",
     "return_basis",
@@ -75,17 +76,18 @@ COMBINED_RETURN_SUMMARY_FIELDS: tuple[str, ...] = (
     "account",
     "account_scope",
     "accounts",
+    "realized_pnl_cny",
+    "realized_pnl_by_ccy",
+    "realized_return_rate",
+    "annualized_realized_return_rate",
+    "premium_income_cny",
+    "premium_income_by_ccy",
+    "premium_return_rate",
     "cash_secured_cny",
     "cash_secured_by_ccy",
     "net_income_cny",
     "net_income_by_ccy",
-    "realized_pnl_cny",
-    "realized_pnl_by_ccy",
-    "premium_income_cny",
-    "premium_income_by_ccy",
     "net_return_rate",
-    "realized_return_rate",
-    "premium_return_rate",
     "annualized_net_return_rate",
     "annualized_basis_days",
     "return_basis",
@@ -499,40 +501,69 @@ _RETURN_FIELD_OVERRIDES: dict[str, dict[str, Any]] = {
         "formula": "current_open_cash_secured converted to CNY",
         "aggregation": "sum",
         "currency": "CNY",
+        "metric_role": "collateral_basis",
+        "profit_metric": False,
     },
     "net_income_cny": {
-        "formula": "income_cashflow_ex_assignment_stock converted to CNY",
+        "formula": "period net cashflow less assignment-stock settlement cashflow, converted to CNY",
         "aggregation": "sum",
         "currency": "CNY",
+        "metric_role": "legacy_option_cashflow",
+        "legacy": True,
+        "profit_metric": False,
+        "do_not": ["describe as profit or PnL"],
     },
     "realized_pnl_cny": {
-        "formula": "realized option/assignment/stock sale PnL converted to CNY",
+        "formula": "realized option lifecycle PnL before fees, converted to CNY",
         "aggregation": "sum",
         "currency": "CNY",
+        "metric_role": "primary_realized_option_pnl",
+        "gross_before_fees": True,
+        "assigned_stock_pnl_included": False,
     },
     "premium_income_cny": {
         "formula": "sell-open option premium converted to CNY",
         "aggregation": "sum",
         "currency": "CNY",
+        "metric_role": "premium_activity",
+        "profit_metric": False,
+        "do_not": ["add to realized_pnl_cny"],
     },
     "net_return_rate": {
         "formula": "net_income_cny / cash_secured_cny",
         "aggregation": "weighted_recompute",
-        "do_not": ["avg", "sum"],
+        "metric_role": "legacy_cashflow_ratio",
+        "legacy": True,
+        "profit_metric": False,
+        "do_not": ["avg", "sum", "describe as monthly investment return"],
     },
     "realized_return_rate": {
         "formula": "realized_pnl_cny / cash_secured_cny",
         "aggregation": "weighted_recompute",
+        "metric_role": "primary_realized_option_return",
+        "gross_before_fees": True,
         "do_not": ["avg", "sum"],
     },
     "premium_return_rate": {
         "formula": "premium_income_cny / cash_secured_cny",
         "aggregation": "weighted_recompute",
+        "metric_role": "premium_activity_ratio",
+        "profit_metric": False,
         "do_not": ["avg", "sum"],
     },
     "annualized_net_return_rate": {
         "formula": "net_return_rate * 365 / annualized_basis_days",
         "aggregation": "weighted_recompute",
+        "metric_role": "legacy_cashflow_ratio",
+        "legacy": True,
+        "profit_metric": False,
+        "do_not": ["avg", "sum", "describe as annualized investment return"],
+    },
+    "annualized_realized_return_rate": {
+        "formula": "realized_return_rate * 365 / annualized_basis_days",
+        "aggregation": "weighted_recompute",
+        "metric_role": "primary_realized_option_return",
+        "gross_before_fees": True,
         "do_not": ["avg", "sum"],
     },
 }
@@ -540,8 +571,9 @@ _RETURN_FIELD_OVERRIDES: dict[str, dict[str, Any]] = {
 
 VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
     "account_monthly_performance": {
-        "description": "semantic account-level monthly performance view for comparing income, rates, premium, realized PnL, and cash-secured basis",
+        "description": "account-level monthly option performance: realized_pnl is the primary gross profit metric, premium is activity, and net_income is legacy cashflow",
         "fields": RETURN_SUMMARY_FIELDS,
+        "primary_metric": "realized_pnl_cny",
         "row_grain": "month + account",
         "primary_keys": ("month", "account"),
         "time_grain": "month",
@@ -554,8 +586,10 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "_field_semantics": _RETURN_FIELD_OVERRIDES,
     },
     "account_monthly_income_components": {
-        "description": "account-level monthly income composition rows with included and excluded components",
+        "description": "legacy non-additive compatibility rows; premium, realized PnL, and cashflow residuals are parallel metrics and must not be summed",
         "fields": ACCOUNT_MONTHLY_COMPONENT_FIELDS,
+        "status": "legacy_compatibility",
+        "additivity": "non_additive",
         "row_grain": "month + account + component",
         "primary_keys": ("month", "account", "component"),
         "time_grain": "month",
@@ -568,20 +602,23 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
             "amount_cny": {
                 "type": "money",
                 "currency": "CNY",
-                "aggregation": "sum",
+                "aggregation": "sum_within_same_component_only",
                 "source": "monthly_income_report",
                 "freshness": "snapshot",
+                "do_not": ["sum across component values"],
             },
             "included_in_net_income": {
                 "type": "status",
                 "aggregation": "group_only",
                 "source": "monthly_income_report",
                 "freshness": "snapshot",
+                "legacy": True,
+                "do_not": ["use as proof that components are additive"],
             },
         },
     },
     "monthly_income_summary": {
-        "description": "monthly income by month/account/currency from OM local ledger",
+        "description": "monthly raw cashflow, gross realized option PnL, and premium activity by month/account/currency",
         "fields": (
             "month",
             "account",
@@ -601,8 +638,9 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "safe_join_keys": ("month", "account", "currency"),
     },
     "monthly_income_return_summary": {
-        "description": "account-level monthly return rows with CNY amounts and return rates",
+        "description": "account-level monthly option performance with primary gross realized PnL, premium activity, collateral basis, and legacy cashflow fields",
         "fields": RETURN_SUMMARY_FIELDS,
+        "primary_metric": "realized_pnl_cny",
         "row_grain": "month + account",
         "primary_keys": ("month", "account"),
         "time_grain": "month",
@@ -614,8 +652,9 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "_field_semantics": _RETURN_FIELD_OVERRIDES,
     },
     "monthly_income_combined_return_summary": {
-        "description": "all-account monthly return rows aggregated by month",
+        "description": "all-account monthly option performance aggregated by month; realized PnL is primary and net_income remains legacy cashflow",
         "fields": COMBINED_RETURN_SUMMARY_FIELDS,
+        "primary_metric": "realized_pnl_cny",
         "row_grain": "month + account_scope",
         "primary_keys": ("month", "account_scope"),
         "time_grain": "month",
@@ -1008,6 +1047,11 @@ _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].symbol",
         "rows[].currency",
         "rows[].status",
+        "rows[].realized_pnl_cny",
+        "rows[].realized_return_rate",
+        "rows[].premium_income_cny",
+        "rows[].net_income_cny",
+        "query_explain.warnings[]",
     ],
     "freshness_fields": ["freshness[]"],
     "model_preview_fields": ["scope", "coverage", "freshness", "query_explain", "rows", "truncated"],
@@ -1029,17 +1073,17 @@ def _analysis_catalog_tool(
         {
             "question": "对比 lx 和 sy 的账户收益，有什么不同？",
             "sql": (
-                "select month, account, net_income_cny, net_return_rate "
+                "select month, account, realized_pnl_cny, realized_return_rate "
                 "from account_monthly_performance "
                 "where account in ('lx','sy') order by month, account"
             ),
         },
         {
-            "question": "lx 和 sy 收益差异主要来自哪里？",
+            "question": "对比 lx 和 sy 的开仓权利金活动",
             "sql": (
-                "select month, account, component, amount_cny, included_in_net_income "
-                "from account_monthly_income_components "
-                "where account in ('lx','sy') order by month, account, component_order"
+                "select month, account, premium_income_cny, premium_return_rate "
+                "from account_monthly_performance "
+                "where account in ('lx','sy') order by month, account"
             ),
         },
         {
@@ -1059,6 +1103,12 @@ def _analysis_catalog_tool(
         "field_types": _catalog_field_types(specs),
         "aggregation_policies": _catalog_aggregation_policies(specs),
         "join_policies": _catalog_join_policies(specs),
+        "metric_policy": {
+            "primary_profit": "realized_pnl_* (gross realized option PnL before fees)",
+            "premium_activity": "premium_income_*; attribution/activity only, never add to realized_pnl_*",
+            "legacy_cashflow": "net_income_* and net_return_rate; not profit, PnL, or investment return",
+            "assigned_stock": "use assigned_stock_position_pnl or assigned_stock_lifecycle separately",
+        },
         "sql_rules": {
             "allowed_statements": ["SELECT", "WITH"],
             "single_statement_only": True,
@@ -1071,6 +1121,9 @@ def _analysis_catalog_tool(
         "anti_patterns": [
             "Do not invent unlisted columns such as net_cashflow, total_return, return_rate, or open_basis_pnl.",
             "Do not average or sum *_return_rate fields directly; recompute weighted rates from money numerator and cash_secured_cny.",
+            "Do not describe net_income_* or net_return_rate as profit or investment return; they are legacy cashflow metrics.",
+            "Do not add premium_income_* to realized_pnl_*; premium is activity attribution, not extra profit.",
+            "Do not sum account_monthly_income_components across component values; that view is legacy and non-additive.",
             "Do not join views unless the join fields are listed in each view's safe_join_keys.",
         ],
     }, [], {"config_path": ctx.mask_path(config_path)}
@@ -1176,6 +1229,8 @@ def _analysis_views_mode_result(
     limit: int,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     view_names = sorted(views)
+    semantic_warnings = _income_metric_semantic_warnings(sql="", views_used=view_names)
+    warnings.extend(warning for warning in semantic_warnings if warning not in warnings)
     view_datasets: dict[str, dict[str, Any]] = {}
     preview_rows: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
@@ -1213,7 +1268,7 @@ def _analysis_views_mode_result(
         "source": {"label": "OM read-only analysis workspace", "kind": "materialized_views"},
         "scope": {"views": view_names, "limit": limit},
         "query": {"mode": "views", "views": view_names, "limit": limit},
-        "preflight": {"ok": True, "warnings": []},
+        "preflight": {"ok": True, "warnings": semantic_warnings},
         "columns": columns,
         "rows": preview_rows,
         "row_count": len(all_rows),
@@ -1225,7 +1280,7 @@ def _analysis_views_mode_result(
             "views_used": view_names,
             "grain": [],
             "aggregations": [],
-            "warnings": [],
+            "warnings": semantic_warnings,
             "coverage": coverage,
             "diagnostics": diagnostics,
         },
@@ -3071,6 +3126,8 @@ def _query_explain_and_evidence(
     materialization_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     aggregations, aggregation_warnings = _query_aggregation_explain(sql=sql, views_used=views_used)
+    semantic_warnings = _income_metric_semantic_warnings(sql=sql, views_used=views_used)
+    query_warnings = [*aggregation_warnings, *semantic_warnings]
     coverage = _query_coverage(rows)
     freshness = _query_freshness(views_used)
     diagnostics = _query_diagnostics(
@@ -3083,7 +3140,7 @@ def _query_explain_and_evidence(
         "views_used": views_used,
         "grain": grain,
         "aggregations": aggregations,
-        "warnings": aggregation_warnings,
+        "warnings": query_warnings,
         "coverage": coverage,
         "diagnostics": diagnostics,
     }
@@ -3103,7 +3160,7 @@ def _query_explain_and_evidence(
         "diagnostics": diagnostics,
         "columns": columns,
     }
-    return query_explain, aggregation_warnings, evidence
+    return query_explain, query_warnings, evidence
 
 
 def _query_diagnostics(
@@ -3742,6 +3799,57 @@ def _query_aggregation_explain(*, sql: str, views_used: list[str]) -> tuple[list
     return aggregations, warnings
 
 
+def _income_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list[str]:
+    def mentions(*fields: str) -> bool:
+        return any(re.search(rf"(?i)\b{re.escape(field)}\b", sql) for field in fields)
+
+    warnings: list[str] = []
+    if not sql.strip() and any(
+        view
+        in {
+            "account_monthly_performance",
+            "monthly_income_return_summary",
+            "monthly_income_combined_return_summary",
+        }
+        for view in views_used
+    ):
+        warnings.append(
+            "Monthly performance rows contain non-additive metric roles: use realized_pnl_* for gross option PnL, "
+            "premium_income_* for activity, and net_income_* only as legacy cashflow."
+        )
+    if mentions("net_income_cny", "net_income_by_ccy"):
+        warnings.append(
+            "net_income_* is a legacy option-cashflow metric that removes assignment-stock settlement "
+            "cashflows; it is not profit or PnL."
+        )
+    if mentions("net_return_rate", "annualized_net_return_rate", "net_return_rate_by_ccy"):
+        warnings.append(
+            "net_return_rate and annualized_net_return_rate are legacy cashflow ratios; do not describe "
+            "them as monthly or annualized investment returns."
+        )
+    if mentions(
+        "premium_income_cny",
+        "premium_income_by_ccy",
+        "premium_return_rate",
+        "annualized_premium_return_rate",
+    ) and mentions(
+        "realized_pnl_cny",
+        "realized_pnl_by_ccy",
+        "realized_return_rate",
+        "annualized_realized_return_rate",
+    ):
+        warnings.append(
+            "premium_income_* is sell-open premium activity and realized_pnl_* is realized option PnL; "
+            "they overlap across lifecycle timing and must not be added."
+        )
+    if "account_monthly_income_components" in views_used:
+        warnings.append(
+            "account_monthly_income_components is a legacy non-additive compatibility view; compare each "
+            "component separately and do not sum components into profit."
+        )
+    return warnings
+
+
 def _field_semantics_for_query_field(field: str, views_used: list[str]) -> dict[str, Any]:
     for view_name in views_used:
         spec = VIEW_SPECS.get(view_name) or {}
@@ -3920,14 +4028,14 @@ def _preferred_unknown_column_replacements(unknown_column: str) -> list[str]:
         return [
             "net_income_cny",
             "net_income_by_ccy",
-            "net_return_rate",
             "net_cashflow_gross",
             "net_cashflow_gross_cny",
+            "realized_pnl_cny",
         ]
     if normalized in {"returnrate", "totalreturnrate"}:
-        return ["net_return_rate", "premium_return_rate", "realized_return_rate"]
+        return ["realized_return_rate", "premium_return_rate", "net_return_rate"]
     if normalized in {"totalreturn", "totalincome"}:
-        return ["net_income_cny", "premium_income_cny", "realized_pnl_cny"]
+        return ["realized_pnl_cny", "premium_income_cny", "net_income_cny"]
     return []
 
 
@@ -4049,7 +4157,9 @@ def _format_cell(value: Any) -> str:
 ANALYSIS_CATALOG_TOOL = build_agent_tool(
     name="analysis_catalog",
     description=(
-        "List the read-only analysis views, their fields, source semantics, and allowed SQL rules. "
+        "List the read-only analysis views, their fields, metric roles, source semantics, and allowed SQL rules. "
+        "For monthly performance, realized_pnl_* is primary gross option PnL, premium_income_* is activity, "
+        "and net_income_* is legacy cashflow rather than profit. "
         "Use this before analysis_query when the correct view or field names are not already known."
     ),
     requires=("runtime_config",),
@@ -4077,6 +4187,9 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
         "fact_fields": [
             "view_count",
             "view_names[]",
+            "metric_policy.primary_profit",
+            "metric_policy.premium_activity",
+            "metric_policy.legacy_cashflow",
             "sql_rules.allowed_statements[]",
             "sql_rules.writes_allowed",
         ],
@@ -4090,7 +4203,10 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         "Run a SELECT-only query against whitelisted in-memory OM analysis views for comparisons, "
         "rankings, trends, breakdowns, and other open-ended analytical questions. Supply either "
         "SELECT/WITH SQL or one or more catalog view names. Inspect analysis_catalog first when view "
-        "or field names are uncertain."
+        "or field names are uncertain. For monthly profit use realized_pnl_* and realized_return_rate; "
+        "these are gross option metrics before fees and exclude assigned-stock market PnL. premium_income_* "
+        "is sell-open activity and must not be added to realized_pnl_*. net_income_* and net_return_rate are "
+        "legacy cashflow metrics and must not be described as profit or investment return."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("analysis_query", "read_only", "analysis_workspace"),
@@ -4139,7 +4255,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "input": {
                 "config_key": "us",
                 "sql": (
-                    "select month, account, net_income_cny, net_return_rate "
+                    "select month, account, realized_pnl_cny, realized_return_rate "
                     "from monthly_income_return_summary order by month, account"
                 ),
             }
