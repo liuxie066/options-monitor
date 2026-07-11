@@ -383,6 +383,8 @@ def _normalized_repair_core_event(target: dict[str, Any], overrides: dict[str, A
     for key, value in _repair_override_payload(overrides).items():
         if key in {"record_id", "close_target_source_event_id"}:
             raw_payload[key] = value
+            if key == "record_id":
+                raw_payload["target_lot_id"] = value
 
     merged["source_type"] = "manual_trade_event"
     merged["source_name"] = "cli_trade_event_repair"

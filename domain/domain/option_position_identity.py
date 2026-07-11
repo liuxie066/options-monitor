@@ -181,7 +181,7 @@ def infer_currency_from_symbol(symbol: Any) -> str | None:
 def resolve_open_currency(symbol: Any, currency: Any) -> str:
     normalized = normalize_currency(currency)
     inferred = infer_currency_from_symbol(symbol)
-    return normalize_currency(normalized or inferred, strict=True)
+    return normalize_currency(inferred or normalized, strict=True)
 
 
 def normalize_close_type(value: Any, *, strict: bool = False) -> str:
