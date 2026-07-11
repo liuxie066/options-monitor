@@ -309,3 +309,43 @@ def test_p1_eval_rejects_incomplete_human_review(tmp_path) -> None:
         assert "must be 0, 1, or 2" in str(exc)
     else:
         raise AssertionError("incomplete review must fail")
+
+
+def test_apply_human_reviews_updates_existing_report_without_running_model() -> None:
+    report = {
+        "schema_version": "om.copilot.p1_eval.v3",
+        "structural_pass": True,
+        "answer_quality_pass": None,
+        "answer_quality_review": "pending_human_review",
+        "cases": [
+            {
+                "name": "july_income",
+                "response": "结论：原始答案",
+                "human_review": copilot_p1_eval._empty_human_review(),
+                "human_score": None,
+                "answer_quality_pass": None,
+            }
+        ],
+    }
+    scores = {dimension: 2 for dimension in copilot_p1_eval._empty_human_review()}
+
+    reviewed = copilot_p1_eval.apply_human_reviews(report, {"july_income": scores})
+
+    assert report["answer_quality_pass"] is None
+    assert reviewed["cases"][0]["response"] == "结论：原始答案"
+    assert reviewed["cases"][0]["human_score"] == 12
+    assert reviewed["answer_quality_review"] == "reviewed"
+    assert reviewed["answer_quality_pass"] is True
+
+
+def test_apply_human_reviews_requires_exact_case_set() -> None:
+    report = {"cases": [{"name": "july_income"}]}
+    scores = {dimension: 2 for dimension in copilot_p1_eval._empty_human_review()}
+
+    try:
+        copilot_p1_eval.apply_human_reviews(report, {"other": scores})
+    except SystemExit as exc:
+        assert "missing=['july_income']" in str(exc)
+        assert "unknown=['other']" in str(exc)
+    else:
+        raise AssertionError("mismatched review cases must fail")
