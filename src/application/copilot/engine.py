@@ -617,6 +617,27 @@ def _execute_tool_call(
     signature = json.dumps([call.name, payload], ensure_ascii=False, sort_keys=True, default=str)
     if signature in state.call_signatures:
         previous_error = state.call_outcomes.get(signature, "")
+        previous_observation = state.successful_observations.get(signature)
+        if previous_error == "SUCCESS" and previous_observation is not None:
+            reused = {
+                key: value
+                for key, value in previous_observation.items()
+                if key not in {"ref", "tool_call_id"}
+            }
+            reused["reused"] = True
+            reused["reused_from_ref"] = previous_observation.get("ref")
+            record_event(
+                "tool_result_reused",
+                {
+                    "iteration": state.iterations,
+                    "iteration_id": state.current_iteration_id,
+                    "tool_call_id": call.call_id,
+                    "tool_name": call.name,
+                    "reused_from_ref": previous_observation.get("ref"),
+                },
+                str(previous_observation.get("ref") or "") or None,
+            )
+            return _append_tool_observation(state, call, reused, record_event)
         if previous_error not in TRANSIENT_TOOL_ERRORS or state.call_attempts.get(signature, 0) >= 2:
             return _append_tool_observation(
                 state,
@@ -663,7 +684,10 @@ def _execute_tool_call(
     observation["tool_input"] = payload
     _attach_result_page(state, observation, response)
     state.call_outcomes[signature] = str(observation.get("error") or "SUCCESS")
-    return _append_tool_observation(state, call, observation, record_event)
+    appended = _append_tool_observation(state, call, observation, record_event)
+    if appended.get("ok"):
+        state.successful_observations[signature] = dict(appended)
+    return appended
 
 
 def _tool_input(arguments: dict[str, Any], scene_input: dict[str, Any]) -> dict[str, Any]:
@@ -725,6 +749,9 @@ def _project_observation_for_model(observation: dict[str, Any]) -> dict[str, Any
     truncation = observation.get("truncation")
     if isinstance(truncation, dict) and truncation:
         projected["truncation"] = dict(truncation)
+    if observation.get("reused") is True:
+        projected["reused"] = True
+        projected["reused_from_ref"] = observation.get("reused_from_ref")
     return projected
 
 

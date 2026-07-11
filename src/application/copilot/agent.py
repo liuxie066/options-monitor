@@ -45,6 +45,7 @@ class AgentState:
     call_signatures: set[str] = field(default_factory=set)
     call_attempts: dict[str, int] = field(default_factory=dict)
     call_outcomes: dict[str, str] = field(default_factory=dict)
+    successful_observations: dict[str, dict[str, Any]] = field(default_factory=dict)
     result_pages: dict[str, str] = field(default_factory=dict)
     accumulated_text_parts: list[str] = field(default_factory=list)
     tool_calls: int = 0

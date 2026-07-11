@@ -11,7 +11,7 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant import inbound_service
-from src.application.assistant.capability_catalog import command_specs
+from src.application.assistant.capability_catalog import command_specs, preview_operation_capabilities
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
@@ -25,6 +25,7 @@ from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.inbound_service import handle_assistant_request
 from src.application.copilot.contracts import AppResult
 from src.application.copilot.host_store import CopilotHostStore
+from src.application.copilot.control_handoff import control_preview_tool_description
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 
@@ -38,6 +39,24 @@ def _assistant_turn_response(response_text: str = "状态查询完成。") -> As
         data={"response_text": response_text},
         meta={"assistant": {"route": "command"}},
     )
+
+
+def test_control_preview_contract_tells_agent_to_collect_required_trade_fields() -> None:
+    specs = preview_operation_capabilities()
+    manual_open = next(item for item in specs if item["intent_name"] == "manual_trade_open")
+    description = control_preview_tool_description(specs)["description"]
+
+    assert manual_open["required_information"] == [
+        "account",
+        "symbol",
+        "side",
+        "option_type",
+        "contracts",
+        "strike",
+        "expiration_ymd",
+        "premium_per_share",
+    ]
+    assert "If required_information is missing, ask the user" in description
 
 
 @pytest.mark.parametrize(
@@ -862,6 +881,31 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "receipt_not_observed" in timeline["warnings"]
     assert "phase=verify" in timeline_out["data"]["response_text"]
     assert "verify=verified_applied" in timeline_out["data"]["response_text"]
+
+
+def test_incomplete_manual_open_does_not_create_pending_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="/record-open sy NVDA short put",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_incomplete_open",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] in {"INPUT_ERROR", "NEEDS_CLARIFICATION"}
+    assert InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1") == []
 
 
 def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

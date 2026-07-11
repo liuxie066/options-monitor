@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 694 (`src`: 401, `domain`: 52, `scripts`: 8, `tests`: 233)
-- Internal import edges: 3694 total, 1702 production/script edges excluding tests
+- Internal import edges: 3696 total, 1703 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -40,11 +40,11 @@ flowchart LR
   infrastructure -->|1| domain
   interfaces -->|115| application
   interfaces -->|2| domain
-  scripts -->|6| application
+  scripts -->|7| application
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1378| application
+  tests -->|1379| application
   tests -->|292| domain
   tests -->|2| domain_services
   tests -->|94| infrastructure
@@ -61,7 +61,7 @@ flowchart LR
 | interfaces | application | 115 |
 | application | infrastructure | 103 |
 | application | storage | 34 |
-| scripts | application | 6 |
+| scripts | application | 7 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
 | interfaces | domain | 2 |
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1378 |
+| tests | application | 1379 |
 | tests | domain | 292 |
 | tests | interfaces | 180 |
 | tests | infrastructure | 94 |
@@ -114,12 +114,12 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.storage | 7 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | domain.domain | 6 |
+| scripts | src.application | 6 |
 | src.application.setup | src.application | 5 |
 | src.application.trades | src.application.ledger | 5 |
 | src.application.trades | src.infrastructure | 5 |
 | domain.domain.ledger | domain.domain | 5 |
 | domain.services | domain.domain | 5 |
-| scripts | src.application | 5 |
 | src.application.positions | src.application.ledger | 4 |
 | src.application.trades | domain.domain.ledger | 4 |
 | src.interfaces | src.application.settings | 4 |
