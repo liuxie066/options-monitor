@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import time
@@ -79,15 +80,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the production-side OM Copilot P1 read-only evaluation.")
     parser.add_argument("--assistant-config", required=True)
     parser.add_argument("--config-key", choices=("us", "hk"), default="us")
+    parser.add_argument("--runtime-root")
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory(prefix="om-copilot-p1-") as temp_dir:
-        payload = run_eval(
-            assistant_config=args.assistant_config,
-            config_key=args.config_key,
-            host_db=str(Path(temp_dir) / "host.sqlite3"),
-        )
+    previous_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
+    try:
+        if args.runtime_root:
+            os.environ["OM_RUNTIME_ROOT"] = args.runtime_root
+        with tempfile.TemporaryDirectory(prefix="om-copilot-p1-") as temp_dir:
+            payload = run_eval(
+                assistant_config=args.assistant_config,
+                config_key=args.config_key,
+                host_db=str(Path(temp_dir) / "host.sqlite3"),
+            )
+    finally:
+        if args.runtime_root:
+            if previous_runtime_root is None:
+                os.environ.pop("OM_RUNTIME_ROOT", None)
+            else:
+                os.environ["OM_RUNTIME_ROOT"] = previous_runtime_root
     text = json.dumps(redact_value(payload), ensure_ascii=False, indent=2, default=str)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

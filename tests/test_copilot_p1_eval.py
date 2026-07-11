@@ -1,7 +1,37 @@
 from __future__ import annotations
 
+import os
+import sys
+
 from src.application.copilot.contracts import AppEvent, AppResult
 from scripts import copilot_p1_eval
+
+
+def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
+    runtime_root = tmp_path / "runtime"
+    observed: dict[str, str | None] = {}
+
+    def run_eval(**kwargs):
+        observed["runtime_root"] = os.environ.get("OM_RUNTIME_ROOT")
+        return {"structural_pass": True}
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(copilot_p1_eval, "run_eval", run_eval)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "copilot_p1_eval.py",
+            "--assistant-config",
+            "config.assistant.json",
+            "--runtime-root",
+            str(runtime_root),
+        ],
+    )
+
+    assert copilot_p1_eval.main() == 0
+    assert observed["runtime_root"] == str(runtime_root)
+    assert "OM_RUNTIME_ROOT" not in os.environ
 
 
 def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_path) -> None:

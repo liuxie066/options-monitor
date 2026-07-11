@@ -364,6 +364,17 @@ failure owner, selected tools, final answer, and six human-review dimensions:
 
 No benchmark may become runtime routing, a dedicated Scene, or an answer template.
 
+Production evaluation must receive the runtime root explicitly instead of
+depending on a shell-specific inherited environment:
+
+```bash
+python3 scripts/copilot_p1_eval.py \
+  --assistant-config /var/lib/options-monitor/resolved/config.assistant.json \
+  --config-key us \
+  --runtime-root /var/lib/options-monitor \
+  --output /tmp/om-copilot-p1.json
+```
+
 ## Delivery Phases
 
 | Phase | Deliverable | Exit gate |
