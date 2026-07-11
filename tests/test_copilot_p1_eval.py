@@ -98,6 +98,38 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
     assert payload["structural_pass"] is True
 
 
+def test_p1_eval_accepts_any_pure_read_evidence_tool(monkeypatch, tmp_path) -> None:
+    def run_channel_request(**kwargs):
+        question = kwargs["user_message"]
+        needs_read = next(
+            case.requires_read_observation
+            for case in copilot_p1_eval.CASES
+            if case.question == question
+        )
+        events = [] if not needs_read else [
+            AppEvent(
+                "evt_1",
+                "run_1",
+                "tool_call",
+                "2026-07-11T00:00:00+00:00",
+                {"tool_name": "analysis_query", "tool_input": {"config_key": "us"}},
+            )
+        ]
+        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+
+    monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
+    payload = copilot_p1_eval.run_eval(
+        assistant_config="config.yaml",
+        config_key="us",
+        host_db=str(tmp_path / "host.sqlite3"),
+    )
+
+    operation_review = next(item for item in payload["cases"] if item["name"] == "operation_review")
+    assert operation_review["tool_names"] == ["analysis_query"]
+    assert operation_review["checks"]["read_observation_used"] is True
+    assert payload["structural_pass"] is True
+
+
 def test_p1_eval_records_one_case_failure_and_continues(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
