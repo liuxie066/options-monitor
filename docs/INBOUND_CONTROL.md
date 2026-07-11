@@ -62,8 +62,8 @@ canonical pure-read tools and owns run/session/event lifecycle. The model never
 receives write, confirm, cancel, or apply tools. Its only state-change surface
 is a generic preview request projected from the Control capability catalog.
 
-After Control returns, the router writes a structured receipt to Copilot session
-history. Before every later channel turn it injects the current conversation's
+After Control returns, the inbound service writes a structured receipt to
+Copilot session history. Before every later channel turn it injects the current conversation's
 pending-operation summaries from the operation store. The operation store, not
 chat history, remains authoritative for confirmation and cancellation.
 
@@ -107,6 +107,21 @@ Planner flags, task profiles, per-business Scene allowlists, and
 Copilot Host persists real sessions, runs, and model/tool events. Control audit
 rows must not be repackaged as synthetic Agent plans, evidence bundles, or
 verifier traces.
+
+Durable Host diagnostics are available through:
+
+```bash
+./om copilot runs --host-db <audit-db>
+./om copilot events --host-db <audit-db> --run-id <run-id>
+./om copilot cancel --host-db <audit-db> --run-id <run-id>
+./om copilot resume --host-db <audit-db> --run-id <run-id> --assistant-config <path>
+./om copilot replies --host-db <audit-db>
+```
+
+`cancel` above cancels an active analysis run. It is distinct from cancelling a
+pending deterministic Control operation. Channel replies use the Host outbox so
+temporary delivery failure is retryable and the same delivery key is not sent
+twice.
 
 ## Non-Goals
 

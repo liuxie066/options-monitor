@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.copilot.agent import ModelRequest, ModelRunner, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, ExecutionContract
+from src.application.copilot.conversation_memory import prepare_contract_with_memory
 from src.application.copilot.eval_fixtures import fixture_observations
 from src.application.copilot.host import run_contract
 from src.application.copilot.host_store import CopilotHostStore
@@ -56,6 +57,8 @@ def run_prepared_contract(
     host_store: CopilotHostStore | None = None,
     session_key: str | None = None,
     control_preview_specs: tuple[dict[str, Any], ...] = (),
+    resumed_from: str | None = None,
+    recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
     model_runner, model_error = _resolve_model_runner(
         model_config_json=model_config_json,
@@ -65,6 +68,13 @@ def run_prepared_contract(
     )
     if model_error:
         return _invalid_model_config_result(prepared, model_error)
+    if model_runner is not None and host_store is not None and session_key:
+        prepared = prepare_contract_with_memory(
+            prepared,
+            store=host_store,
+            session_key=session_key,
+            model_runner=model_runner,
+        )
     return run_contract(
         prepared,
         model_runner=model_runner,
@@ -72,6 +82,8 @@ def run_prepared_contract(
         host_store=host_store,
         session_key=session_key,
         control_preview_specs=control_preview_specs,
+        resumed_from=resumed_from,
+        recovered_observations=recovered_observations,
     )
 
 

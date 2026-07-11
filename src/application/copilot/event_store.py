@@ -8,6 +8,17 @@ from src.application.copilot.contracts import AppEvent, AppResult, new_id, utc_n
 
 EventSink = Callable[[AppEvent], None]
 
+_PUBLIC_PROGRESS = {
+    "contract_received": "正在分析",
+    "model_turn_started": "正在分析",
+    "tool_call": "正在读取数据",
+    "model_continuation_requested": "正在继续分析",
+    "agent_terminated": "正在整理结论",
+    "control_preview_requested": "等待确认",
+    "run_cancelled": "已取消",
+    "final_result": "执行完成",
+}
+
 
 class CopilotEventLog:
     def __init__(self, run_id: str, *, sink: EventSink | None = None) -> None:
@@ -58,3 +69,13 @@ class CopilotEventLog:
             },
         )
         self._final_recorded = True
+
+
+def public_progress_event(event: AppEvent | dict[str, Any]) -> dict[str, Any] | None:
+    event_type = event.type if isinstance(event, AppEvent) else str(event.get("type") or "")
+    label = _PUBLIC_PROGRESS.get(event_type)
+    if not label:
+        return None
+    event_id = event.event_id if isinstance(event, AppEvent) else str(event.get("event_id") or "")
+    timestamp = event.timestamp if isinstance(event, AppEvent) else str(event.get("timestamp") or "")
+    return {"event_id": event_id, "type": event_type, "label": label, "timestamp": timestamp}

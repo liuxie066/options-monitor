@@ -6,7 +6,7 @@ from typing import Any, Callable
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
+from src.application.assistant.inbound_service import ExecuteToolFn, handle_assistant_request
 from src.application.assistant.turn_result import (
     assistant_turn_result_from_response_payload,
     with_assistant_turn_result,

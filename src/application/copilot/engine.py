@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any, Callable
 
 from src.application.copilot.agent import AgentRunResult, AgentState, ModelRequest, ModelRunner, ToolCall
-from src.application.copilot.contracts import SceneManifest
+from src.application.copilot.contracts import SceneManifest, new_id
 
 
 ToolPayloadBuilder = Callable[[str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]]
@@ -41,6 +42,7 @@ def run_engine(
     is_cancelled: CancellationChecker | None = None,
     control_tool_name: str | None = None,
     build_control_request: ControlRequestBuilder | None = None,
+    recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AgentRunResult:
     if model_runner is None:
         return AgentRunResult(
@@ -48,6 +50,7 @@ def run_engine(
             error={"code": "MODEL_REQUIRED", "message": "Copilot model is not configured"},
         )
     state = AgentState(manifest=manifest, messages=[dict(item) for item in manifest.messages])
+    _load_recovered_observations(state, recovered_observations, record_event)
     if use_mock_observations:
         _load_fixture_observations(state, fixture_id, fixture_observations, record_event)
 
@@ -92,6 +95,7 @@ def run_engine(
             max_context_tokens=max_context_tokens,
             timeout_seconds=_remaining_seconds(timeout_seconds, started_at, clock_fn),
             record_event=record_event,
+            is_cancelled=is_cancelled,
         )
         if isinstance(turn, AgentRunResult):
             if state.observations:
@@ -132,6 +136,7 @@ def run_engine(
                     "continuation_count": state.continuation_count,
                     "compaction_count": state.compaction_count,
                     "model_retry_count": state.model_retry_count,
+                    "usage_total": dict(state.token_usage),
                 },
                 None,
             )
@@ -201,6 +206,7 @@ def run_engine(
                 call_read_tool=call_read_tool,
                 compact_observation=compact_observation,
                 record_event=record_event,
+                is_cancelled=is_cancelled,
             )
             batch_ok = batch_ok or bool(observation.get("ok"))
         consecutive_failed_batches = 0 if batch_ok else consecutive_failed_batches + 1
@@ -222,6 +228,7 @@ def run_engine(
         max_context_tokens=max_context_tokens,
         timeout_seconds=_remaining_seconds(timeout_seconds, started_at, clock_fn),
         record_event=record_event,
+        is_cancelled=is_cancelled,
     )
     if isinstance(final_turn, AgentRunResult):
         return final_turn
@@ -235,6 +242,7 @@ def run_engine(
                 "continuation_count": state.continuation_count,
                 "compaction_count": state.compaction_count,
                 "model_retry_count": state.model_retry_count,
+                "usage_total": dict(state.token_usage),
             },
             None,
         )
@@ -254,6 +262,7 @@ def _call_model(
     max_context_tokens: int,
     timeout_seconds: int | None,
     record_event: EventRecorder,
+    is_cancelled: CancellationChecker | None,
 ):
     tools = () if force_finish else tuple(_model_tools(state))
     messages, omitted = _bounded_messages(
@@ -261,13 +270,21 @@ def _call_model(
         max_chars=max_context_chars,
         max_tokens=max_context_tokens,
     )
+    iteration_id = new_id("iter")
+    context_hash = hashlib.sha256(
+        json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
     request = ModelRequest(
         messages=messages,
         tools=tools,
         force_finish=force_finish,
         timeout_seconds=timeout_seconds,
+        is_cancelled=is_cancelled,
+        iteration_id=iteration_id,
+        context_hash=context_hash,
     )
     state.iterations += 1
+    state.current_iteration_id = iteration_id
     if omitted:
         state.compaction_count += 1
         record_event(
@@ -282,20 +299,49 @@ def _call_model(
             None,
         )
     record_event(
+        "iteration_context_snapshot",
+        {
+            "iteration": state.iterations,
+            "iteration_id": iteration_id,
+            "context_hash": context_hash,
+            "message_count": len(messages),
+            "context_chars": _message_chars(list(messages)),
+            "tool_count": len(tools),
+        },
+        None,
+    )
+    record_event(
         "model_turn_started",
-        {"iteration": state.iterations, "force_finish": force_finish, "tool_count": len(tools)},
+        {
+            "iteration": state.iterations,
+            "iteration_id": iteration_id,
+            "force_finish": force_finish,
+            "tool_count": len(tools),
+        },
         None,
     )
     try:
         turn = model_runner(request)
     except Exception as exc:
+        if bool(getattr(exc, "cancelled", False)) or (is_cancelled and is_cancelled()):
+            record_event(
+                "run_cancelled",
+                {"iteration": state.iterations, "iteration_id": iteration_id, "phase": "model_request"},
+                None,
+            )
+            return AgentRunResult(
+                status="cancelled",
+                error={"code": "CANCELLED", "message": "run cancelled during model request"},
+            )
         attempts = max(1, int(getattr(exc, "attempt_count", 1) or 1))
         state.model_retry_count += max(0, attempts - 1)
         record_event(
             "model_error",
             {
                 "iteration": state.iterations,
+                "iteration_id": iteration_id,
                 "error_type": type(exc).__name__,
+                "error_category": _model_error_category(exc),
                 "attempt_count": attempts,
                 "model_retry_count": state.model_retry_count,
             },
@@ -306,10 +352,13 @@ def _call_model(
             error={"code": "MODEL_ERROR", "message": "model request failed"},
         )
     state.model_retry_count += max(0, int(turn.attempt_count) - 1)
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        state.token_usage[key] = state.token_usage.get(key, 0) + max(0, int(turn.usage.get(key) or 0))
     record_event(
         "model_turn_completed",
         {
             "iteration": state.iterations,
+            "iteration_id": iteration_id,
             "has_text": bool(turn.text),
             "tool_call_count": len(turn.tool_calls),
             "force_finish": force_finish,
@@ -317,6 +366,7 @@ def _call_model(
             "usage": dict(turn.usage),
             "attempt_count": turn.attempt_count,
             "model_retry_count": state.model_retry_count,
+            "usage_total": dict(state.token_usage),
         },
         None,
     )
@@ -491,10 +541,28 @@ def _execute_tool_call(
     call_read_tool: ReadToolCaller,
     compact_observation: ObservationCompactor,
     record_event: EventRecorder,
+    is_cancelled: CancellationChecker | None,
 ) -> dict[str, Any]:
+    if is_cancelled and is_cancelled():
+        return _append_tool_observation(
+            state,
+            call,
+            _error_observation(call.name, "CANCELLED", "run cancelled before tool execution"),
+            record_event,
+        )
     if call.name == "__read_observation__":
         state.tool_calls += 1
-        record_event("tool_call", {"tool_name": call.name, "tool_input": dict(call.arguments)}, None)
+        record_event(
+            "tool_call",
+            {
+                "iteration": state.iterations,
+                "iteration_id": state.current_iteration_id,
+                "tool_call_id": call.call_id,
+                "tool_name": call.name,
+                "tool_input": dict(call.arguments),
+            },
+            None,
+        )
         observation = _read_observation_page(state, call.arguments)
         return _append_tool_observation(state, call, observation, record_event)
     if call.name not in state.manifest.allowed_tools:
@@ -510,6 +578,18 @@ def _execute_tool_call(
             record_event,
         )
     if "__invalid_arguments__" in call.arguments:
+        record_event(
+            "tool_protocol_error",
+            {
+                "iteration": state.iterations,
+                "iteration_id": state.current_iteration_id,
+                "tool_call_id": call.call_id,
+                "error_category": "malformed_arguments",
+                "partial_tool_name": call.name,
+                "partial_arguments": _clip_text(call.arguments.get("__invalid_arguments__"), 500),
+            },
+            None,
+        )
         return _append_tool_observation(
             state,
             call,
@@ -552,13 +632,30 @@ def _execute_tool_call(
     state.call_signatures.add(signature)
     state.call_attempts[signature] = state.call_attempts.get(signature, 0) + 1
     state.tool_calls += 1
-    record_event("tool_call", {"tool_name": call.name, "tool_input": payload}, None)
+    record_event(
+        "tool_call",
+        {
+            "iteration": state.iterations,
+            "iteration_id": state.current_iteration_id,
+            "tool_call_id": call.call_id,
+            "tool_name": call.name,
+            "tool_input": payload,
+        },
+        None,
+    )
     try:
         response = call_read_tool(call.name, payload)
     except SystemExit:
         response = {"ok": False, "error": {"code": "CONFIG_ERROR", "message": "tool configuration rejected"}}
     except Exception:
         response = {"ok": False, "error": {"code": "TOOL_EXCEPTION", "message": "tool raised an exception"}}
+    if is_cancelled and is_cancelled():
+        return _append_tool_observation(
+            state,
+            call,
+            _error_observation(call.name, "CANCELLED", "run cancelled during tool execution"),
+            record_event,
+        )
     try:
         observation = compact_observation(call.name, response, payload)
     except Exception:
@@ -587,6 +684,7 @@ def _append_tool_observation(
     item = dict(observation)
     item.setdefault("ref", f"obs_{len(state.observations) + 1}")
     item.setdefault("tool_name", call.name)
+    item.setdefault("tool_call_id", call.call_id)
     state.observations.append(item)
     state.messages.append(
         {
@@ -691,6 +789,35 @@ def _load_fixture_observations(
     )
 
 
+def _load_recovered_observations(
+    state: AgentState,
+    observations: tuple[dict[str, Any], ...],
+    record_event: EventRecorder,
+) -> None:
+    recovered = [dict(item) for item in observations if isinstance(item, dict) and item.get("tool_name")]
+    if not recovered:
+        return
+    for item in recovered:
+        item.setdefault("ref", f"recovered_{len(state.observations) + 1}")
+        state.observations.append(item)
+        payload = dict(item.get("tool_input") or {})
+        signature = json.dumps([str(item.get("tool_name") or ""), payload], ensure_ascii=False, sort_keys=True, default=str)
+        state.call_signatures.add(signature)
+        state.call_attempts[signature] = 1
+        state.call_outcomes[signature] = "SUCCESS" if item.get("ok") else str(item.get("error") or "ERROR")
+        record_event("recovered_tool_result", item, str(item.get("ref") or "") or None)
+    state.messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Recovered read-only observations from the interrupted run. Reuse them and do not repeat an "
+                "identical tool call unless the prior observation failed transiently.\n"
+                + json.dumps([_project_observation_for_model(item) for item in recovered], ensure_ascii=False, default=str)
+            ),
+        }
+    )
+
+
 def _stop_reason(
     state: AgentState,
     *,
@@ -718,6 +845,21 @@ def _remaining_seconds(timeout_seconds: float, started_at: float, clock: Clock) 
 
 def _joined_answer(parts: list[str], final_text: str) -> str:
     return "".join([*parts, final_text]).strip()
+
+
+def _model_error_category(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if isinstance(exc, TimeoutError) or "timeout" in name or "timeout" in text:
+        return "provider_timeout"
+    status = getattr(exc, "http_status", None)
+    if status == 429:
+        return "provider_rate_limit"
+    if isinstance(status, int) and status >= 500:
+        return "provider_unavailable"
+    if "context" in text and any(token in text for token in ("length", "window", "token")):
+        return "context_overflow"
+    return "provider_error"
 
 
 def _error_observation(tool_name: str, code: str, message: str, *, hint: str | None = None) -> dict[str, Any]:

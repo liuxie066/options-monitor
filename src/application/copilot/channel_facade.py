@@ -12,7 +12,7 @@ from src.application.copilot.contracts import (
     new_id,
 )
 from src.application.copilot.local_harness import run_prepared_contract
-from src.application.copilot.host import record_session_turn, session_messages, session_run_slot
+from src.application.copilot.host import host_lane_slot, record_session_turn, session_messages, session_run_slot
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_config import load_assistant_llm_config, model_api_key_configured
 from src.application.copilot.service import prepare_contract
@@ -76,22 +76,32 @@ def run_channel_request(
             return _channel_prepare_failed(request)
         if isinstance(prepared, AppResult):
             return prepared
-        try:
-            result = run_prepared_contract(
-                prepared,
-                assistant_config_path=assistant_config_path,
-                host_store=host_store,
-                session_key=session_key,
-                control_preview_specs=control_preview_specs,
-            )
-        except Exception:
-            result = _channel_run_failed(prepared)
+        with host_lane_slot("chat_read", host_store=host_store, limit=2, ttl_seconds=300) as lane_entered:
+            if not lane_entered:
+                return _request_not_ready(
+                    request,
+                    reason="channel_capacity_exhausted",
+                    message="Copilot 当前分析任务已达到并发上限",
+                )
+            try:
+                result = run_prepared_contract(
+                    prepared,
+                    assistant_config_path=assistant_config_path,
+                    host_store=host_store,
+                    session_key=session_key,
+                    control_preview_specs=control_preview_specs,
+                )
+            except Exception:
+                result = _channel_run_failed(prepared)
         if result.user_response.strip():
             record_session_turn(
                 session_key,
                 user_message,
                 result.user_response,
                 host_store=host_store,
+                tool_uses=_tool_uses(result),
+                warnings=_event_messages(result, "warning"),
+                errors=_event_messages(result, "model_error", "tool_failure_fallback"),
             )
         return result
 
@@ -108,6 +118,36 @@ def record_channel_turn(
     session_key = _channel_session_key(channel=channel, sender_id=sender_id, conversation_id=conversation_id)
     host_store = CopilotHostStore(host_db_path) if str(host_db_path or "").strip() else None
     record_session_turn(session_key, user_message, assistant_message, host_store=host_store)
+
+
+def _tool_uses(result: AppResult) -> tuple[dict[str, Any], ...]:
+    calls: dict[str, dict[str, Any]] = {}
+    completed: list[dict[str, Any]] = []
+    for event in result.events:
+        call_id = str(event.payload.get("tool_call_id") or "")
+        if event.type == "tool_call":
+            calls[call_id] = {
+                "name": str(event.payload.get("tool_name") or ""),
+                "arguments": dict(event.payload.get("tool_input") or {}),
+            }
+        elif event.type == "tool_result":
+            item = dict(calls.get(call_id) or {})
+            item["ok"] = bool(event.payload.get("ok"))
+            item["result_summary"] = event.payload.get("summary") or event.payload.get("error") or ""
+            completed.append(item)
+    return tuple(item for item in completed if item.get("name"))
+
+
+def _event_messages(result: AppResult, *event_types: str) -> tuple[str, ...]:
+    allowed = set(event_types)
+    messages: list[str] = []
+    for event in result.events:
+        if event.type not in allowed:
+            continue
+        text = str(event.payload.get("message") or event.payload.get("reason") or event.type).strip()
+        if text:
+            messages.append(text)
+    return tuple(messages)
 
 
 def _context_messages(
