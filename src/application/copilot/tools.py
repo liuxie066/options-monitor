@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names, pure_read_toolsets
@@ -11,6 +12,9 @@ from src.application.tool_execution import execute_tool
 MAX_SUMMARY_CHARS = 600
 MAX_PREVIEW_ITEMS = 20
 MAX_PREVIEW_DEPTH = 4
+
+_COPILOT_HIDDEN_INPUT_NAMES = frozenset({"data_config"})
+_COPILOT_HIDDEN_INPUT_SUFFIXES = ("_path", "_paths", "_dir", "_root")
 
 
 def available_read_tools(toolsets: list[str] | tuple[str, ...] | None = None) -> tuple[str, ...]:
@@ -80,7 +84,7 @@ def tool_descriptions(
             {
                 "name": definition.name,
                 "description": _agent_description(definition.description, output_contract),
-                "input_schema": definition.input_json_schema(),
+                "input_schema": _copilot_input_schema(definition),
                 "default_input": default_input,
                 "examples": [dict(item) for item in definition.examples[:3]],
                 "capabilities": list(definition.capabilities),
@@ -107,25 +111,70 @@ def compact_observation(
     ][:8] if isinstance(response, dict) else []
     if not ok or error:
         safe_error = _safe_error(error)
+        code = str((safe_error or {}).get("code") or "TOOL_ERROR")
         return {
             "tool_name": tool_name,
             "ok": False,
-            "error": str((safe_error or {}).get("code") or "TOOL_ERROR"),
+            "status": "failed",
+            "error": code,
+            "code": code,
             "message": str((safe_error or {}).get("message") or "tool failed"),
+            "retryable": bool((safe_error or {}).get("retryable", False)),
             **(
                 {"hint": str((safe_error or {}).get("hint"))}
                 if (safe_error or {}).get("hint")
                 else {}
             ),
+            **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
+            **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
         }
+    missing_data = _contract_values(data, output_contract.get("missing_data_fields"), missing_only=True)
+    freshness = _freshness(data, output_contract)
+    row_count = _row_count(data, output_contract)
+    scope = _scope(data)
+    coverage = _coverage(data)
     return {
         "tool_name": tool_name,
         "ok": True,
+        "status": "partial" if missing_data or warnings else ("not_found" if row_count == 0 else "complete"),
         "summary": _summary(tool_name, data, None, output_contract),
-        "value": _preview(data),
+        "value": _preview(data, priorities=_field_priorities(output_contract)),
+        "source": _source(data, output_contract),
+        **({"scope": scope} if scope else {}),
+        **({"coverage": coverage} if coverage else {}),
+        **({"freshness": freshness} if freshness else {}),
+        **({"missing_data": missing_data} if missing_data else {}),
         **({"warnings": warnings} if warnings else {}),
         "result_contract": _compact_output_contract(output_contract),
     }
+
+
+def _copilot_input_schema(definition) -> dict[str, Any]:
+    schema = deepcopy(definition.copilot_input_schema) if definition.copilot_input_schema else definition.input_json_schema()
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, value in definition.safe_default_input.items():
+            if name in properties and isinstance(properties[name], dict):
+                properties[name].setdefault("default", deepcopy(value))
+    if not isinstance(properties, dict):
+        return schema
+    allowed = set(definition.copilot_input_fields) if definition.copilot_input_fields else None
+    visible = {
+        name: value
+        for name, value in properties.items()
+        if (allowed is None or name in allowed) and not _is_hidden_copilot_input(name)
+    }
+    schema["properties"] = visible
+    required = [name for name in schema.get("required") or [] if name in visible]
+    if required:
+        schema["required"] = required
+    else:
+        schema.pop("required", None)
+    return schema
+
+
+def _is_hidden_copilot_input(name: str) -> bool:
+    return name in _COPILOT_HIDDEN_INPUT_NAMES or name.endswith(_COPILOT_HIDDEN_INPUT_SUFFIXES)
 
 
 def _summary(
@@ -154,6 +203,42 @@ def _summary(
         keys = ", ".join(sorted(str(key) for key in data)[:12])
         details.append(f"fields={keys}" if keys else "no data fields")
     return _clip(f"{tool_name} returned read-only data; " + "; ".join(details), MAX_SUMMARY_CHARS)
+
+
+def _row_count(data: dict[str, Any], output_contract: dict[str, Any]) -> int | None:
+    field = str(output_contract.get("row_count_field") or "").strip()
+    value = data.get(field) if field else None
+    if isinstance(value, int):
+        return value
+    primary = str(output_contract.get("primary_rows") or "").strip()
+    rows = data.get(primary) if primary else None
+    return len(rows) if isinstance(rows, list) else None
+
+
+def _source(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
+    source = data.get("source")
+    if isinstance(source, dict):
+        return _preview(source)
+    label = str(output_contract.get("source_label") or "").strip()
+    return {"label": label} if label else {}
+
+
+def _scope(data: dict[str, Any]) -> dict[str, Any]:
+    value = data.get("scope") if isinstance(data.get("scope"), dict) else data.get("filters")
+    return _preview(value) if isinstance(value, dict) else {}
+
+
+def _coverage(data: dict[str, Any]) -> dict[str, Any]:
+    value = data.get("coverage") if isinstance(data.get("coverage"), dict) else data.get("evidence_scope")
+    return _preview(value) if isinstance(value, dict) else {}
+
+
+def _freshness(data: dict[str, Any], output_contract: dict[str, Any]) -> Any:
+    values = _contract_values(data, output_contract.get("freshness_fields"))
+    if values:
+        return values
+    value = data.get("freshness")
+    return _preview(value) if isinstance(value, (dict, list)) and value else {}
 
 
 def _agent_description(description: str, output_contract: dict[str, Any]) -> str:
@@ -185,26 +270,124 @@ def _compact_output_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _preview(value: Any, *, depth: int = 0) -> Any:
+def _field_priorities(output_contract: dict[str, Any]) -> dict[str, list[str]]:
+    priorities: dict[str, list[str]] = {}
+    fields = [
+        *(output_contract.get("model_preview_fields") or ()),
+        *(output_contract.get("fact_fields") or ()),
+        *(output_contract.get("freshness_fields") or ()),
+        *(output_contract.get("missing_data_fields") or ()),
+    ]
+    for raw_path in fields:
+        parts = [part for part in str(raw_path).split(".") if part]
+        for index, part in enumerate(parts):
+            parent = ".".join(parts[:index])
+            key = part[:-2] if part.endswith("[]") else part
+            priorities.setdefault(parent, [])
+            if key not in priorities[parent]:
+                priorities[parent].append(key)
+    return priorities
+
+
+def _preview(
+    value: Any,
+    *,
+    depth: int = 0,
+    path: str = "",
+    priorities: dict[str, list[str]] | None = None,
+) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if depth >= MAX_PREVIEW_DEPTH:
         return _clip(json.dumps(value, ensure_ascii=False, default=str), 320)
     if isinstance(value, dict):
-        keys = list(value)[:MAX_PREVIEW_ITEMS]
-        result = {str(key): _preview(value[key], depth=depth + 1) for key in keys}
+        preferred = list((priorities or {}).get(path, ()))
+        keys = [key for key in preferred if key in value]
+        keys.extend(key for key in value if key not in keys)
+        keys = keys[:MAX_PREVIEW_ITEMS]
+        result = {
+            str(key): _preview(
+                value[key],
+                depth=depth + 1,
+                path=f"{path}.{key}" if path else str(key),
+                priorities=priorities,
+            )
+            for key in keys
+        }
         if len(value) > len(keys):
             result["_truncated_keys"] = len(value) - len(keys)
         return result
     if isinstance(value, list):
-        items = [_preview(item, depth=depth + 1) for item in value[:MAX_PREVIEW_ITEMS]]
+        item_path = f"{path}[]"
+        items = [
+            _preview(item, depth=depth + 1, path=item_path, priorities=priorities)
+            for item in value[:MAX_PREVIEW_ITEMS]
+        ]
         if len(value) > len(items):
             items.append({"_truncated_items": len(value) - len(items)})
         return items
     return str(value)
 
 
-def _safe_error(error: dict[str, Any] | None) -> dict[str, str] | None:
+def _contract_values(
+    data: dict[str, Any],
+    paths: Any,
+    *,
+    missing_only: bool = False,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for raw_path in paths or ():
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        values = _values_at_path(data, path.split("."))
+        values = [value for value in values if value not in (None, "", [], {})]
+        if missing_only:
+            values = [value for value in values if _indicates_missing_data(value)]
+        if values:
+            out[path] = _preview(values[0] if len(values) == 1 else values)
+    return out
+
+
+def _indicates_missing_data(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in {
+        "missing",
+        "not_found",
+        "not_observed",
+        "not_reported",
+        "not_evaluable",
+        "unavailable",
+        "unknown",
+        "stale",
+        "partial",
+        "incomplete",
+    } or normalized.startswith(("missing_", "unavailable_", "not_observed_", "not_reported_"))
+
+
+def _values_at_path(value: Any, parts: list[str]) -> list[Any]:
+    if not parts:
+        return [value]
+    part = parts[0]
+    is_list = part.endswith("[]")
+    key = part[:-2] if is_list else part
+    if not isinstance(value, dict) or key not in value:
+        return []
+    child = value[key]
+    if is_list:
+        if not isinstance(child, list):
+            return []
+        return [item for child_item in child for item in _values_at_path(child_item, parts[1:])]
+    return _values_at_path(child, parts[1:])
+
+
+def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
     if not error:
         return None
     safe = {
@@ -215,6 +398,23 @@ def _safe_error(error: dict[str, Any] | None) -> dict[str, str] | None:
         value = error.get(key)
         if isinstance(value, (str, int, float, bool)) and str(value).strip():
             safe[key] = _clip(value, 240)
+    details = error.get("details")
+    if isinstance(details, dict):
+        safe_details = {
+            key: _preview(value)
+            for key, value in details.items()
+            if key in {"allowed_views", "unknown_views", "first_keyword", "mode", "schema_errors", "tool_name"}
+        }
+        if safe_details:
+            safe["details"] = safe_details
+    explicit_retryable = error.get("retryable")
+    if not isinstance(explicit_retryable, bool) and isinstance(details, dict):
+        explicit_retryable = details.get("retryable")
+    safe["retryable"] = (
+        explicit_retryable
+        if isinstance(explicit_retryable, bool)
+        else safe["code"] in {"INPUT_ERROR", "READ_ERROR", "INTERNAL_ERROR", "TOOL_ERROR"}
+    )
     return safe
 
 

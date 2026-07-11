@@ -7,18 +7,45 @@ from src.application.agent_tools.operations_impl import version_check_tool, vers
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_VERSION_CHECK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "version_check.output.v1",
+    "source_label": "local VERSION and remote git release tags",
+    "result_shape": "scalar",
+    "fact_fields": [
+        "ok",
+        "current_version",
+        "latest_version",
+        "update_available",
+        "release_tag",
+        "remote_name",
+        "checked_at",
+        "message",
+        "error",
+    ],
+    "freshness_fields": ["checked_at"],
+    "missing_data_fields": ["latest_version", "release_tag", "error"],
+}
+
+
 _RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "runtime_runs.output.v1",
     "source_label": "OM 本地 output_runs",
     "primary_rows": "runs",
     "fact_fields": [
         "summary.limit",
-        "summary.total_runs",
+        "summary.total_count",
+        "summary.returned_count",
+        "summary.requested_found",
         "runs[].run_id",
         "runs[].status",
-        "runs[].started_at",
+        "runs[].mtime_utc",
+        "runs[].ran_scan",
+        "runs[].sent",
         "runs[].path",
     ],
+    "freshness_fields": ["runs[].mtime_utc", "selected_run.mtime_utc"],
+    "missing_data_fields": ["summary.runs_root_exists", "summary.requested_found"],
+    "model_preview_fields": ["summary", "selected_run", "runs"],
 }
 
 _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -33,7 +60,10 @@ _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
         "files[].path",
         "files[].exists",
         "files[].tail_line_count",
+        "files[].error",
     ],
+    "missing_data_fields": ["summary.requested_run_found", "files[].exists", "files[].error"],
+    "model_preview_fields": ["summary", "selected_run", "files"],
 }
 
 
@@ -129,6 +159,7 @@ VERSION_CHECK_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={"remote_name": "origin"},
     examples=({"input": {"remote_name": "origin"}},),
+    output_contract=_VERSION_CHECK_OUTPUT_CONTRACT,
 )
 
 VERSION_UPDATE_TOOL = build_agent_tool(
@@ -159,8 +190,8 @@ VERSION_UPDATE_TOOL = build_agent_tool(
 RUNTIME_RUNS_TOOL = build_agent_tool(
     name="runtime_runs",
     description=(
-        "List and inspect local runtime run snapshots from output_runs without running pipelines "
-        "or sending notifications."
+        "List historical runtime run snapshots or inspect one run. Use after runtime_status when a specific run "
+        "must be selected; this does not contain detailed service log lines."
     ),
     requires=("runtime_artifacts",),
     capabilities=("runs", "read_only", "runtime_artifacts"),
@@ -180,12 +211,14 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
     output_contract=_RUNTIME_RUNS_OUTPUT_CONTRACT,
+    copilot_input_fields=("limit", "run_id", "scanned_only"),
 )
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
     name="runtime_logs",
     description=(
-        "Tail local runtime run audit files or service logs without running pipelines or sending notifications."
+        "Read detailed audit or service log tails for a known runtime failure. Use after runtime_status or "
+        "runtime_runs identifies the relevant component or run."
     ),
     requires=("runtime_artifacts",),
     capabilities=("logs", "audit_tail", "read_only", "runtime_artifacts"),
@@ -207,6 +240,7 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
         {"input": {"kind": "service", "lines": 50}},
     ),
     output_contract=_RUNTIME_LOGS_OUTPUT_CONTRACT,
+    copilot_input_fields=("run_id", "kind", "lines"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

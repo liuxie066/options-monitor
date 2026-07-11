@@ -91,6 +91,8 @@ class AgentTool:
     input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
     output_contract: dict[str, Any] = field(default_factory=dict)
     output_contract_resolver: OutputContractResolver | None = field(default=None, repr=False, compare=False)
+    copilot_input_fields: tuple[str, ...] = ()
+    copilot_input_schema: dict[str, Any] = field(default_factory=dict)
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -128,7 +130,13 @@ class AgentTool:
         return self.handler(ctx, payload)
 
     def input_json_schema(self) -> dict[str, Any]:
-        return build_tool_input_json_schema(self.input_schema)
+        schema = build_tool_input_json_schema(self.input_schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for name, value in self.safe_default_input.items():
+                if name in properties and isinstance(properties[name], dict):
+                    properties[name].setdefault("default", deepcopy(value))
+        return schema
 
     def execution_input_json_schema(self) -> dict[str, Any]:
         return build_tool_input_json_schema(
@@ -198,6 +206,8 @@ def build_agent_tool(
     input_validator: InputValidator | None = None,
     output_contract: dict[str, Any] | None = None,
     output_contract_resolver: OutputContractResolver | None = None,
+    copilot_input_fields: tuple[str, ...] = (),
+    copilot_input_schema: dict[str, Any] | None = None,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -223,6 +233,8 @@ def build_agent_tool(
         input_validator=input_validator,
         output_contract=deepcopy(output_contract or {}),
         output_contract_resolver=output_contract_resolver,
+        copilot_input_fields=tuple(copilot_input_fields),
+        copilot_input_schema=deepcopy(copilot_input_schema or {}),
     )
 
 

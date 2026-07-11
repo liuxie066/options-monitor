@@ -997,12 +997,20 @@ _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
     "primary_rows": "rows",
     "row_count_field": "row_count",
     "fact_fields": [
+        "scope.views[]",
+        "scope.limit",
+        "coverage.views[]",
+        "coverage.accounts[]",
+        "coverage.months[]",
+        "coverage.symbols[]",
         "rows[].month",
         "rows[].account",
         "rows[].symbol",
         "rows[].currency",
         "rows[].status",
     ],
+    "freshness_fields": ["freshness[]"],
+    "model_preview_fields": ["scope", "coverage", "freshness", "query_explain", "rows", "truncated"],
 }
 
 
@@ -1134,6 +1142,8 @@ def _analysis_query_tool(
     data = {
         "schema_version": "analysis.query.output.v2",
         "source_label": "OM read-only analysis workspace",
+        "source": {"label": "OM read-only analysis workspace", "kind": "materialized_views"},
+        "scope": {"views": views_used, "limit": limit},
         "query": {"sql": sql, "limit": limit},
         "preflight": {"ok": True, "warnings": query_warnings},
         "columns": columns,
@@ -1144,6 +1154,8 @@ def _analysis_query_tool(
         "available_views": sorted(VIEW_SPECS),
         "query_explain": query_explain,
         "evidence": evidence,
+        "coverage": dict(evidence.get("coverage") or {}),
+        "freshness": list(evidence.get("freshness") or []),
         "cell_refs": cell_refs,
         "fallback_text": _render_fallback_table(rows=rows, columns=columns, row_count=len(rows), truncated=truncated),
     }
@@ -1198,6 +1210,8 @@ def _analysis_views_mode_result(
     data = {
         "schema_version": "analysis.query.output.v2",
         "source_label": "OM read-only analysis workspace",
+        "source": {"label": "OM read-only analysis workspace", "kind": "materialized_views"},
+        "scope": {"views": view_names, "limit": limit},
         "query": {"mode": "views", "views": view_names, "limit": limit},
         "preflight": {"ok": True, "warnings": []},
         "columns": columns,
@@ -1216,6 +1230,8 @@ def _analysis_views_mode_result(
             "diagnostics": diagnostics,
         },
         "evidence": evidence,
+        "coverage": dict(evidence.get("coverage") or {}),
+        "freshness": list(evidence.get("freshness") or []),
         "cell_refs": _cell_refs(preview_rows),
         "fallback_text": _render_fallback_table(rows=preview_rows, columns=columns, row_count=len(all_rows), truncated=truncated),
     }
@@ -4065,6 +4081,7 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
             "sql_rules.writes_allowed",
         ],
     },
+    copilot_input_fields=("config_key", "view"),
 )
 
 ANALYSIS_QUERY_TOOL = build_agent_tool(
@@ -4129,6 +4146,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         },
     ),
     output_contract=_ANALYSIS_OUTPUT_CONTRACT,
+    copilot_input_fields=("config_key", "sql", "view", "views", "limit", "accounts", "months", "symbols"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

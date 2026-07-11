@@ -660,6 +660,21 @@ def option_positions_read_tool(
         "status": bootstrap_status,
         "message": bootstrap_message,
     }
+    data.setdefault("source", {"label": "OM local option ledger", "kind": "ledger_snapshot"})
+    data.setdefault("scope", {"action": action, **(data.get("filters") if isinstance(data.get("filters"), dict) else {})})
+    if isinstance(data.get("evidence_scope"), dict):
+        data.setdefault("coverage", dict(data["evidence_scope"]))
+    data.setdefault(
+        "freshness",
+        {
+            "kind": "ledger_snapshot",
+            **(
+                {"quote_refresh": data.get("quote_refresh")}
+                if isinstance(data.get("quote_refresh"), dict)
+                else {}
+            ),
+        },
+    )
     return data, warnings, {
         "config_path": mask_path(config_path),
         "data_config": mask_path(data_config_path),

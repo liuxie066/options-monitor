@@ -371,6 +371,13 @@ def monthly_income_report_tool(
     rows = report.get("rows") if isinstance(report.get("rows"), list) else []
     premium_rows = report.get("premium_rows") if isinstance(report.get("premium_rows"), list) else []
     data: dict[str, Any] = {
+        "source": {"label": "OM local option ledger", "kind": "ledger_snapshot"},
+        "scope": {
+            "config_key": str(payload.get("config_key") or "").strip() or None,
+            "broker": broker,
+            "account": account,
+            "month": month,
+        },
         "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
         "return_summary": report.get("return_summary") if isinstance(report.get("return_summary"), list) else [],
         "combined_return_summary": report.get("combined_return_summary")
@@ -383,6 +390,23 @@ def monthly_income_report_tool(
         "premium_row_count": len(premium_rows),
         "report_warnings": report_warnings,
     }
+    diagnostics = data["diagnostics"]
+    data["summary_count"] = len(data["summary"])
+    data["return_summary_count"] = len(data["return_summary"])
+    data["coverage"] = {
+        "diagnostic_scope_count": len(diagnostics),
+        "reported_scope_count": sum(
+            1
+            for item in diagnostics
+            if isinstance(item, dict) and str(item.get("income_amount_status") or "") == "reported"
+        ),
+        "unreported_scope_count": sum(
+            1
+            for item in diagnostics
+            if isinstance(item, dict) and str(item.get("income_amount_status") or "") != "reported"
+        ),
+    }
+    data["freshness"] = {"kind": "ledger_snapshot", "market_quotes_included": False}
     if include_rows:
         data["rows"] = rows
         data["premium_rows"] = premium_rows

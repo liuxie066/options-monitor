@@ -6,6 +6,15 @@ from src.application.agent_tools.notifications_impl import preview_notification_
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_PREVIEW_NOTIFICATION_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "preview_notification.output.v1",
+    "source_label": "OM notification formatter",
+    "result_shape": "scalar",
+    "fact_fields": ["account_label", "notification_text"],
+    "model_preview_fields": ["account_label", "notification_text"],
+}
+
+
 def _preview_notification_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
@@ -36,6 +45,8 @@ PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
             }
         },
     ),
+    output_contract=_PREVIEW_NOTIFICATION_OUTPUT_CONTRACT,
+    copilot_input_fields=("alerts_text", "changes_text", "account_label"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (PREVIEW_NOTIFICATION_TOOL,)

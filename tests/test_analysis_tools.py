@@ -241,6 +241,12 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
     assert warnings == []
     assert calls == ["monthly"]
     assert data["rows"] == [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]
+    assert data["source"]["kind"] == "materialized_views"
+    assert data["scope"] == {"views": ["account_monthly_performance"], "limit": 10}
+    assert data["coverage"]["accounts"] == ["lx"]
+    assert data["freshness"][0]["view"] == "account_monthly_performance"
+    assert data["freshness"][0]["freshness"] == "snapshot"
+    assert data["freshness"][0]["source"] == "monthly_income_report.return_summary"
     assert meta["requested_views"] == ["account_monthly_performance"]
     assert meta["materialized_views"] == ["account_monthly_performance"]
 

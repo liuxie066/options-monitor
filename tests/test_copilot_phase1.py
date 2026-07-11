@@ -166,6 +166,113 @@ def test_agent_tool_view_exposes_result_contract() -> None:
     assert nested["value"]["diagnostics"][0]["missing_fields"] == ["trade_events"]
 
 
+def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+
+    candidate = next(item for item in copilot_tools.tool_descriptions(("candidate_rank_explain",)))
+    properties = candidate["input_schema"]["properties"]
+
+    assert properties["mode"]["default"] == "all"
+    assert properties["top_n"]["default"] == 10
+    assert "candidate_path" not in properties
+    assert "report_dir" not in properties
+
+    positions = next(item for item in copilot_tools.tool_descriptions(("option_positions_read",)))
+    assert positions["input_schema"]["properties"]["action"]["type"] == "string"
+    assert positions["input_schema"]["properties"]["status"]["type"] == "string"
+    assert "quote_snapshots" not in positions["input_schema"]["properties"]
+    assert "opend_host" not in positions["input_schema"]["properties"]
+
+    external_positions = get_tool_definition("option_positions_read")
+    assert external_positions is not None
+    assert external_positions.input_json_schema()["properties"]["action"]["type"] == ["string", "array"]
+    assert "quote_snapshots" in external_positions.input_json_schema()["properties"]
+    assert "opend_host" in external_positions.input_json_schema()["properties"]
+
+
+def test_symbol_inputs_are_structurally_required_without_fake_defaults() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+
+    for tool_name in ("symbol_resolve", "symbol_config_read"):
+        definition = get_tool_definition(tool_name)
+        assert definition is not None
+        assert "symbol" in definition.input_json_schema()["required"]
+        assert "symbol" not in definition.safe_default_input
+
+
+def test_observation_projection_prioritizes_contract_facts_and_missing_boundaries() -> None:
+    filler = {f"metadata_{index}": index for index in range(25)}
+    response = {
+        "ok": True,
+        "data": {
+            **filler,
+            "summary": [{"metadata": "ignored", "month": "2026-07", "account": "lx"}],
+            "diagnostics": [{"income_amount_status": "available", "missing_fields": []}],
+            "row_count": 1,
+        },
+    }
+
+    observation = copilot_tools.compact_observation("monthly_income_report", response)
+
+    assert observation["status"] == "complete"
+    assert observation["value"]["summary"][0]["month"] == "2026-07"
+    assert "missing_data" not in observation
+
+    response["data"]["diagnostics"] = [
+        {"income_amount_status": "unavailable", "missing_fields": ["trade_events"]}
+    ]
+    partial = copilot_tools.compact_observation("monthly_income_report", response)
+    assert partial["status"] == "partial"
+    assert partial["missing_data"]["diagnostics[].missing_fields"] == ["trade_events"]
+
+
+def test_observation_projection_preserves_source_scope_and_coverage() -> None:
+    response = {
+        "ok": True,
+        "data": {
+            "rows": [{"symbol": "NVDA"}],
+            "row_count": 1,
+            "source": {"label": "ledger", "as_of": "2026-07-11T10:00:00Z"},
+            "scope": {"account": "lx", "market": "us"},
+            "coverage": {"broker_settlement": "not_observed"},
+        },
+    }
+
+    observation = copilot_tools.compact_observation("analysis_query", response)
+
+    assert observation["source"]["label"] == "ledger"
+    assert observation["scope"] == {"account": "lx", "market": "us"}
+    assert observation["coverage"] == {"broker_settlement": "not_observed"}
+
+
+def test_error_observation_is_structured_and_bounded() -> None:
+    observation = copilot_tools.compact_observation(
+        "analysis_query",
+        {
+            "ok": False,
+            "error": {
+                "code": "INPUT_ERROR",
+                "message": "unknown column pnl",
+                "hint": "Inspect analysis_catalog and retry.",
+                "field": "sql",
+                "details": {
+                    "unknown_views": ["secret_view"],
+                    "schema_errors": [{"path": "$.sql", "expected": "string", "actual": "array"}],
+                    "config_path": "/secret/config.json",
+                },
+            },
+        },
+    )
+
+    assert observation["status"] == "failed"
+    assert observation["error"] == "INPUT_ERROR"
+    assert observation["code"] == "INPUT_ERROR"
+    assert observation["retryable"] is True
+    assert observation["field"] == "sql"
+    assert "config_path" not in observation["details"]
+    assert observation["details"]["schema_errors"][0]["path"] == "$.sql"
+
+
 def test_analysis_query_has_no_fake_default_query() -> None:
     from src.application.agent_tool_registry import get_tool_definition
 

@@ -59,11 +59,26 @@ def close_advice_read_tool(
     data = {
         "query": query.to_payload(),
         "source": _source_payload(sources, mask_path=mask_path),
+        "scope": {
+            "market": desired_market or "all",
+            "query": query.to_payload(),
+        },
         "row_count": len(rows),
         "matched_count": len(matched),
         "returned_count": len(returned),
         "rows": returned,
         "summary": _summary(returned),
+        "coverage": {
+            "source_count": len(sources),
+            "source_row_count": len(rows),
+            "matched_count": len(matched),
+            "returned_count": len(returned),
+            "truncated": len(returned) < len(matched),
+        },
+        "freshness": {
+            "kind": "report_snapshot",
+            "run_ids": sorted({str(source.run_id) for source in sources if source.run_id}),
+        },
     }
     meta: dict[str, Any] = {
         "source_count": len(sources),
