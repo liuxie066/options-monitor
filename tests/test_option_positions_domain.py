@@ -231,7 +231,7 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
     assert us_fields["currency"] == "USD"
 
 
-def test_build_open_fields_explicit_currency_overrides_symbol_inference() -> None:
+def test_build_open_fields_symbol_currency_repairs_mismatched_input() -> None:
     fields = build_open_fields(
         OpenPositionCommand(
             broker="富途",
@@ -249,7 +249,7 @@ def test_build_open_fields_explicit_currency_overrides_symbol_inference() -> Non
         )
     )
 
-    assert fields["currency"] == "USD"
+    assert fields["currency"] == "HKD"
 
 
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:

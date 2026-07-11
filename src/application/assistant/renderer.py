@@ -744,6 +744,7 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
     if isinstance(combined_return_summary, list) and combined_return_summary:
         combined_rows = [row for row in combined_return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
         if combined_rows:
+            mixed_currency = any(_return_row_has_multiple_currencies(row) for row in combined_rows)
             lines = ["收益统计完成（OM 本地账本）："]
             for idx, row in enumerate(combined_rows):
                 if idx > 0:
@@ -759,15 +760,30 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
                 lines.append("")
                 lines.append("分账户：")
                 for row in account_rows:
+                    net_by_ccy = _dict(row.get("net_income_by_ccy"))
+                    net_text = (
+                        _format_ccy_amounts(net_by_ccy)
+                        if mixed_currency
+                        else _cny_with_original(row.get("net_income_cny"), net_by_ccy)
+                    )
+                    rate_text = (
+                        _format_ccy_rates(_dict(row.get("net_return_rate_by_ccy")))
+                        if mixed_currency
+                        else _pct(row.get("net_return_rate"))
+                    )
                     lines.append(
-                        f"- {row.get('account') or '-'}：净现金流 {_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))}"
-                        f" | 现金流率 {_pct(row.get('net_return_rate'))}"
+                        f"- {row.get('account') or '-'}：净现金流 {net_text}"
+                        f" | 现金流率 {rate_text}"
                     )
             if detail_lines:
                 lines.append("")
                 lines.extend(detail_lines)
             lines.append("")
-            lines.append("口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。")
+            lines.append(
+                "口径：金额和收益率按原币分别列示，不跨币种合并。"
+                if mixed_currency
+                else "口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。"
+            )
             return "\n".join(lines)
 
     return_summary = data.get("return_summary")
@@ -790,7 +806,11 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             lines.append("")
             lines.extend(detail_lines)
         lines.append("")
-        lines.append("口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。")
+        lines.append(
+            "口径：金额和收益率按原币分别列示，不跨币种合并。"
+            if any(_return_row_has_multiple_currencies(row) for row in calculable_rows)
+            else "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。"
+        )
         if long_option_recovery_notes:
             lines.append("提示：" + "；".join(_unique(long_option_recovery_notes)))
         return "\n".join(lines)
@@ -908,6 +928,13 @@ def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
     if 0 < annualized_days < 7:
         annualized_suffix += "，短周期仅参考"
     account_label = "全部账户" if row.get("account_scope") == "all" or row.get("account") == "all" else row.get("account") or "-"
+    if _return_row_has_multiple_currencies(row):
+        return [
+            f"{account_label} {row.get('month') or '-'} 收益摘要（按币种）",
+            f"- 净现金流：{_format_ccy_amounts(_dict(row.get('net_income_by_ccy')))} | 现金流率 {_format_ccy_rates(_dict(row.get('net_return_rate_by_ccy')))}",
+            f"- 已实现PnL：{_format_ccy_amounts(_dict(row.get('realized_pnl_by_ccy')))} | 已实现率 {_format_ccy_rates(_dict(row.get('realized_return_rate_by_ccy')))}",
+            f"- 权利金：{_format_ccy_amounts(_dict(row.get('premium_income_by_ccy')))} | 权利金率 {_format_ccy_rates(_dict(row.get('premium_return_rate_by_ccy')))}",
+        ]
     return [
         f"{account_label} {row.get('month') or '-'} 收益摘要",
         f"- 净现金流：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
@@ -958,6 +985,13 @@ def _return_row_is_calculable(row: dict[str, Any]) -> bool:
         if row.get(key) is not None:
             return True
     return False
+
+
+def _return_row_has_multiple_currencies(row: dict[str, Any]) -> bool:
+    currencies: set[str] = set()
+    for key in ("net_income_by_ccy", "realized_pnl_by_ccy", "premium_income_by_ccy", "cash_secured_by_ccy"):
+        currencies.update(str(currency).upper() for currency in _dict(row.get(key)) if str(currency).strip())
+    return len(currencies) > 1
 
 
 def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:

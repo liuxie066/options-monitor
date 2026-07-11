@@ -591,6 +591,7 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
   如果缺少汇率，相关 CNY 和收益率字段为 `null`，并在 `warnings` 中说明。
 - `combined_return_summary`：当未指定 `account` 时按 `month` 输出全账户合并收益摘要。
   合并收益率按 `sum(net_income_cny) / sum(cash_secured_cny)` 计算，不平均各账户收益率。
+  用户面向的多币种摘要按原币分别列示，不把 HKD、USD 合并成一个收入总数。
 - `diagnostics`：按 `month + account` 输出收益统计诊断，包括匹配到的
   `trade_events`、position lots、已平仓行、premium 行、现金担保可用性和
   `missing_fields`。入站 `收益` 命令会用它解释“暂无可计算收益”或数据不完整的原因。

@@ -274,6 +274,58 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
 
 
+def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo, _event_id = _repo_with_open_event(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=4.0,
+            opened_at_ms=1100,
+        ),
+    )
+    first_lot, second_lot = repo.list_position_lots()
+    close_result = ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=first_lot["record_id"],
+        fields=first_lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main([
+        "repair",
+        str(close_result["event_id"]),
+        "--record-id",
+        second_lot["record_id"],
+        "--close-target-source-event-id",
+        second_lot["fields"]["source_event_id"],
+        "--dry-run",
+        "--format",
+        "json",
+    ]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["repair_event"]["target_lot_id"] == second_lot["record_id"]
+    assert out["repair_event"]["raw_payload"]["record_id"] == second_lot["record_id"]
+    assert out["projection_preview"]["projection_diagnostic_count"] == 0
+
+
 def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voided(
     monkeypatch,
     tmp_path: Path,

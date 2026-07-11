@@ -293,8 +293,7 @@ def parse_option_message_text(
         currency = infer_currency(raw2)
         market = infer_market(raw2)
 
-    if not currency:
-        currency = infer_currency_from_symbol(symbol)
+    currency = parse_currency(raw2) or infer_currency_from_symbol(symbol) or currency
 
     multiplier_source = None
     if resolve_multiplier:

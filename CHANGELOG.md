@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.381 - 2026-07-11
+
+### Changed
+- Rendered monthly option income separately by original currency when a period contains both HKD and USD, instead of presenting one cross-currency total.
+- Made the canonical symbol market authoritative for option-open currency and surfaced automatic currency corrections in manual-trade previews.
+
+### Fixed
+- Prevented Futu Hong Kong timestamps and broker labels from misclassifying US option fills such as PDD and TCOM as HKD.
+- Kept repaired close events' canonical `target_lot_id` aligned when `trade-events repair --record-id` changes the target lot.
+
 ## 1.2.380 - 2026-07-11
 
 ### Added
