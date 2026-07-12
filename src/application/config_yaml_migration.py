@@ -284,7 +284,19 @@ def _market_payload_from_user_config(
 def _runtime_without_generated(cfg: dict[str, Any]) -> dict[str, Any]:
     out = deepcopy(cfg)
     out.pop(GENERATED_KEY, None)
-    return out
+
+    def strip_provenance(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: strip_provenance(child)
+                for key, child in value.items()
+                if key not in {"_explicit_fields", "_explicit_call_fields"}
+            }
+        if isinstance(value, list):
+            return [strip_provenance(child) for child in value]
+        return value
+
+    return strip_provenance(out)
 
 
 def _backup_existing_config(path: Path) -> Path | None:
