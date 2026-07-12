@@ -22,6 +22,14 @@ from src.application.shadow_replay.common import (
 from src.application.shadow_replay.settlement import is_usable_mark
 
 
+WHEEL_TRANSITION_OUTCOMES = {"assigned_at_expiry", "called_away_at_expiry"}
+LIFECYCLE_PNL_FIELDS = (
+    "lifecycle_pnl",
+    "assignment_lifecycle_pnl",
+    "callaway_lifecycle_pnl",
+)
+
+
 def analyze_shadow_replay_dataset(
     *,
     dataset: str | Path,
@@ -495,14 +503,18 @@ def _decision_quality_sample(
     status = normal_status(candidate.get("status"))
     profile = _strategy_profile(candidate)
     family = _strategy_family(candidate)
-    pnl = first_float(outcome or {}, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl") if outcome else None
+    option_pnl = first_float(outcome or {}, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl") if outcome else None
+    lifecycle_pnl = first_float(outcome or {}, *LIFECYCLE_PNL_FIELDS) if outcome else None
+    decision_pnl = _decision_outcome_pnl(outcome)
     base = {
         "instrument_key": key,
         "symbol": text(candidate.get("symbol")),
         "status": status,
         "strategy_family": family,
         "strategy_profile": profile,
-        "realized_pnl": pnl,
+        "realized_pnl": option_pnl,
+        "lifecycle_pnl": lifecycle_pnl,
+        "decision_pnl": decision_pnl,
         "max_adverse_pnl": max_adverse_pnl,
     }
     if force_inconclusive:
@@ -522,7 +534,12 @@ def _decision_quality_sample(
         return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["outcome_fact_missing"]}
 
     ex_ante = _ex_ante_quality(candidate, profile=profile)
-    path = _path_quality(candidate, pnl=pnl, max_adverse_pnl=max_adverse_pnl)
+    path = _path_quality(
+        candidate,
+        outcome=outcome,
+        pnl=decision_pnl,
+        max_adverse_pnl=max_adverse_pnl,
+    )
     rejected_like = status in {"rejected", "post_filtered", "ranked_below"}
     if status == "accepted":
         if ex_ante["status"] == "fail" or path["status"] == "fail":
@@ -533,6 +550,8 @@ def _decision_quality_sample(
                 "reasons": ex_ante["reasons"] + path["reasons"],
             }
         if ex_ante["status"] == "unknown":
+            return {**base, "label": "inconclusive", "confidence": "low", "reasons": ex_ante["reasons"] + path["reasons"]}
+        if path["status"] == "unknown":
             return {**base, "label": "inconclusive", "confidence": "low", "reasons": ex_ante["reasons"] + path["reasons"]}
         return {
             **base,
@@ -548,7 +567,9 @@ def _decision_quality_sample(
                 "confidence": _quality_confidence(ex_ante, path),
                 "reasons": ex_ante["reasons"],
             }
-        if ex_ante["status"] == "pass" and pnl is not None and pnl > 0:
+        if ex_ante["status"] == "pass" and path["status"] == "unknown":
+            return {**base, "label": "inconclusive", "confidence": "low", "reasons": ex_ante["reasons"] + path["reasons"]}
+        if ex_ante["status"] == "pass" and decision_pnl is not None and decision_pnl > 0:
             return {
                 **base,
                 "label": "bad_reject",
@@ -596,13 +617,13 @@ def _strategy_family(candidate: dict[str, Any]) -> str:
 
 def _ex_ante_quality(candidate: dict[str, Any], *, profile: str) -> dict[str, Any]:
     if profile == "insurance_underwriting":
-        return _short_vol_ex_ante_quality(candidate)
+        return _underwriting_ex_ante_quality(candidate)
     if profile == "return_first":
         return _return_first_ex_ante_quality(candidate)
     return {"status": "unknown", "reasons": ["strategy_profile_missing_or_unknown"]}
 
 
-def _short_vol_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
+def _underwriting_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     checked = 0
     iv_rv = first_float(candidate, "iv_rv_ratio", "iv_to_rv_ratio")
@@ -617,27 +638,12 @@ def _short_vol_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
         checked += 1
         if iv_minus_rv < min_iv_minus_rv:
             reasons.append("iv_minus_rv_below_minimum")
-    abs_delta = abs_first_float(candidate, "abs_delta", "delta")
-    min_abs_delta = first_float(candidate, "min_abs_delta", "short_vol_min_abs_delta") or 0.15
-    max_abs_delta = first_float(candidate, "max_abs_delta", "short_vol_max_abs_delta") or 0.30
-    if abs_delta is not None:
-        checked += 1
-        if abs_delta < min_abs_delta:
-            reasons.append("delta_below_target_band")
-        elif abs_delta > max_abs_delta:
-            reasons.append("delta_above_target_band")
     spread = first_float(candidate, "spread_ratio", "bid_ask_spread_ratio")
     max_spread = first_float(candidate, "max_spread_ratio") or 0.30
     if spread is not None:
         checked += 1
         if spread > max_spread:
             reasons.append("spread_ratio_above_maximum")
-    concentration = first_float(candidate, "single_trade_concentration", "single_trade_nav_pct", "trade_nav_pct")
-    max_concentration = first_float(candidate, "max_single_trade_nav_pct") or 0.05
-    if concentration is not None:
-        checked += 1
-        if concentration > max_concentration:
-            reasons.append("single_trade_concentration_above_maximum")
     event_reason = _event_risk_reason(candidate)
     if event_reason:
         checked += 1
@@ -697,7 +703,28 @@ def _event_risk_reason(candidate: dict[str, Any]) -> str | None:
     return None
 
 
-def _path_quality(candidate: dict[str, Any], *, pnl: float | None, max_adverse_pnl: float | None) -> dict[str, Any]:
+def _decision_outcome_pnl(outcome: dict[str, Any] | None) -> float | None:
+    if not outcome:
+        return None
+    outcome_name = text(outcome.get("outcome")).lower()
+    if outcome_name in WHEEL_TRANSITION_OUTCOMES:
+        return first_float(outcome, *LIFECYCLE_PNL_FIELDS)
+    return first_float(outcome, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl")
+
+
+def _path_quality(
+    candidate: dict[str, Any],
+    *,
+    outcome: dict[str, Any] | None,
+    pnl: float | None,
+    max_adverse_pnl: float | None,
+) -> dict[str, Any]:
+    outcome_name = text((outcome or {}).get("outcome")).lower()
+    if outcome_name in WHEEL_TRANSITION_OUTCOMES and pnl is None:
+        return {
+            "status": "unknown",
+            "reasons": [f"{outcome_name}_lifecycle_pnl_missing"],
+        }
     premium = first_float(
         candidate,
         "net_income",
@@ -708,6 +735,8 @@ def _path_quality(candidate: dict[str, Any], *, pnl: float | None, max_adverse_p
         "premium",
     )
     reasons: list[str] = []
+    if outcome_name in WHEEL_TRANSITION_OUTCOMES:
+        max_adverse_pnl = None
     if premium is not None and premium > 0:
         if max_adverse_pnl is not None and max_adverse_pnl < 0 and abs(max_adverse_pnl) > premium * 3:
             reasons.append("path_adverse_loss_exceeds_premium_budget")

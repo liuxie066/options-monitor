@@ -231,6 +231,8 @@ def _scorecard(*, evaluation: dict[str, Any] | None, hypotheses: dict[str, Any])
                 "candidate_count": variant.get("candidate_count"),
                 "status": "blocked" if safety_violations else "candidate_review",
                 "domain_metrics": _domain_metrics(family=family, hypotheses=hypotheses),
+                "domain_metrics_status": "declared_not_scored",
+                "score_basis": "candidate_impact_only",
             }
         )
     rows.sort(key=lambda row: (row["status"] == "blocked", -float(row["objective_score"]), str(row["variant"])))
@@ -240,10 +242,12 @@ def _scorecard(*, evaluation: dict[str, Any] | None, hypotheses: dict[str, Any])
         "reason": "observed_universe_scorecard" if rows else "variant_evaluation_missing",
         "rows": rows,
         "best_variant": best,
-        "optimization_claim": "observed_universe_only",
+        "best_variant_basis": "candidate_impact_score",
+        "optimization_claim": "candidate_impact_only",
         "limitations": [
             "scorecard_is_not_production_recommendation",
             "candidate_impact_reuses_observed_run_universe_only",
+            "declared_outcome_metrics_are_not_scored_yet",
             "combo_yield_group_experiment_reported_separately",
         ],
     }

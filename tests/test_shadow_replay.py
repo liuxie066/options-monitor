@@ -322,15 +322,17 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
     samples = {row["symbol"]: row for row in analysis["decision_quality"]["samples"]}
     assert samples["BADACCEPT"]["label"] == "bad_accept"
     assert "iv_rv_ratio_below_minimum" in samples["BADACCEPT"]["reasons"]
-    assert samples["GOODLOSS"]["label"] == "good_accept"
+    assert samples["GOODLOSS"]["label"] == "inconclusive"
+    assert "assigned_at_expiry_lifecycle_pnl_missing" in samples["GOODLOSS"]["reasons"]
     assert samples["EVENTREJ"]["label"] == "good_reject"
     assert samples["RETGOOD"]["label"] == "good_accept"
     assert samples["BADREJ"]["label"] == "bad_reject"
     assert analysis["decision_quality"]["summary"]["label_counts"] == {
         "bad_accept": 1,
         "bad_reject": 1,
-        "good_accept": 2,
+        "good_accept": 1,
         "good_reject": 1,
+        "inconclusive": 1,
     }
     assert analysis["decision_quality"]["summary"]["parameter_advice_allowed"] is True
     assert analysis["decision_quality"]["summary"]["manual_strategy_review_ready"] is True
@@ -339,7 +341,7 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
     assert analysis["summary"]["review_readiness_status"] == "ready_for_manual_strategy_review"
     assert analysis["summary"]["decision_quality_status"] == "ready_for_parameter_review"
     assert analysis["summary"]["bad_decision_count"] == 2
-    assert analysis["summary"]["inconclusive_count"] == 0
+    assert analysis["summary"]["inconclusive_count"] == 1
     assert analysis["summary"]["parameter_advice_allowed"] is True
     assert analysis["review_readiness"]["status"] == "ready_for_manual_strategy_review"
     assert analysis["review_readiness"]["manual_strategy_review_ready"] is True
@@ -373,11 +375,77 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
         "bad_reject_count": 1,
         "bad_decision_count": 2,
         "has_bad_decision_signal": True,
-        "inconclusive_count": 0,
-        "inconclusive_rate": 0.0,
+        "inconclusive_count": 1,
+        "inconclusive_rate": 0.2,
         "inconclusive_too_high": False,
         "blockers": [],
     }
+
+
+def test_shadow_replay_underwriting_observes_delta_and_requires_wheel_lifecycle_pnl() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "contract_symbol": "PUT260619P00100000",
+                "symbol": "PUT",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "insurance_underwriting",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 1.30,
+                "iv_minus_rv": 0.10,
+                "delta": -0.95,
+                "single_trade_concentration": 0.90,
+                "max_single_trade_nav_pct": 0.05,
+                "spread_ratio": 0.10,
+                "net_income": 100,
+            },
+            {
+                "contract_symbol": "CALL260619C00110000",
+                "symbol": "CALL",
+                "option_type": "call",
+                "status": "accepted",
+                "strategy_profile": "insurance_underwriting",
+                "strategy_family": "sell_call",
+                "iv_rv_ratio": 1.30,
+                "iv_minus_rv": 0.10,
+                "delta": 0.95,
+                "single_trade_concentration": 0.90,
+                "max_single_trade_nav_pct": 0.05,
+                "spread_ratio": 0.10,
+                "net_income": 100,
+            },
+        ],
+        filter_decisions=[],
+        mark_snapshots=[
+            {"contract_symbol": "PUT260619P00100000", "unrealized_pnl": -900},
+            {"contract_symbol": "CALL260619C00110000", "unrealized_pnl": -900},
+        ],
+        outcome_facts=[
+            {
+                "contract_symbol": "PUT260619P00100000",
+                "outcome": "assigned_at_expiry",
+                "realized_pnl": -900,
+            },
+            {
+                "contract_symbol": "CALL260619C00110000",
+                "outcome": "called_away_at_expiry",
+                "realized_pnl": -900,
+                "callaway_lifecycle_pnl": 250,
+            },
+        ],
+        min_sample=2,
+    )
+
+    samples = {row["symbol"]: row for row in analysis["decision_quality"]["samples"]}
+    assert samples["PUT"]["label"] == "inconclusive"
+    assert "assigned_at_expiry_lifecycle_pnl_missing" in samples["PUT"]["reasons"]
+    assert samples["CALL"]["label"] == "good_accept"
+    assert samples["CALL"]["decision_pnl"] == 250
+    assert all("delta" not in reason for reason in samples["CALL"]["reasons"])
+    assert all("concentration" not in reason for reason in samples["CALL"]["reasons"])
 
 
 def test_shadow_replay_decision_quality_requires_sample_floor() -> None:

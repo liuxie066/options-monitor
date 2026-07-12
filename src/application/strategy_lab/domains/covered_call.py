@@ -9,8 +9,6 @@ ADAPTER = StrategyDomainAdapter(
     decision_scope="single_leg_short_call_with_share_cover",
     hypothesis_scope="shadow_replay_parameter_set",
     tunable_parameters=(
-        "min_abs_delta",
-        "max_abs_delta",
         "min_dte",
         "max_dte",
         "min_iv_rv_ratio",

@@ -22,7 +22,6 @@ from src.application.shadow_replay.capture import (
 from src.application.shadow_replay.common import (
     MARK_PATH_SCHEMA_VERSION,
     OUTCOME_FACT_SCHEMA_VERSION,
-    abs_first_float,
     dataset_dir_from_arg,
     first_float,
     instrument_key,
@@ -51,8 +50,6 @@ REJECTED_STATUSES = {"rejected", "post_filtered", "ranked_below"}
 PARAMETER_FIELD_MAP = {
     "min_iv_rv_ratio": "iv_rv_ratio",
     "min_iv_minus_rv": "iv_minus_rv",
-    "min_abs_delta": "abs_delta",
-    "max_abs_delta": "abs_delta",
     "min_dte": "dte",
     "max_dte": "dte",
     "min_annualized_return": "annualized_return",
@@ -598,8 +595,6 @@ def _field_coverage(candidates: list[dict[str, Any]], field: str) -> dict[str, A
 
 
 def _has_parameter_field(row: dict[str, Any], field: str) -> bool:
-    if field == "abs_delta":
-        return abs_first_float(row, "abs_delta", "delta") is not None
     return first_float(row, field) is not None
 
 
@@ -614,8 +609,6 @@ def _evaluate_candidate(row: dict[str, Any], *, variant: ParameterVariant) -> di
     reasons: list[str] = []
     _check_min(row, params, "min_iv_rv_ratio", "iv_rv_ratio", reasons)
     _check_min(row, params, "min_iv_minus_rv", "iv_minus_rv", reasons)
-    _check_min_abs_delta(row, params, reasons)
-    _check_max_abs_delta(row, params, reasons)
     _check_min(row, params, "min_dte", "dte", reasons)
     _check_max(row, params, "max_dte", "dte", reasons)
     _check_min(row, params, "min_annualized_return", "annualized_return", reasons)
@@ -643,26 +636,6 @@ def _check_max(row: dict[str, Any], params: dict[str, float], param_key: str, fi
         reasons.append(f"{field}_above_{param_key}")
 
 
-def _check_min_abs_delta(row: dict[str, Any], params: dict[str, float], reasons: list[str]) -> None:
-    if "min_abs_delta" not in params:
-        return
-    value = abs_first_float(row, "abs_delta", "delta")
-    if value is None:
-        reasons.append("abs_delta_missing")
-    elif value < params["min_abs_delta"]:
-        reasons.append("abs_delta_below_min_abs_delta")
-
-
-def _check_max_abs_delta(row: dict[str, Any], params: dict[str, float], reasons: list[str]) -> None:
-    if "max_abs_delta" not in params:
-        return
-    value = abs_first_float(row, "abs_delta", "delta")
-    if value is None:
-        reasons.append("abs_delta_missing")
-    elif value > params["max_abs_delta"]:
-        reasons.append("abs_delta_above_max_abs_delta")
-
-
 def _safety_reasons(row: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not instrument_key(row):
@@ -674,10 +647,6 @@ def _safety_reasons(row: dict[str, Any]) -> list[str]:
     max_spread = first_float(row, "max_spread_ratio") or 0.30
     if spread is not None and spread > max_spread:
         reasons.append("spread_ratio_above_safety_floor")
-    concentration = first_float(row, "single_trade_concentration")
-    max_concentration = first_float(row, "max_single_trade_nav_pct") or 0.05
-    if concentration is not None and concentration > max_concentration:
-        reasons.append("single_trade_concentration_above_safety_floor")
     premium = first_float(row, "net_income", "net_income_cny")
     if premium is not None and premium <= 0:
         reasons.append("premium_not_positive")
