@@ -13,7 +13,7 @@ from src.application.shadow_replay.common import (
     safety_payload,
     text,
 )
-from src.application.shadow_replay.settlement import is_usable_mark
+from src.application.shadow_replay.settlement import is_usable_mark, outcome_gap_summary
 
 
 STATUS_SCHEMA_VERSION = "shadow_replay_dataset_status.v1"
@@ -124,7 +124,13 @@ def _dataset_status(
     summary = analysis["summary"]
     evidence_checks = analysis["evidence_checks"]
     has_rejected_universe = summary["counterfactual_candidate_count"] > 0 and summary["filter_decision_count"] > 0
-    status, reason = _readiness_status(summary, analysis["outcome_coverage"])
+    outcome_gaps = outcome_gap_summary(
+        candidate_snapshots,
+        mark_snapshots,
+        outcome_facts,
+        now=now,
+    )
+    status, reason = _readiness_status(summary, outcome_gaps)
     sampling = _sampling_payload(
         status=status,
         reason=reason,
@@ -154,6 +160,7 @@ def _dataset_status(
         "last_mark_at": _last_mark_at(mark_snapshots),
         "outcome_fact_count": summary["outcome_fact_count"],
         "missing_outcome_instrument_count": analysis["outcome_coverage"]["missing_outcome_instrument_count"],
+        "outcome_gaps": outcome_gaps,
         "sampling": sampling,
         "min_sample": summary["min_sample"],
         "evidence_level": summary["evidence_level"],
@@ -169,15 +176,20 @@ def _dataset_status(
     }
 
 
-def _readiness_status(summary: dict[str, Any], outcome_coverage: dict[str, Any]) -> tuple[str, str]:
+def _readiness_status(summary: dict[str, Any], outcome_gaps: dict[str, Any]) -> tuple[str, str]:
     reason = str(summary.get("reason") or "")
     status = str(summary.get("status") or "not_ready")
     if reason in {"mark_path_snapshots_missing", "usable_mark_path_snapshots_missing"}:
         return "ready_for_sampling", reason
-    if reason == "outcome_facts_missing":
-        return "ready_for_settlement", reason
-    if status == "needs_human_review" and int(outcome_coverage.get("missing_outcome_instrument_count") or 0) > 0:
-        return "ready_for_settlement", "outcome_facts_incomplete"
+    if reason == "outcome_facts_missing" or status == "needs_human_review":
+        if int(outcome_gaps.get("ready_to_settle_count") or 0) > 0:
+            return "ready_for_settlement", (
+                "outcome_facts_missing" if reason == "outcome_facts_missing" else "outcome_facts_incomplete"
+            )
+        if int(outcome_gaps.get("needs_mark_count") or 0) > 0:
+            return "ready_for_sampling", "outcome_marks_incomplete"
+        if int(outcome_gaps.get("missing_outcome_instrument_count") or 0) > 0:
+            return "needs_human_review", "outcome_facts_blocked"
     return status, reason
 
 
@@ -206,7 +218,10 @@ def _sampling_payload(
         "is_mark_stale": is_stale,
     }
     if status == "ready_for_sampling":
-        state = "needs_initial_mark" if reason == "mark_path_snapshots_missing" else "needs_usable_mark"
+        state = {
+            "mark_path_snapshots_missing": "needs_initial_mark",
+            "outcome_marks_incomplete": "needs_outcome_mark",
+        }.get(reason, "needs_usable_mark")
         return {
             **base,
             "state": state,
@@ -233,7 +248,7 @@ def _sampling_payload(
     if status == "needs_human_review":
         return {
             **base,
-            "state": "ready_to_analyze",
+            "state": "outcome_collection_blocked" if reason == "outcome_facts_blocked" else "ready_to_analyze",
             "priority": "low",
             "action": "analyze",
             **_commands(dataset_dir, action="analyze", min_sample=min_sample, required_data_root=required_data_root),
@@ -297,6 +312,7 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "last_mark_at": dataset["last_mark_at"],
                 "mark_age_hours": sampling["mark_age_hours"],
                 "usable_mark_point_count": sampling["usable_mark_point_count"],
+                "outcome_gaps": dataset["outcome_gaps"],
                 "suggested_command": sampling["suggested_command"],
                 "suggested_opend_command": sampling["suggested_opend_command"],
             }
@@ -324,6 +340,7 @@ def _review_queue_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "usable_mark_point_count": sampling["usable_mark_point_count"],
                 "outcome_fact_count": dataset["outcome_fact_count"],
                 "missing_outcome_instrument_count": dataset["missing_outcome_instrument_count"],
+                "outcome_gaps": dataset["outcome_gaps"],
                 "suggested_command": sampling["suggested_command"],
             }
         )

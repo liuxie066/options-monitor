@@ -7,7 +7,7 @@
 - `Sell Put`：卖 Put 机会扫描。收益优先模式下是收益筛选；承保模式下是卖下跌保险的评估，默认接货是可接受结果。
 - `Covered Call`：已有正股上的卖 Call 机会扫描。收益优先模式下是收益筛选；承保模式下是卖上涨保险的评估，默认被行权卖出正股是可接受结果。
 - `combo_yield`：当前 Combo Yield runtime key；作为平行开仓策略配对 short put + long call，用可接受的接货义务融资上行参与。
-- `close_advice`：已有期权 lot 的生命周期管理，按开仓时记录的策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
+- `close_advice`：已有期权 lot 的生命周期管理，给出止盈、继续持有、long-call 退出或无法评估的平仓参考。
 
 它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
 
@@ -324,7 +324,7 @@ om run tick --config config.us.json --accounts lx sy
 
 - **`collect`**：从已有扫描 run 生成脱敏证据包，用于本地分析或 handoff。
 - **`shadow-replay`**：把历史扫描候选、拒绝原因和后续价格路径落地为本地 dataset，做反事实复盘与参数影响评估。
-- **`strategy-lab`**：在 Shadow Replay 之上做策略进化实验，生成只读的 candidate-impact scorecard 和 advisory-only proposal。
+- **`strategy-lab`**：在 Shadow Replay 之上做策略进化实验；候选变化只供审阅，只有严格 outcome dominance 才生成 advisory-only proposal。
 - **`archive`**：把远端 runtime 证据增量镜像到本地，便于磁盘有限的场景做离线复盘。
 
 这些入口默认只读；需要写本地 replay artifact 时必须显式加 `--write`。完整操作手册见 [docs/SHADOW_REPLAY_RUNBOOK.md](docs/SHADOW_REPLAY_RUNBOOK.md) 和 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
@@ -531,11 +531,13 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 当前支持的退出语义：
 
 - 普通 Sell Put / Covered Call：`close`、`hold`、`not_evaluable`
-- Short-vol lot：IV/RV edge 丢失、事件风险或路径风险可以触发 `risk_exit`
+- Short-vol lot：仍按收益捕获决定 `close` / `hold`；IV/RV、Delta、事件和路径风险只作为观察字段
 - 收益增强 short put 腿：`close_put_keep_call` 或 `hold_put_keep_call`
 - 收益增强 long call 腿：`sell_call_take_profit`、`hold_call`、`hold_call_as_convexity`、`sell_call_salvage`、`hold_to_expiry_or_expire`
 
-收益优先开仓的仓位主要按收益捕获逻辑评估。波动率溢价开仓的仓位才按承保 thesis 是否失效评估，例如 IV edge、事件风险、路径风险和风险预算是否恶化。非盈利买回不是 short-vol Sell Put / Covered Call 的默认强平理由：Sell Put 默认可接货，Covered Call 默认可被行权卖出正股。
+Short option 当前统一按收益捕获逻辑评估；`remaining_premium`、手续费后的 `realized_if_close`、`buy_to_close_cost` 和剩余年化用于解释买回经济性。缺少 RV/IV/Delta 不会覆盖已完成的定价判断。Sell Put 默认可接货，Covered Call 默认可被行权卖出正股。历史报告里的 `risk_exit` 仅保留只读展示兼容，不再映射为当前可执行平仓动作。
+
+Short-vol 行还会输出 `remaining_stress_loss`、`remaining_reward_to_stress_loss` 和 `close_calibration_status`，用于离线校准“剩余收益 / 剩余压力风险”。替代机会只接受 lot 或 `strategy_snapshot` 中显式提供的 `replacement_annualized_return`；系统不会从候选数量推测替代交易。显式把 `assignment_acceptable` / `called_away_acceptable` 设为 false 时只标记人工复核，不自动生成平仓动作。
 
 `strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。这些是持仓/平仓侧历史动作字段，本轮不重命名；渲染层只展示已决策的动作，不改变平仓判断。
 

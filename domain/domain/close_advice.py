@@ -40,7 +40,6 @@ TIER_PRIORITY = {
 EXIT_STATE_NOT_EVALUABLE = "not_evaluable"
 EXIT_STATE_HOLD = "hold"
 EXIT_STATE_PROFIT_CAPTURE = "profit_capture"
-EXIT_STATE_RISK_EXIT = "risk_exit"
 EXIT_STATE_TAKE_PROFIT = "take_profit"
 EXIT_STATE_SALVAGE = "salvage"
 EXIT_STATE_LET_EXPIRE = "let_expire"
@@ -48,7 +47,6 @@ EXIT_STATE_LET_EXPIRE = "let_expire"
 EXIT_REASON_TYPE_NOT_EVALUABLE = "not_evaluable"
 EXIT_REASON_TYPE_HOLD = "hold"
 EXIT_REASON_TYPE_PROFIT_CAPTURE = "profit_capture"
-EXIT_REASON_TYPE_RISK_EXIT = "risk_exit"
 EXIT_REASON_TYPE_TAKE_PROFIT = "take_profit"
 EXIT_REASON_TYPE_SALVAGE = "salvage"
 EXIT_REASON_TYPE_THESIS_EXPIRED = "thesis_expired"
@@ -564,10 +562,10 @@ def evaluate_short_vol_close_advice(
 ) -> dict[str, Any]:
     """Evaluate close advice for positions opened under a short-volatility thesis.
 
-    The existing close advice model is a return-capture model.  This wrapper keeps
-    the same quote-quality and profitability gates, then overlays short-vol
-    observations about the original underwriting thesis. Soft changes in IV/RV,
-    delta, or event context do not create a close recommendation by themselves.
+    The existing close advice model is a return-capture model. This wrapper keeps
+    the same quote-quality and profitability gates, then overlays optional
+    short-vol observations. Missing or weaker IV/RV, delta, or event context does
+    not create or invalidate a close recommendation by itself.
     """
 
     row = evaluate_close_advice(inp, close_config)
@@ -586,6 +584,14 @@ def evaluate_short_vol_close_advice(
         ),
     )
     row.update(risk_fields)
+    row.update(
+        _remaining_stress_observations(
+            inp,
+            short_vol_config=short_vol_config,
+            mode=mode_norm,
+            realized_volatility=risk_fields.get("realized_volatility_estimate"),
+        )
+    )
     row["path_stress_status"] = "ok" if risk_fields.get("path_stress_evaluable") is True else "not_evaluable"
     event_status = str(risk_fields.get("event_source_status") or "").strip().lower()
     if risk_fields.get("event_risk_flag") is True:
@@ -613,11 +619,23 @@ def evaluate_short_vol_close_advice(
     if risk_fields.get("abs_delta") is None:
         missing.append("delta")
     if missing:
+        missing_reason = f"缺少 short-vol 观察数据: {', '.join(missing)}"
+        if str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_HOLD:
+            return _short_vol_acceptance_hold(
+                row,
+                reason=(
+                    f"{_short_vol_valid_hold_reason(mode_norm)}；{missing_reason}，"
+                    "仅缺少观察项，不作为平仓依据"
+                ),
+                status="not_evaluable",
+                hold_reason_type=_short_vol_acceptance_hold_reason_type(mode_norm),
+                flag="short_vol_risk_data_missing",
+            )
         return _short_vol_not_evaluable(
             row,
-            reason=f"缺少 short-vol 平仓评估数据: {', '.join(missing)}",
+            reason=missing_reason,
             flag="short_vol_risk_data_missing",
-            preserve_action=str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_PROFIT_CAPTURE,
+            preserve_action=True,
         )
 
     ratio = safe_float(risk_fields.get("iv_rv_ratio"))
@@ -661,6 +679,66 @@ def _short_vol_close_risk_input(inp: CloseAdviceInput, quote_row: dict[str, Any]
     row.setdefault("multiplier", inp.multiplier)
     row.setdefault("premium_cny", None)
     return row
+
+
+def _remaining_stress_observations(
+    inp: CloseAdviceInput,
+    *,
+    short_vol_config: ShortVolAssessmentConfig,
+    mode: str,
+    realized_volatility: Any,
+) -> dict[str, Any]:
+    spot = safe_float(inp.spot)
+    strike = safe_float(inp.strike)
+    mid = safe_float(inp.close_mid)
+    multiplier = safe_float(inp.multiplier)
+    contracts = safe_int(inp.contracts_open)
+    missing = [
+        name
+        for name, value in (
+            ("spot", spot),
+            ("strike", strike),
+            ("close_mid", mid),
+            ("multiplier", multiplier),
+            ("contracts_open", contracts),
+        )
+        if value is None or value <= 0
+    ]
+    if missing:
+        return {
+            "remaining_risk_status": "not_evaluable",
+            "remaining_risk_unavailable_reason": ",".join(missing),
+        }
+
+    assert spot is not None and strike is not None and mid is not None
+    assert multiplier is not None and contracts is not None
+    remaining_reward = mid * multiplier * contracts
+    scenarios: list[tuple[str, float]] = []
+    if mode == "call":
+        scenario_price = spot * (1.0 + max(0.0, float(short_vol_config.call_gap_up_pct)))
+        scenarios.append(("call_gap_up", max(0.0, scenario_price - strike)))
+    else:
+        gap_price = max(0.0, spot * (1.0 - max(0.0, float(short_vol_config.gap_down_pct))))
+        scenarios.append(("put_gap_down", max(0.0, strike - gap_price)))
+        rv = safe_float(realized_volatility)
+        dte = safe_int(inp.dte)
+        if rv is not None and rv >= 0 and dte is not None and dte > 0:
+            sigma_move = max(0.0, float(short_vol_config.stress_down_sigma_multiple)) * rv * math.sqrt(dte / 365.0)
+            sigma_price = max(0.0, spot * (1.0 - sigma_move))
+            scenarios.append(("put_sigma_down", max(0.0, strike - sigma_price)))
+
+    scenario, intrinsic_per_share = max(scenarios, key=lambda item: item[1])
+    scenario_liability = intrinsic_per_share * multiplier * contracts
+    stress_loss = max(0.0, scenario_liability - remaining_reward)
+    return {
+        "remaining_risk_status": "ok",
+        "remaining_risk_unavailable_reason": None,
+        "remaining_stress_scenario": scenario,
+        "remaining_stress_loss": round(stress_loss, 6),
+        "remaining_reward_to_stress_loss": (
+            round(remaining_reward / stress_loss, 6) if stress_loss > 0 else None
+        ),
+    }
 
 
 def _short_vol_not_evaluable(

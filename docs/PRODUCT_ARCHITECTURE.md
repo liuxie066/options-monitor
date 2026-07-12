@@ -242,8 +242,8 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 - Shadow Replay 只提供候选影响和复盘证据；Strategy Lab 当前提供 evidence update facade、decision-instance readiness、hypotheses、candidate-impact experiment、Combo Yield group experiment、轻量 scorecard、advisory-only dry-run proposal 和脱敏 LLM context。
 - Strategy Lab 以策略域适配器组织 Sell Put、Covered Call 和 Combo Yield；实验对象是 `decision_instance`，不是单一 candidate row。
 - Strategy Lab 统一证据、实验、scorecard 和 proposal workflow；每个策略域独立定义决策单元、目标函数、参数空间、硬约束、scorecard 指标和 dry-run patch target。
-- Sell Put / Covered Call 第一阶段可复用单腿 candidate-impact；Combo Yield 必须按 group-level payoff 和 legs 评估，第一阶段输出 observed-universe group optimizer，不输出单腿化参数 patch。
-- Strategy Lab 不能声称绝对最优，只能在当前 observed universe、目标函数、安全约束和样本下给出评分最高的候选建议。
+- Sell Put / Covered Call 第一阶段可复用单腿 candidate-impact；Combo Yield 必须按 group-level payoff 和 legs 评估，第一阶段只输出 observed-universe group outcome evaluator，不生成参数 variant 或单腿化 patch。
+- Strategy Lab 不能声称绝对最优；Sell Put / Covered Call 只有在完整 outcome 下唯一 variant 严格支配 baseline 时才可形成 dry-run 建议。
 - 在线生产监控和离线策略研究保持分离。
 
 主要实现位置：

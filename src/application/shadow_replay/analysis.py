@@ -4,6 +4,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
+
 from src.application.shadow_replay.common import (
     ANALYSIS_SCHEMA_VERSION,
     abs_first_float,
@@ -23,6 +25,8 @@ from src.application.shadow_replay.settlement import is_usable_mark
 
 
 WHEEL_TRANSITION_OUTCOMES = {"assigned_at_expiry", "called_away_at_expiry"}
+WHEEL_LIFECYCLE_RISK_SCHEMA_VERSION = "shadow_replay_wheel_lifecycle_risk.v1"
+MIN_EMPIRICAL_TAIL_SAMPLES = 30
 LIFECYCLE_PNL_FIELDS = (
     "lifecycle_pnl",
     "assignment_lifecycle_pnl",
@@ -141,7 +145,13 @@ def analyze_rows(
         "outcome_coverage": outcome_coverage(candidate_snapshots, mark_snapshots, outcome_facts),
         "path_risk": path_risk_stats(candidate_snapshots, mark_snapshots),
         "outcome_stats": outcome_stats(candidate_snapshots, outcome_facts),
-        "insurance_metrics": insurance_metrics(candidate_snapshots, mark_snapshots, outcome_facts),
+        "insurance_metrics": insurance_metrics(
+            candidate_snapshots,
+            mark_snapshots,
+            outcome_facts,
+            min_sample=sample_floor,
+        ),
+        "wheel_lifecycle_risk": wheel_lifecycle_risk(candidate_snapshots),
         "outcome_by_bucket": outcome_bucket_stats(candidate_snapshots, outcome_facts),
         "decision_quality": quality,
         "review_readiness": review_readiness,
@@ -246,21 +256,310 @@ def outcome_bucket_stats(candidates: list[dict[str, Any]], outcomes: list[dict[s
     return out
 
 
-def insurance_metrics(candidates: list[dict[str, Any]], marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+def insurance_metrics(
+    candidates: list[dict[str, Any]],
+    marks: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    *,
+    min_sample: int,
+) -> dict[str, Any]:
     candidate_by_key = _candidate_by_instrument(candidates)
     adverse_by_key = _max_adverse_pnl_by_instrument(marks)
     by_status: dict[str, dict[str, Any]] = defaultdict(_empty_insurance_group)
     by_mode: dict[str, dict[str, Any]] = defaultdict(_empty_insurance_group)
+    by_mode_status: dict[str, dict[str, dict[str, Any]]] = defaultdict(
+        lambda: defaultdict(_empty_insurance_group)
+    )
     for row in outcomes:
         key = instrument_key(row)
         candidate = candidate_by_key.get(key) or {}
         sample = _insurance_sample(candidate=candidate, outcome=row, instrument_key=key, max_adverse_pnl=adverse_by_key.get(key))
         _record_insurance_payload(by_status[sample["status"]], sample)
         _record_insurance_payload(by_mode[sample["mode"]], sample)
+        _record_insurance_payload(by_mode_status[sample["mode"]][sample["status"]], sample)
     return {
-        "by_status": _insurance_payload(by_status),
-        "by_mode": _insurance_payload(by_mode),
-        "by_bucket": insurance_bucket_stats(candidate_by_key, adverse_by_key, outcomes),
+        "by_status": _insurance_payload(by_status, min_sample=min_sample),
+        "by_mode": _insurance_payload(by_mode, min_sample=min_sample),
+        "by_mode_status": {
+            mode: _insurance_payload(grouped, min_sample=min_sample)
+            for mode, grouped in sorted(by_mode_status.items())
+        },
+        "by_bucket": insurance_bucket_stats(candidate_by_key, adverse_by_key, outcomes, min_sample=min_sample),
+    }
+
+
+def wheel_lifecycle_risk(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    identity_missing_count = 0
+    for row in _wheel_candidate_scenarios(candidates):
+        account = text(row.get("account")).lower()
+        symbol = text(row.get("symbol") or row.get("underlying_symbol")).upper()
+        if not account or not symbol:
+            identity_missing_count += 1
+            continue
+        grouped[(account, symbol)].append(row)
+
+    rows: list[dict[str, Any]] = []
+    for (account, symbol), group_rows in sorted(grouped.items()):
+        put_rows = [row for row in group_rows if _wheel_mode(row) == "put"]
+        call_rows = [row for row in group_rows if _wheel_mode(row) == "call"]
+        sell_put = _sell_put_wheel_risk(put_rows) if put_rows else None
+        covered_call = _covered_call_wheel_risk(call_rows) if call_rows else None
+        sections = [section for section in (sell_put, covered_call) if section is not None]
+        rows.append(
+            {
+                "account": account,
+                "symbol": symbol,
+                "status": (
+                    "evaluable"
+                    if sections and all(section["status"] == "evaluable" for section in sections)
+                    else "not_evaluable"
+                ),
+                "sell_put": sell_put,
+                "covered_call": covered_call,
+            }
+        )
+
+    evaluable_count = sum(1 for row in rows if row["status"] == "evaluable")
+    not_evaluable_count = len(rows) - evaluable_count
+    if not rows or evaluable_count == 0:
+        status = "not_evaluable"
+    elif not_evaluable_count:
+        status = "partial"
+    else:
+        status = "evaluable"
+    return {
+        "schema_version": WHEEL_LIFECYCLE_RISK_SCHEMA_VERSION,
+        "summary": {
+            "status": status,
+            "account_symbol_count": len(rows),
+            "evaluable_account_symbol_count": evaluable_count,
+            "not_evaluable_account_symbol_count": not_evaluable_count,
+            "identity_missing_candidate_count": identity_missing_count,
+            "scenario_basis": "one_candidate_contract_at_a_time",
+            "production_gate_applied": False,
+        },
+        "by_account_symbol": rows,
+        "limitations": [
+            "candidate_contracts_are_alternative_scenarios_not_simultaneous_positions",
+            "account_context_is_read_only_and_not_a_production_gate",
+            "missing_or_inconsistent_capacity_fields_are_not_evaluable",
+        ],
+    }
+
+
+def _wheel_candidate_scenarios(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, ...], dict[str, Any]] = {}
+    for row in candidates:
+        if text(row.get("source_kind")) == "filter_decision" or _strategy_family(row) == "combo_yield":
+            continue
+        mode = _wheel_mode(row)
+        if mode not in {"put", "call"}:
+            continue
+        key = (
+            text(row.get("account")).lower(),
+            text(row.get("symbol") or row.get("underlying_symbol")).upper(),
+            mode,
+            text(row.get("contract_symbol") or row.get("option_symbol")).upper(),
+            text(row.get("expiration") or row.get("exp")),
+            text(row.get("strike")),
+        )
+        target = merged.setdefault(key, {})
+        for field, value in row.items():
+            if _wheel_value_missing(target.get(field)) and not _wheel_value_missing(value):
+                target[field] = value
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in merged.values():
+        grouped[
+            (
+                text(row.get("account")).lower(),
+                text(row.get("symbol") or row.get("underlying_symbol")).upper(),
+                _wheel_mode(row),
+            )
+        ].append(row)
+    out: list[dict[str, Any]] = []
+    for rows in grouped.values():
+        labeled = [row for row in rows if "_candidates_labeled.csv" in text(row.get("source_path")).lower()]
+        out.extend(labeled or rows)
+    return out
+
+
+def _wheel_value_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _wheel_mode(row: dict[str, Any]) -> str:
+    return text(row.get("option_type") or row.get("mode")).lower()
+
+
+def _sell_put_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    nav, nav_issue = _wheel_context_number(rows, "portfolio_nav_cny", "nav_cny")
+    stock, stock_issue = _wheel_context_number(rows, "existing_stock_value_cny_symbol")
+    existing_symbol, symbol_issue = _wheel_context_number(rows, "existing_short_put_assignment_cny_symbol")
+    existing_total, total_issue = _wheel_context_number(rows, "existing_short_put_assignment_cny_total")
+    issues = {
+        "portfolio_nav_cny": nav_issue,
+        "existing_stock_value_cny_symbol": stock_issue,
+        "existing_short_put_assignment_cny_symbol": symbol_issue,
+        "existing_short_put_assignment_cny_total": total_issue,
+    }
+    missing_fields = [field for field, issue in issues.items() if issue == "missing"]
+    inconsistent_fields = [field for field, issue in issues.items() if issue == "inconsistent"]
+
+    obligations: list[float] = []
+    post_symbol_exposure: list[float] = []
+    post_account_obligation: list[float] = []
+    symbol_nav_ratios: list[float] = []
+    account_nav_ratios: list[float] = []
+    cash_supported_count = 0
+    cash_insufficient_count = 0
+    cash_not_evaluable_count = 0
+    cash_basis_counts: Counter[str] = Counter()
+    for row in rows:
+        obligation = first_float(row, "assignment_notional_cny", "cash_required_cny")
+        if obligation is None:
+            cash_not_evaluable_count += 1
+            continue
+        obligations.append(obligation)
+        if stock is not None and existing_symbol is not None:
+            post_symbol_exposure.append(stock + existing_symbol + obligation)
+        if existing_total is not None:
+            post_account_obligation.append(existing_total + obligation)
+        if nav is not None and nav > 0:
+            if stock is not None and existing_symbol is not None:
+                symbol_nav_ratios.append((stock + existing_symbol + obligation) / nav)
+            if existing_total is not None:
+                account_nav_ratios.append((existing_total + obligation) / nav)
+
+        capacity = compute_sell_put_cash_capacity(
+            cash_required_cny=first_float(row, "cash_required_cny", "assignment_notional_cny"),
+            cash_free_cny=first_float(row, "cash_free_cny"),
+            cash_free_total_cny=first_float(row, "cash_free_total_cny"),
+            cash_required_usd=first_float(row, "cash_required_usd"),
+            cash_free_usd=first_float(row, "cash_free_usd"),
+        )
+        if capacity.basis is None:
+            cash_not_evaluable_count += 1
+        else:
+            cash_basis_counts[capacity.basis] += 1
+            if capacity.accepted:
+                cash_supported_count += 1
+            else:
+                cash_insufficient_count += 1
+
+    if len(obligations) != len(rows):
+        missing_fields.append("assignment_notional_cny")
+    if cash_not_evaluable_count:
+        missing_fields.append("cash_capacity_context")
+    return {
+        "status": "evaluable" if not missing_fields and not inconsistent_fields else "not_evaluable",
+        "candidate_scenario_count": len(rows),
+        "portfolio_nav_cny": nav,
+        "existing_stock_value_cny_symbol": stock,
+        "existing_short_put_assignment_cny_symbol": existing_symbol,
+        "existing_short_put_assignment_cny_total": existing_total,
+        "candidate_assignment_obligation_cny": _wheel_range(obligations),
+        "post_assignment_symbol_exposure_cny": _wheel_range(post_symbol_exposure),
+        "post_assignment_account_obligation_cny": _wheel_range(post_account_obligation),
+        "post_assignment_symbol_nav_ratio": _wheel_range(symbol_nav_ratios),
+        "post_assignment_account_obligation_nav_ratio": _wheel_range(account_nav_ratios),
+        "cash_capacity": {
+            "supported_scenario_count": cash_supported_count,
+            "insufficient_scenario_count": cash_insufficient_count,
+            "not_evaluable_scenario_count": cash_not_evaluable_count,
+            "basis_counts": dict(cash_basis_counts),
+        },
+        "missing_fields": sorted(set(missing_fields)),
+        "inconsistent_fields": sorted(set(inconsistent_fields)),
+    }
+
+
+def _covered_call_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    shares_total, total_issue = _wheel_context_number(rows, "shares_total", "shares")
+    shares_locked, locked_issue = _wheel_context_number(rows, "shares_locked")
+    explicit_available, available_issue = _wheel_context_number(rows, "shares_available_for_cover")
+    issues = {
+        "shares_total": total_issue,
+        "shares_locked": locked_issue,
+        "shares_available_for_cover": available_issue,
+    }
+    missing_fields = [field for field, issue in issues.items() if issue == "missing" and field != "shares_available_for_cover"]
+    inconsistent_fields = [field for field, issue in issues.items() if issue == "inconsistent"]
+    shares_available = explicit_available
+    if shares_available is None and shares_total is not None and shares_locked is not None:
+        shares_available = max(0.0, shares_total - shares_locked)
+
+    called_away_shares: list[float] = []
+    called_away_ratios: list[float] = []
+    post_locked_shares: list[float] = []
+    post_locked_ratios: list[float] = []
+    available_contracts: list[float] = []
+    supported_count = 0
+    insufficient_count = 0
+    not_evaluable_count = 0
+    for row in rows:
+        multiplier = first_float(row, "multiplier", "contract_multiplier")
+        contracts = first_float(row, "contracts", "contract_count") or 1.0
+        if multiplier is None or multiplier <= 0 or shares_total is None or shares_locked is None:
+            not_evaluable_count += 1
+            continue
+        called = multiplier * contracts
+        called_away_shares.append(called)
+        post_locked_shares.append(shares_locked + called)
+        if shares_total > 0:
+            called_away_ratios.append(called / shares_total)
+            post_locked_ratios.append((shares_locked + called) / shares_total)
+        capacity = compute_sell_call_share_capacity(
+            shares_total=shares_total,
+            shares_locked=shares_locked,
+            shares_available_for_cover=shares_available,
+            multiplier=multiplier,
+        )
+        available_contracts.append(float(capacity.covered_contracts_available))
+        if capacity.covered_contracts_available >= contracts:
+            supported_count += 1
+        else:
+            insufficient_count += 1
+
+    if not_evaluable_count:
+        missing_fields.append("multiplier_or_share_capacity_context")
+    if shares_total is not None and shares_total <= 0:
+        missing_fields.append("positive_shares_total")
+    return {
+        "status": "evaluable" if not missing_fields and not inconsistent_fields else "not_evaluable",
+        "candidate_scenario_count": len(rows),
+        "shares_total": shares_total,
+        "shares_locked": shares_locked,
+        "shares_available_for_cover": shares_available,
+        "locked_share_ratio": (shares_locked / shares_total) if shares_total and shares_locked is not None else None,
+        "candidate_called_away_shares": _wheel_range(called_away_shares),
+        "candidate_called_away_share_ratio": _wheel_range(called_away_ratios),
+        "post_candidate_locked_shares": _wheel_range(post_locked_shares),
+        "post_candidate_locked_share_ratio": _wheel_range(post_locked_ratios),
+        "covered_contracts_available": _wheel_range(available_contracts),
+        "share_capacity": {
+            "supported_scenario_count": supported_count,
+            "insufficient_scenario_count": insufficient_count,
+            "not_evaluable_scenario_count": not_evaluable_count,
+        },
+        "missing_fields": sorted(set(missing_fields)),
+        "inconsistent_fields": sorted(set(inconsistent_fields)),
+    }
+
+
+def _wheel_context_number(rows: list[dict[str, Any]], *keys: str) -> tuple[float | None, str | None]:
+    values = [value for row in rows if (value := first_float(row, *keys)) is not None]
+    if not values:
+        return None, "missing"
+    if len({round(value, 6) for value in values}) > 1:
+        return None, "inconsistent"
+    return values[0], None
+
+
+def _wheel_range(values: list[float]) -> dict[str, float | None]:
+    return {
+        "min": min(values) if values else None,
+        "max": max(values) if values else None,
     }
 
 
@@ -759,6 +1058,8 @@ def insurance_bucket_stats(
     candidate_by_key: dict[str, dict[str, Any]],
     adverse_by_key: dict[str, float],
     outcomes: list[dict[str, Any]],
+    *,
+    min_sample: int,
 ) -> dict[str, Any]:
     dimensions: dict[str, tuple[str, Any]] = {
         "dte": ("dte", _dte_bucket),
@@ -782,8 +1083,8 @@ def insurance_bucket_stats(
             _record_insurance_payload(payload["by_status"][sample["status"]], sample)
         out[dimension] = {
             label: {
-                **_summarize_insurance_group(payload["all"]),
-                "by_status": _insurance_payload(payload["by_status"]),
+                **_summarize_insurance_group(payload["all"], min_sample=min_sample),
+                "by_status": _insurance_payload(payload["by_status"], min_sample=min_sample),
             }
             for label, payload in sorted(bucketed.items())
         }
@@ -952,13 +1253,20 @@ def _empty_insurance_group() -> dict[str, Any]:
         "outcome_count": 0,
         "instruments": set(),
         "outcomes": Counter(),
+        "pnl_basis_counts": Counter(),
+        "lifecycle_transition_count": 0,
+        "lifecycle_pnl_observation_count": 0,
+        "lifecycle_pnl_values": [],
+        "lifecycle_return_on_capital_values": [],
         "premium_values": [],
         "pnl_values": [],
         "pnl_premium_pairs": [],
         "liability_cost_pairs": [],
         "capital_pairs": [],
+        "return_on_capital_values": [],
         "adverse_values": [],
         "adverse_premium_pairs": [],
+        "adverse_return_on_capital_values": [],
     }
 
 
@@ -971,10 +1279,17 @@ def _insurance_sample(
 ) -> dict[str, Any]:
     mode = _insurance_mode(candidate, outcome)
     status = normal_status(candidate.get("status") or outcome.get("candidate_status"))
-    pnl, value_basis = _outcome_pnl_with_basis(outcome)
+    outcome_label = text(outcome.get("outcome") or outcome.get("settlement") or outcome.get("status")).lower()
+    lifecycle_transition = outcome_label in WHEEL_TRANSITION_OUTCOMES
+    if lifecycle_transition:
+        pnl = first_float(outcome, *LIFECYCLE_PNL_FIELDS)
+        value_basis = "native"
+        pnl_basis = "wheel_lifecycle" if pnl is not None else "wheel_lifecycle_missing"
+    else:
+        pnl, value_basis = _outcome_pnl_with_basis(outcome)
+        pnl_basis = f"option_{value_basis}" if pnl is not None else "option_missing"
     premium = _entry_premium(candidate, value_basis=value_basis)
     capital = _capital_at_risk(candidate, mode=mode, value_basis=value_basis)
-    outcome_label = text(outcome.get("outcome") or outcome.get("settlement") or outcome.get("status"))
     liability_cost = None
     if premium is not None and premium > 0 and pnl is not None:
         liability_cost = max(premium - pnl, 0.0)
@@ -983,6 +1298,8 @@ def _insurance_sample(
         "status": status,
         "mode": mode,
         "outcome": outcome_label,
+        "pnl_basis": pnl_basis,
+        "lifecycle_transition": lifecycle_transition,
         "premium": premium if premium is not None and premium > 0 else None,
         "pnl": pnl,
         "liability_cost": liability_cost,
@@ -999,6 +1316,16 @@ def _record_insurance_payload(payload: dict[str, Any], sample: dict[str, Any]) -
     outcome = text(sample.get("outcome"))
     if outcome:
         payload["outcomes"][outcome] += 1
+    payload["pnl_basis_counts"][text(sample.get("pnl_basis")) or "unknown"] += 1
+    if sample.get("lifecycle_transition"):
+        payload["lifecycle_transition_count"] += 1
+        if sample.get("pnl") is not None:
+            payload["lifecycle_pnl_observation_count"] += 1
+            payload["lifecycle_pnl_values"].append(float(sample["pnl"]))
+            if sample.get("capital") is not None:
+                payload["lifecycle_return_on_capital_values"].append(
+                    float(sample["pnl"]) / float(sample["capital"])
+                )
     premium = sample.get("premium")
     pnl = sample.get("pnl")
     liability_cost = sample.get("liability_cost")
@@ -1014,28 +1341,36 @@ def _record_insurance_payload(payload: dict[str, Any], sample: dict[str, Any]) -
         payload["liability_cost_pairs"].append((float(liability_cost), float(premium)))
     if premium is not None and capital is not None:
         payload["capital_pairs"].append((float(premium), float(capital)))
+    if pnl is not None and capital is not None:
+        payload["return_on_capital_values"].append(float(pnl) / float(capital))
     if adverse is not None:
         adverse_value = float(adverse)
         payload["adverse_values"].append(adverse_value)
+        if capital is not None:
+            payload["adverse_return_on_capital_values"].append(adverse_value / float(capital))
         if premium is not None and adverse_value < 0:
             payload["adverse_premium_pairs"].append((abs(adverse_value), float(premium)))
 
 
-def _insurance_payload(grouped: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _insurance_payload(grouped: dict[str, dict[str, Any]], *, min_sample: int) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for label, payload in sorted(grouped.items()):
-        out[label] = _summarize_insurance_group(payload)
+        out[label] = _summarize_insurance_group(payload, min_sample=min_sample)
     return out
 
 
-def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
+def _summarize_insurance_group(payload: dict[str, Any], *, min_sample: int) -> dict[str, Any]:
     premium_values = list(payload["premium_values"])
     pnl_values = list(payload["pnl_values"])
     pnl_premium_pairs = list(payload["pnl_premium_pairs"])
     liability_cost_pairs = list(payload["liability_cost_pairs"])
     capital_pairs = list(payload["capital_pairs"])
+    return_on_capital_values = list(payload["return_on_capital_values"])
     adverse_values = list(payload["adverse_values"])
     adverse_premium_pairs = list(payload["adverse_premium_pairs"])
+    lifecycle_pnl_values = list(payload["lifecycle_pnl_values"])
+    lifecycle_return_on_capital_values = list(payload["lifecycle_return_on_capital_values"])
+    adverse_return_on_capital_values = list(payload["adverse_return_on_capital_values"])
     outcome_count = int(payload["outcome_count"])
     negative_margin_count = sum(1 for value in pnl_values if value < 0)
     liability_cost_count = sum(1 for cost, _premium in liability_cost_pairs if cost > 0)
@@ -1052,6 +1387,8 @@ def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
     called_away_count = int(outcomes.get("called_away_at_expiry", 0))
     expired_worthless_count = int(outcomes.get("expired_worthless", 0))
     exercise_count = assignment_count + called_away_count + int(outcomes.get("expired_in_the_money", 0))
+    lifecycle_transition_count = int(payload["lifecycle_transition_count"])
+    lifecycle_pnl_observation_count = int(payload["lifecycle_pnl_observation_count"])
     return {
         "instrument_count": len(payload["instruments"]),
         "outcome_count": outcome_count,
@@ -1059,6 +1396,7 @@ def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
         "premium_collected_total": sum(premium_values) if premium_values else None,
         "premium_collected_avg": (sum(premium_values) / len(premium_values)) if premium_values else None,
         "pnl_observation_count": len(pnl_values),
+        "pnl_basis_counts": dict(payload["pnl_basis_counts"].most_common()),
         "realized_pnl_total": sum(pnl_values) if pnl_values else None,
         "realized_pnl_avg": (sum(pnl_values) / len(pnl_values)) if pnl_values else None,
         "underwriting_margin": (pnl_with_premium / premium_for_pnl) if premium_for_pnl > 0 else None,
@@ -1069,6 +1407,19 @@ def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
         "liability_cost_rate": (liability_cost_count / len(liability_cost_pairs)) if liability_cost_pairs else None,
         "negative_margin_count": negative_margin_count,
         "negative_margin_rate": (negative_margin_count / len(pnl_values)) if pnl_values else None,
+        "lifecycle_transition_count": lifecycle_transition_count,
+        "lifecycle_pnl_observation_count": lifecycle_pnl_observation_count,
+        "lifecycle_pnl_missing_count": lifecycle_transition_count - lifecycle_pnl_observation_count,
+        "lifecycle_pnl_total": sum(lifecycle_pnl_values) if lifecycle_pnl_values else None,
+        "lifecycle_pnl_avg": (
+            sum(lifecycle_pnl_values) / len(lifecycle_pnl_values) if lifecycle_pnl_values else None
+        ),
+        "lifecycle_return_on_capital_observation_count": len(lifecycle_return_on_capital_values),
+        "lifecycle_return_on_capital_avg": (
+            sum(lifecycle_return_on_capital_values) / len(lifecycle_return_on_capital_values)
+            if lifecycle_return_on_capital_values
+            else None
+        ),
         "exercise_count": exercise_count,
         "exercise_rate": (exercise_count / outcome_count) if outcome_count > 0 else None,
         "assignment_count": assignment_count,
@@ -1080,11 +1431,48 @@ def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
         "capital_observation_count": len(capital_pairs),
         "capital_at_risk_total": capital_total if capital_pairs else None,
         "premium_to_capital": (premium_for_capital / capital_total) if capital_total > 0 else None,
+        "return_on_capital_observation_count": len(return_on_capital_values),
+        "return_on_capital_avg": (
+            sum(return_on_capital_values) / len(return_on_capital_values) if return_on_capital_values else None
+        ),
+        "tail_risk": _empirical_tail_risk(return_on_capital_values, min_sample=min_sample),
         "max_adverse_pnl_observation_count": len(adverse_values),
         "max_adverse_pnl_worst": min(adverse_values) if adverse_values else None,
+        "max_adverse_return_on_capital_observation_count": len(adverse_return_on_capital_values),
+        "max_adverse_return_on_capital_worst": (
+            min(adverse_return_on_capital_values) if adverse_return_on_capital_values else None
+        ),
         "path_adverse_loss_total": adverse_loss_total if adverse_premium_pairs else None,
         "path_adverse_loss_to_premium": (adverse_loss_total / premium_for_adverse) if premium_for_adverse > 0 else None,
         "outcome_counts": dict(outcomes.most_common(20)),
+    }
+
+
+def _empirical_tail_risk(values: list[float], *, min_sample: int) -> dict[str, Any]:
+    required = max(MIN_EMPIRICAL_TAIL_SAMPLES, int(min_sample))
+    if len(values) < required:
+        return {
+            "status": "not_evaluable",
+            "metric": "return_on_capital",
+            "confidence_level": 0.90,
+            "required_observation_count": required,
+            "observation_count": len(values),
+            "tail_observation_count": 0,
+            "var_90": None,
+            "cvar_90": None,
+        }
+    ordered = sorted(values)
+    tail_count = max(1, (len(ordered) + 9) // 10)
+    tail = ordered[:tail_count]
+    return {
+        "status": "evaluable",
+        "metric": "return_on_capital",
+        "confidence_level": 0.90,
+        "required_observation_count": required,
+        "observation_count": len(ordered),
+        "tail_observation_count": tail_count,
+        "var_90": tail[-1],
+        "cvar_90": sum(tail) / tail_count,
     }
 
 

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 1.2.389 - 2026-07-13
+
+### Added
+- Added an offline four-cell underwriting experiment that compares fixed versus historical-percentile IV/RV filters across production-observed and deduplicated rankings without changing production selection.
+- Added read-only account-and-symbol Wheel lifecycle risk and outcome summaries, including lifecycle return, adverse-path, assignment, call-away, and empirical CVaR evidence.
+- Added a group-level Combo Yield outcome evaluator that validates complete paired legs and reports synchronized group outcomes without generating single-leg variants.
+- Added Close Advice calibration evidence for remaining stress, close cost, replacement opportunity, and continued willingness without changing the existing action thresholds.
+
+### Changed
+- Made offline underwriting ranking prioritize willingness-price safety margin and deduplicated volatility compensation while keeping net income as a threshold or explanation field only.
+- Split Strategy Lab recording into a six-hour cohort builder, a mark-only sampler, and an unrestricted daily outcome settler.
+
+### Removed
+- Removed the legacy Strategy Lab Combo Yield optimizer and new `risk_exit` action generation while retaining read-only rendering compatibility for historical Close Advice artifacts.
+
+### Fixed
+- Preserved the configured absolute IV/RV floor in historical-percentile experiments, used prior runs only, and blocked production recommendations when lifecycle outcomes are incomplete.
+- Preserved effective Covered Call willingness-price boundaries and underwriting order through alert rendering.
+- Prevented soft IV/RV, delta, event, or missing-observation changes from overriding valid return-capture Close Advice actions.
+- Prevented settled datasets from consuming the mark-sampling batch and starving new Strategy Lab observations.
+
 ## 1.2.388 - 2026-07-12
 
 ### Changed

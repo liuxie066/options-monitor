@@ -759,9 +759,10 @@ om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","acco
 
 用途：
 - 基于本地 position lots、required data、quotes 和 lot 策略快照构建平仓建议
-- 输出 deterministic exit state：`profit_capture`、`risk_exit`、`take_profit`、`salvage`、`let_expire`、`hold`、`not_evaluable`
+- 当前输出 deterministic exit state：`profit_capture`、`take_profit`、`salvage`、`let_expire`、`hold`、`not_evaluable`；历史 `risk_exit` 仅作旧 artifact 只读兼容
 - 收益增强腿会输出专用动作：`close_put_keep_call`、`hold_put_keep_call`、`sell_call_take_profit`、`hold_call_as_convexity` 等
 - `not_evaluable` 行会进入待补数据链路，不会被当成已定价建议
+- short-vol 行会分别暴露剩余权利金、买回成本、压力情景增量损失、显式替代收益和继续接货/卖出意愿；这些校准字段不改变当前动作阈值
 
 示例：
 
@@ -792,6 +793,7 @@ om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 用途：
 - 只读已有 `close_advice.csv`，按 account/symbol/option type/side/strike/expiration 过滤平仓建议行
 - 给 Inbound 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
+- 返回已有报告中的 `close_calibration_status`、压力损失、显式替代收益和继续履约意愿，供人工解释和 replay 使用
 - 不刷新行情、不连接 OpenD、不重新生成 close advice、不写报告
 
 示例：
@@ -899,7 +901,7 @@ om-agent run --tool notification_perception_read --input-json '{"conversation_id
 - `review_readiness` 判断是否具备人工策略复盘条件；`candidate-impact` / `candidate-impact-report` 比较显式阈值 variants 对候选集合的影响
 - Strategy Lab update 默认 dry-run 汇总 Shadow Replay status / data-plan；显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset，显式 `--write` 才执行本地 collect / settle 维护动作
 - Strategy Lab readiness 把 replay dataset 归一成 `decision_instance`，按 Sell Put / Covered Call / Combo Yield 输出 domain readiness 和 blocker
-- Strategy Lab experiment 自动生成 Sell Put / Covered Call 受控 hypotheses，复用 candidate-impact evaluator，并输出 observed-universe scorecard；Combo Yield 输出独立的 group-level observed-universe experiment
+- Strategy Lab experiment 自动生成 Sell Put / Covered Call 受控 hypotheses，复用 candidate-impact evaluator，并输出固定/历史百分位 IV/RV × 生产/去重排序的四格 observed-universe 对照和 scorecard；Combo Yield 输出独立的 group-level observed-universe experiment
 - Strategy Lab proposal 从 experiment artifact 生成 advisory-only proposal 和 Markdown；Sell Put / Covered Call 只有 `closed_replay` gate 通过才输出 dry-run patch，Combo Yield 只输出 group advisory，不应用生产配置
 - Strategy Lab llm-context 从 experiment / proposal artifact 生成脱敏本地 LLM 上下文，不调用在线 AI，不应用 patch
 - `service render --include-strategy-lab-recorder` 是远端持续记录证据的 opt-in 部署入口，会生成 latest-run dataset build、mark sampler 和 outcome settler timers
@@ -977,7 +979,7 @@ output_shared/research/strategy_lab/
 - `strategy-lab proposal` 接收 experiment JSON 文件或包含 `experiment.json` 的目录；显式 `--output` / `--markdown-output` 只写本地 artifact，不会应用 patch。`filter_only` / `path_only` 只返回 evidence gap；Combo Yield 结果通过 `group_advisory` 表达，不生成单腿 patch。
 - `strategy-lab llm-context` 接收 experiment JSON、proposal JSON 或对应目录；显式 `--output` 只写本地脱敏 JSON，不会调用在线 AI，不会应用 dry-run patch。
 - Sell Put / Covered Call 可以在第一阶段复用单腿 candidate-impact；Covered Call 缺少持仓覆盖或 cost-basis 证据时不能输出生产参数建议。
-- Combo Yield 必须有 `strategy_group_id`、`leg_role`、同组 legs 和组合 metrics 才能进入组合 optimizer；证据不足时只输出 blocker 和下一步数据需求。
+- Combo Yield 必须有 `strategy_group_id`、`leg_role`、同组 legs 和组合 metrics 才能进入组合 outcome evaluator；证据不足时只输出 blocker 和下一步数据需求。
 
 ---
 

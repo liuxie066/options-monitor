@@ -160,7 +160,7 @@ def _domain_hypothesis(
             "limitations": (
                 [
                     "single_leg_parameter_set_not_supported",
-                    "combo_yield_group_optimizer_runs_in_strategy_lab_experiment",
+                    "combo_yield_group_evaluator_runs_in_strategy_lab_experiment",
                 ]
                 if delegated
                 else ["single_leg_hypothesis_disabled"]
@@ -242,7 +242,13 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
         if signature in seen:
             return
         seen.add(signature)
-        variants.append(ParameterVariant(name=f"{family}_{name}", profiles={CURRENT_UNDERWRITING_PROFILE: clean}))
+        variants.append(
+            ParameterVariant(
+                name=f"{family}_{name}",
+                profiles={CURRENT_UNDERWRITING_PROFILE: clean},
+                strategy_family=family,
+            )
+        )
 
     if {"min_dte", "max_dte"} & set(baseline):
         params = dict(baseline)
@@ -259,6 +265,10 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
         if "min_iv_minus_rv" in params:
             params["min_iv_minus_rv"] = max(0.0, params["min_iv_minus_rv"] - 0.01)
         add("relax_iv_rv_floor", params)
+        params = dict(baseline)
+        params["min_iv_rv_percentile"] = 0.70
+        params["min_iv_rv_history_samples"] = 20.0
+        add("historical_iv_rv_percentile", params)
 
     if "min_annualized_return" in baseline:
         params = dict(baseline)
@@ -301,6 +311,7 @@ def _parameter_set_input_payload(parameter_set: ParameterSet) -> dict[str, Any]:
         "variants": [
             {
                 "name": variant.name,
+                **({"strategy_family": variant.strategy_family} if variant.strategy_family else {}),
                 **variant.profiles,
             }
             for variant in parameter_set.variants

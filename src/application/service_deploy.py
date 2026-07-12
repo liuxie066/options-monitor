@@ -30,10 +30,10 @@ PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
-STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD = "30min"
+STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD = "6h"
 STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD = "2h"
 STRATEGY_LAB_SETTLE_SYSTEMD_CALENDAR = "*-*-* 07:20:00 Asia/Shanghai"
-STRATEGY_LAB_BUILD_INTERVAL_SECONDS = 1800
+STRATEGY_LAB_BUILD_INTERVAL_SECONDS = 21600
 STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS = 7200
 STRATEGY_LAB_SETTLE_LAUNCHD_CALENDAR = {"Hour": 7, "Minute": 20}
 DEFAULT_STRATEGY_LAB_RECORDER_SOURCE = "opend"
@@ -981,7 +981,6 @@ def render_service_bundle(
                 "--write",
                 "--source",
                 "local",
-                "--settle-after-collect",
                 "--min-sample",
                 "30",
                 "--min-mark-points",
@@ -989,7 +988,7 @@ def render_service_bundle(
                 "--mark-stale-hours",
                 str(recorder_mark_stale_hours),
                 "--max-datasets",
-                "1",
+                "0",
             ]
             add(
                 f"systemd/{recorder_build_service}",
@@ -1030,9 +1029,10 @@ def render_service_bundle(
                 "--source",
                 recorder_source,
                 "--write",
+                "--action",
+                "collect_marks",
                 "--max-datasets",
                 str(recorder_max_datasets),
-                "--settle-after-collect",
                 "--min-sample",
                 "30",
                 "--min-mark-points",
@@ -1081,8 +1081,6 @@ def render_service_bundle(
                 "--write",
                 "--action",
                 "settle",
-                "--max-datasets",
-                str(recorder_max_datasets),
                 "--min-sample",
                 "30",
                 "--min-mark-points",
@@ -1416,7 +1414,6 @@ def render_service_bundle(
                 "--write",
                 "--source",
                 "local",
-                "--settle-after-collect",
                 "--min-sample",
                 "30",
                 "--min-mark-points",
@@ -1424,7 +1421,7 @@ def render_service_bundle(
                 "--mark-stale-hours",
                 str(recorder_mark_stale_hours),
                 "--max-datasets",
-                "1",
+                "0",
             ]
             add(
                 f"launchd/{recorder_build_label}.plist",
@@ -1453,9 +1450,10 @@ def render_service_bundle(
                 "--source",
                 recorder_source,
                 "--write",
+                "--action",
+                "collect_marks",
                 "--max-datasets",
                 str(recorder_max_datasets),
-                "--settle-after-collect",
                 "--min-sample",
                 "30",
                 "--min-mark-points",
@@ -1490,8 +1488,6 @@ def render_service_bundle(
                 "--write",
                 "--action",
                 "settle",
-                "--max-datasets",
-                str(recorder_max_datasets),
                 "--min-sample",
                 "30",
                 "--min-mark-points",

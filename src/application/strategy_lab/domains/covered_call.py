@@ -13,6 +13,7 @@ ADAPTER = StrategyDomainAdapter(
         "max_dte",
         "min_iv_rv_ratio",
         "min_iv_minus_rv",
+        "min_iv_rv_percentile",
         "min_annualized_return",
     ),
     safety_boundaries=(

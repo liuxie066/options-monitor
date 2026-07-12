@@ -10,10 +10,16 @@ CURRENT_UNDERWRITING_PROFILE = "insurance_underwriting"
 LEGACY_SHORT_VOL_PROFILE = "short_vol"
 
 ALLOWED_PROFILES = {CURRENT_UNDERWRITING_PROFILE}
+EXPERIMENT_ONLY_PARAMETERS = {
+    "min_iv_rv_percentile",
+    "min_iv_rv_history_samples",
+}
 ALLOWED_PARAMETERS = {
     CURRENT_UNDERWRITING_PROFILE: {
         "min_iv_rv_ratio",
         "min_iv_minus_rv",
+        "min_iv_rv_percentile",
+        "min_iv_rv_history_samples",
         "min_dte",
         "max_dte",
         "min_annualized_return",
@@ -25,9 +31,13 @@ ALLOWED_PARAMETERS = {
 class ParameterVariant:
     name: str
     profiles: dict[str, dict[str, float]]
+    strategy_family: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {"name": self.name, "profiles": self.profiles}
+        payload: dict[str, Any] = {"name": self.name, "profiles": self.profiles}
+        if self.strategy_family:
+            payload["strategy_family"] = self.strategy_family
+        return payload
 
 
 @dataclass(frozen=True)
@@ -76,13 +86,16 @@ def parse_parameter_set(payload: dict[str, Any]) -> ParameterSet:
         if name in names:
             raise ValueError(f"duplicate variant name: {name}")
         names.add(name)
+        strategy_family = str(raw.get("strategy_family") or "").strip().lower() or None
+        if strategy_family not in {None, "sell_put", "covered_call"}:
+            raise ValueError(f"variant {name} has unsupported strategy_family: {strategy_family}")
         profiles = _variant_profiles(raw, variant_name=name)
-        variants.append(ParameterVariant(name=name, profiles=profiles))
+        variants.append(ParameterVariant(name=name, profiles=profiles, strategy_family=strategy_family))
     return ParameterSet(baseline=baseline, variants=tuple(variants))
 
 
 def _variant_profiles(raw: dict[str, Any], *, variant_name: str) -> dict[str, dict[str, float]]:
-    reserved = {"name", "description"}
+    reserved = {"name", "description", "strategy_family"}
     profile_names = [_normalize_profile_key(key) for key in raw if key not in reserved]
     if not profile_names:
         raise ValueError(f"variant {variant_name} requires at least one profile block")
@@ -130,5 +143,15 @@ def _number(value: Any, *, label: str) -> float:
 
 
 def _validate_range(params: dict[str, float], *, variant_name: str, profile: str) -> None:
+    percentile = params.get("min_iv_rv_percentile")
+    if percentile is not None and not 0.0 <= percentile <= 1.0:
+        raise ValueError(f"variant {variant_name}.{profile} min_iv_rv_percentile must be between 0 and 1")
+    if percentile is not None and "min_iv_rv_ratio" not in params:
+        raise ValueError(
+            f"variant {variant_name}.{profile} min_iv_rv_percentile requires min_iv_rv_ratio absolute floor"
+        )
+    history_samples = params.get("min_iv_rv_history_samples")
+    if history_samples is not None and (history_samples < 1 or not float(history_samples).is_integer()):
+        raise ValueError(f"variant {variant_name}.{profile} min_iv_rv_history_samples must be a positive integer")
     if "min_dte" in params and "max_dte" in params and params["min_dte"] > params["max_dte"]:
         raise ValueError(f"variant {variant_name}.{profile} min_dte cannot exceed max_dte")

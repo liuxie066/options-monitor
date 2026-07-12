@@ -666,6 +666,21 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "capture_ratio",
         "remaining_premium",
         "realized_if_close",
+        "buy_to_close_fee",
+        "buy_to_close_cost",
+        "close_fee_to_remaining_premium",
+        "remaining_risk_status",
+        "remaining_risk_unavailable_reason",
+        "remaining_stress_scenario",
+        "remaining_stress_loss",
+        "remaining_reward_to_stress_loss",
+        "replacement_annualized_return",
+        "replacement_annualized_advantage",
+        "replacement_source",
+        "continued_willingness",
+        "continued_willingness_source",
+        "close_calibration_status",
+        "close_calibration_missing",
         "put_leg_realized_if_close",
         "combo_call_cost",
         "combo_call_value_if_close",
@@ -801,6 +816,13 @@ _NUMERIC_PUBLIC_FIELDS = frozenset(
         "capture_ratio",
         "remaining_premium",
         "realized_if_close",
+        "buy_to_close_fee",
+        "buy_to_close_cost",
+        "close_fee_to_remaining_premium",
+        "remaining_stress_loss",
+        "remaining_reward_to_stress_loss",
+        "replacement_annualized_return",
+        "replacement_annualized_advantage",
         "put_leg_realized_if_close",
         "combo_call_cost",
         "combo_call_value_if_close",
@@ -820,6 +842,8 @@ _NUMERIC_PUBLIC_FIELDS = frozenset(
     }
 )
 
+_BOOLEAN_PUBLIC_FIELDS = frozenset({"continued_willingness"})
+
 
 def _normalize_public_value(key: str, value: Any) -> Any:
     text = str(value).strip() if value is not None else ""
@@ -827,6 +851,12 @@ def _normalize_public_value(key: str, value: Any) -> Any:
         return None
     if text.lower() in {"nan", "none", "null"}:
         return None
+    if key in _BOOLEAN_PUBLIC_FIELDS:
+        if text.lower() in {"true", "1", "yes"}:
+            return True
+        if text.lower() in {"false", "0", "no"}:
+            return False
+        return text
     if key not in _NUMERIC_PUBLIC_FIELDS:
         return text
     number = _float_or_none(text)

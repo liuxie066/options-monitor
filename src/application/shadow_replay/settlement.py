@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,95 @@ def derive_outcome_facts(
     return out
 
 
+def outcome_gap_summary(
+    candidate_snapshots: list[dict[str, Any]],
+    mark_snapshots: list[dict[str, Any]],
+    outcome_facts: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Classify missing outcomes by the next action that can actually resolve them."""
+
+    candidates_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    identity_missing_count = 0
+    for candidate in candidate_snapshots:
+        key = instrument_key(candidate)
+        if not key:
+            identity_missing_count += 1
+            continue
+        candidates_by_key[key].append(candidate)
+
+    marks_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for mark in mark_snapshots:
+        key = instrument_key(mark)
+        if key:
+            marks_by_key[key].append(mark)
+
+    outcome_keys = {instrument_key(row) for row in outcome_facts}
+    outcome_keys.discard("")
+    ready_to_settle: list[str] = []
+    needs_mark: list[str] = []
+    blocked: list[tuple[str, str]] = []
+    for key, candidates in candidates_by_key.items():
+        if key in outcome_keys:
+            continue
+        usable_marks = [row for row in marks_by_key.get(key, []) if is_usable_mark(row)]
+        if usable_marks:
+            final_mark = _latest_mark(usable_marks)
+            failures: Counter[str] = Counter()
+            for candidate in candidates:
+                realized_pnl, _model, quality, _outcome = derive_outcome_result(candidate, final_mark)
+                if realized_pnl is not None:
+                    ready_to_settle.append(key)
+                    break
+                failures[quality or "missing_settlement_inputs"] += 1
+            else:
+                if not any(_candidate_has_entry_premium(candidate) for candidate in candidates):
+                    reason = "missing_entry_premium"
+                else:
+                    reason = failures.most_common(1)[0][0] if failures else "missing_settlement_inputs"
+                blocked.append((key, reason))
+            continue
+
+        if not any(_candidate_has_entry_premium(candidate) for candidate in candidates):
+            blocked.append((key, "missing_entry_premium"))
+            continue
+        expirations = [
+            parse_date(text(candidate.get("expiration") or candidate.get("exp")))
+            for candidate in candidates
+        ]
+        expirations = [value for value in expirations if value is not None]
+        if not expirations:
+            blocked.append((key, "missing_expiration"))
+        elif max(expirations) < now.date():
+            blocked.append((key, "expired_without_usable_mark"))
+        else:
+            needs_mark.append(key)
+
+    blocker_counts = Counter(reason for _key, reason in blocked)
+    missing_count = len(ready_to_settle) + len(needs_mark) + len(blocked)
+    return {
+        "schema_version": "shadow_replay_outcome_gaps.v1",
+        "missing_outcome_instrument_count": missing_count,
+        "ready_to_settle_count": len(ready_to_settle),
+        "needs_mark_count": len(needs_mark),
+        "blocked_count": len(blocked),
+        "identity_missing_candidate_count": identity_missing_count,
+        "blocker_counts": dict(sorted(blocker_counts.items())),
+        "ready_to_settle_examples": sorted(ready_to_settle)[:10],
+        "needs_mark_examples": sorted(needs_mark)[:10],
+        "blocked_examples": [
+            {"instrument_key": key, "reason": reason}
+            for key, reason in sorted(blocked)[:10]
+        ],
+    }
+
+
+def _candidate_has_entry_premium(candidate: dict[str, Any]) -> bool:
+    side = text(candidate.get("side") or candidate.get("position_side")).lower() or "short"
+    return _entry_premium(candidate, side=side) is not None
+
+
 def derive_outcome_result(candidate: dict[str, Any], final_mark: dict[str, Any]) -> tuple[float | None, str, str, str]:
     expiration_pnl, expiration_model, expiration_quality, expiration_outcome = _derive_expiration_pnl(candidate, final_mark)
     if expiration_pnl is not None:
@@ -159,13 +249,13 @@ def mark_time(row: dict[str, Any]) -> str | None:
 def _derive_expiration_pnl(candidate: dict[str, Any], final_mark: dict[str, Any]) -> tuple[float | None, str, str, str]:
     if not is_expiration_mark(candidate, final_mark):
         return None, "unavailable", "not_expiration_mark", "counterfactual_mark_to_market"
-    entry_credit = first_float(candidate, "net_income", "net_credit", "entry_credit", "premium")
+    side = text(candidate.get("side") or candidate.get("position_side")).lower() or "short"
+    entry_credit = _entry_premium(candidate, side=side)
     intrinsic = expiration_intrinsic_value(candidate, final_mark)
     if entry_credit is None or intrinsic is None:
         return None, "unavailable", "missing_entry_credit_or_expiration_intrinsic", "expiration_unavailable"
     contracts = first_float(candidate, "contracts", "contract_count") or 1.0
     multiplier = first_float(candidate, "multiplier") or first_float(final_mark, "multiplier") or 100.0
-    side = text(candidate.get("side") or candidate.get("position_side")).lower() or "short"
     intrinsic_value = intrinsic * multiplier * contracts
     if side == "long":
         return intrinsic_value - entry_credit, "long_option_expiration_intrinsic_minus_entry_cost", "derived_from_expiration_spot", _expiration_outcome(candidate, intrinsic=intrinsic, side=side)
@@ -196,17 +286,27 @@ def _derive_realized_pnl(candidate: dict[str, Any], final_mark: dict[str, Any]) 
     mark_pnl = _mark_pnl_value(final_mark)
     if mark_pnl is not None:
         return mark_pnl, "mark_pnl", "derived_from_mark_pnl"
-    entry_credit = first_float(candidate, "net_income", "net_credit", "entry_credit", "premium")
+    side = text(candidate.get("side") or candidate.get("position_side")).lower() or "short"
+    entry_credit = _entry_premium(candidate, side=side)
     exit_price = first_float(final_mark, "option_mid", "mid", "mark", "option_price", "close_price")
     if entry_credit is None or exit_price is None:
         return None, "unavailable", "missing_entry_credit_or_exit_price"
     contracts = first_float(candidate, "contracts", "contract_count") or 1.0
     multiplier = first_float(candidate, "multiplier") or first_float(final_mark, "multiplier") or 100.0
-    side = text(candidate.get("side") or candidate.get("position_side")).lower() or "short"
     exit_value = exit_price * multiplier * contracts
     if side == "long":
         return exit_value - entry_credit, "long_option_exit_value_minus_entry_cost", "derived_from_entry_and_exit_price"
     return entry_credit - exit_value, "short_option_entry_credit_minus_exit_value", "derived_from_entry_and_exit_price"
+
+
+def _entry_premium(candidate: dict[str, Any], *, side: str) -> float | None:
+    if side == "long":
+        explicit_cost = first_float(candidate, "entry_cost", "call_total_cost")
+        if explicit_cost is not None:
+            return abs(explicit_cost)
+        signed_value = first_float(candidate, "net_income", "net_credit", "entry_credit", "premium")
+        return abs(signed_value) if signed_value is not None else None
+    return first_float(candidate, "net_income", "net_credit", "entry_credit", "premium")
 
 
 def _mark_pnl_value(row: dict[str, Any]) -> float | None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
 from pathlib import Path
 
@@ -767,13 +768,16 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     assert str(repo / "om") + " research strategy-lab update --latest" in build_service
     assert "--profile-path " + str(runtime / "service.profile.json") in build_service
     assert "--build-dataset --write --source local" in build_service
-    assert "--max-datasets 1" in build_service
-    assert "OnUnitActiveSec=30min" in build_timer
+    assert "--max-datasets 0" in build_service
+    assert "--settle-after-collect" not in build_service
+    assert "OnUnitActiveSec=6h" in build_timer
     assert str(repo / "om") + " research strategy-lab update --profile-path" in sample_service
-    assert "--source opend --write --max-datasets 3" in sample_service
+    assert "--source opend --write --action collect_marks --max-datasets 3" in sample_service
+    assert "--settle-after-collect" not in sample_service
     assert "After=network-online.target options-monitor-opend.service" in sample_service
     assert "OnUnitActiveSec=2h" in sample_timer
-    assert "--write --action settle --max-datasets 3" in settle_service
+    assert "--write --action settle --min-sample 30" in settle_service
+    assert "--max-datasets" not in settle_service
     assert "OnCalendar=*-*-* 07:20:00 Asia/Shanghai" in settle_timer
     assert {"name": "options-monitor-strategy-lab-build.timer"} in profile["services"]
     assert {"name": "options-monitor-strategy-lab-sample.timer"} in profile["services"]
@@ -783,10 +787,48 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
         "source": "opend",
         "max_datasets": 3,
         "mark_stale_hours": 2,
-        "build_interval": "30min",
+        "build_interval": "6h",
         "sample_interval": "2h",
         "settle_schedule_beijing": "07:20",
     }
+
+
+def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_max_datasets=3,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+
+    def args(name: str) -> list[str]:
+        content = files[f"launchd/com.options-monitor.strategy-lab-{name}.plist"]["content"]
+        return plistlib.loads(content.encode("utf-8"))["ProgramArguments"]
+
+    build_args = args("build")
+    sample_args = args("sample")
+    settle_args = args("settle")
+    build_plist = files["launchd/com.options-monitor.strategy-lab-build.plist"]["content"]
+    build_payload = plistlib.loads(build_plist.encode("utf-8"))
+
+    assert build_args[build_args.index("--max-datasets") + 1] == "0"
+    assert "--settle-after-collect" not in build_args
+    assert build_payload["StartInterval"] == 21600
+    assert sample_args[sample_args.index("--action") + 1] == "collect_marks"
+    assert sample_args[sample_args.index("--max-datasets") + 1] == "3"
+    assert "--settle-after-collect" not in sample_args
+    assert settle_args[settle_args.index("--action") + 1] == "settle"
+    assert "--max-datasets" not in settle_args
 
 
 def test_service_drift_preserves_strategy_lab_recorder_opt_in(tmp_path: Path) -> None:

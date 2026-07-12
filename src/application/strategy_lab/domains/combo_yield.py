@@ -7,14 +7,8 @@ ADAPTER = StrategyDomainAdapter(
     strategy_family="combo_yield",
     display_name="Combo Yield",
     decision_scope="group_level_multi_leg",
-    hypothesis_scope="group_level_observed_universe",
-    tunable_parameters=(
-        "min_put_distance_pct",
-        "max_call_distance_pct",
-        "min_net_premium",
-        "min_premium_to_downside_ratio",
-        "max_abs_put_delta",
-    ),
+    hypothesis_scope="group_level_outcome_evaluation",
+    tunable_parameters=(),
     safety_boundaries=(
         "strategy_group_identity",
         "leg_identity",

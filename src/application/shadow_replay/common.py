@@ -151,13 +151,13 @@ def instrument_key(row: dict[str, Any]) -> str:
     contract = text(row.get("contract_symbol") or row.get("option_symbol"))
     if contract:
         return contract.upper()
-    parts = [
-        text(row.get("account")).lower(),
-        text(row.get("symbol") or row.get("underlying_symbol")).upper(),
-        text(row.get("option_type") or row.get("mode")).lower(),
-        text(row.get("expiration") or row.get("exp")),
-        text(row.get("strike")),
-    ]
+    symbol = text(row.get("symbol") or row.get("underlying_symbol")).upper()
+    option_type = text(row.get("option_type") or row.get("mode")).lower()
+    expiration = text(row.get("expiration") or row.get("exp"))
+    strike = text(row.get("strike"))
+    if not all((symbol, option_type, expiration, strike)):
+        return ""
+    parts = [text(row.get("account")).lower(), symbol, option_type, expiration, strike]
     return "|".join(parts).strip("|")
 
 
