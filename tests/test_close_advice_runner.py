@@ -509,13 +509,15 @@ def test_run_close_advice_uses_vol_convexity_mode_for_yield_enhancement_put(
     )
 
     rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
-    assert result["evaluation_gap_rows"] == 1
+    assert result["evaluation_gap_rows"] == 0
     assert rows[0]["strategy_profile"] == "short_vol"
     assert rows[0]["strategy_source"] == "position_yield_enhancement_mode"
     assert rows[0]["risk_model"] == "short_vol"
-    assert rows[0]["close_action"] == "not_evaluable"
+    assert rows[0]["exit_state"] == "profit_capture"
+    assert rows[0]["close_action"] == "close_put_keep_call"
+    assert rows[0]["short_vol_thesis_status"] == "not_evaluable"
     assert "short_vol_risk_data_missing" in str(rows[0]["data_quality_flags"])
-    assert "rv" in rows[0]["reason"]
+    assert "rv" in rows[0]["short_vol_reason"]
 
 
 def test_run_close_advice_merges_event_snapshot_for_short_vol_position(

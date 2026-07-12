@@ -258,6 +258,15 @@ def _normalize_strategy(raw: Any, *, path: str, allow_ranges: bool = True) -> di
     return out
 
 
+def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
+    out = _normalize_strategy(raw, path=path, allow_ranges=False)
+    out["_explicit_fields"] = [key for key in out if not str(key).startswith("_")]
+    call_cfg = out.get("call")
+    if isinstance(call_cfg, dict):
+        out["_explicit_call_fields"] = [key for key in call_cfg if not str(key).startswith("_")]
+    return out
+
+
 def _canonical_strategy_authoring_key(raw_key: Any) -> str:
     key = str(raw_key or "").strip()
     if key == COVERED_CALL_AUTHORING_KEY:
@@ -297,7 +306,7 @@ def _normalize_strategy_authoring_container(
         if normalize_strategy_values and canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
             out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=allow_ranges)
         elif normalize_strategy_values and canonical_key == COMBO_YIELD_AUTHORING_KEY:
-            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
+            out[canonical_key] = _normalize_combo_yield(raw_value, path=f"{path}.{key}")
         else:
             out[canonical_key] = deepcopy(raw_value)
     return out
@@ -329,7 +338,7 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
                     message=f"{path} cannot define both {COMBO_YIELD_AUTHORING_KEY} and {YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}",
                     hint="Use combo_yield in config.yaml.",
                 )
-            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
+            out[canonical_key] = _normalize_combo_yield(raw_value, path=f"{path}.{key}")
         else:
             out[key] = deepcopy(raw_value)
     return out
