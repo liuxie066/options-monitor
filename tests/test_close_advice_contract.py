@@ -4,7 +4,6 @@ from domain.domain.close_advice import (
     CloseAdviceConfig,
     CloseAdviceInput,
     EXIT_REASON_TYPE_PROFIT_CAPTURE,
-    EXIT_REASON_TYPE_RISK_EXIT,
     EXIT_REASON_TYPE_SALVAGE,
     EXIT_REASON_TYPE_TAKE_PROFIT,
     EXIT_REASON_TYPE_THESIS_EXPIRED,
@@ -12,7 +11,6 @@ from domain.domain.close_advice import (
     EXIT_STATE_LET_EXPIRE,
     EXIT_STATE_NOT_EVALUABLE,
     EXIT_STATE_PROFIT_CAPTURE,
-    EXIT_STATE_RISK_EXIT,
     EXIT_STATE_SALVAGE,
     EXIT_STATE_TAKE_PROFIT,
     HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE,
@@ -105,7 +103,6 @@ def test_short_vol_soft_risk_loss_is_not_actionable() -> None:
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
     assert "默认可接货" in row["reason"]
     assert "IV/RV edge" in row["short_vol_reason"]
-    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
 
 
 def test_short_vol_sell_put_event_context_does_not_override_loss_hold() -> None:
@@ -140,7 +137,6 @@ def test_short_vol_sell_put_event_context_does_not_override_loss_hold() -> None:
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
     assert "默认可接货" in row["reason"]
     assert "到期前存在事件风险" in row["short_vol_reason"]
-    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
 
@@ -174,7 +170,6 @@ def test_short_vol_covered_call_event_context_does_not_override_loss_hold() -> N
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
     assert "默认可被行权卖出正股" in row["reason"]
     assert "到期前存在事件风险" in row["short_vol_reason"]
-    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
 
@@ -234,7 +229,85 @@ def test_short_vol_missing_risk_data_keeps_profit_capture_action() -> None:
     assert row["exit_state"] == EXIT_STATE_PROFIT_CAPTURE
     assert row["exit_reason_type"] == EXIT_REASON_TYPE_PROFIT_CAPTURE
     assert row["short_vol_thesis_status"] == "not_evaluable"
-    assert row["short_vol_reason"] == "缺少 short-vol 平仓评估数据: rv"
+    assert row["short_vol_reason"] == "缺少 short-vol 观察数据: rv"
+    assert "short_vol_risk_data_missing" in row["data_quality_flags"]
+
+
+def test_short_vol_exposes_remaining_reward_to_stress_loss() -> None:
+    cfg = ShortVolAssessmentConfig(
+        enable_stress_check=False,
+        stress_down_sigma_multiple=0,
+        gap_down_pct=0.10,
+        call_gap_up_pct=0.10,
+    )
+    put = evaluate_short_vol_close_advice(
+        _short_put_input(premium=2.0, close_mid=1.0, bid=0.99, ask=1.01, spot=100),
+        short_vol_config=cfg,
+        quote_row={
+            "spot": 100,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "delta": -0.20,
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+    call = evaluate_short_vol_close_advice(
+        _short_put_input(
+            option_type="call",
+            strike=105,
+            premium=2.0,
+            close_mid=1.0,
+            bid=0.99,
+            ask=1.01,
+            spot=100,
+            delta=0.20,
+        ),
+        short_vol_config=cfg,
+        quote_row={
+            "spot": 100,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "delta": 0.20,
+            "event_source_status": "ok",
+        },
+        mode="call",
+    )
+
+    assert put["remaining_risk_status"] == "ok"
+    assert put["remaining_stress_scenario"] == "put_gap_down"
+    assert put["remaining_stress_loss"] == 900.0
+    assert put["remaining_reward_to_stress_loss"] == 0.111111
+    assert call["remaining_stress_scenario"] == "call_gap_up"
+    assert call["remaining_stress_loss"] == 400.0
+    assert call["remaining_reward_to_stress_loss"] == 0.25
+
+
+def test_short_vol_missing_observation_data_keeps_assignment_hold() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(close_mid=0.80, bid=0.79, ask=0.81, dte=30),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": -0.20,
+            "implied_volatility": 0.30,
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert row["short_vol_thesis_status"] == "not_evaluable"
+    assert "缺少 short-vol 观察数据: rv" in row["reason"]
+    assert "仅缺少观察项，不作为平仓依据" in row["reason"]
     assert "short_vol_risk_data_missing" in row["data_quality_flags"]
 
 
@@ -265,7 +338,6 @@ def test_short_vol_profitable_soft_risk_without_capture_is_hold_observation() ->
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
     assert "IV/RV edge" in row["short_vol_reason"]
     assert "不作为平仓提醒" in row["reason"]
-    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
 
 
 def test_short_vol_delta_high_without_capture_is_hold_observation_for_covered_call() -> None:

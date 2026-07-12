@@ -84,7 +84,12 @@ def add_service_update_commands(subparsers: Any) -> None:
         choices=("local", "opend"),
         help="mark sampling source for Strategy Lab recorder timers",
     )
-    service_render.add_argument("--strategy-lab-recorder-max-datasets", type=int, default=5)
+    service_render.add_argument(
+        "--strategy-lab-recorder-max-datasets",
+        type=int,
+        default=5,
+        help="maximum datasets sampled per recorder run",
+    )
     service_render.add_argument("--strategy-lab-recorder-mark-stale-hours", type=int, default=2)
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")

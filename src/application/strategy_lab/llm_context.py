@@ -228,7 +228,7 @@ def _strategy_family_boundaries() -> dict[str, Any]:
         },
         "combo_yield": {
             "decision_unit": "group_level_multi_leg_candidate",
-            "allowed_first_stage_experiment": "group_level_observed_universe_optimizer",
+            "allowed_first_stage_experiment": "group_level_outcome_evaluator",
             "must_not_ignore": ["strategy_group_id", "leg_role", "group_payoff", "funding_quality"],
             "single_leg_parameter_patch_allowed": False,
         },
@@ -244,14 +244,13 @@ def _combo_group_experiment_context(payload: Any) -> dict[str, Any] | None:
         "schema_version": payload.get("schema_version"),
         "summary": {
             "status": summary.get("status"),
+            "group_count": summary.get("group_count"),
             "ready_group_count": summary.get("ready_group_count"),
-            "variant_count": summary.get("variant_count"),
-            "optimization_claim": summary.get("optimization_claim"),
+            "evaluable_group_count": summary.get("evaluable_group_count"),
             "production_recommendation_allowed": summary.get("production_recommendation_allowed"),
         },
         "scorecard": {
             "status": scorecard.get("status"),
-            "best_variant": scorecard.get("best_variant"),
             "rows": list(scorecard.get("rows") or [])[:5],
             "limitations": scorecard.get("limitations") or [],
         },

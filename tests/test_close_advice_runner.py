@@ -3138,7 +3138,7 @@ def test_close_advice_text_can_drive_account_message_without_opening_candidates(
     assert "Put 0 / Covered Call 0" in msg
 
 
-def test_compact_close_advice_renders_risk_exit_loss_as_stop_loss_not_profit() -> None:
+def test_compact_close_advice_renders_legacy_risk_exit_as_read_only_compatibility() -> None:
     from src.application.close_advice_runner import render_markdown_compact
 
     text = render_markdown_compact(
@@ -3208,49 +3208,79 @@ def test_compact_close_advice_does_not_render_short_vol_observation_as_close() -
     assert text == ""
 
 
-def test_fee_gate_keeps_sell_put_event_loss_as_assignment_hold() -> None:
-    from domain.domain.close_advice import HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
-    from src.application.close_advice_runner import _apply_fee_profitability_gate
+def test_buy_to_close_fee_exposes_explicit_close_economics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.application import close_advice_runner
 
-    row = _apply_fee_profitability_gate(
+    monkeypatch.setattr(close_advice_runner, "calc_futu_option_fee", lambda *_args, **_kwargs: 2.0)
+    row = close_advice_runner._apply_buy_to_close_fee(
         {
+            "position_side": "short",
+            "currency": "USD",
+            "close_mid": 0.20,
+            "contracts_open": 1,
+            "multiplier": 100,
+            "remaining_premium": 20.0,
+            "realized_if_close": 80.0,
+        }
+    )
+
+    assert row["buy_to_close_fee"] == 2.0
+    assert row["buy_to_close_cost"] == 22.0
+    assert row["close_fee_to_remaining_premium"] == pytest.approx(0.10)
+    assert row["realized_if_close"] == 78.0
+
+
+def test_close_calibration_uses_only_explicit_replacement_and_willingness() -> None:
+    from src.application import close_advice_runner
+
+    row = close_advice_runner._apply_close_calibration_context(
+        {
+            "position_side": "short",
             "option_type": "put",
-            "tier": "strong",
-            "tier_label": "强烈建议平仓",
-            "exit_state": "risk_exit",
-            "exit_reason_type": "risk_exit",
-            "short_vol_thesis_status": "event_risk",
-            "realized_if_close": -1.0,
-            "data_quality_flags": "",
-        }
-    )
-
-    assert row["tier"] == "none"
-    assert row["exit_state"] == "hold"
-    assert row["exit_reason_type"] == "hold"
-    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
-    assert "默认可接货" in row["reason"]
-
-
-def test_fee_gate_keeps_covered_call_event_loss_as_called_away_hold() -> None:
-    from domain.domain.close_advice import HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
-    from src.application.close_advice_runner import _apply_fee_profitability_gate
-
-    row = _apply_fee_profitability_gate(
+            "evaluation_status": "priced",
+            "tier": "none",
+            "exit_state": "hold",
+            "buy_to_close_cost": 22.0,
+            "remaining_annualized_return": 0.05,
+            "remaining_risk_status": "ok",
+            "remaining_stress_loss": 100.0,
+        },
         {
-            "option_type": "call",
-            "tier": "strong",
-            "tier_label": "强烈建议平仓",
-            "exit_state": "risk_exit",
-            "exit_reason_type": "risk_exit",
-            "short_vol_thesis_status": "event_risk",
-            "realized_if_close": -1.0,
-            "data_quality_flags": "",
-        }
+            "side": "short",
+            "option_type": "put",
+            "strategy_snapshot": {
+                "replacement_annualized_return": 0.12,
+                "replacement_source": "manual_candidate_review",
+                "assignment_acceptable": False,
+            },
+        },
     )
 
-    assert row["tier"] == "none"
-    assert row["exit_state"] == "hold"
-    assert row["exit_reason_type"] == "hold"
-    assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
-    assert "默认可被行权卖出正股" in row["reason"]
+    assert row["replacement_annualized_return"] == 0.12
+    assert row["replacement_annualized_advantage"] == pytest.approx(0.07)
+    assert row["replacement_source"] == "manual_candidate_review"
+    assert row["continued_willingness"] is False
+    assert row["continued_willingness_source"] == "strategy_snapshot"
+    assert row["close_calibration_status"] == "review_required"
+    assert row["close_calibration_missing"] is None
+    assert close_advice_runner._apply_close_action_semantics(row)["close_action"] == "hold"
+
+    partial = close_advice_runner._apply_close_calibration_context(
+        {
+            "position_side": "short",
+            "option_type": "call",
+            "evaluation_status": "priced",
+            "buy_to_close_cost": 22.0,
+            "remaining_risk_status": "ok",
+        },
+        {"side": "short", "option_type": "call"},
+    )
+
+    assert partial["continued_willingness"] is True
+    assert partial["continued_willingness_source"] == "strategy_default"
+    assert partial["close_calibration_status"] == "partial"
+    assert partial["close_calibration_missing"] == "replacement_opportunity"
+
+    from src.application.agent_tools.close_advice_read_impl import _public_row
+
+    assert _public_row(row)["continued_willingness"] is False

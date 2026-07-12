@@ -79,8 +79,6 @@ cat > params.json <<'JSON'
       "insurance_underwriting": {
         "min_iv_rv_ratio": 1.10,
         "min_iv_minus_rv": 0.05,
-        "min_abs_delta": 0.15,
-        "max_abs_delta": 0.30,
         "min_dte": 20,
         "max_dte": 60
       }
@@ -125,20 +123,20 @@ JSON
   --output candidate-impact.md
 ```
 
-参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`。历史 `short_vol` 样本会映射到当前承保参数口径。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
+参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、实验专用历史 IV/RV 百分位、`min_dte`、`max_dte`、`min_annualized_return`。Delta 只做观察和分桶。历史 `short_vol` 样本会映射到当前承保参数口径。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
 
 结果里的关键字段：
 
 - `coverage.strict_backtest_allowed`：指定日期窗口是否真的有扫描 artifacts。没有指定起始日数据时不会静默补数。
 - `universe_scope=observed_run_universe`：只评估历史 artifacts 中出现过的合约。
 - `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。`filter_only` 只能回答“候选数量会怎么变”，不能回答收益、回撤或是否应改生产参数。
-- `evidence_quality.field_coverage`：参数文件实际引用字段的覆盖率，例如 `dte`、`abs_delta`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；字段不足时先修证据，不把结果解释成参数过严。
+- `evidence_quality.field_coverage`：参数与观察字段的覆盖率，例如 `dte`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；`abs_delta` 只用于观察和结果分桶。字段不足时先修证据，不把结果解释成参数过严。
 - `gates.candidate_impact`：候选影响层 gate。扫描证据、样本量和参数字段完整样本达到下限时，可以输出 filter-only 候选影响；如果仍有部分字段缺失，计数应按 lower bound 解读。
-- `gates.production_recommendation`：生产推荐层 gate。只有 `closed_replay` 可进入人工评审；即使通过，也不会自动修改 runtime config。
-- `candidate_impact`：候选影响摘要，包括 baseline 接受数、每组 variant 的新增/移除数量，以及新增候选数最多的 variant。
+- `gates.production_recommendation`：生产推荐层 gate。除 `closed_replay` 外，baseline 和至少一个 variant 还必须通过真实 outcome review readiness；即使通过，也不会自动修改 runtime config。
+- `candidate_impact`：候选影响摘要，包括 baseline 接受数和每组 variant 的新增/移除数量；“新增最多”只用于影响审阅，不代表推荐。
 - `baseline`：生产实际观察结果。
 - `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
-- `recommendation`：只给下一步 gate。`ready_for_live_shadow_candidate_review` 表示候选影响可进入人工评审，不表示已经完成 live shadow；生产改参仍取决于 `gates.production_recommendation`。
+- `recommendation`：只给下一步 gate。`candidate_review_variant` 仅标记候选变化最大的审阅对象；只有 Strategy Lab 证明严格 outcome dominance 后才能形成参数 proposal。
 
 ## 建立 Dataset
 
@@ -319,9 +317,11 @@ DATASET_ID=us-<run-id>
 
 - `summary.status`：只有 `needs_human_review` 才说明证据足够进入人工评审。
 - `outcome_coverage`：有多少 candidate instrument 被 mark、被 usable mark、被 outcome 覆盖。
+- `outcome_gaps`：把缺失 outcome 分成 `ready_to_settle`、`needs_mark` 和 `blocked`，并给出 blocker 计数与样例；缺少完整合约身份的元数据行单独计入 `identity_missing_candidate_count`。`data_plan` 和 `review_queue` 会携带同一摘要，避免对不可恢复数据反复执行 settle。
 - `path_risk.by_status`：accepted / rejected 的最大浮亏和路径样本数量。
 - `outcome_stats.by_status`：accepted 与 rejected 的 PnL、胜率、损失次数。
-- `insurance_metrics`：把 Sell Put / Covered Call 当作承保组合复盘，重点看收取保费、赔付/回补成本、loss ratio、保费/资本占用、接货/被叫走比例，以及路径最大浮亏/保费。
+- `insurance_metrics`：把 Sell Put / Covered Call 当作承保组合复盘；接货/被叫走必须使用完整生命周期 PnL，缺失时不回退单腿期权 PnL。除保费、loss ratio、资本占用和路径最大浮亏外，至少 30 个且达到 `min_sample` 的资金回报样本后才输出经验 90% CVaR（越负越差）。
+- `wheel_lifecycle_risk`：按账户和标的汇总 Sell Put 的单张候选接货义务、接货后标的/账户暴露，以及 Covered Call 的已锁定和单张候选可能叫走股数。候选 strike 是替代场景，不会相加成实际仓位；缺现金、NAV 或持股上下文时输出 `not_evaluable`，该汇总不参与生产过滤。
 - `outcome_by_bucket`：DTE、Delta、IV/RV、Spread、集中度各区间的表现。
 
 ## Status 解释
@@ -334,8 +334,10 @@ DATASET_ID=us-<run-id>
 | `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 `candidate_filter_trace.jsonl` / reject log |
 | `ready_for_sampling / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
 | `ready_for_sampling / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |
-| `ready_for_settlement / outcome_facts_missing` | 有路径但未结算 outcome | 跑 `settle --write` 或 `collect-marks --write --settle` |
-| `ready_for_settlement / outcome_facts_incomplete` | 部分合约 outcome 缺失 | 补跑 `settle --write` 或继续采样 |
+| `ready_for_settlement / outcome_facts_missing` | 缺失 outcome 中已有可用 mark 和 entry premium，可直接结算 | 跑 `settle --write` |
+| `ready_for_settlement / outcome_facts_incomplete` | 部分缺失 outcome 已具备结算输入 | 跑 `settle --write`；其余缺口继续按 `outcome_gaps` 分类 |
+| `ready_for_sampling / outcome_marks_incomplete` | 未到期合约有 entry premium，但仍缺 outcome mark | 跑 `collect-marks --source local` 或 `--source opend`；到期后不会继续无效采样 |
+| `needs_human_review / outcome_facts_blocked` | 缺 entry premium、已到期但没有可用 mark，或存在其他不可由 settle 修复的输入缺口 | 查看 `outcome_gaps.blocker_counts` 和样例；补源数据或接受该 cohort 无法形成 closed replay |
 | `needs_human_review / shadow_replay_ready_for_manual_review` | 证据够人工评审 | 看 bucket 和 accepted/rejected 对比 |
 
 ## 边界

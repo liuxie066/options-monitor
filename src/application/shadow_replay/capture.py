@@ -178,21 +178,126 @@ def accepted_candidate_snapshots(paths: list[Path], *, base: Path) -> list[dict[
     for path in paths:
         strategy = strategy_hint(path)
         mode = strategy_mode(strategy)
-        account = account_hint(path)
+        scope = infer_trace_scope_from_path(path)
+        account = account_hint(path) or text(scope.get("account")).lower() or None
+        source_path = safe_rel(path, base=base)
         for row_number, row in enumerate(read_csv_rows(path), start=1):
-            item = snapshot_from_row(
+            candidate_rows = _combo_pair_rows(
                 row,
-                schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
-                source_kind="candidate_csv",
-                source_path=safe_rel(path, base=base),
-                source_row_number=row_number,
-                status="accepted",
                 strategy=strategy,
-                mode=mode,
-                account_hint=account,
+                source_path=source_path,
+                run_id=text(row.get("run_id") or scope.get("run_id")) or None,
+                account=account,
             )
-            out.append(item)
+            for candidate_row in candidate_rows:
+                item = snapshot_from_row(
+                    candidate_row,
+                    schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+                    source_kind="candidate_csv",
+                    source_path=source_path,
+                    source_row_number=row_number,
+                    status="accepted",
+                    strategy=strategy,
+                    mode=mode,
+                    account_hint=account,
+                )
+                out.append(item)
     return out
+
+
+def _combo_pair_rows(
+    row: dict[str, Any],
+    *,
+    strategy: str | None,
+    source_path: str | None,
+    run_id: str | None,
+    account: str | None,
+) -> list[dict[str, Any]]:
+    put_contract = text(row.get("put_contract_symbol"))
+    call_contract = text(row.get("call_contract_symbol"))
+    family = text(row.get("strategy_family") or strategy).lower().replace("-", "_")
+    if family != "combo_yield" or not put_contract or not call_contract:
+        return [row]
+
+    group_id = text(row.get("strategy_group_id") or row.get("group_id")) or _combo_pair_group_id(
+        row,
+        source_path=source_path,
+        run_id=run_id,
+        account=account,
+        put_contract=put_contract,
+        call_contract=call_contract,
+    )
+    contracts = first_float(row, "contracts", "contract_count", "quantity", "qty") or 1.0
+    put_credit = first_float(row, "put_net_credit")
+    call_cost = first_float(row, "call_total_cost")
+    common = {
+        **row,
+        "net_credit": None,
+        "run_id": text(row.get("run_id") or run_id) or None,
+        "account": text(row.get("account") or account).lower() or None,
+        "strategy_family": "combo_yield",
+        "strategy_profile": text(row.get("strategy_profile") or row.get("yield_enhancement_mode")) or "combo_yield",
+        "strategy_group_id": group_id,
+        "contracts": contracts,
+    }
+    return [
+        {
+            **common,
+            "contract_symbol": put_contract,
+            "option_type": "put",
+            "mode": "put",
+            "side": "short",
+            "leg_role": "funding_put",
+            "strike": first_float(row, "put_strike"),
+            "bid": first_float(row, "put_bid"),
+            "ask": first_float(row, "put_ask"),
+            "mid": first_float(row, "put_mid"),
+            "delta": first_float(row, "put_delta"),
+            "open_interest": first_float(row, "put_open_interest"),
+            "volume": first_float(row, "put_volume"),
+            "spread_ratio": first_float(row, "put_spread_ratio"),
+            "net_income": put_credit,
+            "entry_credit": put_credit,
+        },
+        {
+            **common,
+            "contract_symbol": call_contract,
+            "option_type": "call",
+            "mode": "call",
+            "side": "long",
+            "leg_role": "participation_call",
+            "strike": first_float(row, "call_strike"),
+            "bid": first_float(row, "call_bid"),
+            "ask": first_float(row, "call_ask"),
+            "mid": first_float(row, "call_mid"),
+            "delta": first_float(row, "call_delta"),
+            "open_interest": first_float(row, "call_open_interest"),
+            "volume": first_float(row, "call_volume"),
+            "spread_ratio": first_float(row, "call_spread_ratio"),
+            "net_income": -abs(call_cost) if call_cost is not None else None,
+            "entry_cost": abs(call_cost) if call_cost is not None else None,
+        },
+    ]
+
+
+def _combo_pair_group_id(
+    row: dict[str, Any],
+    *,
+    source_path: str | None,
+    run_id: str | None,
+    account: str | None,
+    put_contract: str,
+    call_contract: str,
+) -> str:
+    parts = (
+        text(row.get("run_id") or run_id or source_path),
+        text(row.get("account") or account).lower(),
+        text(row.get("symbol") or row.get("underlying_symbol")).upper(),
+        text(row.get("expiration") or row.get("exp")),
+        put_contract.upper(),
+        call_contract.upper(),
+    )
+    return "combo_yield|" + "|".join(parts)
 
 
 def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
@@ -352,12 +457,19 @@ def snapshot_from_row(
         "side": text(row.get("side") or row.get("position_side")).lower() or None,
         "contracts": first_float(row, "contracts", "contract_count", "quantity", "qty"),
         "multiplier": first_float(row, "multiplier", "contract_multiplier"),
+        "currency": text(row.get("currency")).upper() or None,
         "spot": first_float(row, "spot", "underlying_price"),
         "dte": first_float(row, "dte"),
         "delta": first_float(row, "delta", "put_delta", "call_delta"),
         "abs_delta": abs_first_float(row, "delta", "put_delta", "call_delta"),
         "iv_rv_ratio": first_float(row, "iv_rv_ratio"),
         "iv_minus_rv": first_float(row, "iv_minus_rv"),
+        "premium_edge_score": first_float(row, "premium_edge_score"),
+        "strike_safety_margin_pct": first_float(row, "strike_safety_margin_pct"),
+        "strike_upside_margin_pct": first_float(row, "strike_upside_margin_pct"),
+        "min_strike": first_float(row, "min_strike"),
+        "max_strike": first_float(row, "max_strike"),
+        "effective_min_strike": first_float(row, "effective_min_strike"),
         "bid": first_float(row, "bid", "option_bid"),
         "ask": first_float(row, "ask", "option_ask"),
         "mid": first_float(row, "mid", "option_mid", "mid_price"),
@@ -372,9 +484,21 @@ def snapshot_from_row(
         "event_risk": text(row.get("event_risk")) or None,
         "has_event_before_expiry": text(row.get("has_event_before_expiry")) or None,
         "symbol_concentration_after": first_float(row, "symbol_concentration_after"),
+        "portfolio_nav_cny": first_float(row, "portfolio_nav_cny", "nav_cny"),
         "assignment_notional_cny": first_float(row, "assignment_notional_cny"),
         "cash_required_cny": first_float(row, "cash_required_cny"),
+        "cash_required_usd": first_float(row, "cash_required_usd"),
+        "cash_free_cny": first_float(row, "cash_free_cny"),
+        "cash_free_total_cny": first_float(row, "cash_free_total_cny"),
+        "cash_free_usd": first_float(row, "cash_free_usd"),
+        "existing_stock_value_cny_symbol": first_float(row, "existing_stock_value_cny_symbol"),
+        "existing_short_put_assignment_cny_symbol": first_float(row, "existing_short_put_assignment_cny_symbol"),
+        "existing_short_put_assignment_cny_total": first_float(row, "existing_short_put_assignment_cny_total"),
         "covered_notional_cny": first_float(row, "covered_notional_cny"),
+        "shares_total": first_float(row, "shares_total", "shares"),
+        "shares_locked": first_float(row, "shares_locked"),
+        "shares_available_for_cover": first_float(row, "shares_available_for_cover"),
+        "covered_contracts_available": first_float(row, "covered_contracts_available"),
         "covered_quantity": first_float(
             row,
             "covered_quantity",
@@ -395,7 +519,14 @@ def snapshot_from_row(
             "annualized_return",
         ),
         "net_income_cny": first_float(row, "net_income_cny", "net_credit_cny", "premium_cny"),
-        "net_income": first_float(row, "net_income", "net_credit", "combo_net_credit"),
+        "net_income": first_float(row, "net_income", "net_credit"),
+        "entry_credit": first_float(row, "entry_credit"),
+        "entry_cost": first_float(row, "entry_cost"),
+        "put_net_credit": first_float(row, "put_net_credit"),
+        "call_total_cost": first_float(row, "call_total_cost"),
+        "combo_net_credit": first_float(row, "combo_net_credit"),
+        "net_credit_retention": first_float(row, "net_credit_retention"),
+        "call_cost_to_put_credit": first_float(row, "call_cost_to_put_credit"),
     }
 
 

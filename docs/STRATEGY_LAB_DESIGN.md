@@ -44,7 +44,7 @@ Strategy Domain Adapters
 |---|---|---|---|
 | Sell Put | 一张 short put candidate | readiness、单腿 hypothesis、candidate-impact、scorecard、proposal | assignment / cash efficiency / downside stress 指标 |
 | Covered Call | 一张 short call candidate + 持股覆盖上下文 | readiness、单腿 hypothesis、candidate-impact、scorecard、proposal | covered share、cost basis、call-away / missed upside 指标 |
-| Combo Yield | 一组 legs 组成的组合 | group identity / leg role readiness、group-level observed-universe optimizer 和 blocker | 不复用单腿 hypothesis；不能输出单腿化 patch |
+| Combo Yield | 一组 legs 组成的组合 | pair-row 归一化、group identity / leg role readiness、group outcome evaluator 和 blocker | 不复用单腿 hypothesis；不能输出单腿化 patch |
 
 所以实验室不是三套产品，也不是一套参数模型。它是一条统一的证据和实验工作流，下面挂三个策略域适配器。Sell Put / Covered Call 第一阶段共享单腿 replay 能力；Combo Yield 走组合级 observed-universe 实验，避免用错误的单腿模型给出伪精确建议。
 
@@ -59,7 +59,7 @@ MVP 必须能回答：
 
 扩展问题：
 
-- 当前 Delta、DTE、IV/RV、IV-RV spread、annualized return 参数是否过严或过松。
+- 当前 DTE、IV/RV、IV-RV spread、annualized return 参数是否过严或过松；Delta 只做观测和分桶。
 - 某个参数调整后，会新增或移除哪些候选。
 - 新增候选后续 mark path / outcome 是否更好。
 - 被过滤掉的候选里是否有明显 bad reject。
@@ -171,7 +171,7 @@ Strategy Lab readiness 比现有人工 review readiness 更严格。它必须判
 |---|---|---|---|
 | Sell Put | option identity、underlying、strike、expiry、option_type、side、DTE、Delta、IV/RV 或缺失原因、annualized return、接受/拒绝状态 | 参数字段覆盖足够，accepted/rejected/post-filtered universe 可比较，样本量达到 `min_sample` | mark path 或 outcome facts 足够支撑风险/收益判断 |
 | Covered Call | Sell Put 单腿字段 + 持股覆盖、covered quantity 或缺失原因、strike/cost basis 关系、call-away 语义 | 参数字段覆盖足够，且覆盖能力不是未知；否则只能做 filter-only 对比 | mark path 或 outcome facts 足够，且 missed upside / call-away 相关字段可解释 |
-| Combo Yield | `strategy_group_id`、leg identity、`leg_role`、同 symbol / expiry / multiplier 的 legs、组合净权利金或缺失原因 | group-level evidence 足够时进入 observed-universe group optimizer | 只能输出组合级 advisory 和 data gap，不输出单腿化生产 patch |
+| Combo Yield | `strategy_group_id`、leg identity、`leg_role`、同 symbol / expiry / multiplier 的 legs、组合净权利金或缺失原因 | group-level evidence 足够时进入 observed-universe evaluator | 只能输出组合级 advisory 和 data gap，不输出单腿化生产 patch |
 
 当前已落地的 readiness 输出包括：
 
@@ -184,7 +184,7 @@ Strategy Lab readiness 比现有人工 review readiness 更严格。它必须判
 当前 readiness 的边界：
 
 - Sell Put / Covered Call 支持单腿 `decision_instance` readiness。
-- Combo Yield 支持 group identity / leg role readiness、blocker 识别和 observed-universe group optimizer。
+- Combo Yield 支持 group identity / leg role readiness、blocker 识别和 observed-universe group evaluator。
 - Combo Yield 第一版只输出组合级实验建议，不输出生产配置 patch。
 - mark path 是否有足够观察点。
 - outcome facts 是否足够。
@@ -256,7 +256,7 @@ decision_instance -> hypotheses -> evaluation -> scorecard -> proposal
 策略细节必须留在 adapter：
 
 - 哪些参数可调。
-- 哪些约束永远不能被 optimizer 放松。
+- 哪些约束永远不能被实验 variant 放松。
 - 哪些指标才代表这个策略的真实质量。
 - dry-run patch 应该写向哪个配置命名空间。
 - 什么情况下只能输出 data gap，而不能输出参数建议。
@@ -267,10 +267,12 @@ decision_instance -> hypotheses -> evaluation -> scorecard -> proposal
 
 - DTE
 - IV/RV
+- IV/RV 历史百分位（仅离线实验）
 - IV-RV
 - annualized return
 
 Delta 和集中度只作为观测、分桶和结果解释字段，不作为默认 underwriting 参数 variant。
+历史百分位按 symbol、option type、DTE bucket 使用严格更早 run 计算；历史不足时回退绝对 IV/RV 底线。
 
 硬约束：
 
@@ -301,10 +303,12 @@ Delta 和集中度只作为观测、分桶和结果解释字段，不作为默�
 
 - DTE
 - IV/RV
+- IV/RV 历史百分位（仅离线实验）
 - IV-RV
 - annualized return
 
 Delta 只作为观测字段；call-away rate 和 missed upside 是结果指标，不是默认拒绝条件。
+历史百分位样本门槛是实验可靠性条件，不是生产 underwriting 配置。
 
 硬约束：
 
@@ -355,31 +359,11 @@ Combo Yield 不按单张 option 独立优化，必须按 `strategy_group_id` / l
 - group-level drawdown
 - payoff shape stability
 
-MVP 对 Combo Yield 的要求是识别 group、readiness blocker，并在证据足够时运行 observed-universe group optimizer。它只能比较已观察组合 universe 中的候选参数，不能声称全市场最优。
-
-当前 group optimizer 的 MVP 可调方向：
-
-- `min_put_distance_pct`
-- `max_call_distance_pct`
-- `min_net_premium`
-- `min_premium_to_downside_ratio`
-- `max_abs_put_delta`
-
-后续可扩展方向：
-
-- `funding_mode`
-- `min_net_credit_annualized`
-- `max_call_cost_to_put_credit`
-- `min_net_credit_retention`
-- `max_combo_spread_ratio`
-- call delta 区间
-- put strike 接货边界和 call participation 的组合约束
-
-这些参数必须在 group-level payoff 下评估，不能把 short put 和 long call 拆成两个互不相关的候选分别打分。
+MVP 对 Combo Yield 的要求是把生产的一行 Put+Call pair 归一为同一 `strategy_group_id` 下的一条 short funding Put 和一条 long participation Call，严格验证组合身份，并按同步 mark 与两腿 outcome 汇总组合收益和最差路径。没有完整组合 outcome 时输出 `not_evaluable`，不生成参数 variants 或最佳方案。
 
 ### 5. Hypothesis Generation
 
-第一版只生成受控参数 variants。Sell Put / Covered Call 可以输出兼容现有 Shadow Replay `ParameterSet` 的结构；Combo Yield 不复用单腿 `ParameterSet`，而是在 `experiment` 里输出独立的 group-level observed-universe variants。
+第一版只为 Sell Put / Covered Call 生成受控参数 variants，并输出兼容现有 Shadow Replay `ParameterSet` 的结构。Combo Yield 不复用单腿 `ParameterSet`，只执行 group-level outcome evaluation。
 
 MVP 可调参数：
 
@@ -428,10 +412,16 @@ generated parameter variants
 - 每个 variant 的新增候选、移除候选。
 - 拒绝原因。
 - safety violation reason。
+- safety-rejected 数量；正常保留安全门禁不算 variant violation。
 - outcome / path / insurance metrics。
 - evidence mode 和 gate status。
+- IV/RV 历史样本数、百分位和绝对底线回退模式。
 
-Sell Put / Covered Call 第一版复用 candidate-impact evaluator。Combo Yield 第一版使用 group-level observed-universe optimizer，不把多腿组合拆成单腿候选去排名。
+Sell Put / Covered Call 第一版复用 candidate-impact evaluator。Combo Yield 第一版使用 group-level outcome evaluator，不生成参数 variants，也不把多腿组合拆成单腿候选去排名。
+
+历史百分位 variant 保留生产绝对 IV/RV 底线，只增加相对历史门槛，以便单独识别历史百分位的影响。历史样本只使用同一 symbol、option type、DTE bucket 的严格更早 run，同一 run 不进入自身历史。没有候选达到历史样本门槛时，该 variant 只能报告绝对底线回退结果，不能进入最佳 variant 比较。min_iv_rv_percentile 和 min_iv_rv_history_samples 是离线实验参数，Proposal 不得把它们转换成生产 dry-run patch。
+
+Strategy Lab 另行输出 Sell Put / Covered Call 的排序对照：保留生产 CSV 观测顺序，并计算“strike 意愿价格边际优先、去重后承保补偿其次”的离线排序。去重补偿分数不包含单笔净收入，波动率补偿取 IV/RV edge 与 IV-RV edge 的较弱项；净收入只作门槛或解释字段，不参与排序。实验同时输出四格对照：固定 IV/RV / 历史百分位 IV/RV × 生产观测顺序 / 去重排序。四格结果复用同一 observed universe、mark 和 lifecycle outcome；证据不足时明确输出 not_evaluable，不得宣称收益、回撤或 CVaR 改善，也不修改生产排序。
 
 评价结果必须按策略域分开解释：
 
@@ -441,20 +431,7 @@ Sell Put / Covered Call 第一版复用 candidate-impact evaluator。Combo Yield
 
 ### 7. Scorecard
 
-Scorecard 不用收益最高作为唯一目标，而是约束下的风险调整评分。
-
-概念目标函数：
-
-```text
-objective_score =
-  risk_adjusted_return
-  - max_adverse_excursion_penalty
-  - tail_loss_penalty
-  - lifecycle_loss_penalty
-  - liquidity_penalty
-  - concentration_penalty
-  - missed_opportunity_penalty
-```
+Scorecard 不使用综合黑盒分数。候选数量只用于影响审阅；选择 variant 必须满足严格 outcome dominance：相对生产 baseline，所有可比结果指标均不差，且至少一项更好。
 
 输出必须同时包含：
 
@@ -481,16 +458,16 @@ Scorecard 必须按 strategy family 输出 domain-specific 指标：
 
 | 层级 | 用途 | 当前状态 |
 |---|---|---|
-| candidate-impact scorecard | 样本量、accepted/rejected 变化和 safety violation | 已落地；只用于候选影响审阅 |
-| outcome scorecard | 生命周期收益、回撤、尾部风险和机会成本 | 尚未计分；当前仅声明所需指标 |
-| family scorecard | Sell Put / Covered Call / Combo Yield 的策略语义指标 | Sell Put / Covered Call 标记已落地，Combo Yield group scorecard 已落地 |
+| candidate-impact scorecard | 样本量、accepted/rejected 变化和 safety violation | 已落地；不产生 `best_variant` |
+| outcome scorecard | 资本收益、最差路径、经验 CVaR、生命周期收益 | Sell Put / Covered Call 已接入严格 dominance；证据不足输出 `not_evaluable` |
+| family scorecard | Sell Put / Covered Call / Combo Yield 的策略语义指标 | Put/Call 分开比较；Combo 缺 group outcome 时不选择 variant |
 | promotion scorecard | 是否进入 shadow rollout | 目标能力，必须等 outcome facts 和 holdout 足够 |
 
-Strategy Lab 不说绝对最优，只能说：
+Strategy Lab 只有在唯一 variant 严格支配生产 baseline 时才说：
 
 ```text
-在当前 observed universe、当前目标函数、当前安全约束和当前样本下，
-该 variant 是本次实验评分最高的候选。
+在当前 observed universe、当前安全约束和当前 outcome 样本下，
+该 variant 在全部可比结果指标上不差于 baseline，且至少一项更好。
 ```
 
 ### 8. Strategy Proposal
@@ -506,7 +483,7 @@ Proposal 输出 advisory-only 建议：
 - 置信度。
 - 是否建议进入 shadow rollout。
 
-Proposal 必须带 `strategy_family`，并且不同策略写入不同 dry-run patch target。Sell Put / Covered Call 只有在 `closed_replay` 和 production recommendation gate 都通过时才输出 dry-run patch；`filter_only` / `path_only` 只能输出证据缺口和下一步动作。Combo Yield 即使有 group optimizer，也只能输出组合级 `group_advisory` / data-gap proposal，不能输出单腿参数 patch。
+Proposal 必须带 `strategy_family`，并且不同策略写入不同 dry-run patch target。Sell Put / Covered Call 只有在 `closed_replay`、真实 outcome readiness 和 `best_variant_basis=strict_outcome_dominance` 同时成立时才输出 dry-run patch；`filter_only` / `path_only` 只能输出证据缺口和下一步动作。Combo Yield 缺 group outcome 时只能输出组合级 data-gap advisory，不能输出推荐 variant 或单腿参数 patch。
 
 它不能修改生产配置。
 
@@ -516,7 +493,7 @@ Proposal 输出规则：
 |---|---|---|
 | Sell Put | 参数 dry-run patch、影响范围、风险、反例、shadow rollout 建议 | 自动改配置、绕过 cash / event / liquidity hard gate |
 | Covered Call | 参数 dry-run patch、持仓覆盖相关限制、missed upside 风险 | 在缺少持仓上下文时给生产建议 |
-| Combo Yield | group evidence readiness、group optimizer 摘要、data-gap proposal、后续 group optimizer 输入需求 | 单腿化参数 patch、把 put leg 结果当组合最优 |
+| Combo Yield | group evidence readiness、group evaluator 摘要、data-gap proposal、后续 outcome 输入需求 | 单腿化参数 patch、把 put leg 结果当组合最优 |
 
 示例结构：
 
@@ -570,7 +547,7 @@ src/application/strategy_lab/
   decisions.py       # implemented
   hypotheses.py      # implemented
   experiment.py      # implemented
-  combo_optimizer.py # implemented
+  combo_evaluator.py # implemented
   evaluator.py       # folded into experiment.py for single-leg MVP
   scorecard.py       # folded into experiment.py for MVP
   proposal.py        # implemented
@@ -593,8 +570,8 @@ src/application/strategy_lab/
 - `decisions.py`：把 candidate / leg / group evidence 归一成 `decision_instance`。
 - `domains/`：定义不同策略域的 adapter、可调参数、硬约束、scorecard 指标和 proposal target。
 - `hypotheses.py`：按 strategy domain 生成参数 variants；Sell Put / Covered Call 可输出兼容 `src.application.shadow_replay.parameter_sets.ParameterSet`。
-- `combo_optimizer.py`：按 `strategy_group_id` 聚合 Combo Yield legs，计算组合级 observed-universe metrics / variants / scorecard。
-- `experiment.py`：调用 `run_shadow_replay_candidate_impact`，不复制 candidate-impact 逻辑；同时接入 Combo Yield group optimizer；MVP 内含轻量 scorecard。
+- `combo_evaluator.py`：按 `strategy_group_id` 聚合 Combo Yield legs，验证组合身份，并计算组合级收益、同步最差路径和 outcome scorecard。
+- `experiment.py`：调用 `run_shadow_replay_candidate_impact`，不复制 candidate-impact 逻辑；同时接入 Combo Yield group evaluator；MVP 内含 outcome-gated scorecard。
 - `evaluator.py`：后续如果 experiment 变复杂，再从 `experiment.py` 拆出 evaluator。
 - `scorecard.py`：后续如果评分逻辑变复杂，再从 `experiment.py` 拆出 scorecard。
 - `proposal.py`：生成 dry-run strategy proposal。
@@ -739,7 +716,7 @@ artifact 命名必须能区分策略域：
 ./om research strategy-lab experiment --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30 --auto
 ```
 
-当前支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 直接聚合 scanned-run window。它会生成 `strategy_lab_hypotheses.v1`，输出 Sell Put / Covered Call 的受控 `ParameterSet` variants；Combo Yield 不进入单腿 `ParameterSet`，而是在 `group_experiments.combo_yield` 输出 `strategy_lab_combo_yield_group_experiment.v1`。随后它调用 Shadow Replay candidate-impact evaluator，并输出 `strategy_lab_experiment.v1` scorecard。该 scorecard 只表示 observed universe 下的候选排序，不是生产参数建议。
+当前支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 直接聚合 scanned-run window。它会生成 `strategy_lab_hypotheses.v1`，输出 Sell Put / Covered Call 的受控 `ParameterSet` variants；Combo Yield 不进入单腿 `ParameterSet`，而是在 `group_experiments.combo_yield` 输出 `strategy_lab_combo_yield_group_experiment.v1`。随后它调用 Shadow Replay candidate-impact evaluator，并输出 `strategy_lab_experiment.v1` scorecard。无 outcome 时 scorecard 只报告候选变化；只有唯一 variant 满足严格 outcome dominance 时才产生 `best_variant`。
 
 ### `proposal`
 
@@ -760,7 +737,7 @@ artifact 命名必须能区分策略域：
 ./om research strategy-lab proposal --experiment <experiment-json> --output <proposal-json> --markdown-output <proposal-md>
 ```
 
-当前 `--experiment` 支持 experiment JSON 文件，或包含 `experiment.json` / `strategy_lab_experiment.json` 的目录。输出是 `strategy_lab_proposal.v1`，包含 `dry_run_patch`、evidence summary、impact、counterexamples、risks、limitations、可选 Combo Yield `group_advisory` 和 Markdown。它不会应用 patch，也不会修改 runtime config；单腿 dry-run patch 需要 `closed_replay`，Combo Yield 只输出 group advisory。
+当前 `--experiment` 支持 experiment JSON 文件，或包含 `experiment.json` / `strategy_lab_experiment.json` 的目录。输出是 `strategy_lab_proposal.v1`，包含 `dry_run_patch`、evidence summary、impact、counterexamples、risks、limitations、可选 Combo Yield `group_advisory` 和 Markdown。它不会应用 patch，也不会修改 runtime config；单腿 dry-run patch 需要严格 outcome dominance，旧 candidate-count artifact 不可生成 patch，Combo Yield 当前只输出 data-gap advisory。
 
 ### `llm-context`
 
@@ -794,20 +771,20 @@ artifact 命名必须能区分策略域：
 4. 实现 `readiness`，复用现有 Shadow Replay dataset，并增加 strategy family / group identity 检查。
 5. Shadow Replay capture 保留 Combo Yield 的 `strategy_group_id` 和 `leg_role`。
 6. 实现 Sell Put / Covered Call / Combo Yield domain adapters。
-7. 实现 `hypotheses`，自动生成 Sell Put / Covered Call 的 Delta / DTE / IV-RV / annualized return variants。
+7. 实现 `hypotheses`，自动生成 Sell Put / Covered Call 的 DTE / IV-RV / annualized return variants；Delta 仅观察。
 8. 实现 `experiment`，复用 `run_shadow_replay_candidate_impact`。
-9. 实现轻量 `scorecard`，按 strategy family 标记 domain-specific 指标和 observed-universe 分数。
+9. 实现 outcome-gated `scorecard`，候选数量仅用于影响审阅，严格 outcome dominance 才产生 `best_variant`。
 10. 实现 `proposal`，输出 advisory-only dry-run patch 和 Markdown。
 11. 实现 `llm_context`，输出脱敏本地 LLM context，不调用在线 AI。
 12. 实现 `update`，收敛 Shadow Replay status / run-data-plan 的 dataset mark / settle 生命周期入口。
 13. 扩展 `update --build-dataset --write`，从 latest scanned run 构建本地 replay dataset 后继续进入 data-plan。
 14. 更新 README / Shadow Replay Runbook / Tool Reference / 架构文档，让 Strategy Lab 成为上层产品入口，Shadow Replay 保持底层引擎。
-15. 实现 Combo Yield group-level observed-universe optimizer，输出组合级 metrics、variants 和 scorecard，但不生成单腿化生产 patch。
+15. 实现 Combo Yield group-level observed-universe evaluator；缺少组合 outcome 时不生成最佳 variant 或单腿化生产 patch。
 
 下一步：
 
 1. 扩展 `update` 支持 archive build-datasets。
-2. 扩展 Combo Yield group optimizer 的 outcome / holdout / payoff 指标，避免只停留在候选集合影响。
+2. 在积累完整组合 outcome 后，扩展 Combo Yield group evaluator 的 holdout 和 payoff-shape 对照。
 
 ## 验收标准
 
@@ -819,7 +796,7 @@ MVP 通过条件：
 - 能判断数据只支持 `filter_only`、`path_only` 还是 `closed_replay`。
 - 能把 Sell Put / Covered Call candidate 转成 `decision_instance`。
 - 能识别 Combo Yield group evidence，并在 group evidence 不足时给出 blocker。
-- 能按 strategy family 自动生成 Delta / DTE / IV-RV / annualized return 参数 variants。
+- 能按 strategy family 自动生成 DTE / IV-RV / annualized return 参数 variants；Delta 不进入参数实验。
 - 能复用 candidate-impact evaluator 比较 variants。
 - 能给每个 variant 输出轻量 scorecard。
 - 能按 Sell Put / Covered Call 输出不同 scorecard 指标。
@@ -829,7 +806,7 @@ MVP 通过条件：
 - 能通过 `update --build-dataset --write` 自动 build latest scanned run dataset。
 - 能通过 `readiness --start-date/--end-date/--market/--account` 直接聚合 scanned-run window。
 - 能通过 `experiment --start-date/--end-date/--market/--account` 直接聚合 scanned-run window。
-- 能按 `strategy_group_id` 对 Combo Yield legs 做 observed-universe group optimizer。
+- 能按组合身份对 Combo Yield 做 observed-universe group evaluation；缺 outcome 时不选择最佳 variant。
 - 能明确列出 blocker、限制和置信度相关前置条件。
 - 不能修改生产配置。
 - 不能写交易状态。

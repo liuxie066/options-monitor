@@ -83,6 +83,271 @@ def test_parameter_set_rejects_delta_as_underwriting_filter() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        (
+            {"min_iv_rv_ratio": 1.0, "min_iv_rv_percentile": 1.1},
+            "min_iv_rv_percentile must be between 0 and 1",
+        ),
+        (
+            {
+                "min_iv_rv_ratio": 1.0,
+                "min_iv_rv_percentile": 0.7,
+                "min_iv_rv_history_samples": 0,
+            },
+            "min_iv_rv_history_samples must be a positive integer",
+        ),
+        (
+            {
+                "min_iv_rv_ratio": 1.0,
+                "min_iv_rv_percentile": 0.7,
+                "min_iv_rv_history_samples": 1.5,
+            },
+            "min_iv_rv_history_samples must be a positive integer",
+        ),
+        (
+            {"min_iv_rv_percentile": 0.7},
+            "min_iv_rv_percentile requires min_iv_rv_ratio absolute floor",
+        ),
+    ],
+)
+def test_parameter_set_rejects_invalid_iv_rv_history_parameters(
+    params: dict[str, float],
+    message: str,
+) -> None:
+    from src.application.shadow_replay.parameter_sets import parse_parameter_set
+
+    with pytest.raises(ValueError, match=message):
+        parse_parameter_set(
+            {
+                "variants": [
+                    {
+                        "name": "invalid_history",
+                        "insurance_underwriting": params,
+                    }
+                ]
+            }
+        )
+
+
+def test_iv_rv_history_percentile_uses_prior_runs_only() -> None:
+    from src.application.shadow_replay.candidate_impact import _enrich_iv_rv_history_percentiles
+
+    rows, summary = _enrich_iv_rv_history_percentiles(
+        [
+            {
+                "run_id": "20260603T010000Z-run",
+                "contract_symbol": "NVDA-3",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "dte": 30,
+                "iv_rv_ratio": 4.0,
+            },
+            {
+                "run_id": "20260601T010000Z-run",
+                "contract_symbol": "NVDA-1A",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "dte": 30,
+                "iv_rv_ratio": 1.0,
+            },
+            {
+                "run_id": "20260601T010000Z-run",
+                "contract_symbol": "NVDA-1B",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "dte": 30,
+                "iv_rv_ratio": 3.0,
+            },
+            {
+                "run_id": "20260602T010000Z-run",
+                "contract_symbol": "NVDA-2",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "dte": 30,
+                "iv_rv_ratio": 2.0,
+            },
+        ]
+    )
+    by_contract = {row["contract_symbol"]: row for row in rows}
+
+    assert by_contract["NVDA-1A"]["iv_rv_history_sample_count"] == 0
+    assert by_contract["NVDA-1B"]["iv_rv_history_sample_count"] == 0
+    assert by_contract["NVDA-2"]["iv_rv_history_sample_count"] == 2
+    assert by_contract["NVDA-2"]["iv_rv_history_percentile"] == 0.5
+    assert by_contract["NVDA-3"]["iv_rv_history_sample_count"] == 3
+    assert by_contract["NVDA-3"]["iv_rv_history_percentile"] == 1.0
+    assert summary["lookahead_allowed"] is False
+
+
+def test_iv_rv_history_percentile_falls_back_to_absolute_floor(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    dataset = tmp_path / "dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "run_id": "20260601T010000Z-run",
+                "contract_symbol": "NVDA-1",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "insurance_underwriting",
+                "iv_rv_ratio": 1.2,
+                "dte": 30,
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params={
+            "variants": [
+                {
+                    "name": "historical_iv_rv",
+                    "insurance_underwriting": {
+                        "min_iv_rv_ratio": 1.1,
+                        "min_iv_rv_percentile": 0.7,
+                        "min_iv_rv_history_samples": 20,
+                    },
+                }
+            ]
+        },
+        min_sample=1,
+    )
+
+    variant = result["variants"][0]
+    assert variant["accepted_count"] == 1
+    assert variant["iv_rv_history_modes"] == {"fallback_absolute_floor": 1}
+    assert variant["iv_rv_history_status"] == "insufficient_history"
+    assert variant["comparison_eligible"] is False
+    assert result["gates"]["candidate_impact"]["reason"] == "iv_rv_history_insufficient"
+
+
+def test_iv_rv_history_percentile_rejects_after_history_is_sufficient(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    dataset = tmp_path / "dataset"
+    candidates = []
+    for run_id, contract, ratio in [
+        ("20260601T010000Z-run", "NVDA-1A", 1.4),
+        ("20260601T010000Z-run", "NVDA-1B", 1.5),
+        ("20260602T010000Z-run", "NVDA-2", 1.3),
+        ("20260603T010000Z-run", "NVDA-3", 1.1),
+    ]:
+        candidates.append(
+            {
+                "run_id": run_id,
+                "contract_symbol": contract,
+                "symbol": "NVDA",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "insurance_underwriting",
+                "iv_rv_ratio": ratio,
+                "dte": 30,
+            }
+        )
+    _write_jsonl(dataset / "candidate_snapshots.jsonl", candidates)
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params={
+            "variants": [
+                {
+                    "name": "historical_iv_rv",
+                    "insurance_underwriting": {
+                        "min_iv_rv_ratio": 1.0,
+                        "min_iv_rv_percentile": 0.7,
+                        "min_iv_rv_history_samples": 3,
+                    },
+                }
+            ]
+        },
+        min_sample=1,
+    )
+
+    variant = result["variants"][0]
+    assert variant["iv_rv_history_modes"] == {
+        "evaluated": 1,
+        "fallback_absolute_floor": 3,
+    }
+    assert variant["iv_rv_history_status"] == "evaluated"
+    assert variant["comparison_eligible"] is True
+    assert variant["newly_rejected_count"] == 1
+    assert variant["newly_rejected_samples"][0]["contract_symbol"] == "NVDA-3"
+    assert variant["newly_rejected_samples"][0]["iv_rv_history_percentile"] == 0.0
+
+
+def test_candidate_impact_scopes_variants_to_strategy_family(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    dataset = tmp_path / "dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA-P",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "strategy_family": "sell_put",
+                "strategy_profile": "insurance_underwriting",
+                "status": "rejected",
+                "iv_rv_ratio": 1.2,
+            },
+            {
+                "contract_symbol": "AAPL-C",
+                "symbol": "AAPL",
+                "option_type": "call",
+                "strategy_family": "sell_call",
+                "strategy_profile": "insurance_underwriting",
+                "status": "rejected",
+                "iv_rv_ratio": 1.2,
+            },
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params={
+            "variants": [
+                {
+                    "name": "put_only",
+                    "strategy_family": "sell_put",
+                    "insurance_underwriting": {"min_iv_rv_ratio": 1.1},
+                },
+                {
+                    "name": "call_only",
+                    "strategy_family": "covered_call",
+                    "insurance_underwriting": {"min_iv_rv_ratio": 1.3},
+                },
+            ]
+        },
+        min_sample=1,
+    )
+
+    put_variant, call_variant = result["variants"]
+    assert put_variant["strategy_family"] == "sell_put"
+    assert put_variant["candidate_count"] == 1
+    assert put_variant["newly_accepted_count"] == 1
+    assert call_variant["strategy_family"] == "covered_call"
+    assert call_variant["candidate_count"] == 1
+    assert call_variant["newly_accepted_count"] == 0
+
+
 def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_candidate_impact
 
@@ -198,7 +463,10 @@ def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(
     assert variant["newly_accepted_samples"][0]["symbol"] == "AMD"
     assert variant["newly_rejected_samples"][0]["symbol"] == "TSLA"
     assert variant["safety_reasons"] == {"spread_ratio_above_safety_floor": 1}
-    assert result["recommendation"]["status"] == "ready_for_live_shadow_review"
+    assert variant["safety_rejected_count"] == 1
+    assert variant["safety_violation_count"] == 0
+    assert result["recommendation"]["status"] == "ready_for_live_shadow_outcome_review"
+    assert result["recommendation"]["production_recommendation_allowed"] is False
     assert result["safety"]["writes_runtime_config"] is False
 
 
@@ -486,6 +754,8 @@ def test_candidate_impact_without_outcomes_is_filter_only(tmp_path: Path) -> Non
     assert result["candidate_impact"]["best_variant_by_new_accepts"] == "iv_rv_1_10"
     assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
     assert result["recommendation"]["reason"] == "outcome_evidence_missing"
+    assert result["recommendation"]["candidate_review_basis"] == "newly_accepted_count_only"
+    assert "candidate_variant" not in result["recommendation"]
 
 
 def test_cli_shadow_replay_candidate_impact_command(capsys, monkeypatch, tmp_path: Path) -> None:
