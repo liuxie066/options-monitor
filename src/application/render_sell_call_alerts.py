@@ -104,8 +104,14 @@ def render_sell_call_alerts(
         print(text)
         return text
 
-    strategy_cfg = build_strategy_config("call")
-    top_df = rank_scored_candidates(df, strategy_cfg, layered=layered, top=top)
+    if (
+        "strategy_profile" in df.columns
+        and df["strategy_profile"].fillna("").astype(str).str.strip().eq("insurance_underwriting").all()
+    ):
+        top_df = df.head(top) if top is not None else df
+    else:
+        strategy_cfg = build_strategy_config("call")
+        top_df = rank_scored_candidates(df, strategy_cfg, layered=layered, top=top)
 
     blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"

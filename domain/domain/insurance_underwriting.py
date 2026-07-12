@@ -215,7 +215,7 @@ def _strike_safety_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConf
 
 
 def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConfig) -> float | None:
-    min_strike = _first_float(row, "min_strike")
+    min_strike = _first_float(row, "effective_min_strike", "min_strike")
     if min_strike is None:
         min_strike = cfg.min_strike
     strike = _float(row.get("strike"))

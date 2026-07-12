@@ -12,6 +12,7 @@ from domain.domain.insurance_underwriting import (
     normalize_underwriting_strategy,
     rank_underwriting_candidates,
 )
+from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.short_vol_assessment import ShortVolAssessmentConfig
 from domain.domain.symbol_identity import symbol_currency
 from src.application.candidate_filter_trace import (
@@ -125,6 +126,17 @@ def enrich_and_filter_covered_call_underwriting(
 
     for idx, row in out.iterrows():
         row_payload = row.to_dict()
+        effective_min_strike = resolve_effective_sell_call_min_strike(
+            min_strike=sell_call_cfg.get("min_strike"),
+            avg_cost=row_payload.get("avg_cost"),
+            cost_multiplier=sell_call_cfg.get("min_strike_cost_multiplier", 1.0),
+        )
+        spot = _float(row_payload.get("spot"))
+        if spot is not None:
+            effective_min_strike = spot if effective_min_strike is None else max(effective_min_strike, spot)
+        if effective_min_strike is not None:
+            row_payload["effective_min_strike"] = effective_min_strike
+            out.loc[idx, "effective_min_strike"] = effective_min_strike
         row_payload.setdefault(
             "covered_notional_cny",
             _covered_notional_cny(row_payload, exchange_rate_converter=exchange_rate_converter),
