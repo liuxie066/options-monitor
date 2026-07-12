@@ -198,22 +198,27 @@ def test_covered_call_underwriting_ranking_prefers_premium_edge_then_upside_marg
     out_path.parent.mkdir(parents=True)
     df = pd.DataFrame(
         [
-            _candidate(contract_symbol="LOW_UPSIDE", strike=125.0, net_income=210.0),
-            _candidate(contract_symbol="HIGH_UPSIDE", strike=140.0, net_income=210.0),
-            _candidate(contract_symbol="RICH", strike=126.0, net_income=280.0, annualized_net_premium_return=0.18),
+            _candidate(contract_symbol="LOW_UPSIDE", strike=125.0, spot=110.0, net_income=210.0),
+            _candidate(contract_symbol="HIGH_UPSIDE", strike=140.0, spot=110.0, net_income=210.0),
+            _candidate(contract_symbol="RICH", strike=126.0, spot=110.0, net_income=280.0, annualized_net_premium_return=0.18),
         ]
     )
 
     filtered = enrich_and_filter_covered_call_underwriting(
         df_labeled=df,
         symbol="NVDA",
-        sell_call_cfg={"strategy": "insurance_underwriting", "min_strike": 120.0, "min_net_income": 200.0},
+        sell_call_cfg={
+            "strategy": "insurance_underwriting",
+            "min_strike_cost_multiplier": 1.2,
+            "min_net_income": 200.0,
+        },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         out_path=out_path,
     )
 
     assert list(filtered["contract_symbol"]) == ["RICH", "HIGH_UPSIDE", "LOW_UPSIDE"]
+    assert set(filtered["effective_min_strike"]) == {120.0}
     assert filtered.iloc[1]["strike_upside_margin_pct"] > filtered.iloc[2]["strike_upside_margin_pct"]
 
 

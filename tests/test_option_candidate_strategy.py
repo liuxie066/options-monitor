@@ -81,6 +81,43 @@ def test_call_mode_rank_uses_call_sort_columns() -> None:
     assert list(ranked["contract_symbol"]) == ["C1", "C2", "C3"]
 
 
+@pytest.mark.parametrize(
+    ("module_name", "renderer_name"),
+    [
+        ("src.application.render_sell_put_alerts", "render_sell_put_alerts"),
+        ("src.application.render_sell_call_alerts", "render_sell_call_alerts"),
+    ],
+)
+def test_underwriting_alert_renderers_preserve_persisted_order(
+    module_name: str,
+    renderer_name: str,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _add_repo_to_syspath()
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(
+        module,
+        "rank_scored_candidates",
+        lambda *_args, **_kwargs: pytest.fail("unexpected rerank"),
+    )
+    monkeypatch.setattr(module, "render_one", lambda row: str(row["contract_symbol"]))
+
+    input_path = tmp_path / "candidates.csv"
+    output_path = tmp_path / "alerts.txt"
+    pd.DataFrame(
+        [
+            {"contract_symbol": "UNDERWRITING_FIRST", "strategy_profile": "insurance_underwriting"},
+            {"contract_symbol": "GENERIC_RANK_WOULD_WIN", "strategy_profile": "insurance_underwriting"},
+        ]
+    ).to_csv(input_path, index=False)
+
+    text = getattr(module, renderer_name)(input_path=input_path, output_path=output_path, top=1)
+
+    assert "UNDERWRITING_FIRST" in text
+    assert "GENERIC_RANK_WOULD_WIN" not in text
+
+
 def test_strategy_param_table_v1_default_weights_split_put_call() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import build_strategy_config
