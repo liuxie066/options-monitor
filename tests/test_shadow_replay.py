@@ -215,21 +215,225 @@ def test_shadow_replay_insurance_metrics_cover_put_and_call_outcomes() -> None:
             {"contract_symbol": "NVDA260619C00110000", "unrealized_pnl": -240},
         ],
         outcome_facts=[
-            {"contract_symbol": "NVDA260619P00100000", "outcome": "assigned_at_expiry", "realized_pnl": -380},
-            {"contract_symbol": "NVDA260619C00110000", "outcome": "called_away_at_expiry", "realized_pnl": -220},
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "outcome": "assigned_at_expiry",
+                "realized_pnl": -380,
+                "assignment_lifecycle_pnl": 40,
+            },
+            {
+                "contract_symbol": "NVDA260619C00110000",
+                "outcome": "called_away_at_expiry",
+                "realized_pnl": -220,
+                "callaway_lifecycle_pnl": 120,
+            },
         ],
         min_sample=2,
     )
 
     metrics = analysis["insurance_metrics"]
     assert metrics["by_mode"]["put"]["assignment_rate"] == 1
-    assert metrics["by_mode"]["put"]["loss_ratio"] == pytest.approx(500 / 120)
+    assert metrics["by_mode"]["put"]["loss_ratio"] == pytest.approx(80 / 120)
     assert metrics["by_mode"]["call"]["called_away_rate"] == 1
     assert metrics["by_mode"]["call"]["capital_at_risk_total"] == 10000
-    assert metrics["by_mode"]["call"]["loss_ratio"] == pytest.approx(300 / 80)
-    assert metrics["by_status"]["accepted"]["loss_ratio"] == pytest.approx(800 / 200)
+    assert metrics["by_mode"]["call"]["loss_ratio"] == 0
+    assert metrics["by_mode_status"]["put"]["accepted"]["assignment_rate"] == 1
+    assert metrics["by_mode_status"]["call"]["accepted"]["called_away_rate"] == 1
+    assert metrics["by_status"]["accepted"]["loss_ratio"] == pytest.approx(80 / 200)
+    assert metrics["by_status"]["accepted"]["realized_pnl_total"] == 160
+    assert metrics["by_status"]["accepted"]["pnl_basis_counts"] == {"wheel_lifecycle": 2}
+    assert metrics["by_status"]["accepted"]["lifecycle_pnl_missing_count"] == 0
+    assert metrics["by_status"]["accepted"]["tail_risk"]["status"] == "not_evaluable"
     assert metrics["by_status"]["accepted"]["path_adverse_loss_to_premium"] == pytest.approx(290 / 200)
     assert metrics["by_bucket"]["abs_delta"]["0.20-0.30"]["exercise_rate"] == 1
+
+
+def test_shadow_replay_insurance_metrics_report_empirical_tail_risk() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    pnl_values = [-3000, -2000, -1000] + [100] * 27
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "contract_symbol": f"TAIL{i:02d}",
+                "option_type": "put",
+                "status": "accepted",
+                "strike": 100,
+                "multiplier": 100,
+                "net_income": 100,
+            }
+            for i in range(30)
+        ],
+        filter_decisions=[],
+        mark_snapshots=[],
+        outcome_facts=[
+            {
+                "contract_symbol": f"TAIL{i:02d}",
+                "outcome": "closed",
+                "realized_pnl": pnl,
+            }
+            for i, pnl in enumerate(pnl_values)
+        ],
+        min_sample=30,
+    )
+
+    tail = analysis["insurance_metrics"]["by_mode"]["put"]["tail_risk"]
+    assert tail["status"] == "evaluable"
+    assert tail["observation_count"] == 30
+    assert tail["tail_observation_count"] == 3
+    assert tail["var_90"] == pytest.approx(-0.1)
+    assert tail["cvar_90"] == pytest.approx(-0.2)
+
+
+def test_shadow_replay_preserves_and_summarizes_wheel_capacity_context(tmp_path: Path) -> None:
+    from src.application.shadow_replay import analyze_shadow_replay_dataset, build_shadow_replay_dataset
+
+    account_dir = tmp_path / "output_runs" / "run-wheel" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,multiplier,portfolio_nav_cny,"
+            "assignment_notional_cny,cash_required_cny,cash_free_total_cny,"
+            "existing_stock_value_cny_symbol,existing_short_put_assignment_cny_symbol,"
+            "existing_short_put_assignment_cny_total\n"
+            "NVDA,put,NVDA260619P00100000,2026-06-19,100,100,1000000,"
+            "10000,10000,50000,20000,10000,30000\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "nvda_sell_put_candidates.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,multiplier\n"
+            "NVDA,put,NVDA260619P00090000,2026-06-19,90,100\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "nvda_sell_call_candidates.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,multiplier,"
+            "shares_total,shares_locked,shares_available_for_cover,covered_contracts_available\n"
+            "NVDA,call,NVDA260619C00120000,2026-06-19,120,100,300,100,200,2\n"
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-wheel", dataset_id="wheel")
+    dataset_dir = Path(manifest["dataset_dir"])
+    analysis = analyze_shadow_replay_dataset(dataset=dataset_dir, min_sample=1)
+    snapshots = _jsonl(dataset_dir / "candidate_snapshots.jsonl")
+
+    put = next(
+        row
+        for row in snapshots
+        if row["option_type"] == "put" and "_candidates_labeled.csv" in row["source_path"]
+    )
+    call = next(row for row in snapshots if row["option_type"] == "call")
+    assert put["portfolio_nav_cny"] == 1_000_000
+    assert put["cash_free_total_cny"] == 50_000
+    assert put["existing_short_put_assignment_cny_total"] == 30_000
+    assert call["shares_total"] == 300
+    assert call["shares_locked"] == 100
+    assert call["shares_available_for_cover"] == 200
+
+    risk = analysis["wheel_lifecycle_risk"]
+    assert risk["summary"]["status"] == "evaluable"
+    assert risk["summary"]["production_gate_applied"] is False
+    assert risk["summary"]["scenario_basis"] == "one_candidate_contract_at_a_time"
+    group = risk["by_account_symbol"][0]
+    assert group["account"] == "lx"
+    assert group["symbol"] == "NVDA"
+    assert group["status"] == "evaluable"
+    assert group["sell_put"]["candidate_scenario_count"] == 1
+    assert group["sell_put"]["candidate_assignment_obligation_cny"] == {"min": 10_000, "max": 10_000}
+    assert group["sell_put"]["post_assignment_symbol_exposure_cny"] == {"min": 40_000, "max": 40_000}
+    assert group["sell_put"]["post_assignment_account_obligation_cny"] == {"min": 40_000, "max": 40_000}
+    assert group["sell_put"]["post_assignment_symbol_nav_ratio"] == {"min": 0.04, "max": 0.04}
+    assert group["sell_put"]["cash_capacity"]["supported_scenario_count"] == 1
+    assert group["covered_call"]["locked_share_ratio"] == pytest.approx(1 / 3)
+    assert group["covered_call"]["candidate_called_away_shares"] == {"min": 100, "max": 100}
+    assert group["covered_call"]["candidate_called_away_share_ratio"]["min"] == pytest.approx(1 / 3)
+    assert group["covered_call"]["post_candidate_locked_share_ratio"]["max"] == pytest.approx(2 / 3)
+    assert group["covered_call"]["share_capacity"]["supported_scenario_count"] == 1
+
+
+def test_shadow_replay_wheel_capacity_is_not_evaluable_without_account_context() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "source_kind": "candidate_csv",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "assignment_notional_cny": 10_000,
+            },
+            {
+                "source_kind": "candidate_csv",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "contract_symbol": "NVDA260619C00120000",
+                "multiplier": 100,
+            },
+        ],
+        filter_decisions=[],
+        mark_snapshots=[],
+        outcome_facts=[],
+        min_sample=1,
+    )
+
+    risk = analysis["wheel_lifecycle_risk"]
+    assert risk["summary"]["status"] == "not_evaluable"
+    group = risk["by_account_symbol"][0]
+    assert group["status"] == "not_evaluable"
+    assert "portfolio_nav_cny" in group["sell_put"]["missing_fields"]
+    assert "cash_capacity_context" in group["sell_put"]["missing_fields"]
+    assert "shares_total" in group["covered_call"]["missing_fields"]
+    assert "shares_locked" in group["covered_call"]["missing_fields"]
+    assert risk["summary"]["production_gate_applied"] is False
+
+
+def test_shadow_replay_wheel_capacity_does_not_hide_incomplete_contracts() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "source_kind": "candidate_csv",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00100000",
+                "source_path": "output_runs/run/accounts/lx/nvda_sell_put_candidates_labeled.csv",
+                "portfolio_nav_cny": 1_000_000,
+                "assignment_notional_cny": 10_000,
+                "cash_free_total_cny": 50_000,
+                "existing_stock_value_cny_symbol": 20_000,
+                "existing_short_put_assignment_cny_symbol": 10_000,
+                "existing_short_put_assignment_cny_total": 30_000,
+            },
+            {
+                "source_kind": "candidate_csv",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "contract_symbol": "NVDA260619P00090000",
+                "source_path": "output_runs/run/accounts/lx/nvda_sell_put_candidates_labeled.csv",
+            },
+        ],
+        filter_decisions=[],
+        mark_snapshots=[],
+        outcome_facts=[],
+        min_sample=1,
+    )
+
+    sell_put = analysis["wheel_lifecycle_risk"]["by_account_symbol"][0]["sell_put"]
+    assert sell_put["candidate_scenario_count"] == 2
+    assert sell_put["status"] == "not_evaluable"
+    assert "assignment_notional_cny" in sell_put["missing_fields"]
+    assert sell_put["cash_capacity"]["not_evaluable_scenario_count"] == 1
 
 
 def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
@@ -446,6 +650,9 @@ def test_shadow_replay_underwriting_observes_delta_and_requires_wheel_lifecycle_
     assert samples["CALL"]["decision_pnl"] == 250
     assert all("delta" not in reason for reason in samples["CALL"]["reasons"])
     assert all("concentration" not in reason for reason in samples["CALL"]["reasons"])
+    put_metrics = analysis["insurance_metrics"]["by_mode"]["put"]
+    assert put_metrics["pnl_observation_count"] == 0
+    assert put_metrics["lifecycle_pnl_missing_count"] == 1
 
 
 def test_shadow_replay_decision_quality_requires_sample_floor() -> None:
@@ -747,6 +954,120 @@ def test_shadow_replay_dataset_status_dashboard_guides_next_actions(tmp_path: Pa
     assert status["safety"]["sends_notifications"] is False
 
 
+def test_shadow_replay_incomplete_outcomes_choose_only_recoverable_actions(tmp_path: Path) -> None:
+    from src.application.shadow_replay import shadow_replay_dataset_status
+
+    root = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets"
+    settled = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "contract_symbol": "NVDA260619P00100000",
+        "expiration": "2026-06-19",
+        "strike": 100,
+        "net_income": 120,
+        "status": "accepted",
+    }
+    settled_mark = {
+        "contract_symbol": settled["contract_symbol"],
+        "mark_at": "2026-06-10T00:00:00Z",
+        "unrealized_pnl": 20,
+    }
+    settled_outcome = {
+        "contract_symbol": settled["contract_symbol"],
+        "outcome": "expired_worthless",
+        "realized_pnl": 120,
+    }
+
+    def dataset(name: str, candidate: dict, mark: dict | None) -> None:
+        directory = root / name
+        _write_jsonl(directory / "candidate_snapshots.jsonl", [settled, candidate])
+        _write_jsonl(
+            directory / "filter_decisions.jsonl",
+            [{"contract_symbol": candidate["contract_symbol"], "status": "rejected", "rule": "test"}],
+        )
+        _write_jsonl(directory / "mark_path_snapshots.jsonl", [settled_mark] + ([mark] if mark else []))
+        _write_jsonl(directory / "outcome_facts.jsonl", [settled_outcome])
+
+    settleable = {
+        "account": "lx",
+        "symbol": "AMD",
+        "option_type": "put",
+        "contract_symbol": "AMD260619P00080000",
+        "expiration": "2026-06-19",
+        "strike": 80,
+        "net_income": 90,
+        "status": "rejected",
+    }
+    dataset(
+        "settleable",
+        settleable,
+        {
+            "contract_symbol": settleable["contract_symbol"],
+            "mark_at": "2026-06-10T00:00:00Z",
+            "quote_status": "matched",
+            "mark_quality": "usable",
+            "option_mid": 0.2,
+        },
+    )
+    needs_mark = {
+        "account": "lx",
+        "symbol": "CRDO",
+        "option_type": "put",
+        "contract_symbol": "CRDO260717P00100000",
+        "expiration": "2026-07-17",
+        "strike": 100,
+        "net_income": 80,
+        "status": "rejected",
+    }
+    dataset("needs-mark", needs_mark, None)
+    blocked = {
+        "account": "lx",
+        "symbol": "GOOGL",
+        "option_type": "call",
+        "contract_symbol": "GOOGL260619C00300000",
+        "expiration": "2026-06-19",
+        "strike": 300,
+        "status": "rejected",
+    }
+    dataset(
+        "blocked",
+        blocked,
+        {
+            "contract_symbol": blocked["contract_symbol"],
+            "mark_at": "2026-06-10T00:00:00Z",
+            "quote_status": "matched",
+            "mark_quality": "usable",
+            "option_mid": 1.0,
+        },
+    )
+
+    status = shadow_replay_dataset_status(
+        repo_root=tmp_path,
+        min_sample=2,
+        now_utc="2026-07-12T00:00:00Z",
+    )
+    by_id = {row["dataset_id"]: row for row in status["datasets"]}
+
+    assert by_id["settleable"]["next_suggested_action"] == "settle"
+    assert by_id["settleable"]["outcome_gaps"]["ready_to_settle_count"] == 1
+    assert by_id["needs-mark"]["next_suggested_action"] == "collect_marks"
+    assert by_id["needs-mark"]["sampling"]["state"] == "needs_outcome_mark"
+    assert by_id["needs-mark"]["outcome_gaps"]["needs_mark_count"] == 1
+    assert by_id["blocked"]["next_suggested_action"] == "analyze"
+    assert by_id["blocked"]["sampling"]["state"] == "outcome_collection_blocked"
+    assert by_id["blocked"]["outcome_gaps"]["blocker_counts"] == {"missing_entry_premium": 1}
+
+    after_expiry = shadow_replay_dataset_status(
+        repo_root=tmp_path,
+        min_sample=2,
+        now_utc="2026-07-18T00:00:00Z",
+    )
+    expired = {row["dataset_id"]: row for row in after_expiry["datasets"]}["needs-mark"]
+    assert expired["next_suggested_action"] == "analyze"
+    assert expired["outcome_gaps"]["blocker_counts"] == {"expired_without_usable_mark": 1}
+
+
 def test_shadow_replay_data_plan_dry_run_is_read_only(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_data_plan
 
@@ -817,22 +1138,24 @@ def test_shadow_replay_data_plan_collects_local_marks_and_receipt(tmp_path: Path
     _write_jsonl(
         dataset_dir / "candidate_snapshots.jsonl",
         [
-            {
-                "symbol": "NVDA",
-                "contract_symbol": "NVDA260619P00100000",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "strike": 100,
-                "status": "accepted",
-            },
-            {
-                "symbol": "AMD",
-                "contract_symbol": "AMD260619P00080000",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "strike": 80,
-                "status": "rejected",
-            },
+                {
+                    "symbol": "NVDA",
+                    "contract_symbol": "NVDA260619P00100000",
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "strike": 100,
+                    "net_income": 120,
+                    "status": "accepted",
+                },
+                {
+                    "symbol": "AMD",
+                    "contract_symbol": "AMD260619P00080000",
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "strike": 80,
+                    "net_income": 90,
+                    "status": "rejected",
+                },
         ],
     )
     _write_jsonl(
@@ -970,6 +1293,33 @@ def test_shadow_replay_settle_derives_outcomes_from_mark_path(tmp_path: Path) ->
     assert settlement["summary"]["written"] is True
     assert after["summary"]["status"] == "needs_human_review"
     assert after["outcome_stats"]["by_status"]["rejected"]["realized_pnl_total"] == -40
+
+
+def test_shadow_replay_long_call_uses_positive_entry_cost_from_signed_income() -> None:
+    from src.application.shadow_replay.settlement import derive_outcome_result
+
+    pnl, model, quality, outcome = derive_outcome_result(
+        {
+            "option_type": "call",
+            "side": "long",
+            "expiration": "2026-06-19",
+            "strike": 220,
+            "contracts": 1,
+            "multiplier": 100,
+            "net_income": -400,
+            "entry_cost": 400,
+        },
+        {
+            "mark_at": "2026-06-19",
+            "dte": 0,
+            "spot": 230,
+        },
+    )
+
+    assert pnl == 600
+    assert model == "long_option_expiration_intrinsic_minus_entry_cost"
+    assert quality == "derived_from_expiration_spot"
+    assert outcome == "expired_in_the_money"
 
 
 def test_shadow_replay_settle_derives_expiration_outcomes_from_spot_marks(tmp_path: Path) -> None:

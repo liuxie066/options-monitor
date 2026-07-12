@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -50,10 +50,12 @@ REJECTED_STATUSES = {"rejected", "post_filtered", "ranked_below"}
 PARAMETER_FIELD_MAP = {
     "min_iv_rv_ratio": "iv_rv_ratio",
     "min_iv_minus_rv": "iv_minus_rv",
+    "min_iv_rv_percentile": "iv_rv_ratio",
     "min_dte": "dte",
     "max_dte": "dte",
     "min_annualized_return": "annualized_return",
 }
+DEFAULT_IV_RV_HISTORY_SAMPLES = 20
 
 
 def run_shadow_replay_candidate_impact(
@@ -199,6 +201,7 @@ def _run_shadow_replay_candidate_impact(
         for row in candidate_snapshots
         if _parameter_profile_for_candidate(row) == CURRENT_UNDERWRITING_PROFILE
     ]
+    scoped_candidates, iv_rv_history = _enrich_iv_rv_history_percentiles(scoped_candidates)
     evidence_quality = _parameter_evidence_quality(
         scoped_candidates,
         required_fields=_required_parameter_fields(parameter_set),
@@ -262,8 +265,10 @@ def _run_shadow_replay_candidate_impact(
             "min_sample": sample_floor,
             "variant_count": len(variants),
             "parameter_complete_candidate_count": evidence_quality["complete_candidate_count"],
+            "iv_rv_history_available_candidate_count": iv_rv_history["history_available_candidate_count"],
         },
         "evidence_quality": evidence_quality,
+        "iv_rv_history": iv_rv_history,
         "baseline": baseline,
         "variants": variants,
         "gates": gates,
@@ -483,6 +488,11 @@ def _variant_payload(
     outcomes: list[dict[str, Any]],
     min_sample: int,
 ) -> dict[str, Any]:
+    candidate_universe = [
+        row
+        for row in baseline_candidates
+        if variant.strategy_family is None or _candidate_strategy_family(row) == variant.strategy_family
+    ]
     evaluated_rows: list[dict[str, Any]] = []
     synthetic_decisions: list[dict[str, Any]] = []
     newly_accepted: list[dict[str, Any]] = []
@@ -490,10 +500,12 @@ def _variant_payload(
     reason_counts: Counter[str] = Counter()
     safety_counts: Counter[str] = Counter()
     missing_field_counts: Counter[str] = Counter()
-    for row in baseline_candidates:
+    history_mode_counts: Counter[str] = Counter()
+    for row in candidate_universe:
         evaluation = _evaluate_candidate(row, variant=variant)
         reason_counts.update(evaluation["reasons"])
         safety_counts.update(evaluation["safety_reasons"])
+        history_mode_counts.update([evaluation["iv_rv_history_mode"]])
         missing_field_counts.update(reason for reason in evaluation["reasons"] if reason.endswith("_missing"))
         candidate = dict(row)
         candidate["status"] = evaluation["status"]
@@ -524,19 +536,34 @@ def _variant_payload(
         outcome_facts=outcomes,
         min_sample=min_sample,
     )
+    history_requested = any(
+        "min_iv_rv_percentile" in params
+        for params in variant.profiles.values()
+    )
+    history_evaluated_count = int(history_mode_counts.get("evaluated", 0))
+    history_status = (
+        "not_requested"
+        if not history_requested
+        else ("evaluated" if history_evaluated_count > 0 else "insufficient_history")
+    )
     return {
         "name": variant.name,
+        "strategy_family": variant.strategy_family,
         "parameters": variant.to_payload()["profiles"],
         "candidate_count": len(evaluated_rows),
         "accepted_count": int(status_counts.get("accepted", 0)),
         "rejected_count": int(status_counts.get("rejected", 0)),
         "newly_accepted_count": len(newly_accepted),
         "newly_rejected_count": len(newly_rejected),
-        "safety_violation_count": sum(safety_counts.values()),
+        "safety_violation_count": 0,
+        "safety_rejected_count": sum(safety_counts.values()),
         "status_counts": dict(sorted(status_counts.items())),
         "top_reasons": dict(reason_counts.most_common(20)),
         "safety_reasons": dict(safety_counts.most_common(20)),
         "missing_fields": dict(missing_field_counts.most_common(20)),
+        "iv_rv_history_modes": dict(sorted(history_mode_counts.items())),
+        "iv_rv_history_status": history_status,
+        "comparison_eligible": not history_requested or history_evaluated_count > 0,
         "newly_accepted_samples": newly_accepted[:20],
         "newly_rejected_samples": newly_rejected[:20],
         "analysis_summary": analysis["summary"],
@@ -602,18 +629,38 @@ def _evaluate_candidate(row: dict[str, Any], *, variant: ParameterVariant) -> di
     profile = _parameter_profile_for_candidate(row)
     params = variant.profiles.get(profile)
     if not params:
-        return {"status": "rejected", "reasons": ["strategy_profile_out_of_scope"], "safety_reasons": []}
+        return {
+            "status": "rejected",
+            "reasons": ["strategy_profile_out_of_scope"],
+            "safety_reasons": [],
+            "iv_rv_history_mode": "not_requested",
+        }
     safety = _safety_reasons(row)
     if safety:
-        return {"status": "rejected", "reasons": safety, "safety_reasons": safety}
+        return {
+            "status": "rejected",
+            "reasons": safety,
+            "safety_reasons": safety,
+            "iv_rv_history_mode": (
+                "safety_rejected"
+                if "min_iv_rv_percentile" in params
+                else "not_requested"
+            ),
+        }
     reasons: list[str] = []
     _check_min(row, params, "min_iv_rv_ratio", "iv_rv_ratio", reasons)
     _check_min(row, params, "min_iv_minus_rv", "iv_minus_rv", reasons)
+    history_mode = _check_iv_rv_percentile(row, params, reasons)
     _check_min(row, params, "min_dte", "dte", reasons)
     _check_max(row, params, "max_dte", "dte", reasons)
     _check_min(row, params, "min_annualized_return", "annualized_return", reasons)
     status = "rejected" if reasons else "accepted"
-    return {"status": status, "reasons": reasons or ["parameter_pass"], "safety_reasons": []}
+    return {
+        "status": status,
+        "reasons": reasons or ["parameter_pass"],
+        "safety_reasons": [],
+        "iv_rv_history_mode": history_mode,
+    }
 
 
 def _check_min(row: dict[str, Any], params: dict[str, float], param_key: str, field: str, reasons: list[str]) -> None:
@@ -634,6 +681,21 @@ def _check_max(row: dict[str, Any], params: dict[str, float], param_key: str, fi
         reasons.append(f"{field}_missing")
     elif value > params[param_key]:
         reasons.append(f"{field}_above_{param_key}")
+
+
+def _check_iv_rv_percentile(row: dict[str, Any], params: dict[str, float], reasons: list[str]) -> str:
+    if "min_iv_rv_percentile" not in params:
+        return "not_requested"
+    required_samples = int(params.get("min_iv_rv_history_samples") or DEFAULT_IV_RV_HISTORY_SAMPLES)
+    history_samples = int(first_float(row, "iv_rv_history_sample_count") or 0)
+    if history_samples < required_samples:
+        return "fallback_absolute_floor"
+    percentile = first_float(row, "iv_rv_history_percentile")
+    if percentile is None:
+        reasons.append("iv_rv_history_percentile_missing")
+    elif percentile < params["min_iv_rv_percentile"]:
+        reasons.append("iv_rv_history_percentile_below_minimum")
+    return "evaluated"
 
 
 def _safety_reasons(row: dict[str, Any]) -> list[str]:
@@ -674,6 +736,90 @@ def _event_risk_reason(row: dict[str, Any]) -> str | None:
         if any(token in value for token in ("unavailable", "missing", "failed", "before_expiry", "event_risk")):
             return "event_risk_not_acceptable"
     return None
+
+
+def _enrich_iv_rv_history_percentiles(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    enriched = [dict(row) for row in candidates]
+    grouped: dict[tuple[str, str, str], dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for idx, row in enumerate(enriched):
+        group_key = _iv_rv_history_group(row)
+        order_key = _iv_rv_history_order(row)
+        if group_key is None or not order_key or first_float(row, "iv_rv_ratio") is None:
+            row["iv_rv_history_sample_count"] = 0
+            row["iv_rv_history_percentile"] = None
+            continue
+        grouped[group_key][order_key].append(idx)
+
+    for group_key, rows_by_run in grouped.items():
+        history: list[float] = []
+        for order_key in sorted(rows_by_run):
+            indexes = rows_by_run[order_key]
+            for idx in indexes:
+                value = first_float(enriched[idx], "iv_rv_ratio")
+                enriched[idx]["iv_rv_history_scope"] = {
+                    "symbol": group_key[0],
+                    "option_type": group_key[1],
+                    "dte_bucket": group_key[2],
+                }
+                enriched[idx]["iv_rv_history_sample_count"] = len(history)
+                enriched[idx]["iv_rv_history_percentile"] = _empirical_percentile(value, history)
+            history.extend(
+                value
+                for idx in indexes
+                if (value := first_float(enriched[idx], "iv_rv_ratio")) is not None
+            )
+
+    sample_counts = [int(first_float(row, "iv_rv_history_sample_count") or 0) for row in enriched]
+    return enriched, {
+        "scope": "symbol_option_type_dte_bucket_prior_runs",
+        "candidate_count": len(enriched),
+        "history_group_count": len(grouped),
+        "history_available_candidate_count": sum(1 for value in sample_counts if value > 0),
+        "history_missing_candidate_count": sum(1 for value in sample_counts if value <= 0),
+        "max_history_sample_count": max(sample_counts, default=0),
+        "lookahead_allowed": False,
+    }
+
+
+def _iv_rv_history_group(row: dict[str, Any]) -> tuple[str, str, str] | None:
+    symbol = text(row.get("symbol") or row.get("underlying_symbol")).upper()
+    option_type = text(row.get("option_type") or row.get("mode")).lower()
+    dte = first_float(row, "dte")
+    if not symbol or option_type not in {"put", "call"} or dte is None:
+        return None
+    return symbol, option_type, _history_dte_bucket(dte)
+
+
+def _iv_rv_history_order(row: dict[str, Any]) -> str:
+    run_id = text(row.get("run_id"))
+    if run_id:
+        return run_id
+    for part in Path(text(row.get("source_path"))).parts:
+        if len(part) >= 8 and part[:8].isdigit():
+            return part
+    return ""
+
+
+def _history_dte_bucket(value: float) -> str:
+    if value < 14:
+        return "<14"
+    if value < 30:
+        return "14-29"
+    if value < 45:
+        return "30-44"
+    if value < 60:
+        return "45-59"
+    return "60+"
+
+
+def _empirical_percentile(value: float | None, history: list[float]) -> float | None:
+    if value is None or not history:
+        return None
+    below = sum(1 for item in history if item < value)
+    equal = sum(1 for item in history if item == value)
+    return round((below + (0.5 * equal)) / len(history), 6)
 
 
 def _filter_candidates(
@@ -754,17 +900,31 @@ def _recommendation(
             "reason": "outcome_evidence_missing",
             "candidate_impact_allowed": True,
             "candidate_impact_reason": candidate_impact.get("reason"),
-            "candidate_variant": candidate_impact.get("best_variant_by_new_accepts"),
+            "candidate_review_variant": candidate_impact.get("best_variant_by_new_accepts"),
+            "candidate_review_basis": "newly_accepted_count_only",
             "parameter_field_status": field_gate.get("status"),
             "missing_required_fields": evidence_quality.get("missing_required_fields"),
             "production_recommendation_allowed": False,
             "next_action": "review_candidate_impact_and_collect_mark_outcomes_before_production_change",
         }
+    production_gate = gates.get("production_recommendation") or {}
+    if not bool(production_gate.get("allowed")):
+        return {
+            "status": "ready_for_live_shadow_outcome_review",
+            "reason": production_gate.get("reason") or "outcome_review_not_ready",
+            "candidate_impact_allowed": True,
+            "candidate_review_variant": candidate_impact.get("best_variant_by_new_accepts"),
+            "candidate_review_basis": "newly_accepted_count_only",
+            "parameter_field_status": field_gate.get("status"),
+            "production_recommendation_allowed": False,
+            "next_action": production_gate.get("next_action") or "collect_complete_outcome_evidence",
+        }
     return {
-        "status": "ready_for_live_shadow_review",
-        "reason": "closed_replay_available",
+        "status": "ready_for_strict_outcome_comparison",
+        "reason": "outcome_review_ready",
         "candidate_impact_allowed": True,
-        "candidate_variant": candidate_impact.get("best_variant_by_new_accepts"),
+        "candidate_review_variant": candidate_impact.get("best_variant_by_new_accepts"),
+        "candidate_review_basis": "newly_accepted_count_only",
         "parameter_field_status": field_gate.get("status"),
         "production_recommendation_allowed": True,
         "next_action": "review_variant_then_run_live_shadow_before_production_change",
@@ -792,6 +952,8 @@ def _gate_payload(
     production_gate = _production_recommendation_gate(
         candidate_gate=candidate_gate,
         data_mode=data_mode,
+        baseline=baseline,
+        variants=variants,
     )
     return {
         "scan_artifacts": scan_gate,
@@ -870,7 +1032,15 @@ def _candidate_impact_gate(
                 "reason": gate.get("reason") or "candidate_impact_not_ready",
                 "next_action": gate.get("next_action") or "review_backtest_evidence",
             }
-    if not variants or max(int(row.get("accepted_count") or 0) for row in variants) <= 0:
+    eligible_variants = [row for row in variants if bool(row.get("comparison_eligible", True))]
+    if not eligible_variants:
+        return {
+            "allowed": False,
+            "status": "not_ready",
+            "reason": "iv_rv_history_insufficient",
+            "next_action": "collect_more_prior_run_iv_rv_history",
+        }
+    if max(int(row.get("accepted_count") or 0) for row in eligible_variants) <= 0:
         return {
             "allowed": False,
             "status": "not_ready",
@@ -889,7 +1059,13 @@ def _candidate_impact_gate(
     }
 
 
-def _production_recommendation_gate(*, candidate_gate: dict[str, Any], data_mode: str) -> dict[str, Any]:
+def _production_recommendation_gate(
+    *,
+    candidate_gate: dict[str, Any],
+    data_mode: str,
+    baseline: dict[str, Any],
+    variants: list[dict[str, Any]],
+) -> dict[str, Any]:
     if not bool(candidate_gate.get("allowed")):
         return {
             "allowed": False,
@@ -906,11 +1082,39 @@ def _production_recommendation_gate(*, candidate_gate: dict[str, Any], data_mode
             "next_action": "collect_mark_outcomes_before_parameter_recommendation",
             "runtime_config_write_allowed": False,
         }
+    baseline_ready = bool((baseline.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
+    ready_variants = [
+        str(row.get("name") or "")
+        for row in variants
+        if bool((row.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
+    ]
+    if not baseline_ready:
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "baseline_outcome_review_not_ready",
+            "next_action": "collect_complete_baseline_mark_and_lifecycle_outcomes",
+            "baseline_review_ready": False,
+            "ready_variants": ready_variants,
+            "runtime_config_write_allowed": False,
+        }
+    if not ready_variants:
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "variant_outcome_review_not_ready",
+            "next_action": "collect_complete_variant_mark_and_lifecycle_outcomes",
+            "baseline_review_ready": True,
+            "ready_variants": [],
+            "runtime_config_write_allowed": False,
+        }
     return {
         "allowed": True,
         "status": "review_ready",
-        "reason": "closed_replay_available",
-        "next_action": "human_review_then_live_shadow",
+        "reason": "outcome_review_ready",
+        "next_action": "compare_variant_outcomes_then_run_live_shadow",
+        "baseline_review_ready": True,
+        "ready_variants": ready_variants,
         "runtime_config_write_allowed": False,
     }
 
@@ -929,18 +1133,22 @@ def _candidate_impact_payload(
             "newly_accepted_count": int(row.get("newly_accepted_count") or 0),
             "newly_rejected_count": int(row.get("newly_rejected_count") or 0),
             "safety_violation_count": int(row.get("safety_violation_count") or 0),
+            "safety_rejected_count": int(row.get("safety_rejected_count") or 0),
+            "iv_rv_history_status": row.get("iv_rv_history_status"),
+            "comparison_eligible": bool(row.get("comparison_eligible", True)),
         }
         for row in variants
     ]
     best_by_new = None
     best_by_total = None
-    if variant_summaries:
+    eligible_summaries = [row for row in variant_summaries if row["comparison_eligible"]]
+    if eligible_summaries:
         best_by_new = max(
-            variant_summaries,
+            eligible_summaries,
             key=lambda row: (row["newly_accepted_count"], row["accepted_count"]),
         )
         best_by_total = max(
-            variant_summaries,
+            eligible_summaries,
             key=lambda row: (row["accepted_count"], row["newly_accepted_count"]),
         )
     return {
@@ -987,6 +1195,25 @@ def _parameter_profile_for_candidate(row: dict[str, Any]) -> str:
     return profile
 
 
+def _candidate_strategy_family(row: dict[str, Any]) -> str:
+    raw = text(
+        row.get("strategy_family")
+        or row.get("function")
+        or row.get("strategy_name")
+        or row.get("strategy")
+    ).lower().replace("-", "_")
+    if raw in {"sell_put", "put"}:
+        return "sell_put"
+    if raw in {"sell_call", "covered_call", "call"}:
+        return "covered_call"
+    mode = text(row.get("option_type") or row.get("mode")).lower()
+    if mode == "put":
+        return "sell_put"
+    if mode == "call":
+        return "covered_call"
+    return "unknown"
+
+
 def _candidate_change(row: dict[str, Any], *, reasons: list[str]) -> dict[str, Any]:
     return {
         "run_id": row.get("run_id"),
@@ -1000,6 +1227,8 @@ def _candidate_change(row: dict[str, Any], *, reasons: list[str]) -> dict[str, A
         "abs_delta": row.get("abs_delta"),
         "iv_rv_ratio": row.get("iv_rv_ratio"),
         "iv_minus_rv": row.get("iv_minus_rv"),
+        "iv_rv_history_percentile": row.get("iv_rv_history_percentile"),
+        "iv_rv_history_sample_count": row.get("iv_rv_history_sample_count"),
         "annualized_return": row.get("annualized_return"),
         "baseline_status": _status_group(row),
         "baseline_rule": row.get("filter_rule"),
@@ -1074,6 +1303,7 @@ def _render_markdown(result: dict[str, Any]) -> str:
                 f"### {variant['name']}",
                 f"- Accepted: {variant['accepted_count']} ({variant['newly_accepted_count']} newly accepted)",
                 f"- Rejected: {variant['rejected_count']} ({variant['newly_rejected_count']} newly rejected)",
+                f"- IV/RV history: {variant.get('iv_rv_history_status')} / {variant.get('iv_rv_history_modes')}",
                 f"- Top reasons: {variant['top_reasons']}",
             ]
         )

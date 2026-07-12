@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.shadow_replay.common import resolve_output_path, safety_payload, text, utc_now, write_json
+from src.application.shadow_replay.parameter_sets import EXPERIMENT_ONLY_PARAMETERS
 
 
 PROPOSAL_SCHEMA_VERSION = "strategy_lab_proposal.v1"
@@ -20,12 +21,15 @@ def build_strategy_lab_proposal(
     best, best_source = _best_variant(experiment_payload)
     evaluation = experiment_payload.get("evaluation") or {}
     variant_payload = _evaluated_variant_for_best(
-        experiment_payload=experiment_payload,
         evaluation=evaluation,
         best=best or {},
-        best_source=best_source,
     )
-    patch_allowed = _dry_run_patch_allowed(experiment_payload=experiment_payload, best=best or {}, best_source=best_source)
+    patch_allowed = _dry_run_patch_allowed(
+        experiment_payload=experiment_payload,
+        best=best or {},
+        best_source=best_source,
+        variant=variant_payload,
+    )
     dry_run_patch = (
         _dry_run_patch(experiment_payload=experiment_payload, best=best or {}, variant=variant_payload)
         if patch_allowed
@@ -44,12 +48,16 @@ def build_strategy_lab_proposal(
         best_source=best_source,
         dry_run_patch=dry_run_patch,
         patch_allowed=patch_allowed,
+        variant=variant_payload,
     )
     result: dict[str, Any] = {
         "schema_version": PROPOSAL_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),
         "status": status,
-        "strategy_family": (best or {}).get("strategy_family"),
+        "strategy_family": (
+            (best or {}).get("strategy_family")
+            or ("combo_yield" if best_source == "combo_yield_group" else None)
+        ),
         "recommended_variant": (best or {}).get("variant"),
         "confidence": _confidence(experiment_payload=experiment_payload, dry_run_patch=dry_run_patch),
         "runtime_config_write_allowed": False,
@@ -57,14 +65,12 @@ def build_strategy_lab_proposal(
         "dry_run_patch": dry_run_patch,
         "evidence_summary": _evidence_summary(
             experiment_payload=experiment_payload,
-            best=best or {},
             best_source=best_source,
         ),
-        "impact": _impact(best=best or {}, variant=variant_payload, best_source=best_source),
+        "impact": _impact(best=best or {}, variant=variant_payload),
         "counterexamples": _counterexamples(variant_payload),
         "group_advisory": _group_advisory(
             experiment_payload=experiment_payload,
-            best=best or {},
             best_source=best_source,
         ),
         "risks": _risks(experiment_payload=experiment_payload, limitations=limitations),
@@ -88,15 +94,14 @@ def build_strategy_lab_proposal(
 
 def _best_variant(experiment_payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     scorecard = experiment_payload.get("scorecard") or {}
-    if isinstance(scorecard, dict):
+    if isinstance(scorecard, dict) and text(scorecard.get("best_variant_basis")) == "strict_outcome_dominance":
         best = scorecard.get("best_variant")
         if isinstance(best, dict):
             return best, "single_leg"
-    combo = (((experiment_payload.get("group_experiments") or {}).get("combo_yield") or {}).get("scorecard") or {})
-    if isinstance(combo, dict):
-        best = combo.get("best_variant")
-        if isinstance(best, dict):
-            return best, "combo_yield_group"
+    combo_summary = (experiment_payload.get("group_experiments") or {}).get("combo_yield") or {}
+    single_leg_rows = (scorecard.get("rows") or []) if isinstance(scorecard, dict) else []
+    if not single_leg_rows and int((combo_summary.get("summary") or {}).get("group_count") or 0) > 0:
+        return None, "combo_yield_group"
     return None, "none"
 
 
@@ -127,19 +132,16 @@ def _proposal_status(
     patch_allowed: bool,
 ) -> str:
     experiment_status = text((experiment_payload.get("summary") or {}).get("status"))
-    if not best or not isinstance(best, dict):
-        return "not_ready"
-    if experiment_status not in {"ready_for_scorecard_review", "ready_for_proposal"}:
-        return "needs_more_evidence"
     if best_source == "combo_yield_group":
         return "data_gap_only"
+    if not best or not isinstance(best, dict):
+        return "needs_more_evidence" if experiment_payload.get("evaluation") else "not_ready"
+    if experiment_status not in {"ready_for_scorecard_review", "ready_for_proposal"}:
+        return "needs_more_evidence"
     if not patch_allowed:
         return "needs_more_evidence"
     if not dry_run_patch:
         return "data_gap_only"
-    score = float(best.get("objective_score") or 0.0)
-    if score <= 0:
-        return "no_change_recommended"
     return "shadow_rollout_candidate"
 
 
@@ -168,17 +170,33 @@ def _dry_run_patch(
     return patch
 
 
-def _dry_run_patch_allowed(*, experiment_payload: dict[str, Any], best: dict[str, Any], best_source: str) -> bool:
+def _dry_run_patch_allowed(
+    *,
+    experiment_payload: dict[str, Any],
+    best: dict[str, Any],
+    best_source: str,
+    variant: dict[str, Any] | None,
+) -> bool:
     if best_source != "single_leg":
+        return False
+    if text((experiment_payload.get("scorecard") or {}).get("best_variant_basis")) != "strict_outcome_dominance":
         return False
     family = text(best.get("strategy_family"))
     if family not in {"sell_put", "covered_call"}:
+        return False
+    if _has_experiment_only_parameters(variant):
         return False
     evaluation = experiment_payload.get("evaluation") or {}
     if text(evaluation.get("data_mode")) != "closed_replay":
         return False
     production_gate = (evaluation.get("gates") or {}).get("production_recommendation") or {}
     return bool(production_gate.get("allowed"))
+
+
+def _has_experiment_only_parameters(variant: dict[str, Any] | None) -> bool:
+    parameters = (variant or {}).get("parameters") or {}
+    profile_params = parameters.get("insurance_underwriting") if isinstance(parameters, dict) else None
+    return isinstance(profile_params, dict) and bool(EXPERIMENT_ONLY_PARAMETERS & set(profile_params))
 
 
 def _baseline_parameters(experiment_payload: dict[str, Any], *, family: str) -> dict[str, Any]:
@@ -208,19 +226,10 @@ def _evaluated_variant(evaluation: dict[str, Any], name: str) -> dict[str, Any] 
 
 def _evaluated_variant_for_best(
     *,
-    experiment_payload: dict[str, Any],
     evaluation: dict[str, Any],
     best: dict[str, Any],
-    best_source: str,
 ) -> dict[str, Any] | None:
-    name = text(best.get("variant"))
-    if best_source == "combo_yield_group":
-        combo = (experiment_payload.get("group_experiments") or {}).get("combo_yield") or {}
-        for variant in combo.get("variants") or []:
-            if variant.get("name") == name:
-                return variant
-        return None
-    return _evaluated_variant(evaluation, name)
+    return _evaluated_variant(evaluation, text(best.get("variant")))
 
 
 def _confidence(*, experiment_payload: dict[str, Any], dry_run_patch: dict[str, Any]) -> str:
@@ -239,7 +248,6 @@ def _confidence(*, experiment_payload: dict[str, Any], dry_run_patch: dict[str, 
 def _evidence_summary(
     *,
     experiment_payload: dict[str, Any],
-    best: dict[str, Any],
     best_source: str,
 ) -> dict[str, Any]:
     summary = experiment_payload.get("summary") or {}
@@ -253,27 +261,18 @@ def _evidence_summary(
         "data_mode": evaluation.get("data_mode"),
         "universe_scope": evaluation.get("universe_scope"),
         "variant_count": summary.get("variant_count"),
-        "objective_score": best.get("objective_score"),
+        "best_variant_basis": (experiment_payload.get("scorecard") or {}).get("best_variant_basis"),
         "best_source": best_source,
-        "optimization_claim": _optimization_claim(experiment_payload=experiment_payload, best_source=best_source),
-        "combo_yield_group_optimizer_status": combo_summary.get("status"),
+        "optimization_claim": (experiment_payload.get("scorecard") or {}).get("optimization_claim"),
+        "combo_yield_group_evaluator_status": combo_summary.get("status"),
         "combo_yield_ready_group_count": combo_summary.get("ready_group_count"),
-        "combo_yield_group_variant_count": combo_summary.get("variant_count"),
+        "combo_yield_evaluable_group_count": combo_summary.get("evaluable_group_count"),
     }
 
 
-def _impact(*, best: dict[str, Any], variant: dict[str, Any] | None, best_source: str) -> dict[str, Any]:
-    if best_source == "combo_yield_group":
-        return {
-            "accepted_group_count": best.get("accepted_group_count"),
-            "newly_accepted_group_count": best.get("newly_accepted_group_count"),
-            "newly_rejected_group_count": best.get("newly_rejected_group_count"),
-            "safety_violation_count": best.get("safety_violation_count"),
-            "missing_metric_count": best.get("missing_metric_count"),
-            "accepted_group_samples": list((variant or {}).get("accepted_group_samples") or [])[:10],
-            "newly_accepted_group_ids": list((variant or {}).get("newly_accepted_group_ids") or [])[:20],
-            "newly_rejected_group_ids": list((variant or {}).get("newly_rejected_group_ids") or [])[:20],
-        }
+def _impact(*, best: dict[str, Any], variant: dict[str, Any] | None) -> dict[str, Any]:
+    if not best:
+        return {}
     return {
         "candidate_count": best.get("candidate_count"),
         "newly_accepted_count": best.get("newly_accepted_count"),
@@ -288,7 +287,6 @@ def _impact(*, best: dict[str, Any], variant: dict[str, Any] | None, best_source
 def _group_advisory(
     *,
     experiment_payload: dict[str, Any],
-    best: dict[str, Any],
     best_source: str,
 ) -> dict[str, Any] | None:
     if best_source != "combo_yield_group":
@@ -299,13 +297,10 @@ def _group_advisory(
     return {
         "strategy_family": "combo_yield",
         "status": summary.get("status"),
-        "recommended_variant": best.get("variant"),
-        "optimization_claim": summary.get("optimization_claim"),
         "ready_group_count": summary.get("ready_group_count"),
-        "variant_count": summary.get("variant_count"),
+        "evaluable_group_count": summary.get("evaluable_group_count"),
         "scorecard_status": scorecard.get("status"),
         "limitations": scorecard.get("limitations") or [],
-        "dry_run_patch_allowed": False,
     }
 
 
@@ -333,20 +328,21 @@ def _risks(*, experiment_payload: dict[str, Any], limitations: list[str]) -> lis
     return out
 
 
-def _optimization_claim(*, experiment_payload: dict[str, Any], best_source: str) -> Any:
+def _patch_blocker(
+    *,
+    experiment_payload: dict[str, Any],
+    best: dict[str, Any],
+    best_source: str,
+    variant: dict[str, Any] | None,
+) -> str | None:
     if best_source == "combo_yield_group":
-        combo = (experiment_payload.get("group_experiments") or {}).get("combo_yield") or {}
-        return (combo.get("scorecard") or {}).get("optimization_claim") or (combo.get("summary") or {}).get(
-            "optimization_claim"
-        )
-    return (experiment_payload.get("scorecard") or {}).get("optimization_claim")
-
-
-def _patch_blocker(*, experiment_payload: dict[str, Any], best: dict[str, Any], best_source: str) -> str | None:
-    if best_source == "combo_yield_group":
-        return "combo_yield_group_optimizer_does_not_emit_single_leg_patch"
+        return "combo_yield_group_evaluator_does_not_emit_single_leg_patch"
+    if not best or text((experiment_payload.get("scorecard") or {}).get("best_variant_basis")) != "strict_outcome_dominance":
+        return "strict_outcome_dominance_required_for_patch"
     if text(best.get("strategy_family")) not in {"sell_put", "covered_call"}:
         return "unsupported_strategy_family_for_patch"
+    if _has_experiment_only_parameters(variant):
+        return "offline_only_variant_not_patchable"
     evaluation = experiment_payload.get("evaluation") or {}
     if text(evaluation.get("data_mode")) != "closed_replay":
         return "closed_replay_outcome_required_for_patch"
@@ -363,6 +359,7 @@ def _limitations(
     best_source: str,
     dry_run_patch: dict[str, Any],
     patch_allowed: bool,
+    variant: dict[str, Any] | None,
 ) -> list[str]:
     scorecard = experiment_payload.get("scorecard") or {}
     limitations = list(scorecard.get("limitations") or [])
@@ -378,9 +375,16 @@ def _limitations(
         ]
     )
     if not patch_allowed:
-        blocker = _patch_blocker(experiment_payload=experiment_payload, best=best, best_source=best_source)
+        blocker = _patch_blocker(
+            experiment_payload=experiment_payload,
+            best=best,
+            best_source=best_source,
+            variant=variant,
+        )
         if blocker:
             limitations.append(blocker)
+    if text((experiment_payload.get("evaluation") or {}).get("data_mode")) != "closed_replay":
+        limitations.append("closed_replay_outcome_required_for_patch")
     if not dry_run_patch:
         limitations.append("no_supported_single_leg_patch")
     out: list[str] = []

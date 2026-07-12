@@ -11,7 +11,7 @@ context for local strategy analysis.
 """
 
 from src.application.strategy_lab.decisions import build_decision_instances
-from src.application.strategy_lab.combo_optimizer import run_combo_yield_group_experiment
+from src.application.strategy_lab.combo_evaluator import run_combo_yield_group_experiment
 from src.application.strategy_lab.experiment import run_strategy_lab_experiment
 from src.application.strategy_lab.hypotheses import generate_strategy_lab_hypotheses
 from src.application.strategy_lab.llm_context import build_strategy_lab_llm_context
