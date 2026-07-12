@@ -155,6 +155,59 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_yaml_combo_yield_keeps_only_authored_fields_explicit(tmp_path: Path) -> None:
+    from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA, FUTU]
+    overrides:
+      NVDA:
+        combo_yield: true
+      FUTU:
+        combo_yield:
+          enabled: true
+          max_call_cost_to_put_credit: 0.30
+          call:
+            min_delta: 0.12
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+    policies = {}
+    for item in cfg["symbols"]:
+        resolved = resolve_watchlist_item_runtime_config(
+            item=item,
+            profiles=cfg["templates"],
+            apply_profiles_fn=apply_profiles,
+        )
+        policies[item["symbol"]] = derive_yield_enhancement_policy(
+            resolved["combo_yield"],
+            resolved["sell_put"],
+            market="us",
+        )
+
+    defaulted = policies["NVDA"]
+    assert defaulted.explicit_fields == ("enabled",)
+    assert defaulted.config["max_call_cost_to_put_credit"] == 0.20
+    assert defaulted.config["min_net_credit_retention"] == 0.75
+    assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
+
+    overridden = policies["FUTU"]
+    assert overridden.explicit_fields == ("enabled", "max_call_cost_to_put_credit", "call")
+    assert overridden.config["max_call_cost_to_put_credit"] == 0.30
+    assert overridden.config["min_net_credit_retention"] == 0.75
+    assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
+
+
 def test_yaml_config_keeps_explicit_sell_put_underwriting_thresholds(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",

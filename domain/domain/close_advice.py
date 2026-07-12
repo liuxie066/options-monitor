@@ -617,6 +617,7 @@ def evaluate_short_vol_close_advice(
             row,
             reason=f"缺少 short-vol 平仓评估数据: {', '.join(missing)}",
             flag="short_vol_risk_data_missing",
+            preserve_action=str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_PROFIT_CAPTURE,
         )
 
     ratio = safe_float(risk_fields.get("iv_rv_ratio"))
@@ -662,14 +663,22 @@ def _short_vol_close_risk_input(inp: CloseAdviceInput, quote_row: dict[str, Any]
     return row
 
 
-def _short_vol_not_evaluable(row: dict[str, Any], *, reason: str, flag: str) -> dict[str, Any]:
+def _short_vol_not_evaluable(
+    row: dict[str, Any],
+    *,
+    reason: str,
+    flag: str,
+    preserve_action: bool = False,
+) -> dict[str, Any]:
     out = dict(row)
-    out["tier"] = "not_evaluable"
-    out["tier_label"] = TIER_LABELS["not_evaluable"]
-    out["reason"] = reason
+    if not preserve_action:
+        out["tier"] = "not_evaluable"
+        out["tier_label"] = TIER_LABELS["not_evaluable"]
+        out["reason"] = reason
+        out["exit_state"] = EXIT_STATE_NOT_EVALUABLE
+        out["exit_reason_type"] = EXIT_REASON_TYPE_NOT_EVALUABLE
     out["short_vol_thesis_status"] = "not_evaluable"
-    out["exit_state"] = EXIT_STATE_NOT_EVALUABLE
-    out["exit_reason_type"] = EXIT_REASON_TYPE_NOT_EVALUABLE
+    out["short_vol_reason"] = reason
     flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
     flags.append(flag)
     out["data_quality_flags"] = ";".join(dict.fromkeys(flags))

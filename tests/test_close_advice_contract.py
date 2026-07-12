@@ -209,6 +209,35 @@ def test_short_vol_event_context_profit_still_uses_return_capture() -> None:
     assert "到期前存在事件风险" in row["short_vol_reason"]
 
 
+def test_short_vol_missing_risk_data_keeps_profit_capture_action() -> None:
+    inp = _short_put_input()
+    base = evaluate_close_advice(inp, CloseAdviceConfig())
+    row = evaluate_short_vol_close_advice(
+        inp,
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": -0.20,
+            "implied_volatility": 0.30,
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+
+    assert row["tier"] == base["tier"] == "strong"
+    assert row["reason"] == base["reason"]
+    assert row["exit_state"] == EXIT_STATE_PROFIT_CAPTURE
+    assert row["exit_reason_type"] == EXIT_REASON_TYPE_PROFIT_CAPTURE
+    assert row["short_vol_thesis_status"] == "not_evaluable"
+    assert row["short_vol_reason"] == "缺少 short-vol 平仓评估数据: rv"
+    assert "short_vol_risk_data_missing" in row["data_quality_flags"]
+
+
 def test_short_vol_profitable_soft_risk_without_capture_is_hold_observation() -> None:
     row = evaluate_short_vol_close_advice(
         _short_put_input(close_mid=0.80, bid=0.79, ask=0.81, dte=30),
