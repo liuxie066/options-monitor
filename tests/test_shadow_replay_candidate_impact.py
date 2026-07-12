@@ -26,8 +26,6 @@ def _params() -> dict:
                 "insurance_underwriting": {
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
-                    "min_abs_delta": 0.15,
-                    "max_abs_delta": 0.30,
                     "min_dte": 20,
                     "max_dte": 60,
                 },
@@ -69,6 +67,22 @@ def test_parameter_set_rejects_non_tunable_safety_floor() -> None:
         )
 
 
+def test_parameter_set_rejects_delta_as_underwriting_filter() -> None:
+    from src.application.shadow_replay.parameter_sets import parse_parameter_set
+
+    with pytest.raises(ValueError, match="non-tunable parameters: max_abs_delta"):
+        parse_parameter_set(
+            {
+                "variants": [
+                    {
+                        "name": "legacy_delta_gate",
+                        "insurance_underwriting": {"max_abs_delta": 0.30},
+                    }
+                ]
+            }
+        )
+
+
 def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_candidate_impact
 
@@ -88,7 +102,8 @@ def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(
                 "delta": -0.20,
                 "dte": 30,
                 "spread_ratio": 0.10,
-                "single_trade_concentration": 0.02,
+                "single_trade_concentration": 0.20,
+                "max_single_trade_nav_pct": 0.05,
                 "net_income": 120,
             },
             {
@@ -357,7 +372,6 @@ def test_candidate_impact_reports_parameter_field_evidence_gap(tmp_path: Path) -
     assert result["evidence_quality"]["complete_candidate_count"] == 0
     assert result["evidence_quality"]["field_coverage"]["dte"]["missing_count"] == 1
     assert set(result["recommendation"]["missing_required_fields"]) == {
-        "abs_delta",
         "dte",
         "iv_minus_rv",
         "iv_rv_ratio",

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from src.application.shadow_replay.common import (
-    abs_first_float,
     first_float,
     normal_status,
     resolve_output_path,
@@ -212,8 +211,6 @@ def _empirical_baseline(candidates: list[dict[str, Any]]) -> dict[str, float]:
     values = {
         "min_iv_rv_ratio": [value for row in source if (value := first_float(row, "iv_rv_ratio")) is not None],
         "min_iv_minus_rv": [value for row in source if (value := first_float(row, "iv_minus_rv")) is not None],
-        "min_abs_delta": [value for row in source if (value := abs_first_float(row, "abs_delta", "delta")) is not None],
-        "max_abs_delta": [value for row in source if (value := abs_first_float(row, "abs_delta", "delta")) is not None],
         "min_dte": [value for row in source if (value := first_float(row, "dte")) is not None],
         "max_dte": [value for row in source if (value := first_float(row, "dte")) is not None],
         "min_annualized_return": [
@@ -225,9 +222,6 @@ def _empirical_baseline(candidates: list[dict[str, Any]]) -> dict[str, float]:
             continue
         value = max(field_values) if key.startswith("max_") else min(field_values)
         params[key] = round(float(value), 6)
-    if params.get("min_abs_delta") is not None and params.get("max_abs_delta") is not None:
-        if params["min_abs_delta"] > params["max_abs_delta"]:
-            params["min_abs_delta"], params["max_abs_delta"] = params["max_abs_delta"], params["min_abs_delta"]
     if params.get("min_dte") is not None and params.get("max_dte") is not None:
         if params["min_dte"] > params["max_dte"]:
             params["min_dte"], params["max_dte"] = params["max_dte"], params["min_dte"]
@@ -242,8 +236,6 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
         clean = {key: round(float(value), 6) for key, value in params.items() if key in UNDERWRITING_PARAMETERS}
         if not clean:
             return
-        if "min_abs_delta" in clean and "max_abs_delta" in clean and clean["min_abs_delta"] > clean["max_abs_delta"]:
-            return
         if "min_dte" in clean and "max_dte" in clean and clean["min_dte"] > clean["max_dte"]:
             return
         signature = tuple(sorted(clean.items()))
@@ -251,14 +243,6 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
             return
         seen.add(signature)
         variants.append(ParameterVariant(name=f"{family}_{name}", profiles={CURRENT_UNDERWRITING_PROFILE: clean}))
-
-    if {"min_abs_delta", "max_abs_delta"} & set(baseline):
-        params = dict(baseline)
-        if "min_abs_delta" in params:
-            params["min_abs_delta"] = max(0.01, params["min_abs_delta"] - 0.02)
-        if "max_abs_delta" in params:
-            params["max_abs_delta"] = min(0.95, params["max_abs_delta"] + 0.02)
-        add("loosen_delta_band", params)
 
     if {"min_dte", "max_dte"} & set(baseline):
         params = dict(baseline)
@@ -282,10 +266,6 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
         add("relax_return_floor", params)
 
     params = dict(baseline)
-    if "min_abs_delta" in params:
-        params["min_abs_delta"] = max(0.01, params["min_abs_delta"] - 0.02)
-    if "max_abs_delta" in params:
-        params["max_abs_delta"] = min(0.95, params["max_abs_delta"] + 0.02)
     if "min_dte" in params:
         params["min_dte"] = max(1.0, params["min_dte"] - 5.0)
     if "max_dte" in params:

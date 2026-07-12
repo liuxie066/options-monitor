@@ -14,8 +14,6 @@ ALLOWED_PARAMETERS = {
     CURRENT_UNDERWRITING_PROFILE: {
         "min_iv_rv_ratio",
         "min_iv_minus_rv",
-        "min_abs_delta",
-        "max_abs_delta",
         "min_dte",
         "max_dte",
         "min_annualized_return",
@@ -132,7 +130,5 @@ def _number(value: Any, *, label: str) -> float:
 
 
 def _validate_range(params: dict[str, float], *, variant_name: str, profile: str) -> None:
-    if "min_abs_delta" in params and "max_abs_delta" in params and params["min_abs_delta"] > params["max_abs_delta"]:
-        raise ValueError(f"variant {variant_name}.{profile} min_abs_delta cannot exceed max_abs_delta")
     if "min_dte" in params and "max_dte" in params and params["min_dte"] > params["max_dte"]:
         raise ValueError(f"variant {variant_name}.{profile} min_dte cannot exceed max_dte")

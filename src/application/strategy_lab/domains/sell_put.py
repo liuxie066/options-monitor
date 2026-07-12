@@ -9,8 +9,6 @@ ADAPTER = StrategyDomainAdapter(
     decision_scope="single_leg_short_put",
     hypothesis_scope="shadow_replay_parameter_set",
     tunable_parameters=(
-        "min_abs_delta",
-        "max_abs_delta",
         "min_dte",
         "max_dte",
         "min_iv_rv_ratio",
@@ -21,7 +19,6 @@ ADAPTER = StrategyDomainAdapter(
         "instrument_identity",
         "event_risk",
         "spread_liquidity_floor",
-        "single_trade_concentration_cap",
         "cash_secured_capacity",
         "trade_state",
     ),
