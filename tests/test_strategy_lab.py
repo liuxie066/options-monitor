@@ -401,6 +401,18 @@ def test_strategy_lab_hypotheses_generate_parameter_set_and_domain_adapters(tmp_
     variants = result["parameter_set"]["variants"]
     assert any(variant["name"].startswith("sell_put_") for variant in variants)
     assert any(variant["name"].startswith("covered_call_") for variant in variants)
+    assert all("delta" not in variant["name"] for variant in variants)
+    assert all(
+        not ({"min_abs_delta", "max_abs_delta"} & set(variant["profiles"]["insurance_underwriting"]))
+        for variant in variants
+    )
+    single_leg_adapters = [
+        item["adapter"]
+        for item in result["domain_hypotheses"]
+        if item["strategy_family"] in {"sell_put", "covered_call"}
+    ]
+    assert all("min_abs_delta" not in adapter["tunable_parameters"] for adapter in single_leg_adapters)
+    assert all("max_abs_delta" not in adapter["tunable_parameters"] for adapter in single_leg_adapters)
     combo = next(item for item in result["domain_hypotheses"] if item["strategy_family"] == "combo_yield")
     assert combo["status"] == "group_experiment_delegated"
     assert combo["adapter"]["hypothesis_enabled"] is False
@@ -452,6 +464,10 @@ def test_strategy_lab_experiment_runs_candidate_impact_scorecard(tmp_path: Path)
     assert result["group_experiments"]["combo_yield"]["schema_version"] == "strategy_lab_combo_yield_group_experiment.v1"
     assert result["group_experiments"]["combo_yield"]["scorecard"]["status"] == "ready"
     assert result["scorecard"]["best_variant"]["variant"]
+    assert result["scorecard"]["optimization_claim"] == "candidate_impact_only"
+    assert result["scorecard"]["best_variant_basis"] == "candidate_impact_score"
+    assert all(row["domain_metrics_status"] == "declared_not_scored" for row in result["scorecard"]["rows"])
+    assert "declared_outcome_metrics_are_not_scored_yet" in result["scorecard"]["limitations"]
     assert "combo_yield_group_optimizer_not_implemented" not in result["scorecard"]["limitations"]
     assert "combo_yield_group_experiment_reported_separately" in result["scorecard"]["limitations"]
     assert result["safety"]["writes_runtime_config"] is False

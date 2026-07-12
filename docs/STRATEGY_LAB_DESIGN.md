@@ -265,19 +265,19 @@ decision_instance -> hypotheses -> evaluation -> scorecard -> proposal
 
 可调参数：
 
-- put delta band
 - DTE
 - IV/RV
 - IV-RV
 - annualized return
-- assignment notional cap 的建议值
+
+Delta 和集中度只作为观测、分桶和结果解释字段，不作为默认 underwriting 参数 variant。
 
 硬约束：
 
 - event risk fail-closed
 - liquidity hard floor
-- concentration hard cap
 - instrument identity
+- cash-secured capacity
 
 核心指标：
 
@@ -299,11 +299,12 @@ decision_instance -> hypotheses -> evaluation -> scorecard -> proposal
 
 可调参数：
 
-- call delta band
 - DTE
-- strike / cost basis multiplier
-- premium threshold
-- right-tail opportunity cost limit
+- IV/RV
+- IV-RV
+- annualized return
+
+Delta 只作为观测字段；call-away rate 和 missed upside 是结果指标，不是默认拒绝条件。
 
 硬约束：
 
@@ -382,8 +383,6 @@ MVP 对 Combo Yield 的要求是识别 group、readiness blocker，并在证据�
 
 MVP 可调参数：
 
-- `min_abs_delta`
-- `max_abs_delta`
 - `min_dte`
 - `max_dte`
 - `min_iv_rv_ratio`
@@ -396,8 +395,8 @@ MVP 可调参数：
 
 - event risk
 - spread / liquidity hard floor
-- concentration hard cap
 - instrument identity
+- cash / covered-share capacity
 - trade state
 - notification behavior
 - broker-facing state
@@ -451,7 +450,7 @@ objective_score =
   risk_adjusted_return
   - max_adverse_excursion_penalty
   - tail_loss_penalty
-  - assignment_or_callaway_penalty
+  - lifecycle_loss_penalty
   - liquidity_penalty
   - concentration_penalty
   - missed_opportunity_penalty
@@ -482,7 +481,8 @@ Scorecard 必须按 strategy family 输出 domain-specific 指标：
 
 | 层级 | 用途 | 当前状态 |
 |---|---|---|
-| common scorecard | 样本量、accepted/rejected 变化、annualized return、基础风险字段 | 已落地轻量版 |
+| candidate-impact scorecard | 样本量、accepted/rejected 变化和 safety violation | 已落地；只用于候选影响审阅 |
+| outcome scorecard | 生命周期收益、回撤、尾部风险和机会成本 | 尚未计分；当前仅声明所需指标 |
 | family scorecard | Sell Put / Covered Call / Combo Yield 的策略语义指标 | Sell Put / Covered Call 标记已落地，Combo Yield group scorecard 已落地 |
 | promotion scorecard | 是否进入 shadow rollout | 目标能力，必须等 outcome facts 和 holdout 足够 |
 
@@ -525,7 +525,6 @@ Proposal 输出规则：
   "status": "shadow_rollout_recommended",
   "runtime_config_write_allowed": false,
   "dry_run_patch": {
-    "sell_put.insurance_underwriting.max_abs_delta": 0.24,
     "sell_put.insurance_underwriting.min_iv_rv_ratio": 1.25
   },
   "confidence": "medium",
