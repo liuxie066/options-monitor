@@ -1492,6 +1492,7 @@ def _materialize_views(
             normalize_broker=ctx.normalize_broker,
             resolve_option_positions_repo=ctx.resolve_option_positions_repo,
             build_monthly_income_report=ctx.build_monthly_income_report,
+            refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
             get_exchange_rates=ctx.get_exchange_rates,
             repo_base=ctx.repo_base,
             mask_path=ctx.mask_path,

@@ -14,6 +14,13 @@ EXPERIMENT_ONLY_PARAMETERS = {
     "min_iv_rv_percentile",
     "min_iv_rv_history_samples",
 }
+PRODUCTION_CLOSED_REPLAY_PARAMETERS = {
+    "min_iv_rv_ratio",
+    "min_iv_minus_rv",
+    "min_dte",
+    "max_dte",
+    "min_annualized_return",
+}
 ALLOWED_PARAMETERS = {
     CURRENT_UNDERWRITING_PROFILE: {
         "min_iv_rv_ratio",
@@ -34,7 +41,22 @@ class ParameterVariant:
     strategy_family: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"name": self.name, "profiles": self.profiles}
+        changed_fields = sorted({key for params in self.profiles.values() for key in params})
+        production_eligible = (
+            len(changed_fields) == 1
+            and changed_fields[0] in PRODUCTION_CLOSED_REPLAY_PARAMETERS
+        )
+        payload: dict[str, Any] = {
+            "name": self.name,
+            "profiles": self.profiles,
+            "changed_fields": changed_fields,
+            "production_closed_replay_eligible": production_eligible,
+            "production_closed_replay_reason": (
+                "single_production_parameter"
+                if production_eligible
+                else "closed_replay_requires_exactly_one_production_parameter"
+            ),
+        }
         if self.strategy_family:
             payload["strategy_family"] = self.strategy_family
         return payload

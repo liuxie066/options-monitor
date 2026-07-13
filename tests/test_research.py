@@ -447,7 +447,7 @@ def test_research_shadow_replay_uses_mark_and_outcome_paths(tmp_path: Path) -> N
     shadow_replay = data["bundle"]["candidate_evidence"]["shadow_replay"]
     assert data["status"] == "ok"
     assert data["bundle"]["candidate_evidence"]["summary"]["shadow_replay_status"] == "needs_human_review"
-    assert shadow_replay["summary"]["evidence_level"] == "closed_replay"
+    assert shadow_replay["summary"]["evidence_level"] == "outcome_incomplete"
     assert shadow_replay["outcome_coverage"]["marked_instrument_count"] == 2
     assert shadow_replay["path_risk"]["by_status"]["rejected"]["max_adverse_pnl"] == -50
     assert shadow_replay["outcome_stats"]["by_status"]["accepted"]["realized_pnl_total"] == 100

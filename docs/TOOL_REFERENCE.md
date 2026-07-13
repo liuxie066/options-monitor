@@ -483,13 +483,13 @@ om-agent run --tool candidate_filter_explain --input-json '{"trace_path":"output
 - `research shadow-replay run-data-plan` 消费 `status.data_plan`；默认 dry-run 且不写 receipt，显式 `--write` 才执行本地采样 / settle 并写本地 receipt；人工复盘仍走 `analyze`
 - `research shadow-replay collect-marks` 是数据采样入口，可从本地 required-data cache 或显式 OpenD 当前报价追加 mark path
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
-- `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
+- `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome；settlement 会传播生命周期净收益、资本天数、费用完整性、Covered Call lot allocation 和 `lifecycle_quality`，指派/被行权但缺后续正股生命周期时标记 `transition_only`
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats、review_readiness 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
-- `research shadow-replay candidate-impact` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 候选影响对比，比较 production observed 与阈值 variants 会新增/移除哪些候选，不重建历史期权链、不修改 runtime config
+- `research shadow-replay candidate-impact` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 候选影响对比，比较 production observed 与阈值 variants 会新增/移除哪些候选；只有费用和 lot 归因完整的 complete-closed lifecycle 才能进入生产参数比较，多参数 variant 仍可 Shadow 但不具备生产建议资格
 - `research shadow-replay candidate-impact-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config
 - `research archive pull/verify/inventory/build-datasets/prune-remote` 是远端空间有限时的证据归档链路：先把远端 runtime 证据 rsync 到本地 `output_shared/research/remote_archive/<remote>/`，再从 verified archive 生成 Shadow Replay dataset
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
-- 只输出人工复盘证据和候选影响对比，不自动改配置
+- 只输出人工复盘证据和候选影响对比；`closed_replay_comparison` 只给单参数人工复核候选，`runtime_config_write_allowed=false`，不自动改配置
 
 示例：
 
