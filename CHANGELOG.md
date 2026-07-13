@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.391 - 2026-07-13
+
+### Added
+- Added stable Close Advice lot identities and assigned-stock lifecycle evidence, including quotes, assignment dates, inventory days, fees, net returns, and capital days.
+- Added ranked portfolio-capacity shadow output across symbols without changing production candidate selection.
+
+### Changed
+- Made trade receipts show opening premium cash flow alongside fill details.
+
 ## 1.2.390 - 2026-07-13
 
 ### Changed
