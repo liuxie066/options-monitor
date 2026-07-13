@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -214,6 +215,9 @@ def build_trade_intake_receipt_message(
         lines.append(f"数量：{contracts} 张")
     if price not in (None, ""):
         lines.append(f"成交价：{price}")
+    funds = _premium_cashflow_text(deal, result, payload)
+    if funds:
+        lines.append(f"资金：{funds}")
     if trade_time:
         lines.append(f"成交时间：{trade_time}")
     status_text = (
@@ -326,6 +330,26 @@ def _option_type_text(value: str | None) -> str | None:
     if raw == "call":
         return "Call"
     return _optional_str(value)
+
+
+def _premium_cashflow_text(deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) -> str | None:
+    if str(_value("option_type", deal, result, payload) or "").lower() not in {"put", "call"}:
+        return None
+    side = str(_value("side", deal, result, payload) or "").lower()
+    values = (
+        _value("price", deal, result, payload),
+        _value("contracts", deal, result, payload) or _value("qty", deal, result, payload),
+        _value("multiplier", deal, result, payload),
+    )
+    currency = str(_value("currency", deal, result, payload) or "").upper()
+    if side not in {"buy", "sell"} or not currency or any(value is None for value in values):
+        return None
+    try:
+        amount = Decimal(values[0]) * Decimal(values[1]) * Decimal(values[2])
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    direction = "流入" if side == "sell" else "流出"
+    return f"权利金毛{direction} {currency} {amount:,.2f}"
 
 
 def _assigned_stock_candidate_lines(diagnostics: dict[str, Any]) -> list[str]:
