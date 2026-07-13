@@ -195,3 +195,123 @@ def compute_short_put_cash_secured(
     if total_contracts > 0 and open_contracts < total_contracts:
         cash_secured = float(cash_secured) / float(total_contracts) * float(open_contracts)
     return max(0.0, float(cash_secured))
+
+
+def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Greedily allocate existing ranked candidates without changing their rank."""
+
+    cash_pools = _consistent_pools(
+        ranked_rows,
+        key_fields=("account",),
+        value_fields=("cash_free_cny", "cash_free_total_cny"),
+    )
+    share_pools = _consistent_pools(
+        ranked_rows,
+        key_fields=("account", "symbol"),
+        value_fields=("shares_available_for_cover",),
+    )
+    selected_groups: set[tuple[str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for rank, source in enumerate(ranked_rows, start=1):
+        row = dict(source)
+        account = str(row.get("account") or "").strip().lower()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        family = _strategy_family(row)
+        group = (account, symbol, family)
+        result = {
+            **row,
+            "allocation_rank": rank,
+            "strategy_family": family,
+            "allocation_status": "not_evaluable",
+            "allocation_reason": "strategy_family_missing",
+            "allocated_contracts": 0,
+            "capacity_before": None,
+            "capacity_required": None,
+            "capacity_after": None,
+            "capacity_unit": None,
+        }
+        if not account or not symbol or family not in {"sell_put", "covered_call"}:
+            out.append(result)
+            continue
+        if group in selected_groups:
+            result.update(
+                allocation_status="alternative_not_allocated",
+                allocation_reason="primary_candidate_already_allocated",
+            )
+            out.append(result)
+            continue
+
+        contracts = max(1, _to_nonnegative_int(row.get("contracts") or row.get("contract_count") or 1))
+        if family == "sell_put":
+            pool_key = (account,)
+            pool = cash_pools.get(pool_key)
+            required = _to_float(row.get("cash_required_cny") or row.get("assignment_notional_cny"))
+            unit = "CNY"
+        else:
+            pool_key = (account, symbol.lower())
+            pool = share_pools.get(pool_key)
+            multiplier = _to_float(row.get("multiplier"))
+            required = multiplier * contracts if multiplier is not None and multiplier > 0 else None
+            unit = "shares"
+        result.update(capacity_before=pool, capacity_required=required, capacity_unit=unit)
+        if pool is None:
+            result["allocation_reason"] = "capacity_pool_missing_or_inconsistent"
+        elif required is None or required <= 0:
+            result["allocation_reason"] = "candidate_capacity_requirement_missing"
+        elif required > pool:
+            result.update(
+                allocation_status="capacity_blocked",
+                allocation_reason="portfolio_capacity_insufficient",
+                capacity_after=pool,
+            )
+        else:
+            remaining = max(0.0, pool - required)
+            if family == "sell_put":
+                cash_pools[pool_key] = remaining
+            else:
+                share_pools[pool_key] = remaining
+            selected_groups.add(group)
+            result.update(
+                allocation_status="allocated",
+                allocation_reason="portfolio_capacity_supported",
+                allocated_contracts=contracts,
+                capacity_after=remaining,
+            )
+        out.append(result)
+    return out
+
+
+def _strategy_family(row: dict[str, Any]) -> str:
+    value = str(row.get("strategy_family") or "").strip().lower()
+    if value in {"sell_put", "covered_call"}:
+        return value
+    option_type = str(row.get("option_type") or row.get("mode") or "").strip().lower()
+    return "sell_put" if option_type == "put" else "covered_call" if option_type == "call" else ""
+
+
+def _consistent_pools(
+    rows: list[dict[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+    value_fields: tuple[str, ...],
+) -> dict[tuple[str, ...], float | None]:
+    values: dict[tuple[str, ...], list[float]] = {}
+    for row in rows:
+        key = tuple(str(row.get(field) or "").strip().lower() for field in key_fields)
+        if not all(key):
+            continue
+        value = next(
+            (
+                parsed
+                for field in value_fields
+                if (parsed := _to_float(row.get(field))) is not None
+            ),
+            None,
+        )
+        if value is not None and value >= 0:
+            values.setdefault(key, []).append(value)
+    out: dict[tuple[str, ...], float | None] = {}
+    for key, items in values.items():
+        first = items[0]
+        out[key] = first if all(abs(item - first) <= 1e-6 for item in items[1:]) else None
+    return out
