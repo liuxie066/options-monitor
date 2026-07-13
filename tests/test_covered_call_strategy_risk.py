@@ -190,7 +190,7 @@ def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: P
     assert "net_income_missing" in trace
 
 
-def test_covered_call_underwriting_ranking_prefers_premium_edge_then_upside_margin(tmp_path: Path) -> None:
+def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicates_income(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -200,7 +200,7 @@ def test_covered_call_underwriting_ranking_prefers_premium_edge_then_upside_marg
         [
             _candidate(contract_symbol="LOW_UPSIDE", strike=125.0, spot=110.0, net_income=210.0),
             _candidate(contract_symbol="HIGH_UPSIDE", strike=140.0, spot=110.0, net_income=210.0),
-            _candidate(contract_symbol="RICH", strike=126.0, spot=110.0, net_income=280.0, annualized_net_premium_return=0.18),
+            _candidate(contract_symbol="RICH", strike=126.0, spot=110.0, net_income=280.0),
         ]
     )
 
@@ -217,9 +217,11 @@ def test_covered_call_underwriting_ranking_prefers_premium_edge_then_upside_marg
         out_path=out_path,
     )
 
-    assert list(filtered["contract_symbol"]) == ["RICH", "HIGH_UPSIDE", "LOW_UPSIDE"]
+    assert list(filtered["contract_symbol"]) == ["HIGH_UPSIDE", "RICH", "LOW_UPSIDE"]
     assert set(filtered["effective_min_strike"]) == {120.0}
-    assert filtered.iloc[1]["strike_upside_margin_pct"] > filtered.iloc[2]["strike_upside_margin_pct"]
+    by_contract = filtered.set_index("contract_symbol")
+    assert by_contract.loc["RICH", "premium_edge_score"] == by_contract.loc["LOW_UPSIDE", "premium_edge_score"]
+    assert by_contract.loc["HIGH_UPSIDE", "strike_upside_margin_pct"] > by_contract.loc["RICH", "strike_upside_margin_pct"]
 
 
 def test_covered_call_underwriting_raises_when_filtered_csv_cannot_be_written(

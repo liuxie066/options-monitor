@@ -562,7 +562,7 @@ def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tm
             "premium_edge_score,strike_safety_margin_pct,net_income,spread_ratio,"
             "annualized_net_return_on_cash_basis,iv_rv_ratio,iv_minus_rv,dte\n"
             "NVDA,put,NVDA_NEAR,2026-06-19,105,110,110,insurance_underwriting,"
-            "1.10,0.045455,300,0.05,0.30,1.20,0.08,30\n"
+            "1.50,0.045455,300,0.05,0.30,1.20,0.08,30\n"
             "NVDA,put,NVDA_SAFE,2026-06-19,95,110,110,insurance_underwriting,"
             "1.10,0.136364,180,0.05,0.12,1.20,0.08,30\n"
         ),
@@ -583,6 +583,36 @@ def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tm
     assert data["ranked"][0]["score_components"]["strike_safety_margin_pct"] > data["ranked"][1]["score_components"][
         "strike_safety_margin_pct"
     ]
+    assert data["ranked"][0]["primary_drivers"] == ["strike_safety_margin_pct", "premium_edge_score"]
+
+
+def test_candidate_rank_explain_prioritizes_covered_call_upside_margin(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+
+    candidate_path = tmp_path / "sell_call_candidates_labeled.csv"
+    candidate_path.write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,effective_min_strike,spot,strategy_profile,"
+            "premium_edge_score,strike_upside_margin_pct,net_income,spread_ratio,open_interest,"
+            "annualized_net_premium_return,iv_rv_ratio,iv_minus_rv,dte\n"
+            "NVDA,call,NVDA_RICH,2026-06-19,126,120,110,insurance_underwriting,"
+            "1.50,0.05,300,0.05,500,0.30,1.20,0.08,30\n"
+            "NVDA,call,NVDA_UPSIDE,2026-06-19,140,120,110,insurance_underwriting,"
+            "1.10,0.166667,180,0.05,500,0.12,1.20,0.08,30\n"
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, _meta = candidate_rank_explain_tool(
+        {"candidate_path": str(candidate_path), "mode": "call", "top_n": 2},
+        repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path / "output_shared" / "agent_tools",
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+    )
+
+    assert warnings == []
+    assert data["ranked"][0]["contract_symbol"] == "NVDA_UPSIDE"
+    assert data["ranked"][0]["primary_drivers"] == ["strike_upside_margin_pct", "premium_edge_score"]
 
 
 def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path) -> None:

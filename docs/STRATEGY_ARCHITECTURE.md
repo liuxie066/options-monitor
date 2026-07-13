@@ -81,19 +81,21 @@ Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选�
 
 排序顺序：
 
-1. `premium_edge_score` 降序
-2. `strike_safety_margin_pct` 降序
-3. `net_credit` / `net_income` 降序
-4. `spread_ratio` 升序
+1. `strike_safety_margin_pct` 降序
+2. `premium_edge_score` 降序
+3. `spread_ratio` 升序
+4. `open_interest` 降序
+5. `net_income_cny` / `net_income` 降序，仅作最终同分项
 
-`premium_edge_score` 由通过硬筛的定价补偿项归一化得到：
+Sell Put 的 `premium_edge_score` 保留现有字段名以兼容已有 artifact，但改为去重后的承保补偿分：
 
-- 年化收益率 / 最低年化收益率
-- 单笔净收益 / 最低单笔净收益
-- IV/RV / 最低 IV/RV
-- (IV-RV) / 最低 IV-RV
+- `return_edge = 年化收益率 / 最低年化收益率`
+- `iv_rv_edge = IV/RV / 最低 IV/RV`
+- `iv_minus_rv_edge = (IV-RV) / 最低 IV-RV`
+- `vol_edge = min(iv_rv_edge, iv_minus_rv_edge)`
+- `premium_edge_score = mean(return_edge, vol_edge)`
 
-每项 capped 后取平均，避免单个极端值压倒其他定价证据。
+每项仍以 `premium_score_cap` 封顶。净权利金保留为硬门槛和最终同分项，不再与已包含它的年化收益重复进入主评分。IV/RV 与 IV-RV 取较弱证据，避免对同一波动率优势重复加权。
 
 `strike_safety_margin_pct = (max_strike - strike) / max_strike`
 
@@ -134,10 +136,13 @@ Covered Call 的上行放弃是这个策略的自然代价，应通过 `min_stri
 
 排序顺序：
 
-1. `premium_edge_score` 降序
-2. `strike_upside_margin_pct` 降序
-3. `net_credit` / `net_income` 降序
-4. `spread_ratio` 升序
+1. `strike_upside_margin_pct` 降序
+2. `premium_edge_score` 降序
+3. `spread_ratio` 升序
+4. `open_interest` 降序
+5. `net_income_cny` / `net_income` 降序，仅作最终同分项
+
+Covered Call 的 `premium_edge_score` 使用与 Sell Put 相同的去重补偿分：年化收益与 `min(IV/RV 优势, IV-RV 优势)` 取平均，每项仍以 `premium_score_cap` 封顶。净权利金保留为硬门槛和最终同分项，不再重复进入主评分。
 
 `strike_upside_margin_pct = (strike - min_strike) / min_strike`
 

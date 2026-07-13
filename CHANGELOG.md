@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.390 - 2026-07-13
+
+### Changed
+- Made Sell Put rank strike safety distance first and Covered Call rank strike upside distance first, ahead of premium compensation.
+- Deduplicated underwriting compensation to combine annualized return with the weaker IV/RV or IV-RV edge, while keeping net income as a hard gate and final tie-break only.
+- Aligned candidate-rank explanations and Strategy Lab ranking evidence with the production ordering, including spread and open-interest liquidity tie-breaks.
+
 ## 1.2.389 - 2026-07-13
 
 ### Added
