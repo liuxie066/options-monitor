@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.392 - 2026-07-13
+
+### Added
+- Added an advisory-only Close Advice capital-reallocation shadow that combines formal exit advice, ranked portfolio capacity, and lot-specific position context without changing notifications, candidate ranking, position state, or runtime config.
+
+### Changed
+- Limited production-parameter replay comparisons to single-field variants backed by fee-complete `complete_closed` lifecycle outcomes; incomplete assignment or call-away transitions remain explicit evidence gaps.
+- Propagated lifecycle net P&L, capital days, fee quality, and Covered Call allocation evidence through settlement and candidate-impact reports while keeping runtime config writes disabled.
+- Versioned the monthly-income detail contract as v3 and clarified that current assigned-stock rows may refresh read-only quotes while historical cutoffs never use realtime prices.
+
 ## 1.2.391 - 2026-07-13
 
 ### Added
