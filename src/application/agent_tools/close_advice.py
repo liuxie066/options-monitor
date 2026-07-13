@@ -15,6 +15,7 @@ _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
         "source.run_id",
         "source.paths[]",
         "rows[].account",
+        "rows[].position_lot_id",
         "rows[].symbol",
         "rows[].side",
         "rows[].option_type",

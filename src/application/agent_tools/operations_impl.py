@@ -394,7 +394,12 @@ def _assigned_stock_action(
         status = "partially_sold"
     quote_snapshots = payload.get("quote_snapshots")
     as_of_ms = _optional_int(payload.get("as_of_ms")) if payload.get("as_of_ms") not in (None, "") else None
-    refresh_quotes = _bool_flag(payload.get("refresh_quotes"))
+    refresh_flag = payload.get("refresh_quotes")
+    refresh_quotes = (
+        _bool_flag(refresh_flag)
+        if refresh_flag not in (None, "")
+        else as_of_ms is None and "quote_snapshots" not in payload
+    )
 
     report = build_monthly_income_report(
         [],

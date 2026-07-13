@@ -64,6 +64,28 @@ _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
         "assignment_lifecycle_rows[].option_premium_attribution",
         "assignment_lifecycle_rows[].assignment_lifecycle_pnl",
         "assignment_lifecycle_rows[].quote_status",
+        "assignment_lifecycle_rows[].assigned_date",
+        "assignment_lifecycle_rows[].inventory_days",
+        "assignment_lifecycle_rows[].actual_fees",
+        "assignment_lifecycle_rows[].estimated_fees",
+        "assignment_lifecycle_rows[].fees_used",
+        "assignment_lifecycle_rows[].fee_missing_components",
+        "assignment_lifecycle_rows[].fee_evidence",
+        "assignment_lifecycle_rows[].spot_time",
+        "assignment_lifecycle_rows[].quote_source",
+        "assignment_lifecycle_rows[].covered_call_pnl",
+        "assignment_lifecycle_rows[].covered_call_allocation_status",
+        "assignment_lifecycle_rows[].put_capital_days",
+        "assignment_lifecycle_rows[].stock_capital_days",
+        "assignment_lifecycle_rows[].lifecycle_pnl_net",
+        "assignment_lifecycle_rows[].capital_days",
+        "assignment_lifecycle_rows[].annualized_capital_efficiency",
+        "assignment_lifecycle_rows[].fee_basis",
+        "assignment_lifecycle_rows[].lifecycle_quality",
+        "lifecycle_efficiency_summary[].lifecycle_count",
+        "lifecycle_efficiency_summary[].lifecycle_pnl_net",
+        "lifecycle_efficiency_summary[].capital_days",
+        "lifecycle_efficiency_summary[].annualized_capital_efficiency",
         "assigned_stock_review_rows[].status",
         "realized_rows[].contracts_closed",
         "realized_rows[].realized_gross",
@@ -105,7 +127,7 @@ _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
-    "schema_version": "option_positions_read.assigned_stock_output.v1",
+    "schema_version": "option_positions_read.assigned_stock_output.v2",
     "source_label": "OM 本地 SQLite assigned_stock_events + trade_events",
     "primary_rows": "rows",
     "row_count_field": "row_count",
@@ -117,6 +139,8 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
     "missing_data_fields": [
         "quote_refresh.missing_symbols",
         "rows[].quote_status",
+        "rows[].fee_missing_components",
+        "rows[].covered_call_allocation_status",
     ],
     "fact_fields": [
         "rows[].stock_lot_id",
@@ -133,7 +157,25 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].assigned_stock_realized_pnl",
         "rows[].option_premium_attribution",
         "rows[].assignment_lifecycle_pnl",
+        "rows[].assigned_date",
+        "rows[].inventory_days",
+        "rows[].actual_fees",
+        "rows[].estimated_fees",
+        "rows[].fees_used",
+        "rows[].fee_basis",
+        "rows[].fee_missing_components",
+        "rows[].fee_evidence",
+        "rows[].covered_call_pnl",
+        "rows[].covered_call_allocation_status",
+        "rows[].put_capital_days",
+        "rows[].stock_capital_days",
+        "rows[].capital_days",
+        "rows[].lifecycle_pnl_net",
+        "rows[].annualized_capital_efficiency",
+        "rows[].lifecycle_quality",
         "rows[].quote_status",
+        "rows[].spot_time",
+        "rows[].quote_source",
         "assigned_stock_review_rows[].status",
     ],
     "model_preview_fields": ["scope", "coverage", "freshness", "rows", "quote_refresh", "warnings"],
@@ -155,6 +197,7 @@ def _monthly_income_report_tool(
         normalize_broker=ctx.normalize_broker,
         resolve_option_positions_repo=ctx.resolve_option_positions_repo,
         build_monthly_income_report=ctx.build_monthly_income_report,
+        refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
         get_exchange_rates=ctx.get_exchange_rates,
         repo_base=ctx.repo_base,
         mask_path=ctx.mask_path,
@@ -218,6 +261,8 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
         "cashflows; it is not profit or PnL. Likewise net_return_rate and annualized_net_return_rate are legacy "
         "cashflow ratios, not investment returns. Use YYYY-MM for a requested month; omit account to aggregate "
         "every available account while preserving currency. "
+        "Current assigned-stock rows refresh read-only realtime quotes by default; historical as_of_ms rows never "
+        "use realtime prices. "
         "When diagnostics.income_amount_status is not_reported, the ledger has not reported a numeric "
         "income amount for that scope; empty rows must not be interpreted as zero income. "
         "diagnostics.position_lot_snapshots_count counts ledger lot snapshots only; it does not "
@@ -240,6 +285,14 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
             "type": "boolean",
             "description": "Include cashflow, realized, open-basis, and premium detail rows",
         },
+        "refresh_quotes": {
+            "type": "boolean",
+            "description": "Current reports refresh realtime assigned-stock quotes by default; false disables it. Historical as_of_ms never uses realtime quotes.",
+        },
+        "as_of_ms": {
+            "type": "integer",
+            "description": "Optional historical report cutoff in Unix milliseconds",
+        },
     },
     handler=_monthly_income_report_tool,
     pure_read=True,
@@ -257,7 +310,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "inspection state. For current exposure use action=list and status=open; preserve account and currency. "
         "An expired_position_marked_open warning identifies a local ledger-state inconsistency only; it does not "
         "prove broker settlement, assignment, liquidation, or a pending order. cash_secured_amount is assignment "
-        "collateral, not profit, available cash, or loss; this tool does not provide market-price P&L evidence."
+        "collateral, not profit, available cash, or loss. action=assigned-stock can add read-only quote evidence "
+        "for current stock P&L; other actions do not provide market-price P&L evidence."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_positions", "read_only", "ledger_diagnostics"),
@@ -291,8 +345,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "strike": "list/events/inspect numeric selector",
         "exp": "events/inspect YYYY-MM-DD selector",
         "stock_lot_id": "assigned-stock selector",
-        "quote_snapshots": "assigned-stock optional quote snapshot list/dict",
-        "refresh_quotes": "assigned-stock optional bool; explicitly fetch realtime OpenD spot for open assigned-stock lots",
+        "quote_snapshots": "assigned-stock optional quote snapshot list/dict; supplying it disables implicit realtime refresh",
+        "refresh_quotes": "assigned-stock optional bool; current queries refresh realtime OpenD spot by default, false disables it, true with historical as_of_ms is skipped",
         "opend_host": "assigned-stock refresh_quotes optional OpenD host override",
         "opend_port": "assigned-stock refresh_quotes optional OpenD port override",
         "as_of_ms": "assigned-stock optional as-of timestamp for quote snapshot selection",
