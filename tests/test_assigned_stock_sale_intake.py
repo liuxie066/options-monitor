@@ -116,6 +116,35 @@ def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> Non
     assert lifecycle["assignment_lifecycle_pnl"] == 750.0
 
 
+def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy(tmp_path: Path) -> None:
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+
+    sale = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
+    buy = resolve_trade_deal(
+        _stock_sale_deal(deal_id="stock-buy-1", side="buy", price=95.0, trade_time_ms=4000),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    later_sale = resolve_trade_deal(
+        _stock_sale_deal(deal_id="stock-sale-2", price=110.0, trade_time_ms=5000),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert sale.status == "applied"
+    assert buy.status == "skipped"
+    assert buy.reason == "not_option_deal"
+    assert later_sale.status == "skipped"
+    assert later_sale.reason == "not_option_deal"
+    assert len(repo.list_assigned_stock_events()) == 1
+    lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
+    assert lifecycle["status"] == "closed"
+    assert lifecycle["shares_remaining"] == 0
+    assert lifecycle["assigned_stock_realized_pnl"] == 500.0
+
+
 def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(tmp_path: Path) -> None:
     repo, _stock_lot_id = _repo_with_assigned_stock(tmp_path)
 

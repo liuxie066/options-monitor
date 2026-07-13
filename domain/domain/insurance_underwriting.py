@@ -131,10 +131,11 @@ def rank_underwriting_candidates(
     return sorted(
         enriched,
         key=lambda item: (
-            -_sort_number(item.get("premium_edge_score")),
             -_sort_number(item.get(margin_key)),
-            -_sort_number(_first_present(item, "net_credit", "net_income")),
+            -_sort_number(item.get("premium_edge_score")),
             _sort_number(item.get("spread_ratio")),
+            -_sort_number(item.get("open_interest")),
+            -_sort_number(_first_present(item, "net_income_cny", "net_income")),
         ),
     )
 
@@ -147,21 +148,18 @@ def premium_edge_score(
     iv_rv_ratio: float | None = None,
     iv_minus_rv: float | None = None,
 ) -> float:
-    annualized_return = _annualized_return(row, mode=_mode(mode))
-    net_income = _net_income_for_threshold(row)
+    mode_norm = _mode(mode)
+    annualized_return = _annualized_return(row, mode=mode_norm)
     if iv_rv_ratio is None or iv_minus_rv is None:
         iv_rv_ratio, iv_minus_rv = _vol_edge(row)
 
-    pieces = [
-        _threshold_score(annualized_return, cfg.min_annualized_return, cap=cfg.premium_score_cap),
-        _threshold_score(net_income, cfg.min_net_income, cap=cfg.premium_score_cap),
-        _threshold_score(iv_rv_ratio, cfg.min_iv_rv_ratio, cap=cfg.premium_score_cap),
-        _threshold_score(iv_minus_rv, cfg.min_iv_minus_rv, cap=cfg.premium_score_cap),
-    ]
-    usable = [x for x in pieces if x is not None]
-    if not usable:
-        return 0.0
-    return round(sum(usable) / len(usable), 6)
+    return_edge = _threshold_score(annualized_return, cfg.min_annualized_return, cap=cfg.premium_score_cap)
+    iv_rv_edge = _threshold_score(iv_rv_ratio, cfg.min_iv_rv_ratio, cap=cfg.premium_score_cap)
+    iv_minus_rv_edge = _threshold_score(iv_minus_rv, cfg.min_iv_minus_rv, cap=cfg.premium_score_cap)
+    vol_pieces = [value for value in (iv_rv_edge, iv_minus_rv_edge) if value is not None]
+    vol_edge = min(vol_pieces) if vol_pieces else None
+    usable = [value for value in (return_edge, vol_edge) if value is not None]
+    return round(sum(usable) / len(usable), 6) if usable else 0.0
 
 
 def _reject(

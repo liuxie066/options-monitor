@@ -327,10 +327,11 @@ def _rank_underwriting_rows_for_explain(rows: list[dict[str, Any]], *, mode: str
     return sorted(
         rows_for_sort,
         key=lambda item: (
-            -_sort_number(item.get("premium_edge_score")),
             -_sort_number(item.get(margin_key)),
-            -_sort_number(_first_number(item, "net_credit", "net_income")),
+            -_sort_number(item.get("premium_edge_score")),
             _sort_number(item.get("spread_ratio")),
+            -_sort_number(item.get("open_interest")),
+            -_sort_number(_first_number(item, "net_income_cny", "net_income")),
         ),
     )
 
@@ -339,10 +340,11 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
     mode_norm = normalize_strategy_mode(mode)
     margin_key = _underwriting_margin_key(mode=mode_norm)
     margin_label = "strike 安全距离" if mode_norm == "put" else "strike 上行距离"
+    compensation_label = "去重补偿分"
     score_components = {
         "premium_edge_score": _sort_number(row.get("premium_edge_score")),
         margin_key: _sort_number(row.get(margin_key)),
-        "net_income": _sort_number(_first_number(row, "net_credit", "net_income")),
+        "net_income": _sort_number(_first_number(row, "net_income_cny", "net_credit", "net_income")),
         "spread_ratio": _sort_number(row.get("spread_ratio")),
     }
     score_inputs = {
@@ -351,7 +353,7 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
             "annualized_net_return_on_cash_basis" if mode_norm == "put" else "annualized_net_premium_return",
             "annualized_return",
         ),
-        "net_income": _first_number(row, "net_credit", "net_income"),
+        "net_income": _first_number(row, "net_income_cny", "net_credit", "net_income"),
         "spread_ratio": _first_number(row, "spread_ratio"),
         "iv_rv_ratio": _first_number(row, "iv_rv_ratio"),
         "iv_minus_rv": _first_number(row, "iv_minus_rv"),
@@ -370,7 +372,7 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "net_income": score_inputs["net_income"],
         "score_components": score_components,
         "score_component_labels": {
-            "premium_edge_score": "保费边际",
+            "premium_edge_score": compensation_label,
             margin_key: margin_label,
             "net_income": "净收入",
             "spread_ratio": "价差",
@@ -378,9 +380,9 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "score_inputs": score_inputs,
         "score_warnings": [],
         "risk_notes": [],
-        "primary_drivers": ["premium_edge_score", margin_key],
-        "primary_driver_labels": ["保费边际", margin_label],
-        "rank_reason": f"按承保策略排序：先看保费边际，再看{margin_label}，随后比较净收入和价差",
+        "primary_drivers": [margin_key, "premium_edge_score"],
+        "primary_driver_labels": [margin_label, compensation_label],
+        "rank_reason": f"按承保策略排序：先看{margin_label}，再看{compensation_label}，随后比较价差、未平仓量和净收入",
     }
 
 

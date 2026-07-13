@@ -59,7 +59,7 @@ def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_ga
     assert fields["iv_rv_ratio"] == 1.5
     assert fields["iv_minus_rv"] == 0.12
     assert fields["strike_safety_margin_pct"] == 0.090909
-    assert fields["premium_edge_score"] > 1.0
+    assert fields["premium_edge_score"] == 1.281818
     assert "single_trade_concentration" not in fields
 
 
@@ -255,7 +255,7 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
     assert filtered.iloc[0]["contract_symbol"] == "NVDA260619P00100000"
 
 
-def test_sell_put_underwriting_ranking_prefers_premium_edge_then_strike_safety(tmp_path: Path) -> None:
+def test_sell_put_underwriting_ranking_prefers_strike_safety_and_deduplicates_income(tmp_path: Path) -> None:
     from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -278,8 +278,10 @@ def test_sell_put_underwriting_ranking_prefers_premium_edge_then_strike_safety(t
         out_path=out_path,
     )
 
-    assert list(filtered["contract_symbol"]) == ["RICH", "FAR", "NEAR"]
-    assert filtered.iloc[1]["strike_safety_margin_pct"] > filtered.iloc[2]["strike_safety_margin_pct"]
+    assert list(filtered["contract_symbol"]) == ["FAR", "RICH", "NEAR"]
+    by_contract = filtered.set_index("contract_symbol")
+    assert by_contract.loc["RICH", "premium_edge_score"] == by_contract.loc["NEAR", "premium_edge_score"]
+    assert by_contract.loc["RICH", "strike_safety_margin_pct"] > by_contract.loc["NEAR", "strike_safety_margin_pct"]
 
 
 def test_enrich_and_filter_sell_put_underwriting_raises_when_filtered_csv_cannot_be_written(
