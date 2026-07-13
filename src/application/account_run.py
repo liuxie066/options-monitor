@@ -19,6 +19,7 @@ from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.close_advice_runner import run_close_advice
+from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
@@ -574,6 +575,30 @@ def run_one_account(
         duration_ms=acct_metrics["pipeline_ms"],
         data=_safe_runlog_data({"account": acct}),
     )
+
+    try:
+        capacity_shadow = write_portfolio_capacity_shadow(report_dir=acct_report_dir, account=acct)
+        audit_fn(
+            "tool_call",
+            "portfolio_capacity_shadow",
+            run_id=request.run_id,
+            account=acct,
+            status="ok",
+            tool_name="portfolio_capacity_shadow",
+            extra={
+                "rows": capacity_shadow.get("rows"),
+                "status_counts": capacity_shadow.get("status_counts"),
+            },
+        )
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="portfolio_capacity_shadow",
+            exc=exc,
+        )
 
     text = notif_path.read_text(encoding="utf-8", errors="replace").strip() if notif_path.exists() else ""
     try:

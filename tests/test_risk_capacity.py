@@ -1,11 +1,64 @@
 from __future__ import annotations
 
 from domain.domain.risk_capacity import (
+    allocate_portfolio_capacity_shadow,
     compute_sell_call_share_capacity,
     compute_sell_put_cash_capacity,
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
 )
+
+
+def test_portfolio_capacity_shadow_allocates_in_existing_order_without_optimizer() -> None:
+    rows = [
+        {"account": "lx", "symbol": "NVDA", "strategy_family": "sell_put", "cash_free_cny": 10_000, "cash_required_cny": 6_000},
+        {"account": "lx", "symbol": "NVDA", "strategy_family": "sell_put", "cash_free_cny": 10_000, "cash_required_cny": 5_000},
+        {"account": "lx", "symbol": "PDD", "strategy_family": "sell_put", "cash_free_cny": 10_000, "cash_required_cny": 5_000},
+        {"account": "lx", "symbol": "NVDA", "strategy_family": "covered_call", "shares_available_for_cover": 200, "multiplier": 100},
+        {"account": "lx", "symbol": "NVDA", "strategy_family": "covered_call", "shares_available_for_cover": 200, "multiplier": 100},
+    ]
+
+    allocated = allocate_portfolio_capacity_shadow(rows)
+
+    assert [row["allocation_status"] for row in allocated] == [
+        "allocated",
+        "alternative_not_allocated",
+        "capacity_blocked",
+        "allocated",
+        "alternative_not_allocated",
+    ]
+    assert allocated[0]["capacity_after"] == 4_000
+    assert allocated[2]["capacity_before"] == 4_000
+    assert allocated[3]["capacity_after"] == 100
+    assert "allocation_status" not in rows[0]
+
+
+def test_portfolio_capacity_shadow_fails_closed_on_inconsistent_pool() -> None:
+    allocated = allocate_portfolio_capacity_shadow(
+        [
+            {"account": "lx", "symbol": "NVDA", "strategy_family": "sell_put", "cash_free_cny": 10_000, "cash_required_cny": 5_000},
+            {"account": "lx", "symbol": "PDD", "strategy_family": "sell_put", "cash_free_cny": 9_000, "cash_required_cny": 5_000},
+        ]
+    )
+
+    assert {row["allocation_status"] for row in allocated} == {"not_evaluable"}
+    assert {row["allocation_reason"] for row in allocated} == {"capacity_pool_missing_or_inconsistent"}
+
+
+def test_portfolio_capacity_shadow_fails_closed_when_pool_is_missing() -> None:
+    allocated = allocate_portfolio_capacity_shadow(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+                "cash_required_cny": 5_000,
+            }
+        ]
+    )
+
+    assert allocated[0]["allocation_status"] == "not_evaluable"
+    assert allocated[0]["allocation_reason"] == "capacity_pool_missing_or_inconsistent"
 
 
 def test_sell_put_cash_capacity_prefers_base_cny_over_total_cny() -> None:

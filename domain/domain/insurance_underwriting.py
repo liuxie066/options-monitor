@@ -118,13 +118,14 @@ def rank_underwriting_candidates(
     rows: list[dict[str, Any]],
     *,
     mode: str,
-    cfg: InsuranceUnderwritingConfig,
+    cfg: InsuranceUnderwritingConfig | None = None,
 ) -> list[dict[str, Any]]:
     mode_norm = _mode(mode)
     enriched: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
-        payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
+        if cfg is not None:
+            payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 
     margin_key = "strike_safety_margin_pct" if mode_norm == "put" else "strike_upside_margin_pct"
