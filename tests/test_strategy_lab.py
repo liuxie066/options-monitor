@@ -833,9 +833,9 @@ def test_strategy_lab_compares_observed_and_deduplicated_underwriting_rankings(t
     assert experiment["summary"]["status"] == "ready"
     assert experiment["summary"]["production_recommendation_allowed"] is False
     assert experiment["policy"]["net_income_in_primary_score"] is False
-    assert experiment["policy"]["net_income_ranking_role"] == "threshold_or_explanation_only"
+    assert experiment["policy"]["net_income_ranking_role"] == "final_tiebreak_only"
     assert group["top_n"]["production_observed"] == ["RICH", "NEAR", "SAFE_LOW_INCOME"]
-    assert group["top_n"]["deduplicated"] == ["SAFE_LOW_INCOME", "SAFE_HIGH_INCOME", "RICH"]
+    assert group["top_n"]["deduplicated"] == ["SAFE_HIGH_INCOME", "SAFE_LOW_INCOME", "RICH"]
     assert group["top_n"]["changed"] is True
     assert by_contract["SAFE_HIGH_INCOME"]["deduplicated_compensation_score"] == by_contract[
         "SAFE_LOW_INCOME"

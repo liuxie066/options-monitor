@@ -421,7 +421,7 @@ Sell Put / Covered Call 第一版复用 candidate-impact evaluator。Combo Yield
 
 历史百分位 variant 保留生产绝对 IV/RV 底线，只增加相对历史门槛，以便单独识别历史百分位的影响。历史样本只使用同一 symbol、option type、DTE bucket 的严格更早 run，同一 run 不进入自身历史。没有候选达到历史样本门槛时，该 variant 只能报告绝对底线回退结果，不能进入最佳 variant 比较。min_iv_rv_percentile 和 min_iv_rv_history_samples 是离线实验参数，Proposal 不得把它们转换成生产 dry-run patch。
 
-Strategy Lab 另行输出 Sell Put / Covered Call 的排序对照：保留生产 CSV 观测顺序，并计算“strike 意愿价格边际优先、去重后承保补偿其次”的离线排序。去重补偿分数不包含单笔净收入，波动率补偿取 IV/RV edge 与 IV-RV edge 的较弱项；净收入只作门槛或解释字段，不参与排序。实验同时输出四格对照：固定 IV/RV / 历史百分位 IV/RV × 生产观测顺序 / 去重排序。四格结果复用同一 observed universe、mark 和 lifecycle outcome；证据不足时明确输出 not_evaluable，不得宣称收益、回撤或 CVaR 改善，也不修改生产排序。
+Strategy Lab 另行输出 Sell Put / Covered Call 的排序对照：保留生产 CSV 观测顺序，并计算“strike 意愿价格边际优先、去重后承保补偿其次”的排序。去重补偿分数不包含单笔净收入，波动率补偿取 IV/RV edge 与 IV-RV edge 的较弱项；净收入只作最后 tie-break。实验同时输出四格对照：固定 IV/RV / 历史百分位 IV/RV × 生产观测顺序 / 去重排序。四格结果复用同一 observed universe、mark 和 lifecycle outcome；证据不足时明确输出 not_evaluable，不得宣称收益、回撤或 CVaR 改善，也不修改 runtime config。
 
 评价结果必须按策略域分开解释：
 

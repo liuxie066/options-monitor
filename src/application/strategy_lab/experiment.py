@@ -531,10 +531,11 @@ def _underwriting_ranking_experiment(
                 "deduplicated_compensation_desc",
                 "spread_ratio_asc",
                 "open_interest_desc",
+                "net_income_desc_tiebreak_only",
             ],
             "compensation": "mean(return_edge, min(iv_rv_edge, iv_minus_rv_edge))",
             "net_income_in_primary_score": False,
-            "net_income_ranking_role": "threshold_or_explanation_only",
+            "net_income_ranking_role": "final_tiebreak_only",
             "threshold_source": "strategy_lab_empirical_baseline",
         },
         "field_coverage": coverage,
@@ -982,6 +983,7 @@ def _deduplicated_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
         -_rank_number(row.get("deduplicated_compensation_score")),
         _rank_number(row.get("spread_ratio"), missing=float("inf")),
         -_rank_number(row.get("open_interest")),
+        -_rank_number(row.get("net_income")),
     )
 
 
