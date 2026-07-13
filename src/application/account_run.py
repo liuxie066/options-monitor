@@ -17,6 +17,7 @@ from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
+from src.application.close_advice_reallocation_shadow import write_close_advice_reallocation_shadow
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.close_advice_runner import run_close_advice
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
@@ -663,6 +664,33 @@ def run_one_account(
                     "flag_counts": close_result.get("flag_counts"),
                 },
             )
+            try:
+                reallocation_shadow = write_close_advice_reallocation_shadow(
+                    report_dir=acct_report_dir,
+                    context_path=(acct_state_dir / "option_positions_context.json").resolve(),
+                    account=acct,
+                )
+                audit_fn(
+                    "tool_call",
+                    "close_advice_reallocation_shadow",
+                    run_id=request.run_id,
+                    account=acct,
+                    status="ok",
+                    tool_name="close_advice_reallocation_shadow",
+                    extra={
+                        "rows": reallocation_shadow.get("rows"),
+                        "status_counts": reallocation_shadow.get("status_counts"),
+                    },
+                )
+            except Exception as exc:
+                _record_account_run_degraded(
+                    runlog=runlog,
+                    audit_fn=audit_fn,
+                    run_id=request.run_id,
+                    account=acct,
+                    action="close_advice_reallocation_shadow",
+                    exc=exc,
+                )
             close_text_path = acct_report_dir / "close_advice.txt"
             close_text = close_text_path.read_text(encoding="utf-8", errors="replace").strip() if close_text_path.exists() else ""
             if close_text:

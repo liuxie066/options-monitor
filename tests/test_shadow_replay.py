@@ -23,7 +23,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text((text + "\n") if text else "", encoding="utf-8")
 
 
-def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path) -> None:
+def test_shadow_replay_builds_universe_and_analyzes_outcome_incomplete(tmp_path: Path) -> None:
     from src.application.shadow_replay import (
         analyze_shadow_replay_dataset,
         build_shadow_replay_dataset,
@@ -124,7 +124,7 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert next(row for row in snapshots if row["symbol"] == "NVDA")["volume"] == 20
     assert next(row for row in snapshots if row["status"] == "rejected")["event_risk_status"] == "source_unavailable"
     assert analysis["summary"]["status"] == "needs_human_review"
-    assert analysis["summary"]["evidence_level"] == "closed_replay"
+    assert analysis["summary"]["evidence_level"] == "outcome_incomplete"
     assert analysis["outcome_coverage"]["marked_instrument_count"] == 2
     assert analysis["outcome_coverage"]["outcome_instrument_count"] == 2
     assert analysis["path_risk"]["by_status"]["rejected"]["max_adverse_pnl"] == -35
@@ -148,6 +148,29 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert readiness["parameter_advice_gate"]["status"] == analysis["parameter_advice_gate"]["status"]
     assert readiness["decision_quality"]["by_strategy_profile"]["insurance_underwriting"]["good_accept"] == 1
     assert readiness["safety"]["writes_runtime_config"] is False
+
+
+def test_shadow_replay_evidence_level_requires_complete_closed_lifecycle() -> None:
+    from src.application.shadow_replay.analysis import _evidence_level
+
+    candidates = [{"contract_symbol": "NVDA260619P00100000"}]
+    decisions = [{"contract_symbol": "NVDA260619P00100000", "status": "accepted"}]
+    marks = [{"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 10}]
+    incomplete = [{"contract_symbol": "NVDA260619P00100000", "outcome": "expired_worthless"}]
+    complete = [
+        {
+            **incomplete[0],
+            "lifecycle_quality": "complete_closed",
+            "lifecycle_pnl_net": 10,
+            "capital_days": 1_000,
+            "fee_basis": "actual",
+            "fee_missing_components": [],
+            "covered_call_allocation_status": "none",
+        }
+    ]
+
+    assert _evidence_level(candidates, decisions, marks, incomplete) == "outcome_incomplete"
+    assert _evidence_level(candidates, decisions, marks, complete) == "closed_replay"
 
 
 def test_shadow_replay_readiness_flags_final_candidates_only_survivorship_bias(tmp_path: Path) -> None:
@@ -1293,6 +1316,59 @@ def test_shadow_replay_settle_derives_outcomes_from_mark_path(tmp_path: Path) ->
     assert settlement["summary"]["written"] is True
     assert after["summary"]["status"] == "needs_human_review"
     assert after["outcome_stats"]["by_status"]["rejected"]["realized_pnl_total"] == -40
+
+
+def test_shadow_replay_settlement_propagates_complete_lifecycle_quality_and_blocks_assignment_transition() -> None:
+    from src.application.shadow_replay.settlement import derive_outcome_facts
+
+    candidate = {
+        "contract_symbol": "NVDA260619P00100000",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-06-19",
+        "strike": 100,
+        "multiplier": 100,
+        "net_income": 120,
+    }
+    complete = derive_outcome_facts(
+        [candidate],
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "unrealized_pnl": 80,
+                "lifecycle_pnl_net": 75,
+                "capital_days": 10_000,
+                "annualized_capital_efficiency": 2.7375,
+                "fee_basis": "mixed",
+                "fee_missing_components": [],
+                "covered_call_allocation_status": "none",
+                "lifecycle_quality": "complete_closed",
+            }
+        ],
+        existing_outcomes=[],
+    )[0]
+    transition = derive_outcome_facts(
+        [candidate],
+        [
+                {
+                    "contract_symbol": "NVDA260619P00100000",
+                    "option_type": "put",
+                    "strike": 100,
+                    "dte": 0,
+                "spot": 90,
+                "mark_at": "2026-06-19",
+            }
+        ],
+        existing_outcomes=[],
+    )[0]
+
+    assert complete["lifecycle_pnl_net"] == 75
+    assert complete["capital_days"] == 10_000
+    assert complete["lifecycle_quality"] == "complete_closed"
+    assert complete["production_parameter_eligible"] is True
+    assert transition["outcome"] == "assigned_at_expiry"
+    assert transition["lifecycle_quality"] == "transition_only"
+    assert transition["production_parameter_eligible"] is False
 
 
 def test_shadow_replay_long_call_uses_positive_entry_cost_from_signed_income() -> None:

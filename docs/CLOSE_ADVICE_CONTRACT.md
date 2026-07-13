@@ -85,8 +85,10 @@ from the canonical `position_lots.record_id`. This is the stable identity for a
 specific open lot. `position_id` is not used for this purpose because multiple
 lots of the same contract may share it.
 
-`close_advice_read` preserves `position_lot_id`. Contract fields remain a
-compatibility fallback for older artifacts that do not contain a lot ID.
+`close_advice_read` preserves `position_lot_id`, and the capital-reallocation
+shadow uses it for exact position-context matching whenever both inputs provide
+the field. Contract fields are only a compatibility fallback for older
+artifacts that do not contain a lot ID.
 
 ## Scenario Matrix
 
@@ -155,6 +157,52 @@ without changing the current action policy:
 `not_evaluable`. These fields are replay and manual-review evidence; production
 thresholds remain unchanged until lifecycle outcomes support calibration.
 
+## Capital Reallocation Shadow
+
+Capital reallocation is evaluated in a separate shadow artifact after the
+formal close-advice report is written:
+
+```text
+close_advice.csv
++ portfolio_capacity_shadow.csv
++ option_positions_context.json
+-> close_advice_reallocation_shadow.csv
+```
+
+This path is advisory only. It does not change `close_advice.csv`, notification
+text, candidate rank, position state, or runtime config. A shadow failure marks
+the account run degraded but never blocks or rewrites formal Close Advice.
+
+Replacement selection intentionally stays simple:
+
+- Sell Put may use a different symbol, but must keep the same account, market,
+  strategy family, and strategy profile. Released cash must have a reliable CNY
+  conversion.
+- Covered Call must additionally keep the same symbol, because closing a call
+  only releases that symbol's covered shares.
+- Existing candidate order is authoritative. The first matching candidate that
+  becomes feasible after released capacity is used; no optimizer or reranking is
+  introduced.
+- The current contract is excluded. A single Combo Yield leg is not eligible for
+  replacement analysis because combo economics require a group-level decision.
+- Position context is joined by `position_lot_id` when available. Same-contract
+  multi-lot positions must not be collapsed or reported as ambiguous merely
+  because their account, symbol, expiry, strike, and option type are identical.
+
+The shadow status is one of:
+
+| Status | Meaning |
+|---|---|
+| `review_switch` | Replacement efficiency is higher and incremental yield recovers close fee, replacement open fee, and spread slippage within `min(current_dte, replacement_dte)`. |
+| `hold_more_efficient` | A replacement exists, but its incremental efficiency does not recover switching cost inside the comparison horizon. |
+| `no_feasible_replacement` | Formal advice is not an exit and no matching candidate fits after released capacity. |
+| `exit_without_replacement` | Formal advice already supports closing, but no matching replacement is feasible. |
+| `not_evaluable` | Pricing, position identity, capacity, FX, or switch-economics evidence is incomplete. |
+
+`review_switch` is a manual-review signal, not an executable close/open pair.
+Promotion into production requires closed-lifecycle replay evidence and an
+explicit policy decision.
+
 ## Acceptance Matrix
 
 | Area | Acceptance standard |
@@ -164,12 +212,14 @@ thresholds remain unchanged until lifecycle outcomes support calibration.
 | Short-vol hold thesis | Short-vol Sell Put defaults to assignment-acceptable and Covered Call defaults to called-away-acceptable; a non-profitable buyback stays `hold` with `hold_reason_type=assignment_acceptable` or `called_away_acceptable`. Any future risk-budget exit requires a separate explicit contract. |
 | Short-vol observation | IV/RV, delta, event, and path fields are explanatory only; they do not create a close action. |
 | Close calibration | Remaining reward, transaction cost, stress loss, explicit replacement return, and continued willingness are exposed separately; incomplete evidence never becomes an inferred recommendation. |
+| Reallocation shadow | Formal Close Advice and notifications remain unchanged; replacement analysis is written only to `close_advice_reallocation_shadow.csv`. |
+| Lot identity | New formal and shadow rows expose `position_lot_id=position_lots.record_id`; legacy rows without it retain contract-key fallback. |
+| Replacement selection | Existing candidate rank is preserved; no optimizer or hidden reranking is allowed. |
 | Legacy risk exit | Historical `risk_exit` artifacts remain readable/renderable but are not actionable in the current policy. |
 | YE short put | Action is `close_put_keep_call` / `hold_put_keep_call`, never plain `close`. |
 | YE long call | Action is based on convexity state, not short-premium capture rules. |
 | Combo cost | Missing paired call cost is explicit and never treated as zero. |
 | Combo action | `close_both_optional` requires a paired call with computable combo economics. |
-| Lot identity | New rows expose `position_lot_id=position_lots.record_id`; legacy rows without it remain readable. |
 | Pricing quality | Wide spreads and missing core pricing fields produce `not_evaluable`, including YE long-call legs. |
 | Short-vol source data | Missing RV/IV/delta is explicit but preserves the priced profit-capture or hold action. |
 | Event source data | Short-vol event context is read from the run-level snapshot and remains observational for close actions. |

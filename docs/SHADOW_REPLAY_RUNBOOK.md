@@ -77,10 +77,7 @@ cat > params.json <<'JSON'
     {
       "name": "iv_rv_1_10",
       "insurance_underwriting": {
-        "min_iv_rv_ratio": 1.10,
-        "min_iv_minus_rv": 0.05,
-        "min_dte": 20,
-        "max_dte": 60
+        "min_iv_rv_ratio": 1.10
       }
     }
   ]
@@ -125,18 +122,38 @@ JSON
 
 参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、实验专用历史 IV/RV 百分位、`min_dte`、`max_dte`、`min_annualized_return`。Delta 只做观察和分桶。历史 `short_vol` 样本会映射到当前承保参数口径。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
 
+生产参数人工评审采用单变量原则。每个 production variant 只能修改
+`min_iv_rv_ratio`、`min_iv_minus_rv`、`min_dte`、`max_dte` 或
+`min_annualized_return` 中的一个字段。多参数组合和历史百分位仍可用于 Shadow
+探索，但会标记为不可形成生产参数建议，避免把相关性误当成单一参数效果。
+
+`closed_replay` 也不是“有到期结果就算闭环”。可用于生产参数比较的 outcome
+必须同时满足：
+
+- `lifecycle_quality=complete_closed`；指派/被行权但没有后续正股生命周期的
+  `transition_only` 不合格。
+- `lifecycle_pnl_net` 存在，且 `capital_days > 0`。
+- `fee_basis` 为 `actual`、`estimated` 或 `mixed`，并且
+  `fee_missing_components` 为空。
+- Covered Call 的 lot allocation 不能是 `unallocated`、`mixed`、
+  `ambiguous` 或 `missing`。
+
+Settlement 会把这些生命周期字段从 candidate/mark evidence 传播到
+`outcome_facts.jsonl`。只有满足上述门槛的记录才参与生产参数层比较。
+
 结果里的关键字段：
 
 - `coverage.strict_backtest_allowed`：指定日期窗口是否真的有扫描 artifacts。没有指定起始日数据时不会静默补数。
 - `universe_scope=observed_run_universe`：只评估历史 artifacts 中出现过的合约。
-- `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。`filter_only` 只能回答“候选数量会怎么变”，不能回答收益、回撤或是否应改生产参数。
+- `data_mode=filter_only/path_only/outcome_incomplete/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。`filter_only` 只能回答“候选数量会怎么变”；普通 mark/outcome 或仅完成指派转换会进入 `outcome_incomplete`，不能回答是否应改生产参数；只有费用和 lot 归因完整的关闭生命周期才进入 `closed_replay`。
 - `evidence_quality.field_coverage`：参数与观察字段的覆盖率，例如 `dte`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；`abs_delta` 只用于观察和结果分桶。字段不足时先修证据，不把结果解释成参数过严。
 - `gates.candidate_impact`：候选影响层 gate。扫描证据、样本量和参数字段完整样本达到下限时，可以输出 filter-only 候选影响；如果仍有部分字段缺失，计数应按 lower bound 解读。
-- `gates.production_recommendation`：生产推荐层 gate。除 `closed_replay` 外，baseline 和至少一个 variant 还必须通过真实 outcome review readiness；即使通过，也不会自动修改 runtime config。
+- `gates.production_recommendation`：生产推荐层 gate。除 `closed_replay` 外，baseline 和至少一个单参数 variant 还必须达到 complete-closed 最小样本；即使通过，也只允许人工复核，不会自动修改 runtime config。
 - `candidate_impact`：候选影响摘要，包括 baseline 接受数和每组 variant 的新增/移除数量；“新增最多”只用于影响审阅，不代表推荐。
 - `baseline`：生产实际观察结果。
 - `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
-- `recommendation`：只给下一步 gate。`candidate_review_variant` 仅标记候选变化最大的审阅对象；只有 Strategy Lab 证明严格 outcome dominance 后才能形成参数 proposal。
+- `closed_replay_comparison`：按 complete-closed 样本比较加权资本效率、生命周期净收益、负收益率、指派/被行权率、90% 尾部 CVaR、标的资本天数集中度和 HHI；只给人工复核候选。
+- `recommendation`：只给下一步 gate。`candidate_review_variant` 仅标记候选变化最大的审阅对象；`runtime_config_write_allowed` 始终为 `false`，参数变更仍需独立人工决策和发布流程。
 
 ## 建立 Dataset
 

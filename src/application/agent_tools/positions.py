@@ -47,7 +47,7 @@ _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
     **_MONTHLY_INCOME_OUTPUT_CONTRACT,
-    "schema_version": "monthly_income_report.detail_output.v2",
+    "schema_version": "monthly_income_report.detail_output.v3",
     "fact_fields": [
         *_MONTHLY_INCOME_OUTPUT_CONTRACT["fact_fields"],
         "cashflow_rows[].month",
@@ -254,15 +254,14 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     name="monthly_income_report",
     description=(
         "Return monthly option performance and cashflow statistics from the local ledger without running "
-        "market data or notification workflows. For 'how much profit' use return_summary.realized_pnl_* and "
+        "notification workflows. Current assigned-stock rows refresh read-only realtime quotes by default; "
+        "historical as_of_ms rows never use realtime prices. For 'how much profit' use return_summary.realized_pnl_* and "
         "realized_return_rate as the primary option metrics; they are gross before fees and exclude assigned-stock "
         "market PnL. premium_income_* is sell-open premium activity, not additional profit, and must not be added "
         "to realized_pnl_*. net_income_* is a legacy option-cashflow metric that removes assignment-stock settlement "
         "cashflows; it is not profit or PnL. Likewise net_return_rate and annualized_net_return_rate are legacy "
         "cashflow ratios, not investment returns. Use YYYY-MM for a requested month; omit account to aggregate "
         "every available account while preserving currency. "
-        "Current assigned-stock rows refresh read-only realtime quotes by default; historical as_of_ms rows never "
-        "use realtime prices. "
         "When diagnostics.income_amount_status is not_reported, the ledger has not reported a numeric "
         "income amount for that scope; empty rows must not be interpreted as zero income. "
         "diagnostics.position_lot_snapshots_count counts ledger lot snapshots only; it does not "

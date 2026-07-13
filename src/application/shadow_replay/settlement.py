@@ -108,11 +108,81 @@ def derive_outcome_facts(
                 "final_mark_at": mark_time(final_mark),
                 "max_adverse_pnl": min(pnl_values) if pnl_values else None,
                 "max_favorable_pnl": max(pnl_values) if pnl_values else None,
+                **_lifecycle_fact_payload(
+                    candidate,
+                    final_mark,
+                    outcome=outcome,
+                ),
                 "writes_runtime_config": False,
                 "writes_trade_state": False,
             }
         )
     return out
+
+
+def _lifecycle_fact_payload(
+    candidate: dict[str, Any],
+    final_mark: dict[str, Any],
+    *,
+    outcome: str,
+) -> dict[str, Any]:
+    fields = (
+        "lifecycle_pnl_net",
+        "capital_days",
+        "annualized_capital_efficiency",
+        "fee_basis",
+        "fee_missing_components",
+        "covered_call_allocation_status",
+        "allocation_quality",
+        "lifecycle_quality",
+    )
+    payload = {
+        field: _first_lifecycle_value(final_mark, candidate, field)
+        for field in fields
+    }
+    if not text(payload.get("lifecycle_quality")):
+        payload["lifecycle_quality"] = (
+            "transition_only"
+            if outcome in {"assigned_at_expiry", "called_away_at_expiry"}
+            else "closed_incomplete"
+        )
+    payload["production_parameter_eligible"] = is_complete_closed_outcome(payload)
+    if not payload["production_parameter_eligible"]:
+        payload["production_parameter_blocker"] = "fee_complete_closed_lifecycle_required"
+    return payload
+
+
+def _first_lifecycle_value(primary: dict[str, Any], fallback: dict[str, Any], field: str) -> Any:
+    for source in (primary, fallback):
+        if field in source and source.get(field) is not None:
+            return source.get(field)
+    return None
+
+
+def is_complete_closed_outcome(payload: dict[str, Any]) -> bool:
+    if text(payload.get("lifecycle_quality")).lower() != "complete_closed":
+        return False
+    if first_float(payload, "lifecycle_pnl_net") is None:
+        return False
+    capital_days = first_float(payload, "capital_days")
+    if capital_days is None or capital_days <= 0:
+        return False
+    if text(payload.get("fee_basis")).lower() not in {"actual", "estimated", "mixed"}:
+        return False
+    missing = payload.get("fee_missing_components")
+    if isinstance(missing, (list, tuple, set, dict)) and missing:
+        return False
+    if not isinstance(missing, (list, tuple, set, dict)) and text(missing).lower() not in {
+        "",
+        "[]",
+        "{}",
+        "none",
+        "null",
+        "nan",
+    }:
+        return False
+    allocation = text(payload.get("covered_call_allocation_status") or payload.get("allocation_quality")).lower()
+    return allocation not in {"unallocated", "mixed", "ambiguous", "missing"}
 
 
 def outcome_gap_summary(
