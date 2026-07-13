@@ -253,7 +253,7 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     income = get_tool_definition("monthly_income_report")
     assert income is not None
     detail_contract = income.resolve_output_contract({"include_rows": True})
-    assert detail_contract["schema_version"] == "monthly_income_report.detail_output.v2"
+    assert detail_contract["schema_version"] == "monthly_income_report.detail_output.v3"
     assert detail_contract["primary_rows"] == "return_summary"
     assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
     assert "assignment_lifecycle_rows[].lifecycle_pnl_net" in detail_contract["fact_fields"]

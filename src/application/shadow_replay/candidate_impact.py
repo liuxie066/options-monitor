@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -237,11 +238,17 @@ def _run_shadow_replay_candidate_impact(
         variants=variants,
         gates=gates,
     )
+    closed_replay_comparison = _closed_replay_comparison(
+        baseline=baseline,
+        variants=variants,
+        gates=gates,
+    )
     recommendation = _recommendation(
         data_mode=data_mode,
         evidence_quality=evidence_quality,
         gates=gates,
         candidate_impact=candidate_impact,
+        closed_replay_comparison=closed_replay_comparison,
     )
     result: dict[str, Any] = {
         "schema_version": schema_version,
@@ -262,6 +269,9 @@ def _run_shadow_replay_candidate_impact(
             "mark_path_snapshot_count": len(mark_snapshots),
             "usable_mark_path_snapshot_count": sum(1 for row in mark_snapshots if is_usable_mark(row)),
             "outcome_fact_count": len(outcome_facts),
+            "complete_closed_outcome_fact_count": sum(
+                1 for row in outcome_facts if _complete_closed_outcome_eligibility(row)[0]
+            ),
             "min_sample": sample_floor,
             "variant_count": len(variants),
             "parameter_complete_candidate_count": evidence_quality["complete_candidate_count"],
@@ -273,6 +283,7 @@ def _run_shadow_replay_candidate_impact(
         "variants": variants,
         "gates": gates,
         "candidate_impact": candidate_impact,
+        "closed_replay_comparison": closed_replay_comparison,
         "recommendation": recommendation,
         "safety": safety_payload(writes_local_dataset=False),
     }
@@ -467,6 +478,7 @@ def _baseline_payload(
         outcome_facts=outcomes,
         min_sample=min_sample,
     )
+    closed_metrics = _closed_lifecycle_metrics(candidates, outcomes, min_sample=min_sample)
     return {
         "name": "production_observed",
         "candidate_count": len(candidates),
@@ -476,6 +488,7 @@ def _baseline_payload(
         "analysis_summary": analysis["summary"],
         "insurance_metrics": analysis["insurance_metrics"],
         "outcome_stats": analysis["outcome_stats"],
+        "closed_lifecycle_metrics": closed_metrics,
         "decision_quality": analysis["decision_quality"]["summary"],
     }
 
@@ -546,10 +559,14 @@ def _variant_payload(
         if not history_requested
         else ("evaluated" if history_evaluated_count > 0 else "insufficient_history")
     )
+    variant_payload = variant.to_payload()
     return {
         "name": variant.name,
         "strategy_family": variant.strategy_family,
-        "parameters": variant.to_payload()["profiles"],
+        "parameters": variant_payload["profiles"],
+        "changed_fields": variant_payload["changed_fields"],
+        "production_closed_replay_eligible": variant_payload["production_closed_replay_eligible"],
+        "production_closed_replay_reason": variant_payload["production_closed_replay_reason"],
         "candidate_count": len(evaluated_rows),
         "accepted_count": int(status_counts.get("accepted", 0)),
         "rejected_count": int(status_counts.get("rejected", 0)),
@@ -569,7 +586,149 @@ def _variant_payload(
         "analysis_summary": analysis["summary"],
         "insurance_metrics": analysis["insurance_metrics"],
         "outcome_stats": analysis["outcome_stats"],
+        "closed_lifecycle_metrics": _closed_lifecycle_metrics(
+            evaluated_rows,
+            outcomes,
+            min_sample=min_sample,
+        ),
         "decision_quality": analysis["decision_quality"]["summary"],
+    }
+
+
+def _closed_lifecycle_metrics(
+    candidates: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    *,
+    min_sample: int,
+) -> dict[str, Any]:
+    outcomes_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for outcome in outcomes:
+        key = instrument_key(outcome)
+        if key:
+            outcomes_by_key[key].append(outcome)
+
+    accepted = [row for row in candidates if _status_group(row) == "accepted"]
+    lifecycle_rows: list[dict[str, Any]] = []
+    blocker_counts: Counter[str] = Counter()
+    missing_outcome_count = 0
+    for candidate in accepted:
+        key = instrument_key(candidate)
+        matched = outcomes_by_key.get(key) or []
+        if not matched:
+            missing_outcome_count += 1
+            continue
+        eligible = None
+        candidate_blockers: set[str] = set()
+        for outcome in matched:
+            allowed, reasons = _complete_closed_outcome_eligibility(outcome)
+            if allowed:
+                eligible = outcome
+                break
+            candidate_blockers.update(reasons)
+        if eligible is None:
+            blocker_counts.update(candidate_blockers or {"complete_closed_outcome_missing"})
+            continue
+        lifecycle_rows.append(eligible)
+
+    pnl_values = [float(first_float(row, "lifecycle_pnl_net") or 0.0) for row in lifecycle_rows]
+    capital_days_values = [float(first_float(row, "capital_days") or 0.0) for row in lifecycle_rows]
+    efficiency_values = [
+        float(first_float(row, "annualized_capital_efficiency") or 0.0)
+        if first_float(row, "annualized_capital_efficiency") is not None
+        else float(first_float(row, "lifecycle_pnl_net") or 0.0) * 365.0 / float(first_float(row, "capital_days") or 1.0)
+        for row in lifecycle_rows
+    ]
+    total_pnl = sum(pnl_values)
+    total_capital_days = sum(capital_days_values)
+    count = len(lifecycle_rows)
+    outcome_counts = Counter(text(row.get("outcome")).lower() or "unknown" for row in lifecycle_rows)
+    fee_basis_counts = Counter(text(row.get("fee_basis")).lower() or "unknown" for row in lifecycle_rows)
+    allocation_counts = Counter(
+        text(row.get("covered_call_allocation_status") or row.get("allocation_quality")).lower() or "none"
+        for row in lifecycle_rows
+    )
+    symbol_capital_days: dict[str, float] = defaultdict(float)
+    for row, capital_days in zip(lifecycle_rows, capital_days_values, strict=True):
+        symbol_capital_days[text(row.get("symbol") or row.get("underlying_symbol")).upper() or "UNKNOWN"] += capital_days
+    concentration_weights = [value / total_capital_days for value in symbol_capital_days.values()] if total_capital_days > 0 else []
+    tail = _closed_lifecycle_tail(efficiency_values)
+    return {
+        "metric_basis": "accepted_complete_closed_lifecycle",
+        "accepted_candidate_count": len(accepted),
+        "complete_closed_count": count,
+        "missing_outcome_count": missing_outcome_count,
+        "incomplete_outcome_count": max(0, len(accepted) - missing_outcome_count - count),
+        "blocker_counts": dict(blocker_counts.most_common()),
+        "min_sample": int(min_sample),
+        "sample_ready": count >= int(min_sample),
+        "lifecycle_pnl_net_total": round(total_pnl, 6),
+        "capital_days_total": round(total_capital_days, 6),
+        "weighted_annualized_capital_efficiency": (
+            round(total_pnl * 365.0 / total_capital_days, 8)
+            if total_capital_days > 0
+            else None
+        ),
+        "negative_outcome_count": sum(1 for value in pnl_values if value < 0),
+        "negative_outcome_rate": round(sum(1 for value in pnl_values if value < 0) / count, 6) if count else None,
+        "assignment_count": int(outcome_counts.get("assigned_at_expiry", 0)),
+        "assignment_rate": round(outcome_counts.get("assigned_at_expiry", 0) / count, 6) if count else None,
+        "called_away_count": int(outcome_counts.get("called_away_at_expiry", 0)),
+        "called_away_rate": round(outcome_counts.get("called_away_at_expiry", 0) / count, 6) if count else None,
+        "exercise_rate": round(
+            (outcome_counts.get("assigned_at_expiry", 0) + outcome_counts.get("called_away_at_expiry", 0)) / count,
+            6,
+        ) if count else None,
+        "tail_risk": tail,
+        "concentration": {
+            "top_symbol_capital_days_ratio": round(max(concentration_weights), 6) if concentration_weights else None,
+            "capital_days_hhi": round(sum(value * value for value in concentration_weights), 6) if concentration_weights else None,
+            "symbol_count": len(symbol_capital_days),
+        },
+        "fee_basis_counts": dict(sorted(fee_basis_counts.items())),
+        "allocation_quality_counts": dict(sorted(allocation_counts.items())),
+        "runtime_config_write_allowed": False,
+    }
+
+
+def _complete_closed_outcome_eligibility(outcome: dict[str, Any]) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if text(outcome.get("lifecycle_quality")).lower() != "complete_closed":
+        reasons.append("lifecycle_quality_not_complete_closed")
+    if first_float(outcome, "lifecycle_pnl_net") is None:
+        reasons.append("lifecycle_pnl_net_missing")
+    capital_days = first_float(outcome, "capital_days")
+    if capital_days is None or capital_days <= 0:
+        reasons.append("capital_days_missing")
+    fee_basis = text(outcome.get("fee_basis")).lower()
+    if fee_basis not in {"actual", "estimated", "mixed"}:
+        reasons.append("fee_basis_incomplete")
+    if _has_missing_fee_components(outcome.get("fee_missing_components")):
+        reasons.append("fee_components_missing")
+    allocation = text(outcome.get("covered_call_allocation_status") or outcome.get("allocation_quality")).lower()
+    if allocation in {"unallocated", "mixed", "ambiguous", "missing"}:
+        reasons.append("allocation_quality_incomplete")
+    return not reasons, reasons
+
+
+def _has_missing_fee_components(value: Any) -> bool:
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    normalized = text(value).lower()
+    return normalized not in {"", "[]", "{}", "none", "null", "nan"}
+
+
+def _closed_lifecycle_tail(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"observation_count": 0, "var_90": None, "cvar_90": None, "worst": None}
+    ordered = sorted(values)
+    tail_count = max(1, int(ceil(len(ordered) * 0.10)))
+    tail = ordered[:tail_count]
+    return {
+        "observation_count": len(ordered),
+        "tail_observation_count": tail_count,
+        "var_90": round(tail[-1], 8),
+        "cvar_90": round(sum(tail) / len(tail), 8),
+        "worst": round(ordered[0], 8),
     }
 
 
@@ -882,6 +1041,7 @@ def _recommendation(
     evidence_quality: dict[str, Any],
     gates: dict[str, Any],
     candidate_impact: dict[str, Any],
+    closed_replay_comparison: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_gate = gates.get("candidate_impact") or {}
     field_gate = gates.get("parameter_fields") or {}
@@ -895,9 +1055,14 @@ def _recommendation(
             "candidate_count": evidence_quality.get("candidate_count"),
         }
     if data_mode != "closed_replay":
+        reason = (
+            "complete_closed_lifecycle_evidence_missing"
+            if data_mode == "outcome_incomplete"
+            else "outcome_evidence_missing"
+        )
         return {
             "status": "ready_for_live_shadow_candidate_review",
-            "reason": "outcome_evidence_missing",
+            "reason": reason,
             "candidate_impact_allowed": True,
             "candidate_impact_reason": candidate_impact.get("reason"),
             "candidate_review_variant": candidate_impact.get("best_variant_by_new_accepts"),
@@ -905,7 +1070,7 @@ def _recommendation(
             "parameter_field_status": field_gate.get("status"),
             "missing_required_fields": evidence_quality.get("missing_required_fields"),
             "production_recommendation_allowed": False,
-            "next_action": "review_candidate_impact_and_collect_mark_outcomes_before_production_change",
+            "next_action": "review_candidate_impact_and_collect_fee_complete_closed_lifecycle_outcomes",
         }
     production_gate = gates.get("production_recommendation") or {}
     if not bool(production_gate.get("allowed")):
@@ -920,14 +1085,15 @@ def _recommendation(
             "next_action": production_gate.get("next_action") or "collect_complete_outcome_evidence",
         }
     return {
-        "status": "ready_for_strict_outcome_comparison",
-        "reason": "outcome_review_ready",
+        "status": "ready_for_manual_closed_replay_review",
+        "reason": "complete_closed_outcome_review_ready",
         "candidate_impact_allowed": True,
-        "candidate_review_variant": candidate_impact.get("best_variant_by_new_accepts"),
-        "candidate_review_basis": "newly_accepted_count_only",
+        "candidate_review_variant": closed_replay_comparison.get("suggested_variant_for_manual_review"),
+        "candidate_review_basis": "complete_closed_weighted_capital_efficiency_with_risk_metrics",
         "parameter_field_status": field_gate.get("status"),
         "production_recommendation_allowed": True,
-        "next_action": "review_variant_then_run_live_shadow_before_production_change",
+        "runtime_config_write_allowed": False,
+        "next_action": "manually_review_single_parameter_variant_then_run_live_shadow",
     }
 
 
@@ -949,8 +1115,14 @@ def _gate_payload(
         field_gate=field_gate,
         variants=variants,
     )
+    lifecycle_gate = _closed_lifecycle_gate(
+        baseline=baseline,
+        variants=variants,
+        min_sample=min_sample,
+    )
     production_gate = _production_recommendation_gate(
         candidate_gate=candidate_gate,
+        lifecycle_gate=lifecycle_gate,
         data_mode=data_mode,
         baseline=baseline,
         variants=variants,
@@ -960,6 +1132,7 @@ def _gate_payload(
         "sample_size": sample_gate,
         "parameter_fields": field_gate,
         "candidate_impact": candidate_gate,
+        "closed_lifecycle_evidence": lifecycle_gate,
         "production_recommendation": production_gate,
     }
 
@@ -1059,9 +1232,56 @@ def _candidate_impact_gate(
     }
 
 
+def _closed_lifecycle_gate(
+    *,
+    baseline: dict[str, Any],
+    variants: list[dict[str, Any]],
+    min_sample: int,
+) -> dict[str, Any]:
+    baseline_metrics = baseline.get("closed_lifecycle_metrics") or {}
+    baseline_count = int(baseline_metrics.get("complete_closed_count") or 0)
+    ready_variants: list[str] = []
+    ineligible_variants: dict[str, str] = {}
+    for variant in variants:
+        name = str(variant.get("name") or "")
+        if not bool(variant.get("production_closed_replay_eligible")):
+            ineligible_variants[name] = str(
+                variant.get("production_closed_replay_reason")
+                or "closed_replay_requires_exactly_one_production_parameter"
+            )
+            continue
+        metrics = variant.get("closed_lifecycle_metrics") or {}
+        if int(metrics.get("complete_closed_count") or 0) < int(min_sample):
+            ineligible_variants[name] = "complete_closed_sample_below_min_sample"
+            continue
+        ready_variants.append(name)
+    baseline_ready = baseline_count >= int(min_sample)
+    allowed = baseline_ready and bool(ready_variants)
+    if not baseline_ready:
+        reason = "baseline_complete_closed_sample_below_min_sample"
+        next_action = "collect_more_fee_complete_closed_baseline_lifecycles"
+    elif not ready_variants:
+        reason = "no_single_parameter_variant_has_complete_closed_sample"
+        next_action = "use_single_parameter_variants_and_collect_complete_closed_lifecycles"
+    else:
+        reason = "complete_closed_lifecycle_comparison_ready"
+        next_action = None
+    return {
+        "allowed": allowed,
+        "status": "pass" if allowed else "fail",
+        "reason": reason,
+        "baseline_complete_closed_count": baseline_count,
+        "min_sample": int(min_sample),
+        "ready_variants": ready_variants,
+        "ineligible_variants": ineligible_variants,
+        "next_action": next_action,
+    }
+
+
 def _production_recommendation_gate(
     *,
     candidate_gate: dict[str, Any],
+    lifecycle_gate: dict[str, Any],
     data_mode: str,
     baseline: dict[str, Any],
     variants: list[dict[str, Any]],
@@ -1078,8 +1298,45 @@ def _production_recommendation_gate(
         return {
             "allowed": False,
             "status": "blocked",
-            "reason": "outcome_evidence_missing",
-            "next_action": "collect_mark_outcomes_before_parameter_recommendation",
+            "reason": "complete_closed_lifecycle_evidence_missing",
+            "next_action": "collect_fee_complete_closed_lifecycle_outcomes",
+            "runtime_config_write_allowed": False,
+        }
+    if not bool(lifecycle_gate.get("allowed")):
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": lifecycle_gate.get("reason") or "complete_closed_lifecycle_evidence_missing",
+            "next_action": lifecycle_gate.get("next_action") or "collect_fee_complete_closed_lifecycle_outcomes",
+            "ready_variants": lifecycle_gate.get("ready_variants") or [],
+            "runtime_config_write_allowed": False,
+        }
+    baseline_ready = bool((baseline.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
+    lifecycle_ready = set(lifecycle_gate.get("ready_variants") or [])
+    ready_variants = [
+        str(row.get("name") or "")
+        for row in variants
+        if str(row.get("name") or "") in lifecycle_ready
+        and bool((row.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
+    ]
+    if not baseline_ready:
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "baseline_outcome_review_not_ready",
+            "next_action": "collect_complete_baseline_mark_and_lifecycle_outcomes",
+            "baseline_review_ready": False,
+            "ready_variants": ready_variants,
+            "runtime_config_write_allowed": False,
+        }
+    if not ready_variants:
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "variant_outcome_review_not_ready",
+            "next_action": "collect_complete_variant_mark_and_lifecycle_outcomes",
+            "baseline_review_ready": True,
+            "ready_variants": [],
             "runtime_config_write_allowed": False,
         }
     baseline_ready = bool((baseline.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
@@ -1164,10 +1421,94 @@ def _candidate_impact_payload(
     }
 
 
+def _closed_replay_comparison(
+    *,
+    baseline: dict[str, Any],
+    variants: list[dict[str, Any]],
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    lifecycle_gate = gates.get("closed_lifecycle_evidence") or {}
+    production_gate = gates.get("production_recommendation") or {}
+    ready_names = set(lifecycle_gate.get("ready_variants") or [])
+    baseline_metrics = baseline.get("closed_lifecycle_metrics") or {}
+    comparisons: list[dict[str, Any]] = []
+    for variant in variants:
+        name = str(variant.get("name") or "")
+        metrics = variant.get("closed_lifecycle_metrics") or {}
+        comparisons.append(
+            {
+                "name": name,
+                "changed_fields": list(variant.get("changed_fields") or []),
+                "production_eligible": name in ready_names,
+                "metrics": metrics,
+                "deltas_vs_baseline": _closed_metric_deltas(baseline_metrics, metrics),
+            }
+        )
+    eligible = [row for row in comparisons if row["production_eligible"]]
+    suggested = max(eligible, key=_closed_variant_sort_key) if eligible else None
+    return {
+        "status": "review_ready" if bool(production_gate.get("allowed")) else "not_ready",
+        "reason": production_gate.get("reason"),
+        "baseline_metrics": baseline_metrics,
+        "variant_comparisons": comparisons,
+        "suggested_variant_for_manual_review": suggested.get("name") if suggested and production_gate.get("allowed") else None,
+        "selection_basis": [
+            "weighted_annualized_capital_efficiency",
+            "lifecycle_pnl_net_total",
+            "negative_outcome_rate",
+            "tail_cvar_90",
+            "top_symbol_capital_days_ratio",
+        ],
+        "writes_runtime_config": False,
+    }
+
+
+def _closed_metric_deltas(baseline: dict[str, Any], variant: dict[str, Any]) -> dict[str, float | None]:
+    fields = {
+        "weighted_annualized_capital_efficiency": (baseline, variant),
+        "lifecycle_pnl_net_total": (baseline, variant),
+        "negative_outcome_rate": (baseline, variant),
+        "assignment_rate": (baseline, variant),
+        "exercise_rate": (baseline, variant),
+    }
+    out: dict[str, float | None] = {}
+    for field, (left, right) in fields.items():
+        base_value = first_float(left, field)
+        variant_value = first_float(right, field)
+        out[field] = round(variant_value - base_value, 8) if base_value is not None and variant_value is not None else None
+    for field, section, key in (
+        ("tail_cvar_90", "tail_risk", "cvar_90"),
+        ("top_symbol_capital_days_ratio", "concentration", "top_symbol_capital_days_ratio"),
+    ):
+        base_value = first_float(baseline.get(section) or {}, key)
+        variant_value = first_float(variant.get(section) or {}, key)
+        out[field] = round(variant_value - base_value, 8) if base_value is not None and variant_value is not None else None
+    return out
+
+
+def _closed_variant_sort_key(row: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    metrics = row.get("metrics") or {}
+    efficiency = first_float(metrics, "weighted_annualized_capital_efficiency")
+    total_pnl = first_float(metrics, "lifecycle_pnl_net_total")
+    negative_rate = first_float(metrics, "negative_outcome_rate")
+    tail_cvar = first_float(metrics.get("tail_risk") or {}, "cvar_90")
+    concentration = first_float(metrics.get("concentration") or {}, "top_symbol_capital_days_ratio")
+    return (
+        efficiency if efficiency is not None else float("-inf"),
+        total_pnl if total_pnl is not None else float("-inf"),
+        -(negative_rate if negative_rate is not None else float("inf")),
+        tail_cvar if tail_cvar is not None else float("-inf"),
+        -(concentration if concentration is not None else float("inf")),
+    )
+
+
 def _data_mode(marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> str:
-    if outcomes and any(is_usable_mark(row) for row in marks):
+    has_usable_mark = any(is_usable_mark(row) for row in marks)
+    if has_usable_mark and any(_complete_closed_outcome_eligibility(row)[0] for row in outcomes):
         return "closed_replay"
-    if any(is_usable_mark(row) for row in marks):
+    if outcomes and has_usable_mark:
+        return "outcome_incomplete"
+    if has_usable_mark:
         return "path_only"
     return "filter_only"
 

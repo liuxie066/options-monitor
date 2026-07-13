@@ -265,10 +265,11 @@ def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[Par
         if "min_iv_minus_rv" in params:
             params["min_iv_minus_rv"] = max(0.0, params["min_iv_minus_rv"] - 0.01)
         add("relax_iv_rv_floor", params)
-        params = dict(baseline)
-        params["min_iv_rv_percentile"] = 0.70
-        params["min_iv_rv_history_samples"] = 20.0
-        add("historical_iv_rv_percentile", params)
+        if "min_iv_rv_ratio" in baseline:
+            params = dict(baseline)
+            params["min_iv_rv_percentile"] = 0.70
+            params["min_iv_rv_history_samples"] = 20.0
+            add("historical_iv_rv_percentile", params)
 
     if "min_annualized_return" in baseline:
         params = dict(baseline)

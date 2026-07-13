@@ -21,7 +21,7 @@ from src.application.shadow_replay.common import (
     utc_now,
     write_json,
 )
-from src.application.shadow_replay.settlement import is_usable_mark
+from src.application.shadow_replay.settlement import is_complete_closed_outcome, is_usable_mark
 
 
 WHEEL_TRANSITION_OUTCOMES = {"assigned_at_expiry", "called_away_at_expiry"}
@@ -1610,9 +1610,11 @@ def _summarize_outcome_group(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _evidence_level(candidates: list[dict[str, Any]], decisions: list[dict[str, Any]], marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> str:
     usable_marks = [row for row in marks if is_usable_mark(row)]
-    if candidates and decisions and usable_marks and outcomes:
-        return "closed_replay"
     if candidates and decisions and usable_marks:
+        if any(is_complete_closed_outcome(row) for row in outcomes):
+            return "closed_replay"
+        if outcomes:
+            return "outcome_incomplete"
         return "marked_universe"
     if candidates and decisions:
         return "candidate_and_reject_universe"

@@ -83,6 +83,31 @@ def test_parameter_set_rejects_delta_as_underwriting_filter() -> None:
         )
 
 
+def test_parameter_set_marks_only_single_production_field_as_closed_replay_eligible() -> None:
+    from src.application.shadow_replay.parameter_sets import parse_parameter_set
+
+    parameter_set = parse_parameter_set(
+        {
+            "variants": [
+                {
+                    "name": "single",
+                    "insurance_underwriting": {"min_dte": 21},
+                },
+                {
+                    "name": "multi",
+                    "insurance_underwriting": {"min_dte": 21, "max_dte": 60},
+                },
+            ]
+        }
+    )
+
+    single, multi = parameter_set.to_payload()["variants"]
+    assert single["changed_fields"] == ["min_dte"]
+    assert single["production_closed_replay_eligible"] is True
+    assert multi["changed_fields"] == ["max_dte", "min_dte"]
+    assert multi["production_closed_replay_eligible"] is False
+
+
 @pytest.mark.parametrize(
     ("params", "message"),
     [
@@ -455,7 +480,7 @@ def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(
 
     variant = result["variants"][0]
     assert result["schema_version"] == "shadow_replay_candidate_impact.v1"
-    assert result["data_mode"] == "closed_replay"
+    assert result["data_mode"] == "outcome_incomplete"
     assert result["baseline"]["accepted_count"] == 2
     assert variant["accepted_count"] == 2
     assert variant["newly_accepted_count"] == 1
@@ -465,9 +490,174 @@ def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(
     assert variant["safety_reasons"] == {"spread_ratio_above_safety_floor": 1}
     assert variant["safety_rejected_count"] == 1
     assert variant["safety_violation_count"] == 0
-    assert result["recommendation"]["status"] == "ready_for_live_shadow_outcome_review"
+    assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
     assert result["recommendation"]["production_recommendation_allowed"] is False
     assert result["safety"]["writes_runtime_config"] is False
+
+
+def test_candidate_impact_closed_replay_uses_complete_lifecycles_and_single_parameter_variant(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    dataset = tmp_path / "dataset"
+    candidates = [
+        {
+            "contract_symbol": "NVDA260619P00100000",
+            "symbol": "NVDA",
+            "account": "lx",
+            "option_type": "put",
+            "status": "accepted",
+            "strategy_profile": "insurance_underwriting",
+            "iv_rv_ratio": 1.30,
+            "iv_minus_rv": 0.08,
+            "dte": 30,
+            "spread_ratio": 0.10,
+            "net_income": 20,
+        },
+        {
+            "contract_symbol": "AMD260619P00080000",
+            "symbol": "AMD",
+            "account": "lx",
+            "option_type": "put",
+            "status": "rejected",
+            "strategy_profile": "insurance_underwriting",
+            "iv_rv_ratio": 1.15,
+            "iv_minus_rv": 0.06,
+            "dte": 30,
+            "spread_ratio": 0.10,
+            "net_income": 20,
+        },
+    ]
+    _write_jsonl(dataset / "candidate_snapshots.jsonl", candidates)
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(
+        dataset / "mark_path_snapshots.jsonl",
+        [
+            {"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": -40},
+            {"contract_symbol": "AMD260619P00080000", "unrealized_pnl": 20},
+        ],
+    )
+    _write_jsonl(
+        dataset / "outcome_facts.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "outcome": "closed",
+                "realized_pnl": -100,
+                "lifecycle_pnl_net": -100,
+                "capital_days": 10_000,
+                "annualized_capital_efficiency": -3.65,
+                "fee_basis": "actual",
+                "fee_missing_components": [],
+                "covered_call_allocation_status": "none",
+                "lifecycle_quality": "complete_closed",
+            },
+            {
+                "contract_symbol": "AMD260619P00080000",
+                "symbol": "AMD",
+                "outcome": "closed",
+                "realized_pnl": 200,
+                "lifecycle_pnl_net": 200,
+                "capital_days": 20_000,
+                "annualized_capital_efficiency": 3.65,
+                "fee_basis": "estimated",
+                "fee_missing_components": [],
+                "covered_call_allocation_status": "none",
+                "lifecycle_quality": "complete_closed",
+            },
+        ],
+    )
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params={
+            "variants": [
+                {
+                    "name": "iv_rv_1_10",
+                    "insurance_underwriting": {"min_iv_rv_ratio": 1.10},
+                }
+            ]
+        },
+        min_sample=1,
+    )
+
+    assert result["data_mode"] == "closed_replay"
+    assert result["summary"]["complete_closed_outcome_fact_count"] == 2
+    assert result["gates"]["closed_lifecycle_evidence"]["allowed"] is True
+    assert result["gates"]["production_recommendation"]["allowed"] is True
+    baseline = result["baseline"]["closed_lifecycle_metrics"]
+    variant = result["variants"][0]
+    assert baseline["complete_closed_count"] == 1
+    assert baseline["weighted_annualized_capital_efficiency"] == -3.65
+    assert variant["changed_fields"] == ["min_iv_rv_ratio"]
+    assert variant["production_closed_replay_eligible"] is True
+    assert variant["closed_lifecycle_metrics"]["complete_closed_count"] == 2
+    assert result["closed_replay_comparison"]["suggested_variant_for_manual_review"] == "iv_rv_1_10"
+    assert result["recommendation"]["status"] == "ready_for_manual_closed_replay_review"
+    assert result["recommendation"]["runtime_config_write_allowed"] is False
+
+
+def test_candidate_impact_assignment_transition_without_stock_lifecycle_is_not_closed_replay(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    dataset = tmp_path / "dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "insurance_underwriting",
+                "iv_rv_ratio": 1.30,
+                "dte": 30,
+                "spread_ratio": 0.10,
+                "net_income": 20,
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(
+        dataset / "mark_path_snapshots.jsonl",
+        [{"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": -40}],
+    )
+    _write_jsonl(
+        dataset / "outcome_facts.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "outcome": "assigned_at_expiry",
+                "realized_pnl": -100,
+                "lifecycle_quality": "transition_only",
+            }
+        ],
+    )
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params={
+            "variants": [
+                {
+                    "name": "iv_rv_1_10",
+                    "insurance_underwriting": {"min_iv_rv_ratio": 1.10},
+                }
+            ]
+        },
+        min_sample=1,
+    )
+
+    assert result["data_mode"] == "outcome_incomplete"
+    assert result["summary"]["complete_closed_outcome_fact_count"] == 0
+    assert result["gates"]["production_recommendation"]["allowed"] is False
+    assert result["recommendation"]["reason"] == "complete_closed_lifecycle_evidence_missing"
 
 
 def test_candidate_impact_uses_canonical_schema(tmp_path: Path) -> None:
