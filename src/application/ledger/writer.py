@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Sequence
 
+from domain.domain.fee_calc import extract_actual_fees
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import normalize_currency
 from domain.domain.trade_contract_identity import (
@@ -230,6 +231,13 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     multiplier_source = str(getattr(deal, "multiplier_source", "") or "").strip()
     if multiplier_source:
         raw_payload.setdefault("multiplier_source", multiplier_source)
+    actual_fees = extract_actual_fees(raw_payload)
+    if actual_fees is not None:
+        raw_payload["fee_provenance"] = {
+            "basis": "actual",
+            "source": actual_fees["source"],
+            "components": actual_fees["components"],
+        }
     event_time_ms = _required_broker_trade_time_ms(deal)
     contract_key = ContractKey.from_values(
         broker=getattr(deal, "broker", None) or "富途",
@@ -250,6 +258,7 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         currency=normalize_currency(getattr(deal, "currency", None)),
         source="opend_push",
         multiplier=float(getattr(deal, "multiplier", None) or 100),
+        fees=float(actual_fees["amount"]) if actual_fees is not None else 0.0,
         target_lot_id=str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip() or None,
         raw_payload=raw_payload,
     )

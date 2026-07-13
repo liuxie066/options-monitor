@@ -332,6 +332,7 @@ def monthly_income_report_tool(
     normalize_broker,
     resolve_option_positions_repo,
     build_monthly_income_report,
+    refresh_assigned_stock_quotes,
     get_exchange_rates,
     repo_base,
     mask_path,
@@ -345,6 +346,12 @@ def monthly_income_report_tool(
     account = str(payload.get("account") or "").strip() or None
     month = str(payload.get("month") or "").strip() or None
     include_rows = bool(payload.get("include_rows", False))
+    try:
+        as_of_ms = int(payload["as_of_ms"]) if payload.get("as_of_ms") not in (None, "") else None
+    except Exception as exc:
+        raise AgentToolError("INVALID_ARGUMENT", "as_of_ms must be an integer timestamp in milliseconds") from exc
+    refresh_flag = payload.get("refresh_quotes")
+    refresh_quotes = bool(refresh_flag is True or (as_of_ms is None and refresh_flag is not False))
 
     warnings: list[str] = []
     rate_cache_path = (config_path.parent / "output_shared" / "state" / "rate_cache.json").resolve()
@@ -356,15 +363,60 @@ def monthly_income_report_tool(
     list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
     raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
     assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None
+    records = list_canonical_position_lot_snapshots(repo, base=repo_base())
     report = build_monthly_income_report(
-        list_canonical_position_lot_snapshots(repo, base=repo_base()),
+        records,
         account=account,
         broker=broker,
         month=month,
         rates=rates,
         trade_events=trade_events,
         assigned_stock_events=assigned_stock_events,
+        as_of_ms=as_of_ms,
     )
+    quote_refresh: dict[str, Any] = {"enabled": False}
+    if refresh_quotes:
+        if as_of_ms is not None:
+            quote_refresh = {
+                "enabled": False,
+                "status": "skipped_historical_as_of",
+                "reason": "historical as-of queries require supplied quote snapshots or saved marks",
+            }
+            warnings.append("refresh_quotes ignored because as_of_ms was provided")
+        else:
+            lifecycle_rows = [row for row in report.get("assignment_lifecycle_rows") or [] if isinstance(row, dict)]
+            try:
+                refreshed = refresh_assigned_stock_quotes(
+                    lifecycle_rows,
+                    cfg=cfg,
+                    account=account,
+                    base_dir=repo_base(),
+                    state_base_dir=config_path.parent,
+                )
+            except Exception as exc:
+                quote_refresh = {
+                    "enabled": True,
+                    "status": "source_error",
+                    "quote_source": "opend_realtime",
+                    "errors": [{"error_code": type(exc).__name__, "message": str(exc)}],
+                }
+                warnings.append(f"assigned stock quote refresh failed: {type(exc).__name__}: {exc}")
+            else:
+                quote_refresh = dict(getattr(refreshed, "diagnostics", {}) or {})
+                quote_refresh.setdefault("enabled", True)
+                warnings.extend(str(item) for item in (getattr(refreshed, "warnings", []) or []) if str(item).strip())
+                quote_snapshots = list(getattr(refreshed, "quote_snapshots", []) or [])
+                if quote_snapshots:
+                    report = build_monthly_income_report(
+                        records,
+                        account=account,
+                        broker=broker,
+                        month=month,
+                        rates=rates,
+                        trade_events=trade_events,
+                        assigned_stock_events=assigned_stock_events,
+                        quote_snapshots=quote_snapshots,
+                    )
     report_warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
     warnings.extend(report_warnings)
 
@@ -389,6 +441,7 @@ def monthly_income_report_tool(
         "row_count": len(rows),
         "premium_row_count": len(premium_rows),
         "report_warnings": report_warnings,
+        "quote_refresh": quote_refresh,
     }
     diagnostics = data["diagnostics"]
     data["summary_count"] = len(data["summary"])
@@ -414,6 +467,8 @@ def monthly_income_report_tool(
             "cashflow_rows",
             "stock_settlement_rows",
             "assignment_lifecycle_rows",
+            "lifecycle_efficiency_rows",
+            "lifecycle_efficiency_summary",
             "assigned_stock_lots",
             "assigned_stock_sale_rows",
             "assigned_stock_review_rows",

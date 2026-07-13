@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from domain.domain.option_position_lots import BUY_TO_CLOSE, EXPIRE_AUTO_CLOSE, parse_exp_to_ms
+from domain.domain.fee_calc import FUTU_US_FEE_SCHEDULE_URL, calc_futu_hk_stock_fee
 import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
@@ -1276,10 +1277,10 @@ def test_monthly_income_report_assignment_lifecycle_marks_sold_assigned_stock() 
             "shares_remaining": 0,
             "shares_sold": 100,
             "stock_cost_per_share": 100.0,
-            "assigned_stock_realized_pnl": 500.0,
+            "assigned_stock_realized_pnl": 497.4739,
             "assigned_stock_unrealized_pnl": None,
             "option_premium_attribution": 250.0,
-            "assignment_lifecycle_pnl": 750.0,
+            "assignment_lifecycle_pnl": 747.4739,
             "quote_status": "not_required",
         },
     )
@@ -1296,15 +1297,302 @@ def test_monthly_income_report_assignment_lifecycle_marks_sold_assigned_stock() 
             "event_at": _ms("2026-06-01"),
             "shares": 100,
             "price": 105.0,
-            "fees": 0.0,
+            "fees": 2.5261,
+            "fee_basis": "estimated",
+            "fee_source": FUTU_US_FEE_SCHEDULE_URL,
+            "fee_reason": "standard_fixed_stock_fee_schedule_estimate",
             "cash_in_gross": 10500.0,
-            "stock_sale_cash_in_net": 10500.0,
+            "stock_sale_cash_in_net": 10497.4739,
             "stock_cost_basis_sold": 10000.0,
-            "assigned_stock_realized_pnl": 500.0,
+            "assigned_stock_realized_pnl": 497.4739,
             "source": "manual",
             "source_deal_id": None,
         }
     ]
+    stock_sale_fee = next(item for item in row["fee_evidence"] if item["component"] == "stock_sale_fee")
+    assert stock_sale_fee == {
+        "component": "stock_sale_fee",
+        "basis": "estimated",
+        "amount": 2.5261,
+        "source": FUTU_US_FEE_SCHEDULE_URL,
+        "reason": "standard_fixed_stock_fee_schedule_estimate",
+    }
+    assignment_fee = next(item for item in row["fee_evidence"] if item["component"] == "assignment_stock_fee")
+    assert assignment_fee["basis"] == "missing"
+    assert assignment_fee["reason"] == "us_assignment_fee_rule_not_explicit"
+
+
+def test_assignment_lifecycle_reports_dates_complete_fees_and_capital_days() -> None:
+    noon_ms = 12 * 60 * 60 * 1000
+    open_event = _trade_event(
+        "open-short-fees",
+        side="sell",
+        position_effect="open",
+        price=2.5,
+        trade_date="2026-04-03",
+        raw_payload={"fees": 2.0},
+    )
+    assignment_event = _trade_event(
+        "assign-short-put-fees",
+        side="buy",
+        position_effect="close",
+        price=0.0,
+        trade_date="2026-05-01",
+        raw_payload={
+            "close_type": "assignment",
+            "target_lot_id": "lot-open-short-fees",
+            "fees": 0.0,
+            "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0, "fees": 1.0},
+        },
+    )
+    open_event["trade_time_ms"] += noon_ms
+    assignment_event["trade_time_ms"] += noon_ms
+    sale_at = _ms("2026-06-01") + noon_ms
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=[open_event, assignment_event],
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "sale-fees",
+                "target_stock_lot_id": "assigned-stock-assign-short-put-fees",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "side": "sell",
+                "shares": 100,
+                "price": 105.0,
+                "currency": "USD",
+                "fees": 1.5,
+                "trade_time_ms": sale_at,
+            }
+        ],
+    )
+
+    row = report["lifecycle_efficiency_rows"][0]
+    assert row["assigned_at_ms"] == _ms("2026-05-01") + noon_ms
+    assert row["assigned_date"] == "2026-05-01"
+    assert row["inventory_end_at_ms"] == sale_at
+    assert row["inventory_days"] == 31.0
+    assert row["actual_fees"] == 4.5
+    assert row["estimated_fees"] == 0.0
+    assert row["fees_used"] == 4.5
+    assert row["fee_basis"] == "actual"
+    assert row["fee_missing_components"] == []
+    assert {item["component"] for item in row["fee_evidence"]} == {
+        "put_open_option_fee",
+        "put_assignment_option_fee",
+        "assignment_stock_fee",
+        "stock_sale_fee",
+    }
+    assert row["put_capital_days"] == 280000.0
+    assert row["stock_capital_days"] == 310031.0
+    assert row["capital_days"] == 590031.0
+    assert row["lifecycle_pnl_gross"] == 750.0
+    assert row["lifecycle_pnl_net"] == 745.5
+    assert row["annualized_capital_efficiency"] == round(745.5 * 365 / 590031, 8)
+    assert row["lifecycle_quality"] == "complete_closed"
+
+
+def test_hk_assignment_estimates_stock_settlement_fee_without_assignment_exercise_fee() -> None:
+    events = [
+        _trade_event(
+            "open-hk-assignment-fee",
+            side="sell",
+            position_effect="open",
+            price=2.5,
+            trade_date="2026-04-03",
+            symbol="0700.HK",
+            currency="HKD",
+        ),
+        _trade_event(
+            "assign-hk-assignment-fee",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            symbol="0700.HK",
+            currency="HKD",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    row = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+    )["assignment_lifecycle_rows"][0]
+
+    assignment_fee = next(item for item in row["fee_evidence"] if item["component"] == "assignment_stock_fee")
+    assert assignment_fee["basis"] == "estimated"
+    assert assignment_fee["amount"] == calc_futu_hk_stock_fee(100.0, shares=100, is_sell=False)
+    assert assignment_fee["reason"] == "hk_assignment_stock_fee_excluding_assignment_exercise_fee"
+
+
+def test_assignment_lifecycle_integrates_partial_stock_capital_days() -> None:
+    events = [
+        _trade_event("open-short-partial", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put-partial",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0, "fees": 0.0},
+            },
+        ),
+    ]
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "sale-partial",
+                "target_stock_lot_id": "assigned-stock-assign-short-put-partial",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "side": "sell",
+                "shares": 40,
+                "price": 105.0,
+                "currency": "USD",
+                "fees": 0.0,
+                "trade_time_ms": _ms("2026-05-11"),
+            }
+        ],
+        quote_snapshots=[{"symbol": "NVDA", "spot": 102.0, "quote_time_ms": _ms("2026-05-21")}],
+        as_of_ms=_ms("2026-05-21"),
+    )
+
+    row = report["lifecycle_efficiency_rows"][0]
+    assert row["inventory_days"] == 20.0
+    assert row["stock_capital_days"] == 160000.0
+    assert row["status"] == "partially_sold"
+    assert row["lifecycle_quality"] == "open_marked"
+
+
+def test_assignment_lifecycle_attributes_covered_call_fifo_and_rejects_mixed_inventory() -> None:
+    events = [
+        _trade_event(
+            "open-call-before-assignment",
+            side="sell",
+            position_effect="open",
+            price=1.0,
+            trade_date="2026-04-01",
+            option_type="call",
+            strike=120.0,
+        ),
+        _trade_event(
+            "close-call-before-assignment",
+            side="buy",
+            position_effect="close",
+            price=0.5,
+            trade_date="2026-04-02",
+            option_type="call",
+            strike=120.0,
+        ),
+        _trade_event("open-put-cc", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-put-cc",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0, "fees": 0.0},
+            },
+        ),
+        _trade_event(
+            "open-call-cc",
+            side="sell",
+            position_effect="open",
+            price=2.0,
+            trade_date="2026-05-05",
+            option_type="call",
+            strike=110.0,
+        ),
+        _trade_event(
+            "close-call-cc",
+            side="buy",
+            position_effect="close",
+            price=0.5,
+            trade_date="2026-05-20",
+            option_type="call",
+            strike=110.0,
+        ),
+    ]
+    sale = {
+        "event_type": "sale",
+        "stock_event_id": "sale-cc",
+        "target_stock_lot_id": "assigned-stock-assign-put-cc",
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "side": "sell",
+        "shares": 100,
+        "price": 105.0,
+        "currency": "USD",
+        "fees": 0.0,
+        "trade_time_ms": _ms("2026-06-01"),
+    }
+
+    fifo = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+        assigned_stock_events=[sale],
+    )
+    mixed = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+        assigned_stock_events=[sale],
+        assigned_stock_holdings=[
+            {"account": "lx", "broker": "富途", "symbol": "NVDA", "currency": "USD", "shares": 200}
+        ],
+    )
+
+    fifo_row = fifo["lifecycle_efficiency_rows"][0]
+    assert fifo_row["covered_call_pnl"] == 150.0
+    assert fifo_row["covered_call_allocation_status"] == "derived_fifo"
+    assert fifo_row["lifecycle_pnl_gross"] == 900.0
+    assert not any(
+        row.get("event_id") == "open-call-before-assignment"
+        for row in fifo["assigned_stock_review_rows"]
+    )
+    mixed_row = mixed["lifecycle_efficiency_rows"][0]
+    assert mixed_row["covered_call_pnl"] == 0.0
+    assert any(row["status"] == "covered_call_unallocated" for row in mixed["assigned_stock_review_rows"])
+
+
+def test_lifecycle_efficiency_summary_uses_weighted_capital_days() -> None:
+    from src.application.positions.reporting import _lifecycle_efficiency_summary
+
+    summary = _lifecycle_efficiency_summary(
+        [
+            {"account": "lx", "currency": "USD", "lifecycle_quality": "complete_closed", "lifecycle_pnl_net": 10.0, "capital_days": 100.0},
+            {"account": "lx", "currency": "USD", "lifecycle_quality": "complete_closed", "lifecycle_pnl_net": 30.0, "capital_days": 900.0},
+        ]
+    )[0]
+
+    assert summary["lifecycle_pnl_net"] == 40.0
+    assert summary["capital_days"] == 1000.0
+    assert summary["annualized_capital_efficiency"] == 14.6
 
 
 def test_monthly_income_report_assignment_lifecycle_filters_assigned_stock_sales_by_account() -> None:

@@ -8,6 +8,7 @@ import src.application.ledger.repository as ledger_repository
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.commands import record_manual_assignment
 from src.application.positions.reporting import build_monthly_income_report
+from src.application.positions.workflows import execute_manual_assigned_stock_sale
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import resolve_trade_deal
 
@@ -93,7 +94,9 @@ def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> No
     assert operation["event_id"] == "assigned-stock-sale-stock-sale-1"
     assert operation["fields"]["source"] == "broker"
     assert operation["fields"]["target_stock_lot_id"] == stock_lot_id
-    assert result.diagnostics["assigned_stock_sale"]["stock_lot_after"]["assigned_stock_realized_pnl"] == 500.0
+    assert operation["fields"]["fees"] == 2.5261
+    assert operation["fields"]["fee_provenance"]["basis"] == "estimated"
+    assert result.diagnostics["assigned_stock_sale"]["stock_lot_after"]["assigned_stock_realized_pnl"] == 497.4739
 
 
 def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> None:
@@ -109,11 +112,54 @@ def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> Non
     assert events[0]["stock_event_id"] == "assigned-stock-sale-stock-sale-1"
     assert events[0]["source"] == "broker"
     assert events[0]["source_deal_id"] == "stock-sale-1"
+    assert events[0]["fees"] == 2.5261
+    assert events[0]["fee_provenance"]["basis"] == "estimated"
     lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
     assert lifecycle["status"] == "closed"
-    assert lifecycle["assigned_stock_realized_pnl"] == 500.0
+    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
     assert lifecycle["option_premium_attribution"] == 250.0
-    assert lifecycle["assignment_lifecycle_pnl"] == 750.0
+    assert lifecycle["assignment_lifecycle_pnl"] == 747.4739
+
+
+def test_broker_assigned_stock_sale_preserves_actual_fee_evidence(tmp_path: Path) -> None:
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+
+    result = resolve_trade_deal(
+        _stock_sale_deal(raw_payload={"commission": -0.99, "platform_fee": -1.0}),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert result.status == "applied"
+    event = repo.list_assigned_stock_events()[0]
+    assert event["fees"] == 1.99
+    assert event["fee_provenance"] == {
+        "basis": "actual",
+        "source": "raw_payload.components",
+        "reason": "broker_reported_fee",
+        "components": ["commission", "platform_fee"],
+    }
+    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == 498.01
+
+
+def test_manual_assigned_stock_sale_explicit_zero_is_actual(tmp_path: Path) -> None:
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+
+    execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=100,
+        price=105.0,
+        fees=0.0,
+        trade_time_ms=3000,
+        dry_run=False,
+    )
+
+    event = repo.list_assigned_stock_events()[0]
+    assert event["fees"] == 0.0
+    assert event["fee_provenance"]["basis"] == "actual"
+    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == 500.0
 
 
 def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy(tmp_path: Path) -> None:
@@ -142,7 +188,7 @@ def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy
     lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
     assert lifecycle["status"] == "closed"
     assert lifecycle["shares_remaining"] == 0
-    assert lifecycle["assigned_stock_realized_pnl"] == 500.0
+    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
 
 
 def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(tmp_path: Path) -> None:

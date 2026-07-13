@@ -1750,6 +1750,8 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert dry_run_payload["operation"] == "manual_assigned_stock_sale"
     assert dry_run_payload["write_model"] == "assigned_stock_events"
     assert dry_run_payload["write_applied"] is False
+    assert dry_run_payload["sale_event"]["fees"] == 2.5261
+    assert dry_run_payload["sale_event"]["fee_provenance"]["basis"] == "estimated"
     assert repo.list_assigned_stock_events() == []
 
     monkeypatch.setattr(
@@ -1786,6 +1788,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert applied_payload["write_applied"] is True
     assert applied_payload["result"]["created"] is True
     assert len(repo.list_assigned_stock_events()) == 1
+    assert repo.list_assigned_stock_events()[0]["fee_provenance"]["basis"] == "estimated"
 
     monkeypatch.setattr(
         sys,
@@ -1810,9 +1813,9 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     report = json.loads(capsys.readouterr().out)
     lifecycle = [row for row in report["assignment_lifecycle_rows"] if row["stock_lot_id"] == stock_lot_id][0]
     assert lifecycle["status"] == "closed"
-    assert lifecycle["assigned_stock_realized_pnl"] == 500.0
+    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
     assert lifecycle["option_premium_attribution"] == 250.0
-    assert lifecycle["assignment_lifecycle_pnl"] == 750.0
+    assert lifecycle["assignment_lifecycle_pnl"] == 747.4739
 
 
 def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:

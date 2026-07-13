@@ -72,6 +72,91 @@ def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
     assert out == 21.0
 
 
+def test_extract_actual_fees_prefers_explicit_total_then_components() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import extract_actual_fees
+
+    total = extract_actual_fees({"total_fee": 3.5, "commission": 2.0, "platform_fee": 1.0})
+    components = extract_actual_fees({"commission": 2.0, "platform_fee": 1.0})
+
+    assert total == {"amount": 3.5, "source": "raw_payload.total_fee", "components": ["total_fee"]}
+    assert components == {
+        "amount": 3.0,
+        "source": "raw_payload.components",
+        "components": ["commission", "platform_fee"],
+    }
+    assert extract_actual_fees({}) is None
+
+    signed = extract_actual_fees({"commission": -0.99, "reg_fee": -0.01})
+    assert signed == {
+        "amount": 1.0,
+        "source": "raw_payload.components",
+        "components": ["commission", "reg_fee"],
+    }
+    assert extract_actual_fees({"charges": -2.5}) == {
+        "amount": 2.5,
+        "source": "raw_payload.charges",
+        "components": ["charges"],
+    }
+
+
+def test_calc_futu_us_stock_fee_includes_sell_only_regulatory_fees() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import calc_futu_us_stock_fee
+
+    sell = calc_futu_us_stock_fee(105.0, shares=100, is_sell=True)
+    buy = calc_futu_us_stock_fee(105.0, shares=100, is_sell=False)
+
+    assert sell == 2.5261
+    assert buy == 2.2903
+
+
+def test_calc_futu_hk_stock_fee_rounds_stamp_duty_up() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import calc_futu_hk_stock_fee
+
+    out = calc_futu_hk_stock_fee(10.01, shares=100, is_sell=True)
+
+    assert out == round(3.0 + 15.0 + 1001 * 0.000042 + 2.0 + 1001 * 0.0000565 + 1001 * 0.000027 + 1001 * 0.0000015, 6)
+
+
+def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
+    _add_repo_to_syspath()
+    from types import SimpleNamespace
+
+    from src.application.ledger.writer import _trade_event_from_normalized_deal
+
+    event = _trade_event_from_normalized_deal(
+        SimpleNamespace(
+            broker="富途",
+            futu_account_id="1",
+            internal_account="lx",
+            deal_id="deal-fee-1",
+            order_id="order-fee-1",
+            symbol="NVDA",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=2.5,
+            strike=100.0,
+            multiplier=100,
+            multiplier_source="payload",
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1_780_000_000_000,
+            raw_payload={"commission": 1.99, "platform_fee": 0.3},
+        )
+    )
+
+    assert event.fees == 2.29
+    assert event.raw_payload["fee_provenance"] == {
+        "basis": "actual",
+        "source": "raw_payload.components",
+        "components": ["commission", "platform_fee"],
+    }
+
+
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     _add_repo_to_syspath()
     from src.application.scan_sell_put import compute_metrics

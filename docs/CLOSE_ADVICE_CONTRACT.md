@@ -78,6 +78,16 @@ Strategy resolution is deterministic:
 `close_advice.strategy` is not a supported control. `yield_enhancement` derives
 from `sell_put.strategy`; it does not define an independent strategy.
 
+## Lot Identity
+
+Every newly generated `close_advice.csv` row carries `position_lot_id`, copied
+from the canonical `position_lots.record_id`. This is the stable identity for a
+specific open lot. `position_id` is not used for this purpose because multiple
+lots of the same contract may share it.
+
+`close_advice_read` preserves `position_lot_id`. Contract fields remain a
+compatibility fallback for older artifacts that do not contain a lot ID.
+
 ## Scenario Matrix
 
 | Scenario | Thesis evaluator | Domain exit states | Action policy | Default action |
@@ -159,6 +169,7 @@ thresholds remain unchanged until lifecycle outcomes support calibration.
 | YE long call | Action is based on convexity state, not short-premium capture rules. |
 | Combo cost | Missing paired call cost is explicit and never treated as zero. |
 | Combo action | `close_both_optional` requires a paired call with computable combo economics. |
+| Lot identity | New rows expose `position_lot_id=position_lots.record_id`; legacy rows without it remain readable. |
 | Pricing quality | Wide spreads and missing core pricing fields produce `not_evaluable`, including YE long-call legs. |
 | Short-vol source data | Missing RV/IV/delta is explicit but preserves the priced profit-capture or hold action. |
 | Event source data | Short-vol event context is read from the run-level snapshot and remains observational for close actions. |

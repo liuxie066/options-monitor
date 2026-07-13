@@ -597,11 +597,20 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
   `missing_fields`。入站 `收益` 命令会用它解释“暂无可计算收益”或数据不完整的原因。
 - `include_rows=true` 时，若存在 Sell Put assignment 的 `stock_settlement`，
   额外返回 `stock_settlement_rows`、`assigned_stock_lots`、
-  `assignment_lifecycle_rows`、`assigned_stock_sale_rows` 和
+  `assignment_lifecycle_rows`、`lifecycle_efficiency_rows`、
+  `lifecycle_efficiency_summary`、`assigned_stock_sale_rows` 和
   `assigned_stock_review_rows`。其中 `assignment_lifecycle_pnl` 是组合口径：
   option premium attribution + assigned stock realized/unrealized PnL；正股成本
   `stock_cost_per_share` 仍按真实交割价记录，不扣除权利金。缺 spot 时
   `quote_status=missing_quote`，浮盈亏和 lifecycle PnL 为 `null`。
+  生命周期行还会明确返回 `assigned_at_ms` / `assigned_date` / `inventory_days`、实际/估算/缺失费用、
+  `fee_evidence`（component / basis / amount / source / reason）、
+  `spot_time` / `quote_source` / `quote_status`、
+  Covered Call lot 归因、`lifecycle_pnl_net`、`capital_days`、
+  `annualized_capital_efficiency` 和 `lifecycle_quality`。汇总使用
+  `sum(lifecycle_pnl_net) * 365 / sum(capital_days)`，不是逐行年化值的简单平均。
+  当前时点默认刷新开放 assigned-stock lot 的实时报价；显式传
+  `refresh_quotes=false` 才关闭。指定 `as_of_ms` 时不会用实时行情回填。
 
 示例：
 
@@ -619,9 +628,10 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
 - `action=history`：读取单个 lot 的事件链
 - `action=inspect`：读取投影诊断状态
 - `action=assigned-stock`：读取 Sell Put 被指派后形成的正股 lot、已记录 sale events、
-  lifecycle PnL 和 review rows。默认只消费本地账本和可选 `quote_snapshots`，
-  不主动连接 OpenD；只有显式传 `refresh_quotes=true` 时，才通过 OpenD
-  获取开放 assigned-stock lot 的实时 spot，并返回 `quote_refresh` 诊断。
+  lifecycle PnL 和 review rows。当前时点且未传 `quote_snapshots` 时，默认通过
+  OpenD 获取开放 assigned-stock lot 的实时 spot，并返回 `quote_refresh` 诊断；
+  `refresh_quotes=false` 显式关闭刷新。调用方传入 `quote_snapshots` 时不会隐式
+  覆盖这份证据，仍可显式传 `refresh_quotes=true` 要求刷新。
   指定 `as_of_ms` 的历史查询不会使用实时 spot 回填，只会使用传入的
   `quote_snapshots` 或返回 `missing_quote`。
 - Inbound 用户入口：`/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all]`。
@@ -631,6 +641,9 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
 - 口径：`assigned_stock_unrealized_pnl` 和 `assigned_stock_realized_pnl` 是正股自身
   PnL，不含 Sell Put 权利金；`assignment_lifecycle_pnl` 才包含权利金归因。
   `stock_cost_per_share` 按真实交割价记录，不扣除权利金。
+  `fee_evidence` 区分 `actual`、`estimated`、`missing`；历史 `fees=0` 若没有
+  provenance，不视为真实零费用。富途正股卖出缺实际费用时按标准费表估算；
+  美股 assignment 未发现明确收费规则时保持 `missing`。
 - 用户回执：当前 Inbound slash 命令走确定性只读渲染；Copilot v2 若在本地/eval 场景
   使用该工具，必须基于工具 observation 回答，且不能在缺价时编造浮盈亏。正常
   `fresh` 报价不逐行重复展示；缺价或异常 quote 状态必须在回答、检查提示或
@@ -645,6 +658,9 @@ om-agent run --tool option_positions_read --input-json '{"config_key":"us","acti
 om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"assigned-stock","account":"lx","refresh_quotes":true}'
 om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-assign_xxx --shares 100 --price 105 --trade-time-ms 1780000000000 --dry-run
 ```
+
+`assigned-stock-sale` 省略 `--fees` 时按支持的券商标准费表估算并记录
+`fee_provenance.basis=estimated`；显式 `--fees 0` 才表示经确认的实际零费用。
 
 注意：
 - 这个工具只开放读和诊断动作
@@ -794,6 +810,7 @@ om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 - 只读已有 `close_advice.csv`，按 account/symbol/option type/side/strike/expiration 过滤平仓建议行
 - 给 Inbound 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
 - 返回已有报告中的 `close_calibration_status`、压力损失、显式替代收益和继续履约意愿，供人工解释和 replay 使用
+- 新报告返回 `position_lot_id=position_lots.record_id`，用于区分同合约的多个 lot；旧报告没有该字段时仍可读取
 - 不刷新行情、不连接 OpenD、不重新生成 close advice、不写报告
 
 示例：

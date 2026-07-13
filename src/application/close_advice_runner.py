@@ -73,6 +73,7 @@ from src.application.strategy_policy import (
 
 OUTPUT_COLUMNS = [
     "account",
+    "position_lot_id",
     "symbol",
     "option_type",
     "expiration",
@@ -2098,9 +2099,10 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     atomic_write_text(path, buf.getvalue(), encoding="utf-8")
 
 
-def _close_trace_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+def _close_trace_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
     return (
         str(row.get("account") or "").strip().lower(),
+        str(row.get("position_lot_id") or "").strip(),
         str(row.get("symbol") or "").strip().upper(),
         str(row.get("option_type") or "").strip().lower(),
         str(row.get("expiration") or "").strip(),
@@ -2248,6 +2250,7 @@ def run_close_advice(
             config=config,
             close_cfg=cfg,
         )
+        row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
         issue_reason = str(issue_reasons.get(key) or "").strip()

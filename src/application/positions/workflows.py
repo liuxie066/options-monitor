@@ -6,6 +6,12 @@ import hashlib
 import json
 from typing import Any
 
+from domain.domain.fee_calc import (
+    FUTU_HK_FEE_SCHEDULE_URL,
+    FUTU_US_FEE_SCHEDULE_URL,
+    calc_futu_stock_fee,
+    extract_actual_fees,
+)
 from domain.domain.ledger.position_fields import (
     OpenPositionCommand,
     effective_expiration_ymd,
@@ -131,6 +137,7 @@ def _build_assigned_stock_sale_event(
     shares: int,
     price: float,
     fees: float,
+    fee_provenance: dict[str, Any] | None,
     trade_time_ms: int,
     account: str | None,
     broker: str | None,
@@ -149,11 +156,13 @@ def _build_assigned_stock_sale_event(
         "shares": int(shares),
         "price": float(price),
         "currency": normalize_currency(currency) or lot.get("currency"),
-        "fees": float(fees or 0.0),
+        "fees": float(fees),
         "trade_time_ms": int(trade_time_ms),
         "source": str(source or "").strip() or "manual",
         "source_deal_id": str(source_deal_id or "").strip() or None,
     }
+    if isinstance(fee_provenance, dict):
+        payload["fee_provenance"] = dict(fee_provenance)
     payload["stock_event_id"] = _assigned_stock_sale_event_id(payload)
     return payload
 
@@ -178,6 +187,11 @@ def _build_manual_assigned_stock_sale_event(
         shares=shares,
         price=price,
         fees=fees,
+        fee_provenance={
+            "basis": "actual",
+            "source": "manual_input",
+            "reason": "explicit_manual_fee",
+        },
         trade_time_ms=trade_time_ms,
         account=account,
         broker=broker,
@@ -201,29 +215,52 @@ class BrokerAssignedStockSaleMatchError(ValueError):
         self.diagnostics = dict(diagnostics or {})
 
 
-def _stock_sale_deal_fee(deal: Any) -> tuple[float, str | None]:
+def _stock_sale_deal_fee(deal: Any) -> tuple[float | None, dict[str, Any] | None]:
     raw = getattr(deal, "raw_payload", None)
     payload = raw if isinstance(raw, dict) else {}
-    aggregate_keys = ("fees", "fee", "total_fee", "total_fees", "charges")
-    component_keys = ("commission", "platform_fee", "system_fee", "settlement_fee", "trading_fee", "sec_fee", "reg_fee")
-    for key in aggregate_keys:
-        if payload.get(key) in (None, ""):
-            continue
-        try:
-            return abs(float(payload[key])), key
-        except Exception:
-            continue
-    total = 0.0
-    used: list[str] = []
-    for key in component_keys:
-        if payload.get(key) in (None, ""):
-            continue
-        try:
-            total += abs(float(payload[key]))
-            used.append(key)
-        except Exception:
-            continue
-    return (total, ",".join(used) if used else None)
+    extracted = extract_actual_fees(payload)
+    if extracted is None:
+        return None, None
+    return float(extracted["amount"]), {
+        "basis": "actual",
+        "source": str(extracted.get("source") or "broker_payload"),
+        "reason": "broker_reported_fee",
+        "components": list(extracted.get("components") or []),
+    }
+
+
+def _resolve_stock_sale_fee(
+    *,
+    broker: str | None,
+    currency: str | None,
+    shares: int,
+    price: float,
+    fees: float | None,
+    fee_provenance: dict[str, Any] | None,
+) -> tuple[float, dict[str, Any] | None]:
+    if fees is not None:
+        return float(fees), dict(fee_provenance) if isinstance(fee_provenance, dict) else None
+    if normalize_broker(broker) != "富途":
+        return 0.0, {
+            "basis": "missing",
+            "source": "assigned_stock_sale",
+            "reason": "unsupported_broker_fee_schedule",
+        }
+    ccy = normalize_currency(currency)
+    source = FUTU_HK_FEE_SCHEDULE_URL if ccy == "HKD" else FUTU_US_FEE_SCHEDULE_URL
+    try:
+        amount = calc_futu_stock_fee(ccy, price, shares=shares, is_sell=True)
+    except Exception:
+        return 0.0, {
+            "basis": "missing",
+            "source": source if ccy in {"USD", "HKD"} else "assigned_stock_sale",
+            "reason": "stock_fee_estimate_failed",
+        }
+    return float(amount), {
+        "basis": "estimated",
+        "source": source,
+        "reason": "standard_fixed_stock_fee_schedule_estimate",
+    }
 
 
 def _safe_positive_int(value: Any) -> int | None:
@@ -318,7 +355,14 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
                 "assigned stock sale duplicate has missing required fields",
                 diagnostics={"selector": selector, "missing_fields": missing, "existing_event": dict(existing_by_source)},
             )
-        fees, fee_source = _stock_sale_deal_fee(deal)
+        fees = _safe_non_negative_float(existing_by_source.get("fees"))
+        if fees is None:
+            fees = 0.0
+        fee_provenance = (
+            dict(existing_by_source["fee_provenance"])
+            if isinstance(existing_by_source.get("fee_provenance"), dict)
+            else None
+        )
         return {
             "lot": lot,
             "existing_events": existing_events,
@@ -326,8 +370,8 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
             "selector": selector,
             "shares": int(shares or 0),
             "price": float(price or 0.0),
-            "fees": float(fees or 0.0),
-            "fee_source": fee_source,
+            "fees": float(fees),
+            "fee_provenance": fee_provenance,
             "trade_time_ms": int(trade_time_ms or 0),
             "source_deal_id": source_deal_id,
             "diagnostics": {
@@ -335,7 +379,8 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
                 "matched_stock_lot_id": lot.get("stock_lot_id"),
                 "existing_stock_event_id": existing_by_source.get("stock_event_id") or existing_by_source.get("event_id"),
                 "idempotent_candidate": True,
-                "fee_source": fee_source,
+                "fee_basis": (fee_provenance or {}).get("basis"),
+                "fee_source": (fee_provenance or {}).get("source"),
             },
         }
 
@@ -423,7 +468,7 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         )
 
     lot = viable[0]
-    fees, fee_source = _stock_sale_deal_fee(deal)
+    fees, fee_provenance = _stock_sale_deal_fee(deal)
     return {
         "lot": lot,
         "existing_events": existing_events,
@@ -431,11 +476,16 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         "selector": selector,
         "shares": int(shares or 0),
         "price": float(price or 0.0),
-        "fees": float(fees or 0.0),
-        "fee_source": fee_source,
+        "fees": fees,
+        "fee_provenance": fee_provenance,
         "trade_time_ms": int(trade_time_ms or 0),
         "source_deal_id": source_deal_id,
-        "diagnostics": diagnostics | {"matched_stock_lot_id": lot.get("stock_lot_id"), "fee_source": fee_source},
+        "diagnostics": diagnostics
+        | {
+            "matched_stock_lot_id": lot.get("stock_lot_id"),
+            "fee_basis": (fee_provenance or {}).get("basis"),
+            "fee_source": (fee_provenance or {}).get("source"),
+        },
     }
 
 
@@ -826,7 +876,8 @@ def _execute_assigned_stock_sale(
     target_stock_lot_id: str,
     shares: int,
     price: float,
-    fees: float = 0.0,
+    fees: float | None = None,
+    fee_provenance: dict[str, Any] | None = None,
     trade_time_ms: int,
     account: str | None = None,
     broker: str | None = None,
@@ -846,7 +897,7 @@ def _execute_assigned_stock_sale(
         raise ValueError("assigned stock sale requires shares > 0")
     if float(price) < 0:
         raise ValueError("assigned stock sale requires price >= 0")
-    if float(fees or 0.0) < 0:
+    if fees is not None and float(fees) < 0:
         raise ValueError("assigned stock sale requires fees >= 0")
     if int(trade_time_ms or 0) <= 0:
         raise ValueError("assigned stock sale requires trade_time_ms > 0")
@@ -860,12 +911,23 @@ def _execute_assigned_stock_sale(
     before_lot = _find_assigned_stock_lot(before_report, stock_lot_id)
     if before_lot is None:
         raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+    effective_broker = normalize_broker(broker) or before_lot.get("broker")
+    effective_currency = normalize_currency(currency) or before_lot.get("currency")
+    effective_fees, effective_fee_provenance = _resolve_stock_sale_fee(
+        broker=effective_broker,
+        currency=effective_currency,
+        shares=int(shares),
+        price=float(price),
+        fees=fees,
+        fee_provenance=fee_provenance,
+    )
     sale_event = _build_assigned_stock_sale_event(
         before_lot,
         target_stock_lot_id=stock_lot_id,
         shares=int(shares),
         price=float(price),
-        fees=float(fees or 0.0),
+        fees=effective_fees,
+        fee_provenance=effective_fee_provenance,
         trade_time_ms=int(trade_time_ms),
         account=account,
         broker=broker,
@@ -933,7 +995,7 @@ def execute_manual_assigned_stock_sale(
     target_stock_lot_id: str,
     shares: int,
     price: float,
-    fees: float = 0.0,
+    fees: float | None = None,
     trade_time_ms: int,
     account: str | None = None,
     broker: str | None = None,
@@ -948,6 +1010,15 @@ def execute_manual_assigned_stock_sale(
         shares=shares,
         price=price,
         fees=fees,
+        fee_provenance=(
+            {
+                "basis": "actual",
+                "source": "manual_input",
+                "reason": "explicit_manual_fee",
+            }
+            if fees is not None
+            else None
+        ),
         trade_time_ms=trade_time_ms,
         account=account,
         broker=broker,
@@ -984,7 +1055,12 @@ def execute_broker_assigned_stock_sale(
         target_stock_lot_id=str(lot.get("stock_lot_id") or ""),
         shares=int(match["shares"]),
         price=float(match["price"]),
-        fees=float(match["fees"]),
+        fees=float(match["fees"]) if match.get("fees") is not None else None,
+        fee_provenance=(
+            dict(match["fee_provenance"])
+            if isinstance(match.get("fee_provenance"), dict)
+            else None
+        ),
         trade_time_ms=int(match["trade_time_ms"]),
         account=getattr(deal, "internal_account", None),
         broker=getattr(deal, "broker", None),

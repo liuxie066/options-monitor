@@ -117,6 +117,11 @@ assignment_lifecycle_pnl =
       "price": 100,
       "currency": "USD",
       "fees": 0,
+      "fee_provenance": {
+        "basis": "actual",
+        "source": "broker_lifecycle",
+        "reason": "broker_reported_fee"
+      },
       "source": "broker_lifecycle|manual",
       "source_deal_id": "optional"
     }
@@ -197,6 +202,11 @@ assigned_stock_events
   "price": 105,
   "currency": "USD",
   "fees": 1.2,
+  "fee_provenance": {
+    "basis": "actual",
+    "source": "broker_payload.total_fee",
+    "reason": "broker_reported_fee"
+  },
   "trade_time_ms": 1780000000000,
   "source": "broker_deal|manual",
   "source_deal_id": "optional"
@@ -212,7 +222,8 @@ assigned_stock_events
 - 幂等键：broker 来源使用 `(broker, account, source_deal_id)`；manual 来源使用归一化 payload hash。
 - 目标 lot：`target_stock_lot_id` 必须存在，且 account / broker / symbol / currency 一致。
 - 数量：`shares > 0`，且 `shares <= shares_remaining`；超额卖出必须 fail closed。
-- 价格：`price >= 0`，费用 `fees >= 0`；缺价格不能写 sale fact。
+- 价格：`price >= 0`；缺价格不能写 sale fact。费用可显式提供 `fees >= 0`，
+  也可在支持的券商/币种上省略并按标准费表估算。
 - 时间：`trade_time_ms >= assigned_stock_lot.opened_at_ms`。
 - 状态：closed lot 不能再写 sale；void/repair 必须指向确定 stock event。
 
@@ -235,7 +246,7 @@ assigned_stock_events
 优先级：
 
 1. Broker stock deal intake：从券商成交明细读取真实股票卖出成交，带 source deal id 做幂等。
-2. Manual stock sale entry：自动来源缺失时，由用户录入卖出日期、股数、价格、费用和目标 stock lot。
+2. Manual stock sale entry：自动来源缺失时，由用户录入卖出日期、股数、价格和目标 stock lot；费用可录入 actual，也可省略后估算。
 3. Reconciliation only：external holdings / Feishu holdings 可以提示“持仓减少了，可能有未记录卖出”，但不能直接作为卖出事实写账。
 
 如果卖出没有记录，收益报表必须显示该 stock lot 仍是 open 或 data incomplete，而不是用当前持仓差额猜测卖出价。
@@ -264,9 +275,10 @@ broker holdings、external holdings 或 Feishu holdings 只能作为 reconciliat
 
 推荐查询顺序：
 
-1. 默认只消费调用方传入的 `quote_snapshots`，不隐式连接 OpenD。
-2. 用户显式请求 `refresh_quotes=true` 时，`option_positions_read action=assigned-stock`
-   通过 OpenD / Futu quote adapter 获取开放 assigned-stock lot 的正股最新报价。
+1. 当前时点且调用方未传 `quote_snapshots` 时，默认通过 OpenD / Futu quote
+   adapter 获取开放 assigned-stock lot 的正股最新报价。
+2. `refresh_quotes=false` 显式关闭刷新；调用方提供 `quote_snapshots` 时不隐式覆盖，
+   但仍可显式传 `refresh_quotes=true` 请求刷新。
 3. 若实时 quote 不可用，可使用本次运行已有 required-data / quote snapshot，但必须带 `quote_source`、`quote_time` 和 stale 标记。
 4. 若仍不可用，返回 `quote_status=missing_quote`，正股成本和已实现现金流可展示，浮动收益和总收益为 `null`。
 
@@ -384,7 +396,7 @@ lifecycle_pnl =
 
 - `monthly_income_report` 默认输出现有 option income / cashflow / realized / open-basis 口径。
 - `monthly_income_report(include_rows=true)` 输出 `assignment_lifecycle_rows`，但不改变既有字段含义。
-- 只读查询能力 `option_positions_read action=assigned-stock` 专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；`refresh_quotes=true` 是显式实时估值开关。
+- 只读查询能力 `option_positions_read action=assigned-stock` 专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；当前时点默认补实时估值，`refresh_quotes=false` 显式关闭。
 - Inbound `/income` 默认不把 `assignment_stock_net_cashflow_gross=-10000` 解释为亏损；用户问“被指派股票收益”“接货后盈亏”“assigned stock”时才调用 assignment lifecycle 口径。
 - 自然语言入口由 Agent Composer 基于工具 evidence 表达；LLM 不能自己合成 spot、卖出价、
   missing sale、金额或股数。若 guard 不通过，回退到 deterministic renderer。
@@ -398,7 +410,8 @@ lifecycle_pnl =
 如果 assignment event 已有 `stock_settlement`：
 
 - 直接重建 `assigned_stock_lots`。
-- 正股成本按 `stock_settlement.price` / `stock_settlement.fees` 重建。
+- 正股成本按 `stock_settlement.price` 和带 provenance 的实际/估算费用重建；
+  没有 provenance 的历史零费用不能自动认定为 actual。
 - 若没有 sale event，则只展示 open lot 和实时估值。
 
 ### 8.2 assignment event 缺 stock settlement
@@ -409,7 +422,7 @@ lifecycle_pnl =
 
 1. 进入 review 队列，标记 `missing_stock_settlement`。
 2. 若 broker lifecycle evidence 有匹配 stock leg，用 repair 写入事实。
-3. 若没有 broker evidence，要求用户手动确认 stock side、shares、price、fees、date。
+3. 若没有 broker evidence，要求用户手动确认 stock side、shares、price、date；费用若未知可保留 estimated/missing provenance，不能伪装成 actual zero。
 4. 可以提供默认建议 `shares=contracts*multiplier`、`price=strike`，但必须由用户确认后才写入。
 
 ### 8.3 历史卖出缺失
@@ -452,8 +465,8 @@ lifecycle_pnl =
 1. `assigned_stock_lots` 由 assignment event 和 `assigned_stock_events` 重建。
 2. `assigned_stock_events` 记录被指派正股 sale fact，保留 source id 幂等和目标 lot 校验。
 3. `option_positions_read action=assigned-stock` 返回 lot、spot、浮盈亏、已实现正股盈亏和 lifecycle PnL。
-4. `refresh_quotes=true` 显式获取开放 assigned-stock lot 的实时 spot；历史 `as_of_ms` 不用实时 spot 回填。
-5. `om option-positions assigned-stock-sale` 支持人工录入 sale，默认 dry-run / confirm，并要求显式目标 stock lot。
+4. 当前时点默认获取开放 assigned-stock lot 的实时 spot；`refresh_quotes=false` 关闭，历史 `as_of_ms` 不用实时 spot 回填。
+5. `om option-positions assigned-stock-sale` 支持人工录入 sale，默认 dry-run / confirm，并要求显式目标 stock lot；省略费用时估算，显式 `--fees 0` 才是 actual zero。
 6. Broker stock sell intake 可以在唯一匹配开放 assigned-stock lot 时写入 sale fact；无法安全归属时等待人工确认。
 7. `monthly_income_report(include_rows=true)` 保留既有字段语义，并输出 assignment lifecycle rows。
 

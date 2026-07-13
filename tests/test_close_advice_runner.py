@@ -50,6 +50,7 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
     context = {
         "open_positions_min": [
             {
+                "record_id": "lot-nvda-1",
                 "account": "lx",
                 "symbol": "NVDA",
                 "option_type": "put",
@@ -109,7 +110,72 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
     assert "平仓建议" in text
     assert "NVDA Put 2026-05-15" in text
     rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["position_lot_id"] == "lot-nvda-1"
     assert rows[0]["strategy_exit_mode"] == "standard_short_option"
+
+
+def test_run_close_advice_keeps_distinct_lot_ids_for_same_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.close_advice_runner import _close_trace_key
+
+    _freeze_close_advice_business_today(monkeypatch)
+    position = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "status": "open",
+        "contracts_open": 1,
+        "currency": "USD",
+        "strike": 100,
+        "multiplier": 100,
+        "premium": 1.6,
+        "expiration": "2026-05-15",
+    }
+    context = {
+        "open_positions_min": [
+            {**position, "record_id": "lot-nvda-a"},
+            {**position, "record_id": "lot-nvda-b"},
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    parsed = tmp_path / "required_data" / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=ctx_path,
+        required_data_root=tmp_path / "required_data",
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["rows"] == 2
+    assert {row["position_lot_id"] for row in rows} == {"lot-nvda-a", "lot-nvda-b"}
+    assert len({_close_trace_key(row) for row in rows}) == 2
 
 
 def test_run_close_advice_uses_underwriting_config_for_short_vol_close_thesis(
