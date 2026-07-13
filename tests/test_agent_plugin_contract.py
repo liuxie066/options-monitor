@@ -237,7 +237,14 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "diagnostics[].position_lot_snapshots_count" in income_contract["fact_fields"]
     assert "diagnostics[].missing_fields" in income_contract["missing_data_fields"]
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
+    assert assigned_stock_contract["schema_version"] == "option_positions_read.assigned_stock_output.v2"
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
+    assert "rows[].lifecycle_pnl_net" in assigned_stock_contract["fact_fields"]
+    assert "rows[].capital_days" in assigned_stock_contract["fact_fields"]
+    assert "rows[].fee_evidence" in assigned_stock_contract["fact_fields"]
+    assert "rows[].spot_time" in assigned_stock_contract["fact_fields"]
+    assert "rows[].quote_source" in assigned_stock_contract["fact_fields"]
+    assert "rows[].fee_missing_components" in assigned_stock_contract["missing_data_fields"]
     assert "rows[].quote_status" in assigned_stock_contract["freshness_fields"]
     assert "quote_refresh.missing_symbols" in assigned_stock_contract["missing_data_fields"]
     list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
@@ -249,6 +256,14 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert detail_contract["schema_version"] == "monthly_income_report.detail_output.v2"
     assert detail_contract["primary_rows"] == "return_summary"
     assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
+    assert "assignment_lifecycle_rows[].lifecycle_pnl_net" in detail_contract["fact_fields"]
+    assert "assignment_lifecycle_rows[].capital_days" in detail_contract["fact_fields"]
+    assert "assignment_lifecycle_rows[].fee_evidence" in detail_contract["fact_fields"]
+    assert "lifecycle_efficiency_summary[].annualized_capital_efficiency" in detail_contract["fact_fields"]
+
+    close_advice = get_tool_definition("close_advice_read")
+    assert close_advice is not None
+    assert "rows[].position_lot_id" in close_advice.output_contract["fact_fields"]
 
 
 def test_agent_tool_manifest_exposes_runtime_annotations_without_answer_pipeline_metadata() -> None:

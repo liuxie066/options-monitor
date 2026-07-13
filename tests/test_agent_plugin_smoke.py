@@ -822,6 +822,7 @@ def test_spec_exposes_broker_as_public_field() -> None:
 def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+    from src.application.positions.assigned_stock_quotes import AssignedStockQuoteRefreshResult
 
     def _ms(value: str) -> int:
         out = parse_exp_to_ms(value)
@@ -871,12 +872,21 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     )
 
     rate_calls: list[dict[str, Any]] = []
+    refresh_calls: list[list[dict[str, Any]]] = []
 
     def _fake_get_exchange_rates(**kwargs):
         rate_calls.append(kwargs)
         return {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}}
 
-    _patch_agent_tool_context(monkeypatch, get_exchange_rates=_fake_get_exchange_rates)
+    def _fake_refresh_quotes(rows, **_kwargs):
+        refresh_calls.append(list(rows))
+        return AssignedStockQuoteRefreshResult([], {"enabled": True, "status": "skipped_no_open_assigned_stock"}, [])
+
+    _patch_agent_tool_context(
+        monkeypatch,
+        get_exchange_rates=_fake_get_exchange_rates,
+        refresh_assigned_stock_quotes=_fake_refresh_quotes,
+    )
 
     out = run_tool(
         "monthly_income_report",
@@ -908,6 +918,33 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     assert out["data"]["premium_row_count"] == 1
     assert out["data"]["calculation_method"] == "trade_events"
     assert len(out["data"]["summary"]) == 1
+    assert out["data"]["quote_refresh"]["status"] == "skipped_no_open_assigned_stock"
+    assert len(refresh_calls) == 1
+
+    disabled = run_tool(
+        "monthly_income_report",
+        {"config_path": str(cfg_path), "account": "user1", "refresh_quotes": False},
+    )
+    assert disabled["data"]["quote_refresh"] == {"enabled": False}
+    assert len(refresh_calls) == 1
+
+    refreshed = run_tool(
+        "monthly_income_report",
+        {"config_path": str(cfg_path), "account": "user1", "refresh_quotes": True},
+    )
+    historical = run_tool(
+        "monthly_income_report",
+        {
+            "config_path": str(cfg_path),
+            "account": "user1",
+            "refresh_quotes": True,
+            "as_of_ms": _ms("2026-04-30"),
+        },
+    )
+    assert refreshed["data"]["quote_refresh"]["status"] == "skipped_no_open_assigned_stock"
+    assert len(refresh_calls) == 2
+    assert historical["data"]["quote_refresh"]["status"] == "skipped_historical_as_of"
+    assert len(refresh_calls) == 2
     row = out["data"]["summary"][0]
     assert {key: row.get(key) for key in {
         "month",
@@ -1288,7 +1325,6 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
             "action": "assigned-stock",
             "account": "user1",
             "symbol": "NVDA",
-            "refresh_quotes": True,
         },
     )
 
@@ -1299,10 +1335,27 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert quote_refresh_calls[0]["rows"][0]["stock_lot_id"] == stock_lot_id
     refreshed_row = refreshed_assigned_stock["data"]["rows"][0]
     assert refreshed_row["spot"] == 99.0
+    assert refreshed_row["spot_time"] == _ms("2026-05-17")
     assert refreshed_row["quote_source"] == "opend_realtime"
     assert refreshed_row["assigned_stock_unrealized_pnl"] == -100.0
     assert refreshed_row["assignment_lifecycle_pnl"] == 150.0
     assert refreshed_assigned_stock["data"]["quote_refresh"]["status"] == "ok"
+
+    disabled_current_refresh = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "NVDA",
+            "refresh_quotes": False,
+        },
+    )
+
+    assert disabled_current_refresh["ok"] is True
+    assert len(quote_refresh_calls) == 1
+    assert disabled_current_refresh["data"]["quote_refresh"] == {"enabled": False}
+    assert disabled_current_refresh["data"]["rows"][0]["quote_status"] == "missing_quote"
 
     skipped_historical_refresh = run_tool(
         "option_positions_read",
@@ -2997,6 +3050,7 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
         [
             {
                 "account": "lx",
+                "position_lot_id": "lot-9992-call-1",
                 "symbol": "9992",
                 "option_type": "call",
                 "position_side": "buy",
@@ -3045,6 +3099,7 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     assert out["data"]["matched_count"] == 1
     assert out["data"]["source"]["run_id"] == "run-1"
     row = out["data"]["rows"][0]
+    assert row["position_lot_id"] == "lot-9992-call-1"
     assert row["symbol"] == "9992.HK"
     assert row["side"] == "long"
     assert row["close_action"] == "hold_call_as_convexity"

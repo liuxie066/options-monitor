@@ -650,6 +650,7 @@ def _parse_date(value: Any) -> date | None:
 def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "account",
+        "position_lot_id",
         "symbol",
         "option_type",
         "side",
