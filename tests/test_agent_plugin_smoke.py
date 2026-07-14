@@ -4043,6 +4043,51 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
     assert "sell_put.min_delta" in missing["data"]["message"]
 
 
+def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    us_cfg = _minimal_cfg()
+    us_cfg["symbols"][0]["sell_call"] = {"enabled": True, "min_strike": 190}
+    hk_cfg = _minimal_cfg(market="hk")
+    hk_cfg["symbols"][0].update(
+        {
+            "symbol": "0700.HK",
+            "market": "HK",
+            "sell_call": {"enabled": True, "min_strike": 550},
+        }
+    )
+    us_path = tmp_path / "config.us.json"
+    hk_path = tmp_path / "config.hk.json"
+    us_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    hk_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+
+    hk_out = run_tool(
+        "symbol_config_read",
+        {"config_key": "us", "symbol": "腾讯", "strategy": "sell_call", "field": "min_strike"},
+    )
+    us_out = run_tool(
+        "symbol_config_read",
+        {"config_path": str(hk_path), "symbol": "NVDA", "strategy": "sell_call", "field": "min_strike"},
+    )
+
+    assert hk_out["ok"] is True
+    assert hk_out["data"]["value"] == 550
+    assert hk_out["meta"]["config_path"].endswith("config.hk.json")
+    assert us_out["ok"] is True
+    assert us_out["data"]["value"] == 190
+    assert us_out["meta"]["config_path"].endswith("config.us.json")
+
+    hk_path.unlink()
+    missing = run_tool(
+        "symbol_config_read",
+        {"config_key": "us", "symbol": "腾讯", "strategy": "sell_call", "field": "min_strike"},
+    )
+    assert missing["ok"] is False
+    assert missing["error"]["code"] == "CONFIG_ERROR"
+    assert "config.hk.json" in missing["error"]["message"]
+
+
 def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

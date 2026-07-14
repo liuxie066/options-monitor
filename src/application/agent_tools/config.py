@@ -6,6 +6,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import config_validate_tool, scheduler_status_tool
 from src.application.agent_tools.symbols_impl import find_symbol_entry, manage_symbols_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
@@ -242,6 +243,16 @@ def _symbol_config_read_tool(
             hint="请提供标准标的代码或已配置的别名，例如 9992.HK、0700.HK、NVDA。",
             details={"symbol": raw_symbol},
         )
+
+    symbol_market = str(calibration.market or "").strip().lower()
+    config_market = infer_runtime_config_market(
+        config_key=payload.get("config_key"),
+        config_path=config_path,
+        config=cfg,
+    )
+    if symbol_market in {"us", "hk"} and symbol_market != config_market:
+        sibling_path = config_path.with_name(f"config.{symbol_market}.json") if payload.get("config_path") else None
+        config_path, cfg = ctx.load_runtime_config(config_key=symbol_market, config_path=sibling_path)
 
     canonical = str(calibration.canonical_symbol)
     _idx, entry = find_symbol_entry(cfg, canonical, resolve_watchlist_config=ctx.resolve_watchlist_config)
