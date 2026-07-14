@@ -13,11 +13,31 @@ from domain.domain.insurance_underwriting import (
 from domain.domain.risk_capacity import allocate_portfolio_capacity_shadow
 
 
+EMPTY_OUTPUT_COLUMNS = [
+    "account",
+    "symbol",
+    "contract_symbol",
+    "option_type",
+    "expiration",
+    "strike",
+    "strategy_family",
+    "strategy_profile",
+    "allocation_rank",
+    "allocation_status",
+    "allocation_reason",
+    "allocated_contracts",
+    "capacity_before",
+    "capacity_required",
+    "capacity_after",
+    "capacity_unit",
+]
+
+
 def write_portfolio_capacity_shadow(*, report_dir: Path, account: str) -> dict[str, Any]:
     rows = _candidate_rows(Path(report_dir), account=account)
     allocated = allocate_portfolio_capacity_shadow(rows)
     output = Path(report_dir) / "portfolio_capacity_shadow.csv"
-    pd.DataFrame(allocated).to_csv(output, index=False)
+    pd.DataFrame(allocated, columns=EMPTY_OUTPUT_COLUMNS if not allocated else None).to_csv(output, index=False)
     counts: dict[str, int] = {}
     for row in allocated:
         status = str(row.get("allocation_status") or "unknown")

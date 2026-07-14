@@ -7,6 +7,15 @@ import pandas as pd
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 
 
+def test_write_portfolio_capacity_shadow_writes_header_when_no_candidates(tmp_path: Path) -> None:
+    result = write_portfolio_capacity_shadow(report_dir=tmp_path, account="lx")
+
+    rows = pd.read_csv(tmp_path / "portfolio_capacity_shadow.csv")
+    assert result["rows"] == 0
+    assert rows.empty
+    assert {"account", "symbol", "allocation_status", "capacity_before", "capacity_required"}.issubset(rows.columns)
+
+
 def test_write_portfolio_capacity_shadow_keeps_candidate_files_unchanged(tmp_path: Path) -> None:
     candidate = tmp_path / "nvda_sell_put_candidates_labeled.csv"
     pd.DataFrame(
