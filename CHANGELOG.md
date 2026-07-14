@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.394 - 2026-07-14
+
+### Fixed
+- Made `symbol_config_read` follow the calibrated symbol market so cross-market ClawBot queries use the matching runtime config instead of reporting configured US or HK symbols as missing.
+
 ## 1.2.393 - 2026-07-14
 
 ### Fixed
