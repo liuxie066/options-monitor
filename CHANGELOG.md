@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.393 - 2026-07-14
+
+### Fixed
+- Kept empty portfolio-capacity shadow artifacts parseable by writing stable CSV headers when no candidates survive filtering.
+
 ## 1.2.392 - 2026-07-13
 
 ### Added
