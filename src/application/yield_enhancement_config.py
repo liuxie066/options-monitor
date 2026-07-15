@@ -48,9 +48,9 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "objective": "premium_funded_long_call",
     "output_mode": "separate",
     "funding_mode": "credit_or_even",
-    "min_combo_net_credit": 0.0,
+    "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
-    "max_call_cost_to_put_credit": 1.0,
+    "max_call_cost_to_put_credit": None,
     "min_open_interest": 100,
     "min_volume": 5,
     "max_spread_ratio": 0.35,
@@ -69,9 +69,7 @@ YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
 YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
     YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE: {
         "funding_mode": "credit_or_even",
-        "min_combo_net_credit": 0.0,
-        "max_call_cost_to_put_credit": 0.20,
-        "min_net_credit_retention": 0.75,
+        "min_net_credit_retention": 0.80,
         "call": {
             "min_delta": 0.05,
             "max_delta": 0.20,

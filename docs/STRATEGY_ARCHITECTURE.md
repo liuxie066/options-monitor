@@ -166,10 +166,9 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 
 - put strike < call strike。
 - `funding_mode` 通过：默认要求扣除 long call 成本和手续费后 `combo_net_credit >= 0`。
-- `min_combo_net_credit` 通过。
 - `min_net_credit_annualized` 通过。
-- `max_call_cost_to_put_credit` 通过。
-- `min_net_credit_retention` 通过。
+- `min_net_credit_retention` 通过；默认至少保留 80% short put 净权利金。
+- 显式配置时，兼容门槛 `min_combo_net_credit` / `max_call_cost_to_put_credit` 通过。
 - `max_combo_spread_ratio` 通过。
 - put / call 基础流动性通过。
 
@@ -180,7 +179,9 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 - put OTM 百分比
 - call OTM 百分比
 - upside lift to call cost / put credit
-- Sell Put / Covered Call 的 underwriting event gate
+- Sell Put / Covered Call 的完整 IV/RV underwriting gate
+
+Combo Yield 仍复用事件注释，并默认按 `reject_event_risk=true`、`event_source_fail_closed=true` fail closed；事件数据源不可用或到期前有事件时，不进入资金与配对筛选。
 
 原因是 Combo Yield 的第一性目标不是“交易 IV 溢价”，而是判断一组结构是否值得开：接货义务是否在愿意范围内，short put 是否足够融资 long call，组合是否仍保留净权利金，以及 call 是否提供足够上行参与。
 
