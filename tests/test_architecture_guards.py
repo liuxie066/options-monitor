@@ -697,7 +697,8 @@ def test_capability_map_presents_one_general_copilot_scene() -> None:
 
 def test_readme_presents_local_copilot_as_one_scene_surface() -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "唯一的只读 `om_chat` Copilot Scene" in text
+    assert "唯一的 read-first `om_chat` Copilot Scene" in text
+    assert "最多请求一个确定性 Control preview" in text
     assert "--scene current_option_exposure" not in text
     assert "--scene monthly_income_attribution" not in text
     assert "--model-turn-json-file" in text
