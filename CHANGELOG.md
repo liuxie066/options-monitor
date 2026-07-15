@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.396 - 2026-07-15
+
+### Changed
+- Added a dedicated fail-closed event-risk gate for Combo Yield without applying Sell Put IV/RV underwriting.
+- Standardized the default premium-funded call range to 0.05-0.20 delta, at least 80% net-credit retention, and at least 8% annualized remaining credit while preserving explicitly configured legacy thresholds.
+- Applied market-specific liquidity defaults when deriving Combo Yield policy, so HK uses its intended open-interest and volume thresholds.
+
+### Fixed
+- Aggregated structural, liquidity, funding, retention, and other pair rejection reasons into Combo Yield candidate traces.
+- Rejected `min_net_credit_retention` values outside the inclusive 0..1 range.
+
 ## 1.2.395 - 2026-07-15
 
 ### Changed
