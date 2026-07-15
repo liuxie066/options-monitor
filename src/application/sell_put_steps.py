@@ -20,7 +20,7 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from domain.domain.symbol_identity import symbol_currency
+from domain.domain.symbol_identity import symbol_currency, symbol_market
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.render_sell_put_alerts import render_sell_put_alerts
 from src.application.report_labels import add_sell_put_labels
@@ -256,7 +256,11 @@ def run_sell_put_scan_and_summarize(
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
-    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, yield_sp)
+    yield_enhancement_policy = derive_yield_enhancement_policy(
+        yield_enhancement_cfg,
+        yield_sp,
+        market=symbol_market(symbol),
+    )
 
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
     resolved_min_annualized_net_return = 0.0 if sell_put_semantics.scan_uses_underwriting_gate else validate_min_annualized_net_return(

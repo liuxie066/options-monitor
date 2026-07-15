@@ -68,26 +68,44 @@ def evaluate_underwriting_candidate(
         if iv_minus_rv < cfg.min_iv_minus_rv:
             return _reject("vol_edge_spread_below_min", iv_minus_rv, cfg.min_iv_minus_rv, fields)
 
+    event_decision = evaluate_event_risk_candidate(
+        row,
+        reject_event_risk=cfg.reject_event_risk,
+        event_source_fail_closed=cfg.event_source_fail_closed,
+        fields=fields,
+    )
+    if not event_decision["accepted"]:
+        return event_decision
+
+    return {"accepted": True, "rule": "insurance_underwriting_candidate_accepted", "fields": fields}
+
+
+def evaluate_event_risk_candidate(
+    row: dict[str, Any],
+    *,
+    reject_event_risk: bool = True,
+    event_source_fail_closed: bool = True,
+    fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    decision_fields = dict(fields or {})
     event_status = str(row.get("event_source_status") or "").strip().lower()
-    event_ok = event_status in {"ok", "ok_with_fallback"}
-    if cfg.event_source_fail_closed and not event_ok:
+    if event_source_fail_closed and event_status not in {"ok", "ok_with_fallback"}:
         return _reject(
             "event_source_unavailable",
             event_status or None,
             "ok",
-            fields,
+            decision_fields,
             message="event source unavailable for underwriting",
         )
-    if cfg.reject_event_risk and _truthy(row.get("event_flag")):
+    if reject_event_risk and _truthy(row.get("event_flag")):
         return _reject(
             "event_risk_within_expiry",
             True,
             False,
-            fields,
+            decision_fields,
             message="event risk before expiration",
         )
-
-    return {"accepted": True, "rule": "insurance_underwriting_candidate_accepted", "fields": fields}
+    return {"accepted": True, "rule": "event_risk_candidate_accepted", "fields": decision_fields}
 
 
 def underwriting_fields(

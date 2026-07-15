@@ -549,6 +549,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         'max_call_cost_to_put_credit',
     ):
         _validate_optional_non_negative_number(cfg, key, path)
+    _validate_optional_unit_interval_number(cfg, 'min_net_credit_retention', path)
     if 'funding_mode' in cfg and cfg.get('funding_mode') is not None:
         mode = str(cfg.get('funding_mode') or '').strip().lower()
         if mode not in YIELD_ENHANCEMENT_FUNDING_MODES:

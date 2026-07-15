@@ -528,9 +528,9 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 - 依赖 `sell_put.enabled=true`
 - put 腿使用 Sell Put 的接货价格边界：`min_strike` 可空，`max_strike` 与 spot 共同形成上界
 - call 腿使用结构价格边界：`call.strike >= max(spot, call.min_strike)`，`call.max_strike` 可选
-- 不继承 Sell Put 的 `insurance_underwriting` RV、event 或 underwriting gate
+- 不继承 Sell Put 的 IV/RV underwriting；只复用事件注释，并默认按 `reject_event_risk=true`、`event_source_fail_closed=true` fail closed
 - 启用收益增强后会为 long call 侧规划 required data，即使没有启用 Covered Call 扫描
-- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`min_net_credit_annualized`、`max_call_cost_to_put_credit`、`min_net_credit_retention`、`max_combo_spread_ratio` 和 call delta 区间
+- 核心约束包括 `funding_mode`、`min_net_credit_annualized`、`min_net_credit_retention`、`max_combo_spread_ratio` 和 call delta 区间；默认保留至少 80% short put 净权利金，`min_combo_net_credit` 与 `max_call_cost_to_put_credit` 仅保留为显式兼容门槛
 - 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%
 
 ### Close Advice

@@ -1081,6 +1081,7 @@ def test_sell_put_steps_combo_yield_put_universe_is_retained_but_pairs_are_cash_
         "volume": 20,
         "implied_volatility": 0.25,
         "delta": -0.2,
+        "event_source_status": "ok",
     }
 
     def _fake_run_sell_put_scan(**kwargs):
@@ -1200,6 +1201,7 @@ def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_ins
         "implied_volatility": 0.18,
         "realized_volatility_estimate": 0.20,
         "delta": -0.2,
+        "event_source_status": "ok",
     }
 
     def _fake_run_sell_put_scan(**kwargs):
@@ -1293,6 +1295,7 @@ def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_ret
         "implied_volatility": 0.18,
         "realized_volatility_estimate": 0.20,
         "delta": -0.2,
+        "event_source_status": "ok",
     }
 
     def _fake_run_sell_put_scan(**kwargs):
