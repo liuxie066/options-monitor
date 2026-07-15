@@ -22,9 +22,9 @@
 | `return_first` 收益优先 | 收益筛选器 | 收益条件合格，基础交易约束合格 |
 | `insurance_underwriting` 承保 | 承保评估器 | 这张保单的保费、边界和基础风险相对合理 |
 
-收益优先模式主要看 DTE、strike 范围、年化收益、单笔净收入、流动性、价差、Sell Put 现金是否够、Covered Call 股票是否够覆盖。它不系统性判断保费是否足够补偿 IV/RV 和事件风险。
+收益优先模式主要看 DTE、strike 范围、年化收益、单笔净权利金、流动性、价差、Sell Put 现金是否够、Covered Call 股票是否够覆盖。它不系统性判断保费是否足够补偿 IV/RV 和事件风险。
 
-承保模式才是“开保险公司”的主逻辑。它系统性看收益率、单笔净收入、IV/RV、IV-RV、事件风险、流动性、Sell Put 现金覆盖和 Covered Call 股票覆盖，用来判断当前保费是否足够，再按 strike 安全距离和保费边际推荐候选。
+承保模式才是“开保险公司”的主逻辑。它系统性看收益率、单笔净权利金、IV/RV、IV-RV、事件风险、流动性、Sell Put 现金覆盖和 Covered Call 股票覆盖，用来判断当前保费是否足够；通过硬筛后，优先按 Sell Put 的 strike 安全距离或 Covered Call 的 strike 上行距离推荐候选，再比较去重后的承保补偿分和流动性。
 
 完整产品闭环：
 
@@ -76,11 +76,11 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup check
 ```
 
-无参数安装会解析并安装最新 GitHub release，例如 `v1.2.339`；不会安装浮动 `main` 分支。需要复现、回滚或固定生产版本时，显式指定 release tag：
+无参数安装会解析并安装最新 GitHub release；不会安装浮动 `main` 分支。需要复现、回滚或固定生产版本时，显式指定 release tag：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.339 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
 ```
 
 安装脚本会下载代码、checkout 指定 release、创建 `.venv`、安装依赖、更新 `current` symlink，并默认在 `$HOME/.local/bin` 创建 `om` / `om-agent` 用户级 wrapper。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
@@ -324,7 +324,7 @@ om run tick --config config.us.json --accounts lx sy
 
 - **`collect`**：从已有扫描 run 生成脱敏证据包，用于本地分析或 handoff。
 - **`shadow-replay`**：把历史扫描候选、拒绝原因和后续价格路径落地为本地 dataset，做反事实复盘与参数影响评估。
-- **`strategy-lab`**：在 Shadow Replay 之上做策略进化实验；候选变化只供审阅，只有严格 outcome dominance 才生成 advisory-only proposal。
+- **`strategy-lab`**：在 Shadow Replay 之上做策略进化实验；Sell Put / Covered Call 生成受控 hypotheses（含历史百分位 IV/RV variants）并输出生产观测顺序 vs 去重承保排序对照，Combo Yield 只做 group-level outcome evaluator；候选变化只供审阅，只有严格 outcome dominance 才生成 advisory-only proposal。
 - **`archive`**：把远端 runtime 证据增量镜像到本地，便于磁盘有限的场景做离线复盘。
 
 这些入口默认只读；需要写本地 replay artifact 时必须显式加 `--write`。完整操作手册见 [docs/SHADOW_REPLAY_RUNBOOK.md](docs/SHADOW_REPLAY_RUNBOOK.md) 和 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
@@ -364,6 +364,8 @@ Tool Gateway：
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
+
+日常 tick 会先写正式 `close_advice.csv`；如果同一账户已有 `portfolio_capacity_shadow.csv`，还会额外写 `close_advice_reallocation_shadow.csv`。这个 reallocation shadow 只提示是否值得人工 review 换仓，不改正式 Close Advice、不改通知、不改候选排序，也不写持仓或配置。
 
 ### Symbols
 
@@ -447,6 +449,13 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 入口会按 runtime config 的 `_generated.market` 过滤 open lots：`config.us.json` 只处理 US 标的，`config.hk.json` 只处理 HK 标的；不会跨市场扫描同一账户下的全部期权 lot。到期 +N 天的 eligible cutoff 按标的市场本地日期计算，US 使用美东时间，HK 使用香港时间。短仓期权还必须有到期后的 OpenD spot 证明已经价外才会自动写入过期平仓；价内/平值或缺少 spot 时会进入 assignment review，等待指派/行权结果。
 
+被 Sell Put 指派后形成的 assigned-stock lot 可只读查看；卖出这类正股使用独立入口，默认仍是 dry-run，确认写入需要 `--confirm`：
+
+```bash
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"assigned-stock","account":"lx"}'
+./om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-assign_xxx --shares 100 --price 105 --trade-time-ms 1780000000000 --dry-run
+```
+
 月度收益报表：
 
 ```bash
@@ -469,8 +478,8 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 `sell_put.strategy` / `sell_call.strategy` 支持两种口径：
 
-- `return_first`：收益优先。它是收益筛选器，主要用年化收益、单笔净收入、基础 DTE/strike、流动性、现金或股票覆盖能力筛出“收益条件合格”的候选；它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
-- `insurance_underwriting`：承保评估器。它先过滤收益率、单笔净收入、IV/RV、事件风险、流动性和覆盖能力，再按保费边际、strike 安全距离、净收入和价差排序。默认 profile 是 `insurance_underwriting`。
+- `return_first`：收益优先。它是收益筛选器，主要用年化收益、单笔净权利金、基础 DTE/strike、流动性、现金或股票覆盖能力筛出“收益条件合格”的候选；它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
+- `insurance_underwriting`：承保评估器。它先过滤收益率、单笔净权利金、IV/RV、事件风险、流动性和覆盖能力；通过硬筛后，优先比较 Sell Put 的 strike 安全距离或 Covered Call 的 strike 上行距离，其次比较去重后的承保补偿分，再按价差和 open interest 排序，净权利金仅作最终同分项。默认 profile 是 `insurance_underwriting`。
 
 开仓配置不再接受 `strategy: short_vol`。`short_vol` 仍是 Close Advice、历史仓位和部分 replay 里的持仓 thesis 名称，不作为 Sell Put / Covered Call 的开仓配置值。
 
@@ -480,7 +489,7 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `insurance_underwriting` 下是卖下跌保险的承保评估。
 
-`insurance_underwriting` profile 会把 short put 视为愿意接货前提下的保险承保，先确认收益、波动率边际、事件风险、流动性和现金覆盖，再把收益指标与 strike 安全距离纳入排序：
+`insurance_underwriting` profile 会把 short put 视为愿意接货前提下的保险承保，先确认收益、波动率边际、事件风险、流动性和现金覆盖，再以 strike 安全距离为第一排序条件、去重后的承保补偿分为第二排序条件：
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
@@ -493,7 +502,7 @@ Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `insurance_underwri
 - `min_annualized_net_return`
 - `min_net_income`
 
-在 `insurance_underwriting` profile 下，收益率和单笔净收入是准入条件；通过过滤后的候选会按保费边际、距离 `max_strike` 的安全空间、净收入和价差排序。
+在 `insurance_underwriting` profile 下，收益率和单笔净权利金是准入条件；通过过滤后的候选依次按距离 `max_strike` 的安全空间降序、去重后的承保补偿分降序、价差升序、open interest 降序排序，净权利金仅作最终同分项。
 
 候选过滤之后会叠加账户现金维度的 `cash_reserve` 后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV/RV、strike、spot 或 multiplier 等关键输入时，承保策略会 fail closed。
 
@@ -624,6 +633,8 @@ bash scripts/install_agent_plugin.sh
 ./om-agent run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
+./om-agent run --tool analysis_catalog --input-json '{"config_key":"us"}'
+./om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, realized_pnl_cny from monthly_income_return_summary order by month, account"}'
 ./om-agent run --tool close_advice_read --input-json '{"config_key":"us","query":{"option_type":"call","side":"long"}}'
 ```
 
@@ -639,7 +650,7 @@ bash scripts/install_agent_plugin.sh
 ./om assistant model current
 ```
 
-显式命令和 pending-operation 回复进入确定性 Control；其他文本在 `assistant.copilot.enabled=true` 时进入唯一的只读 `om_chat` Copilot Scene。Copilot 通过 Host 投影的纯读工具自由完成模型/工具循环，不能进入确认、写配置、写仓位/交易、通知、服务控制或升级路径。链路保留 sender allowlist、message_id 幂等和 SQLite audit。当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`/record-expiry <富途通知>`、`设置 09898 covered call min strike 85`。`./om-agent` 是外部 Agent 使用的 Tool Gateway，不是 OM 自己的 Agent。架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，能力边界见 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)，渠道契约见 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
+显式命令和 pending-operation 回复进入确定性 Control；其他文本在 `assistant.copilot.enabled=true` 时进入唯一的 read-first `om_chat` Copilot Scene。Copilot 常规执行只能使用 Host 投影的纯读工具；遇到明确支持的变更请求时，最多请求一个确定性 Control preview，生成 pending operation 给人确认。它不能自己确认、取消、apply，也不能直接写配置、仓位/交易、通知、服务控制、升级或 broker state。链路保留 sender allowlist、message_id 幂等和 SQLite audit。当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`/record-expiry <富途通知>`、`设置 09898 covered call min strike 85`。`./om-agent` 是外部 Agent 使用的 Tool Gateway，不是 OM 自己的 Agent。架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，能力边界见 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)，渠道契约见 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 本地 Copilot 自由问答和 deterministic eval 使用同一个 `om_chat` Scene：
 
@@ -649,7 +660,7 @@ bash scripts/install_agent_plugin.sh
 ./om copilot eval --fixture june_income_attribution_basic --text "6月收益主要来自哪里" --model-turn-json-file tests/fixtures/copilot/june_income_attribution_model_turns.json
 ```
 
-`run` 会读取本地只读工具证据；没有显式模型配置时，不会降级成普通聊天。`eval` 只消费固定 fixture 或显式 eval-only model turn，用来回归 answer-quality 边界。
+`run` 默认读取本地只读工具证据回答，不直接写入；通道入口的显式变更请求也只产出 Control preview。没有显式模型配置时，不会降级成普通聊天。`eval` 只消费固定 fixture 或显式 eval-only model turn，用来回归 answer-quality 边界。
 
 离线复盘（`./om research`）与 Inbound Assistant 是分开的模块，也不暴露为 `./om-agent` tool。它只做本地证据收集、Shadow Replay dataset 维护和 Strategy Lab 只读实验；需要写本地 artifact 时必须显式加 `--write`，不会改 runtime config、交易状态或通知。详细命令见 [docs/SHADOW_REPLAY_RUNBOOK.md](docs/SHADOW_REPLAY_RUNBOOK.md) 和 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
 
@@ -677,7 +688,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 | 任务 | 推荐入口 | 运行方式 | 主要副作用 |
 |---|---|---|---|
-| 期权监控 / 扫描通知 | `./om run tick-cron --market hk --accounts lx sy --timeout 600` / `./om run tick-cron --market us --accounts lx sy --timeout 600` | cron 每 10 分钟唤醒，代码内判断业务窗口 | 写本地报告和运行状态，并按通知策略发送扫描/建议消息 |
+| 期权监控 / 扫描通知 | `./om run tick-cron --market hk --accounts lx sy --timeout 600` / `./om run tick-cron --market us --accounts lx sy --timeout 600` | cron 每 10 分钟唤醒，代码内判断业务窗口 | 写本地报告、portfolio capacity shadow 和运行状态；启用 Close Advice 时额外写 reallocation shadow；并按通知策略发送扫描/建议消息 |
 | Strategy Lab 证据记录 | `./om service render --include-strategy-lab-recorder ...` 生成的 `options-monitor-strategy-lab-*.timer` | 独立低频 timer | 写本地 Shadow Replay dataset、mark path、outcome facts、required-data cache 和 receipt；不发通知、不改生产配置 |
 | 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或人工检查 | 只读 |
 | 自动交易监听 / 入账 | `python3 -m src.application.trades.auto_intake --config config.us.json --mode apply --yes` | 长驻进程 | 写本地 `option_positions`、intake state/status，并按 receipt 配置发送回执 |
@@ -699,6 +710,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | `./om-agent run --tool config_validate ...` | 否 | 否 | 否 |
 | `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 |
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 |
+| `./om-agent run --tool analysis_query ...` | 否 | 否 | 否 |
 | `./om-agent run --tool scan_opportunities ...` | 是 | 否 | 否 |
 | `./om-agent run --tool get_close_advice ...` | 是 | 否 | 否 |
 | `./om-agent run --tool query_cash_headroom ...` | 是 | 否 | 否 |
@@ -750,7 +762,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 - [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
 - [docs/candidate_strategy.md](docs/candidate_strategy.md)：候选生成和策略边界
 - [docs/OPTION_POSITIONS_REPAIR.md](docs/OPTION_POSITIONS_REPAIR.md)：option positions 修复
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：主要模块边界
+- [docs/CLOSE_ADVICE_CONTRACT.md](docs/CLOSE_ADVICE_CONTRACT.md)：Close Advice 与 capital reallocation shadow 合同
 - [tests/README.md](tests/README.md)：测试分层和运行方式
 
 ## 风险提示

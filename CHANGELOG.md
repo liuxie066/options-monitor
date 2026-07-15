@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.395 - 2026-07-15
+
+### Changed
+- Updated README to match the current release surfaces, including distance-first underwriting ranking, read-first Copilot Control previews, analysis tools, assigned-stock handling, and Close Advice reallocation-shadow boundaries.
+
 ## 1.2.394 - 2026-07-14
 
 ### Fixed
