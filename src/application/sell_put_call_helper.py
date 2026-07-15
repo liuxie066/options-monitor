@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from domain.domain.candidate_defaults import (
 )
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_put_risk_bands import classify_sell_put_risk
+from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_models import CandidateContractInput
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.yield_enhancement_config import derive_yield_enhancement_policy
@@ -157,23 +159,23 @@ def _passes_range(value: float, min_value: float | None, max_value: float | None
     return True
 
 
-def _passes_liquidity(
+def _liquidity_reject_reason(
     leg: YieldEnhancementLeg,
     *,
     min_open_interest: float,
     min_volume: float,
     max_spread_ratio: float | None,
-) -> bool:
+) -> str | None:
     oi = _safe_float(leg.open_interest) or 0.0
     volume = _safe_float(leg.volume) or 0.0
     spread_ratio = _safe_float(leg.spread_ratio)
     if oi < float(min_open_interest):
-        return False
+        return "call_open_interest_below_min"
     if volume < float(min_volume):
-        return False
+        return "call_volume_below_min"
     if max_spread_ratio is not None and spread_ratio is not None and spread_ratio > float(max_spread_ratio):
-        return False
-    return True
+        return "call_spread_ratio_above_max"
+    return None
 
 
 def _normalized_iv(*values: Any) -> float | None:
@@ -447,11 +449,13 @@ def _load_yield_enhancement_call_legs_by_expiration(
     call_cfg: dict[str, Any],
     window: Any,
     liquidity: Any,
-) -> dict[str, list[YieldEnhancementLeg]]:
+) -> tuple[dict[str, list[YieldEnhancementLeg]], Counter[str]]:
     raw_calls = _load_required_data_calls(input_root=input_root, symbol=symbol)
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
+    reject_counts: Counter[str] = Counter()
     if raw_calls.empty:
-        return call_legs_by_expiration
+        reject_counts["call_universe_empty"] += 1
+        return call_legs_by_expiration, reject_counts
     min_call_delta = _safe_float(call_cfg.get("min_delta"))
     max_call_delta = _safe_float(call_cfg.get("max_delta"))
     configured_min_strike = _safe_float(call_cfg.get("min_strike"))
@@ -459,49 +463,67 @@ def _load_yield_enhancement_call_legs_by_expiration(
     for _, raw in raw_calls.iterrows():
         leg = _call_leg_from_required_data(raw)
         if leg is None:
+            reject_counts["call_leg_invalid"] += 1
             continue
         if not _passes_range(leg.dte, int(window.min_dte), int(window.max_dte)):
+            reject_counts["call_dte_out_of_range"] += 1
             continue
         effective_min_strike = max(value for value in (configured_min_strike, leg.spot) if value is not None)
         if leg.strike < effective_min_strike:
+            reject_counts["call_strike_below_min"] += 1
             continue
         if configured_max_strike is not None and leg.strike > configured_max_strike:
+            reject_counts["call_strike_above_max"] += 1
             continue
         call_delta = _safe_float(leg.delta)
-        if min_call_delta is not None and (call_delta is None or call_delta < float(min_call_delta)):
+        if call_delta is None and (min_call_delta is not None or max_call_delta is not None):
+            reject_counts["call_delta_missing"] += 1
             continue
-        if max_call_delta is not None and (call_delta is None or call_delta > float(max_call_delta)):
+        if min_call_delta is not None and call_delta < float(min_call_delta):
+            reject_counts["call_delta_below_min"] += 1
             continue
-        if not _passes_liquidity(
+        if max_call_delta is not None and call_delta > float(max_call_delta):
+            reject_counts["call_delta_above_max"] += 1
+            continue
+        liquidity_reject = _liquidity_reject_reason(
             leg,
             min_open_interest=liquidity.min_open_interest,
             min_volume=liquidity.min_volume,
             max_spread_ratio=liquidity.max_spread_ratio,
-        ):
+        )
+        if liquidity_reject:
+            reject_counts[liquidity_reject] += 1
             continue
         call_legs_by_expiration.setdefault(leg.expiration, []).append(leg)
-    return call_legs_by_expiration
+    return call_legs_by_expiration, reject_counts
 
 
-def _candidate_passes_pair_filters(
+def _candidate_pair_reject_reasons(
     candidate: dict[str, Any],
     *,
     funding_mode: str,
     max_debit_native: float | None,
     min_net_credit_retention: float | None,
-) -> bool:
+) -> tuple[str, ...]:
+    reasons: list[str] = []
     if not bool(candidate.get("funding_accepted")):
-        return False
+        reasons.extend(
+            reason
+            for reason in str(candidate.get("funding_reject_reasons") or "").split("|")
+            if reason
+        )
+        if not reasons:
+            reasons.append("funding_rejected")
     if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
-        return False
+        reasons.append("funding_mode_credit_or_even")
     if funding_mode == "max_debit" and max_debit_native is not None and float(candidate["net_debit"]) > float(max_debit_native):
-        return False
+        reasons.append("max_debit_native")
     net_credit_retention = _safe_float(candidate.get("net_credit_retention"))
     if min_net_credit_retention is not None and (
         net_credit_retention is None or net_credit_retention < float(min_net_credit_retention)
     ):
-        return False
-    return True
+        reasons.append("min_net_credit_retention")
+    return tuple(dict.fromkeys(reasons))
 
 
 def _build_yield_enhancement_pair_rows(
@@ -517,20 +539,29 @@ def _build_yield_enhancement_pair_rows(
     funding_mode: str,
     max_debit_native: float | None,
     min_net_credit_retention: float | None,
+    reject_counts: Counter[str],
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
     for _, raw in df.iterrows():
         put_leg = _put_leg_from_sell_put_row(raw)
         if put_leg is None:
+            reject_counts["put_leg_invalid"] += 1
             continue
         if not _passes_range(put_leg.dte, int(window.min_dte), int(window.max_dte)):
+            reject_counts["put_dte_out_of_range"] += 1
             continue
         if not _put_leg_passes_assignment_bounds(put_leg, sell_put_cfg):
+            reject_counts["put_assignment_bounds"] += 1
             continue
 
-        for call_leg in call_legs_by_expiration.get(put_leg.expiration, []):
+        call_legs = call_legs_by_expiration.get(put_leg.expiration, [])
+        if not call_legs:
+            reject_counts["call_expiration_unavailable"] += 1
+            continue
+        for call_leg in call_legs:
             pair_rejects = validate_yield_enhancement_pair(put_leg, call_leg)
             if pair_rejects:
+                reject_counts.update(pair_rejects)
                 continue
             expected_iv = _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
             try:
@@ -543,13 +574,16 @@ def _build_yield_enhancement_pair_rows(
                     sell_put_cfg=sell_put_cfg,
                 )
             except Exception:
+                reject_counts["pair_metrics_error"] += 1
                 continue
-            if not _candidate_passes_pair_filters(
+            pair_rejects = _candidate_pair_reject_reasons(
                 candidate,
                 funding_mode=funding_mode,
                 max_debit_native=max_debit_native,
                 min_net_credit_retention=min_net_credit_retention,
-            ):
+            )
+            if pair_rejects:
+                reject_counts.update(pair_rejects)
                 continue
             candidate.update(put_strategy_fields)
             candidate.update(policy_fields)
@@ -569,7 +603,11 @@ def find_sell_put_yield_enhancement_pairs(
     output_path: Path | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
-    policy = derive_yield_enhancement_policy(yield_enhancement_cfg, sell_put_cfg)
+    policy = derive_yield_enhancement_policy(
+        yield_enhancement_cfg,
+        sell_put_cfg,
+        market=symbol_market(symbol),
+    )
     cfg = policy.to_config()
     cfg["_max_call_cost_to_put_credit_explicit"] = "max_call_cost_to_put_credit" in set(policy.explicit_fields)
     if df.empty or not policy.enabled:
@@ -595,7 +633,7 @@ def find_sell_put_yield_enhancement_pairs(
         min_net_credit_retention = None
     min_combo_notional_floor = 1.0
 
-    call_legs_by_expiration = _load_yield_enhancement_call_legs_by_expiration(
+    call_legs_by_expiration, reject_counts = _load_yield_enhancement_call_legs_by_expiration(
         input_root=Path(input_root),
         symbol=symbol,
         call_cfg=call_cfg,
@@ -615,10 +653,12 @@ def find_sell_put_yield_enhancement_pairs(
         funding_mode=funding_mode,
         max_debit_native=max_debit_native,
         min_net_credit_retention=min_net_credit_retention,
+        reject_counts=reject_counts,
     )
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)
     pairs_df = pd.DataFrame(ranked_pairs) if ranked_pairs else _empty_pairs_df()
+    pairs_df.attrs["reject_counts"] = dict(sorted(reject_counts.items()))
     _write_pairs_df(pairs_df, output_path)
     return pairs_df
 

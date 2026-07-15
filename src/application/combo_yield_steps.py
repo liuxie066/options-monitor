@@ -9,6 +9,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
+from domain.domain.insurance_underwriting import evaluate_event_risk_candidate
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -58,6 +59,68 @@ def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
         candidates_path=(report_dir / f"{symbol_lower}_combo_yield_candidates.csv").resolve(),
         alerts_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
     )
+
+
+def _filter_combo_yield_event_risk(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+    sell_put_cfg: dict[str, Any],
+    policy: YieldEnhancementPolicy,
+    out_path: Path,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    reject_event_risk = bool(sell_put_cfg.get("reject_event_risk", True))
+    event_source_fail_closed = bool(sell_put_cfg.get("event_source_fail_closed", True))
+    scope = infer_trace_scope_from_path(out_path)
+    keep_mask: list[bool] = []
+    trace_rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        decision = evaluate_event_risk_candidate(
+            row.to_dict(),
+            reject_event_risk=reject_event_risk,
+            event_source_fail_closed=event_source_fail_closed,
+        )
+        keep_mask.append(bool(decision["accepted"]))
+        if decision["accepted"]:
+            continue
+        trace_rows.append(
+            build_candidate_filter_trace_row(
+                run_id=scope.get("run_id"),
+                account=scope.get("account"),
+                symbol=row.get("symbol") or symbol,
+                function=COMBO_YIELD_FAMILY,
+                mode=policy.mode,
+                strategy_family=COMBO_YIELD_FAMILY,
+                strategy_profile=policy.mode,
+                status="rejected",
+                stage="combo_event_risk",
+                rule=decision["rule"],
+                metric_value=decision.get("metric_value"),
+                threshold=decision.get("threshold"),
+                contract_symbol=row.get("contract_symbol"),
+                expiration=row.get("expiration"),
+                strike=row.get("strike"),
+                message=decision.get("message") or "combo yield event risk filter",
+                evidence_path=out_path.name,
+                config_values={
+                    **policy.to_fields(),
+                    "reject_event_risk": reject_event_risk,
+                    "event_source_fail_closed": event_source_fail_closed,
+                },
+                replay_fields=row.to_dict(),
+            )
+        )
+
+    filtered = df.loc[keep_mask].copy()
+    try:
+        filtered.to_csv(out_path, index=False)
+    except Exception as exc:
+        raise RuntimeError(f"failed to persist combo yield event-filtered put universe: {out_path}") from exc
+    append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), trace_rows)
+    return filtered
 
 
 def run_combo_yield_scan_and_summarize(
@@ -124,10 +187,17 @@ def run_combo_yield_scan_and_summarize(
     )
     label_put_candidates_fn(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
     df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
-    df_yield_put_candidates_for_pairs = df_yield_put_universe
-    if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
+    df_yield_put_event_filtered = _filter_combo_yield_event_risk(
+        df_yield_put_universe,
+        symbol=symbol,
+        sell_put_cfg=yield_sp,
+        policy=yield_enhancement_policy,
+        out_path=symbol_yield_put_universe_labeled,
+    )
+    df_yield_put_candidates_for_pairs = df_yield_put_event_filtered
+    if cash_filter_put_candidates_fn is not None and not df_yield_put_event_filtered.empty:
         df_yield_put_candidates_for_pairs = cash_filter_put_candidates_fn(
-            df_labeled=df_yield_put_universe.copy(),
+            df_labeled=df_yield_put_event_filtered.copy(),
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
@@ -148,8 +218,32 @@ def run_combo_yield_scan_and_summarize(
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
 
     scope = infer_trace_scope_from_path(result.candidates_path)
+    trace_rows = [
+        build_candidate_filter_trace_row(
+            run_id=scope.get("run_id"),
+            account=scope.get("account"),
+            symbol=symbol,
+            function=COMBO_YIELD_FAMILY,
+            mode=yield_enhancement_policy.mode,
+            strategy_family=COMBO_YIELD_FAMILY,
+            strategy_profile=yield_enhancement_policy.mode,
+            status="rejected",
+            stage="combo_pair_filter",
+            rule=str(reason),
+            metric_value=int(count),
+            threshold=0,
+            message=f"combo yield pair rejection count: {reason}",
+            evidence_path=result.candidates_path.name,
+            config_values=yield_enhancement_policy.to_fields(),
+        )
+        for reason, count in sorted(dict(raw_yield_pairs_df.attrs.get("reject_counts") or {}).items())
+        if int(count) > 0
+    ]
     if df_yield_put_universe.empty:
         yield_rule = "combo_yield_put_universe_empty"
+        yield_status = "post_filtered"
+    elif df_yield_put_event_filtered.empty:
+        yield_rule = "combo_yield_put_event_filtered"
         yield_status = "post_filtered"
     elif df_yield_put_candidates_for_pairs.empty:
         yield_rule = "combo_yield_put_cash_filtered"
@@ -163,28 +257,26 @@ def run_combo_yield_scan_and_summarize(
     else:
         yield_rule = "combo_yield_pair_accepted"
         yield_status = "accepted"
-    append_candidate_filter_trace_rows(
-        candidate_trace_path_for_output(result.candidates_path),
-        [
-            build_candidate_filter_trace_row(
-                run_id=scope.get("run_id"),
-                account=scope.get("account"),
-                symbol=symbol,
-                function=COMBO_YIELD_FAMILY,
-                mode=yield_enhancement_policy.mode,
-                strategy_family=COMBO_YIELD_FAMILY,
-                strategy_profile=yield_enhancement_policy.mode,
-                status=yield_status,
-                stage="post_filter",
-                rule=yield_rule,
-                metric_value=len(recommended_yield_pairs_df),
-                threshold=1,
-                message="combo yield pair selection",
-                evidence_path=result.candidates_path.name,
-                config_values=yield_enhancement_policy.to_fields(),
-            )
-        ],
+    trace_rows.append(
+        build_candidate_filter_trace_row(
+            run_id=scope.get("run_id"),
+            account=scope.get("account"),
+            symbol=symbol,
+            function=COMBO_YIELD_FAMILY,
+            mode=yield_enhancement_policy.mode,
+            strategy_family=COMBO_YIELD_FAMILY,
+            strategy_profile=yield_enhancement_policy.mode,
+            status=yield_status,
+            stage="post_filter",
+            rule=yield_rule,
+            metric_value=len(recommended_yield_pairs_df),
+            threshold=1,
+            message="combo yield pair selection",
+            evidence_path=result.candidates_path.name,
+            config_values=yield_enhancement_policy.to_fields(),
+        )
     )
+    append_candidate_filter_trace_rows(candidate_trace_path_for_output(result.candidates_path), trace_rows)
 
     separate_enabled = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_separate(yield_enhancement_cfg)
     inline_enabled = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_inline(yield_enhancement_cfg)

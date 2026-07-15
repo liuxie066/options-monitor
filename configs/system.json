@@ -183,12 +183,12 @@
     "alert_policy": {
       "change_annual_threshold": 0.02,
       "sell_put": {
-        "high_annual": 0.20,
-        "high_spread_max": 0.20,
+        "high_annual": 0.2,
+        "high_spread_max": 0.2,
         "medium_annual": 0.12
       },
       "sell_call": {
-        "high_annual": 0.10,
+        "high_annual": 0.1,
         "high_total": 0.15,
         "medium_annual": 0.06
       }
@@ -253,9 +253,9 @@
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
           "funding_mode": "credit_or_even",
-          "min_combo_net_credit": 0.0,
+          "min_combo_net_credit": null,
           "min_net_credit_annualized": 0.08,
-          "max_call_cost_to_put_credit": 1.0,
+          "max_call_cost_to_put_credit": null,
           "min_open_interest": 100,
           "min_volume": 5,
           "max_spread_ratio": 0.35,
@@ -329,9 +329,9 @@
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
           "funding_mode": "credit_or_even",
-          "min_combo_net_credit": 0.0,
+          "min_combo_net_credit": null,
           "min_net_credit_annualized": 0.08,
-          "max_call_cost_to_put_credit": 1.0,
+          "max_call_cost_to_put_credit": null,
           "min_open_interest": 50,
           "min_volume": 0,
           "max_spread_ratio": 0.35,

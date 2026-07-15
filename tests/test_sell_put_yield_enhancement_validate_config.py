@@ -179,6 +179,29 @@ def test_validate_config_rejects_invalid_combo_yield_net_credit_annualized() -> 
         assert "NVDA.combo_yield.min_net_credit_annualized" in str(exc)
 
 
+def test_validate_config_rejects_combo_yield_net_credit_retention_outside_unit_interval() -> None:
+    from src.application.config_validator import validate_config
+
+    for value in (-0.01, 1.01):
+        cfg = {
+            "templates": {},
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                    "combo_yield": {"enabled": True, "min_net_credit_retention": value},
+                    "sell_call": {"enabled": False},
+                }
+            ],
+        }
+
+        try:
+            validate_config(cfg)
+            raise AssertionError("expected config validation failure")
+        except SystemExit as exc:
+            assert "NVDA.combo_yield.min_net_credit_retention" in str(exc)
+
+
 def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> None:
     from src.application.config_validator import validate_config
 

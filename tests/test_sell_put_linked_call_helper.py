@@ -24,8 +24,8 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert income.enabled is True
     assert income.config["enabled"] is True
     assert income.config["min_net_credit_annualized"] == 0.08
-    assert income.config["max_call_cost_to_put_credit"] == 0.20
-    assert income.config["min_net_credit_retention"] == 0.75
+    assert income.config["max_call_cost_to_put_credit"] is None
+    assert income.config["min_net_credit_retention"] == 0.80
     assert income.config["call"]["min_delta"] == 0.05
     assert income.config["call"]["max_delta"] == 0.20
 
@@ -34,7 +34,8 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert isolated.derived_from_sell_put_strategy == "return_first"
     assert isolated.enabled is True
     assert isolated.config["min_net_credit_annualized"] == 0.08
-    assert isolated.config["max_call_cost_to_put_credit"] == 0.20
+    assert isolated.config["max_call_cost_to_put_credit"] is None
+    assert isolated.config["min_net_credit_retention"] == 0.80
     assert isolated.config["call"]["min_delta"] == 0.05
     assert isolated.config["call"]["max_delta"] == 0.20
 
@@ -49,6 +50,83 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert income_partial_policy.config["call"]["min_delta"] == 0.10
     assert income_partial_policy.config["call"]["max_delta"] == 0.20
     assert "max_otm_pct" not in income_partial_policy.config["call"]
+
+    hk = derive_yield_enhancement_policy(
+        {"enabled": True},
+        {"strategy": "return_first"},
+        market="hk",
+    )
+    assert hk.config["min_open_interest"] == 50
+    assert hk.config["min_volume"] == 0
+
+
+def test_yield_enhancement_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+    from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "call",
+                "expiration": "2026-08-28",
+                "dte": 44,
+                "contract_symbol": "HK.TCH260828C650000",
+                "strike": 650.0,
+                "spot": 500.0,
+                "bid": 1.9,
+                "ask": 2.0,
+                "mid": 1.95,
+                "volume": 0,
+                "open_interest": 75,
+                "implied_volatility": 0.40,
+                "currency": "HKD",
+                "delta": 0.10,
+                "multiplier": 100,
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
+    puts = pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "expiration": "2026-08-28",
+                "dte": 44,
+                "contract_symbol": "HK.TCH260828P450000",
+                "multiplier": 100,
+                "currency": "HKD",
+                "strike": 450.0,
+                "spot": 500.0,
+                "bid": 15.0,
+                "ask": 15.1,
+                "mid": 15.05,
+                "open_interest": 500,
+                "volume": 10,
+                "implied_volatility": 0.40,
+                "delta": -0.20,
+            }
+        ]
+    )
+    cfg = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True}})
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=puts,
+        symbol="0700.HK",
+        input_root=tmp_path,
+        yield_enhancement_cfg=cfg,
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "return_first",
+            "min_dte": 20,
+            "max_dte": 60,
+            "max_strike": 450.0,
+        },
+    )
+
+    assert len(pairs) == 1
+    assert pairs.attrs["reject_counts"] == {}
 
 
 def _write_single_call(
@@ -500,6 +578,7 @@ def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_p
     )
 
     assert rejected.empty
+    assert rejected.attrs["reject_counts"]["annualized_net_credit_yield"] == 1
     assert len(accepted) == 1
     assert float(accepted.iloc[0]["annualized_net_credit_yield"]) < 0.08
 
@@ -531,8 +610,27 @@ def test_yield_enhancement_return_first_policy_accepts_income_upside_pair(tmp_pa
     assert row["yield_enhancement_mode"] == "income_upside_enhancement"
     assert row["derived_from_sell_put_strategy"] == "return_first"
     assert float(row["call_cost_to_put_credit"]) <= 0.20
-    assert float(row["net_credit_retention"]) >= 0.75
+    assert float(row["net_credit_retention"]) >= 0.80
     assert float(row["annualized_net_credit_yield"]) >= 0.08
+
+
+def test_yield_enhancement_aggregates_call_prefilter_rejections(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(tmp_path, dte=44, delta=0.30)
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(dte=44),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={"enabled": True},
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60},
+    )
+
+    assert pairs.empty
+    assert pairs.attrs["reject_counts"] == {
+        "call_delta_above_max": 1,
+        "call_expiration_unavailable": 1,
+    }
 
 
 def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
