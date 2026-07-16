@@ -888,6 +888,10 @@ def test_incomplete_manual_open_does_not_create_pending_operation(
     tmp_path: Path,
 ) -> None:
     _enable_inbound_trade_write(monkeypatch)
+    monkeypatch.setattr(
+        "src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics",
+        lambda **_kwargs: (None, None, {"attempted_sources": []}),
+    )
     cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
