@@ -4,6 +4,8 @@ from datetime import date
 from pathlib import Path
 import time
 
+import pytest
+
 from src.application.multi_tick import required_data_prefetch as mod
 
 
@@ -18,6 +20,14 @@ class _Gateway:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+@pytest.fixture(autouse=True)
+def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.required_data_planning as planning
+
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(planning, "list_option_expirations", lambda *args, **kwargs: [])
 
 
 def _patch_0700_plan_discovery(monkeypatch, expirations: list[str] | None = None) -> None:
