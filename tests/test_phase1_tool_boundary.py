@@ -4,10 +4,18 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
+
+
+@pytest.fixture(autouse=True)
+def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.application.required_data_planning._resolve_spot_reference", lambda **_kwargs: None)
+    monkeypatch.setattr("src.application.required_data_planning.list_option_expirations", lambda *_args, **_kwargs: [])
 
 
 def test_scheduler_decision_schema_boundary() -> None:
