@@ -5,7 +5,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
@@ -36,8 +36,8 @@ from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     effective_multiplier,
     normalize_account,
-    normalize_currency,
 )
+from domain.domain.option_position_identity import normalize_currency
 from src.application.opend_utils import normalize_underlier
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,

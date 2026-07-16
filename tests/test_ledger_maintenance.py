@@ -81,9 +81,9 @@ def test_build_expired_close_decisions_marks_expired_position() -> None:
     )
 
     assert len(decisions) == 1
-    assert decisions[0]["should_close"] is True
-    assert decisions[0]["record_id"] == "rec_1"
-    patch = decisions[0]["patch"]
+    assert decisions[0].to_payload()["should_close"] is True
+    assert decisions[0].to_payload()["record_id"] == "rec_1"
+    patch = decisions[0].to_payload()["patch"]
     assert isinstance(patch, dict)
     assert patch["contracts_open"] == 0
     assert patch["status"] == "close"
@@ -108,9 +108,9 @@ def test_build_expired_close_decisions_skips_missing_record_id() -> None:
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["reason"] == "missing record_id"
-    assert decisions[0]["patch"] is None
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["reason"] == "missing record_id"
+    assert decisions[0].to_payload()["patch"] is None
 
 
 def test_build_expired_close_decisions_waits_until_expiration_plus_full_grace_day() -> None:
@@ -134,10 +134,10 @@ def test_build_expired_close_decisions_waits_until_expiration_plus_full_grace_da
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "grace_period_pending"
-    assert decisions[0]["eligible_after_utc"] == "2026-05-02T00:00:00+00:00"
-    assert "expired but waiting grace cutoff" in decisions[0]["reason"]
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "grace_period_pending"
+    assert decisions[0].to_payload()["eligible_after_utc"] == "2026-05-02T00:00:00+00:00"
+    assert "expired but waiting grace cutoff" in decisions[0].to_payload()["reason"]
 
 
 def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day() -> None:
@@ -161,8 +161,8 @@ def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day(
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is True
-    assert decisions[0]["expiration_ymd"] == "2026-05-01"
+    assert decisions[0].to_payload()["should_close"] is True
+    assert decisions[0].to_payload()["expiration_ymd"] == "2026-05-01"
 
 
 def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> None:
@@ -186,11 +186,11 @@ def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> No
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "grace_period_pending"
-    assert decisions[0]["eligible_after_utc"] == "2026-06-19T04:00:00+00:00"
-    assert decisions[0]["expiration_market"] == "US"
-    assert decisions[0]["expiration_timezone"] == "America/New_York"
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "grace_period_pending"
+    assert decisions[0].to_payload()["eligible_after_utc"] == "2026-06-19T04:00:00+00:00"
+    assert decisions[0].to_payload()["expiration_market"] == "US"
+    assert decisions[0].to_payload()["expiration_timezone"] == "America/New_York"
 
     at_us_midnight_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
     decisions = build_expired_close_decisions(
@@ -209,7 +209,7 @@ def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> No
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is True
+    assert decisions[0].to_payload()["should_close"] is True
 
 
 def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> None:
@@ -233,7 +233,7 @@ def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> No
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is True
+    assert decisions[0].to_payload()["should_close"] is True
 
 
 def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm() -> None:
@@ -261,12 +261,12 @@ def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm()
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
-    assert decisions[0]["assignment_review"]["status"] == "itm_or_atm"
-    assert decisions[0]["assignment_review"]["spot"] == 80
-    assert decisions[0]["assignment_review"]["strike"] == 85
-    assert decisions[0]["patch"] is None
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0].to_payload()["assignment_review"]["status"] == "itm_or_atm"
+    assert decisions[0].to_payload()["assignment_review"]["spot"] == 80
+    assert decisions[0].to_payload()["assignment_review"]["strike"] == 85
+    assert decisions[0].to_payload()["patch"] is None
 
 
 def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified() -> None:
@@ -294,9 +294,9 @@ def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified()
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is True
-    assert decisions[0]["assignment_review"]["status"] == "otm_verified"
-    assert decisions[0]["assignment_review"]["spot"] == 90
+    assert decisions[0].to_payload()["should_close"] is True
+    assert decisions[0].to_payload()["assignment_review"]["status"] == "otm_verified"
+    assert decisions[0].to_payload()["assignment_review"]["spot"] == 90
 
 
 def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm() -> None:
@@ -324,9 +324,9 @@ def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm(
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
-    assert decisions[0]["assignment_review"]["status"] == "itm_or_atm"
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0].to_payload()["assignment_review"]["status"] == "itm_or_atm"
 
 
 def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missing() -> None:
@@ -353,10 +353,10 @@ def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missin
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
-    assert decisions[0]["assignment_review"]["status"] == "missing_spot"
-    assert decisions[0]["patch"] is None
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0].to_payload()["assignment_review"]["status"] == "missing_spot"
+    assert decisions[0].to_payload()["patch"] is None
 
 
 def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> None:
@@ -379,10 +379,10 @@ def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> No
         grace_days=1,
     )
 
-    assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "already_closed_or_zero_open"
-    assert decisions[0]["contracts_open"] == 0
-    assert decisions[0]["patch"] is None
+    assert decisions[0].to_payload()["should_close"] is False
+    assert decisions[0].to_payload()["skip_reason"] == "already_closed_or_zero_open"
+    assert decisions[0].to_payload()["contracts_open"] == 0
+    assert decisions[0].to_payload()["patch"] is None
 
 
 def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:

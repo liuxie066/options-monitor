@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.symbol_identity import canonical_symbol
-from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+from src.application.config_sections import (
+    resolve_templates_config,
+    resolve_watchlist_config,
+)
 from src.application.config_profiles import apply_profiles
 from src.application.events.orchestrator import (
     DEFAULT_EVENT_SOURCE_PROVIDER,

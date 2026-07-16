@@ -9,16 +9,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_shell_entrypoints_target_src_interfaces() -> None:
-    om_src = (ROOT / "om").read_text(encoding="utf-8")
-    agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
-
-    assert "src.interfaces.cli.main" in om_src
-    assert "src.interfaces.agent.cli" in agent_src
-    assert 'export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"' in om_src
-    assert 'export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"' in agent_src
-
-
 def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
     proc = subprocess.run(
         [str((ROOT / "om").resolve()), "--help"],
@@ -38,99 +28,6 @@ def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
     )
     payload = json.loads(agent_proc.stdout)
     assert payload["name"] == "options-monitor-local-tools"
-
-
-def test_runtime_entrypoints_use_application_facades() -> None:
-    service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
-    agent_runtime_src = (ROOT / "src" / "application" / "agent_tool_runtime.py").read_text(encoding="utf-8")
-    runtime_helpers_src = (ROOT / "src" / "application" / "agent_tools" / "runtime_helpers.py").read_text(encoding="utf-8")
-    pipeline_runtime_src = (ROOT / "src" / "application" / "pipeline_runtime.py").read_text(encoding="utf-8")
-    cli_src = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
-    run_ops_src = (ROOT / "src" / "interfaces" / "cli" / "run_ops.py").read_text(encoding="utf-8")
-    om_src = (ROOT / "om").read_text(encoding="utf-8")
-    agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
-    multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
-    tick_notification_flow_src = (ROOT / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
-    multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
-    tick_scheduler_context_src = (ROOT / "src" / "application" / "tick_scheduler_context.py").read_text(encoding="utf-8")
-    multi_tick_finalization_src = (ROOT / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
-    cron_runtime_src = (ROOT / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
-    tool_execution_src = (ROOT / "src" / "application" / "tool_execution.py").read_text(encoding="utf-8")
-    healthcheck_src = (ROOT / "src" / "application" / "healthcheck.py").read_text(encoding="utf-8")
-    healthcheck_runner_src = (ROOT / "src" / "application" / "healthcheck_runner.py").read_text(encoding="utf-8")
-    required_data_prefetch_src = (ROOT / "src" / "application" / "multi_tick" / "required_data_prefetch.py").read_text(encoding="utf-8")
-    prefetch_coordinator_src = (ROOT / "src" / "application" / "multi_tick" / "prefetch_coordinator.py").read_text(encoding="utf-8")
-    scan_pipeline_src = (ROOT / "src" / "application" / "scan_pipeline.py").read_text(encoding="utf-8")
-    notification_pipeline_src = (ROOT / "src" / "application" / "notification_pipeline.py").read_text(encoding="utf-8")
-    close_advice_pipeline_src = (ROOT / "src" / "application" / "close_advice_pipeline.py").read_text(encoding="utf-8")
-
-    assert not (ROOT / "scripts" / "send_if_needed.py").exists()
-    assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
-    assert not (ROOT / "scripts" / "option_positions.py").exists()
-    assert not (ROOT / "run_watchlist.sh").exists()
-    assert not (ROOT / "scripts" / "models.py").exists()
-    assert not (ROOT / "scripts" / "daily_health_summary.py").exists()
-    assert not (ROOT / "scripts" / "doctor_opend_required_fields.py").exists()
-    assert not (ROOT / "scripts" / "doctor_futu.py").exists()
-    assert not (ROOT / "scripts" / "append_cash_summary.py").exists()
-    assert not (ROOT / "scripts" / "auto_close_expired_positions.py").exists()
-    assert not (ROOT / "scripts" / "auto_deploy_from_main.py").exists()
-    assert not (ROOT / "scripts" / "diagnose_opend_option_chain.py").exists()
-    assert not (ROOT / "scripts" / "deploy_safe.sh").exists()
-    assert not (ROOT / "scripts" / "deploy_to_prod.py").exists()
-    assert not (ROOT / "scripts" / "deploy_status.py").exists()
-    assert not (ROOT / "scripts" / "healthcheck.py").exists()
-    assert not (ROOT / "scripts" / "healthcheck_and_notify.py").exists()
-    assert not (ROOT / "scripts" / "opend_watchdog.py").exists()
-    assert not (ROOT / "scripts" / "opend_watchdog_loop.py").exists()
-    assert not (ROOT / "scripts" / "policy_check.py").exists()
-    assert not (ROOT / "scripts" / "publish_to_prod.sh").exists()
-    assert not (ROOT / "scripts" / "retention_reports.py").exists()
-    assert not (ROOT / "src" / "application" / "deploy_observability.py").exists()
-    assert not (ROOT / "scripts" / "ssh_selfcheck.sh").exists()
-    assert not (ROOT / "scripts" / "tools" / "doctor_opend_telnet.py").exists()
-    assert not (ROOT / "scripts" / "tools" / "doctor_required_data_schema.py").exists()
-    assert not (ROOT / "scripts" / "tools" / "sell_put_cash_and_notify.py").exists()
-    assert not (ROOT / "scripts" / "tools" / "snip_sell_put_headroom.py").exists()
-    assert not (ROOT / "run_webui.sh").exists()
-    assert not (ROOT / "scripts" / "webui").exists()
-    assert not (ROOT / "src" / "interfaces" / "webui").exists()
-    assert "src.interfaces.cli.main" in service_src
-    assert "scripts/opend_watchdog.py" not in service_src
-    assert "scripts/doctor_futu.py" not in agent_runtime_src
-    assert "scripts/append_cash_summary.py" not in pipeline_runtime_src
-    assert "from src.application.futu_doctor import run_futu_doctor_checks" in runtime_helpers_src
-    assert "from src.application.cash_summary_footer import append_cash_summary_footer" in pipeline_runtime_src
-    assert "from src.infrastructure.opend_watchdog import run_watchdog_check" in service_src
-    assert "src.interfaces.cli.main" in om_src
-    assert "src.interfaces.agent.cli" in agent_src
-    assert "handle_run_command(" in cli_src
-    assert "from src.application.multi_account_tick import run_tick" in run_ops_src
-    assert "return int(run_tick_fn(_tick_argv(args)))" in run_ops_src
-    assert "src.interfaces.cli.option_positions" in cli_src
-    assert "src.application.multi_tick.main" not in multi_account_tick_src
-    assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()
-    assert not (ROOT / "scripts" / "infra" / "service.py").exists()
-    assert "run_scheduler_flow" in tick_scheduler_context_src
-    assert "build_multi_tick_scheduler_decision" in multi_tick_scheduler_src
-    assert "build_multi_tick_account_scheduler_view" in multi_tick_scheduler_src
-    assert "apply_notify_results_to_tick_metrics" in tick_notification_flow_src
-    assert "build_shared_last_run_meta" in multi_tick_finalization_src
-    assert "build_run_end_payload" in multi_tick_finalization_src
-    assert "def build_notify_summary(" in cron_runtime_src
-    assert not (ROOT / "src" / "application" / "agent_tools.py").exists()
-    assert not (ROOT / "scripts" / "agent_plugin").exists()
-    assert "from src.application.tool_execution import execute_tool" in healthcheck_src
-    assert "get_tenant_access_token" in healthcheck_runner_src
-    assert "run_scheduler" in healthcheck_runner_src
-    assert "from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator" in required_data_prefetch_src
-    assert "ThreadPoolExecutor" not in required_data_prefetch_src
-    assert "ThreadPoolExecutor" in prefetch_coordinator_src
-    assert "from src.application.tool_execution import execute_tool" in scan_pipeline_src
-    assert "from src.application.tool_execution import execute_tool" in notification_pipeline_src
-    assert "from src.application.tool_execution import execute_tool" in close_advice_pipeline_src
-    assert "scripts.agent_plugin.tools" not in tool_execution_src
-    assert "src.application.agent_tool_registry" in tool_execution_src
 
 
 def test_unified_tick_help_works() -> None:

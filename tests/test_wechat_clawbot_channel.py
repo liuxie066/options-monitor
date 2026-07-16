@@ -354,7 +354,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
 
 
 def test_reply_wechat_clawbot_text_reuses_idempotent_receipt(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import reply_wechat_clawbot_text
+    from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()

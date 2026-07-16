@@ -221,10 +221,10 @@ def test_resolve_trade_close_dry_run_builds_patches() -> None:
     assert result.action == "close"
     assert result.diagnostics["close_target_resolution"]["record_ids"] == ["rec1", "rec2"]
     assert len(result.operations) == 2
-    assert result.operations[0]["close_target_resolution"]["record_ids"] == ["rec1", "rec2"]
-    assert result.operations[0]["action"] == "buy_close"
-    assert result.operations[0]["patch"]["contracts_open"] == 0
-    assert result.operations[0]["patch"]["close_type"] == "buy_to_close"
+    assert result.operations[0].to_payload()["close_target_resolution"]["record_ids"] == ["rec1", "rec2"]
+    assert result.operations[0].to_payload()["action"] == "buy_close"
+    assert result.operations[0].to_payload()["patch"]["contracts_open"] == 0
+    assert result.operations[0].to_payload()["patch"]["close_type"] == "buy_to_close"
 
 
 def test_resolve_unknown_buy_call_prefers_existing_short_call_close() -> None:
@@ -241,7 +241,7 @@ def test_resolve_unknown_buy_call_prefers_existing_short_call_close() -> None:
 
     assert result.status == "dry_run"
     assert result.action == "close"
-    assert result.operations[0]["record_id"] == "short-call"
+    assert result.operations[0].to_payload()["record_id"] == "short-call"
     assert result.diagnostics["position_effect_inference"]["decision"] == "close"
 
 
@@ -263,7 +263,7 @@ def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_p
     assert result.status == "dry_run"
     assert result.action == "lifecycle"
     assert result.reason == "waiting_settlement_evidence"
-    assert result.operations[0]["action"] == "lifecycle_pending"
+    assert result.operations[0].to_payload()["action"] == "lifecycle_pending"
     assert result.diagnostics["decision"]["decision_type"] == "needs_review"
 
 
@@ -305,9 +305,9 @@ def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
     assert result.status == "dry_run"
     assert result.action == "close"
     assert len(result.operations) == 2
-    assert result.operations[0]["action"] == "sell_close"
-    assert result.operations[0]["patch"]["contracts_open"] == 0
-    assert result.operations[0]["patch"]["close_type"] == "sell_to_close"
+    assert result.operations[0].to_payload()["action"] == "sell_close"
+    assert result.operations[0].to_payload()["patch"]["contracts_open"] == 0
+    assert result.operations[0].to_payload()["patch"]["close_type"] == "sell_to_close"
 
 
 def test_resolve_trade_close_apply_updates_records() -> None:
@@ -321,7 +321,7 @@ def test_resolve_trade_close_apply_updates_records() -> None:
     )
 
     assert result.status == "applied"
-    assert [row["record_id"] for row in result.operations] == ["rec1", "rec2"]
+    assert [row.record_id for row in result.operations] == ["rec1", "rec2"]
     assert result.diagnostics["close_target_resolution"]["strategy"] == "strict_exact_fifo"
     assert repo.updated == []
 
@@ -337,8 +337,8 @@ def test_resolve_trade_long_close_apply_updates_records() -> None:
     )
 
     assert result.status == "applied"
-    assert [row["record_id"] for row in result.operations] == ["rec1", "rec2"]
-    assert [row["action"] for row in result.operations] == ["sell_close", "sell_close"]
+    assert [row.record_id for row in result.operations] == ["rec1", "rec2"]
+    assert [row.action for row in result.operations] == ["sell_close", "sell_close"]
     assert repo.updated == []
 
 
@@ -374,9 +374,9 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     )
 
     assert result.status == "applied"
-    assert [row["record_id"] for row in result.operations] == open_lot_ids
-    assert [row["contracts_to_close"] for row in result.operations] == [1, 2]
-    assert {row["ledger_preflight"]["event_type"] for row in result.operations} == {"close"}
+    assert [row.record_id for row in result.operations] == open_lot_ids
+    assert [row.contracts_to_close for row in result.operations] == [1, 2]
+    assert {row.ledger_preflight.event_type for row in result.operations} == {"close"}
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
     assert {item["raw_payload"]["record_id"] for item in close_events} == set(open_lot_ids)
     assert {tuple(item["raw_payload"]["close_target_resolution"]["record_ids"]) for item in close_events} == {
@@ -489,7 +489,7 @@ def test_confirm_lifecycle_expired_unassigned_records_expire_close(tmp_path) -> 
     assert result.status == "applied"
     assert result.action == "expire_close"
     assert result.reason == "expire_close_recorded"
-    assert result.operations[0]["ledger_preflight"]["event_type"] == "expire_close"
+    assert result.operations[0].to_payload()["ledger_preflight"]["event_type"] == "expire_close"
     close_events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
     assert len(close_events) == 1
     assert close_events[0]["target_lot_id"] == lot_id
@@ -860,7 +860,7 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
 
     assert stock_result.status == "applied"
     assert stock_result.action == "assignment"
-    assert stock_result.operations[0]["ledger_preflight"]["event_type"] == "assignment"
+    assert stock_result.operations[0].to_payload()["ledger_preflight"]["event_type"] == "assignment"
     assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
     assert len(assignment_events) == 1
     assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
@@ -1128,7 +1128,7 @@ def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -
 
     assert stock_result.status == "applied"
     assert stock_result.action == "exercise"
-    assert stock_result.operations[0]["ledger_preflight"]["event_type"] == "exercise"
+    assert stock_result.operations[0].to_payload()["ledger_preflight"]["event_type"] == "exercise"
     exercise_events = [item for item in repo.list_trade_events() if item.get("event_type") == "exercise"]
     assert len(exercise_events) == 1
     assert exercise_events[0]["raw_payload"]["record_id"] == lot_id

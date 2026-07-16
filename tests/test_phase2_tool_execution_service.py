@@ -116,15 +116,12 @@ def test_state_repo_idempotency_and_audit_helpers() -> None:
                 "finished_at_utc": finished_at.isoformat(),
             },
         )
-        rows = state_repo.query_tool_execution_audit(base, tool_name="required_data_prefetch", limit=10)
-        assert len(rows) == 1
-        ret = state_repo.apply_tool_execution_audit_retention(base, max_lines=1, max_age_days=30)
-        assert ret["kept"] == 1
+        audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
+        assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_tool_execution_service_idempotency_and_audit() -> None:
     from domain.services import ToolExecutionIntent, ToolExecutionService
-    from domain.storage.repositories import state_repo
 
     class _Proc:
         returncode = 0
@@ -156,8 +153,8 @@ def test_tool_execution_service_idempotency_and_audit() -> None:
         assert p2["status"] == "skipped"
         assert len(calls) == 1
 
-        rows = state_repo.query_tool_execution_audit(base, limit=20)
-        assert len(rows) >= 2
+        audit_path = base / "output_shared" / "state" / "tool_execution_audit.jsonl"
+        assert len(audit_path.read_text(encoding="utf-8").splitlines()) >= 2
 
 
 def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency() -> None:

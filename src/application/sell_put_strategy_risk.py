@@ -21,7 +21,6 @@ from src.application.candidate_filter_trace import (
 )
 from src.application.short_vol_risk_context import (
     PortfolioRiskContext,
-    build_portfolio_risk_context,
     enrich_short_vol_contract_cny_fields,
 )
 from src.application.strategy_policy import RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE, normalize_strategy_profile

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tools.base import build_default_agent_tool_context
 from src.application.agent_tools.permissions import write_gate_error
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import (
@@ -32,7 +31,7 @@ def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[
         return build_response(tool_name=name, ok=False, error=build_error_payload(gate_error))
 
     try:
-        data, warnings, meta = definition.call(build_default_agent_tool_context(), payload_dict)
+        data, warnings, meta = definition.call(payload_dict)
         return build_response(
             tool_name=name,
             ok=True,

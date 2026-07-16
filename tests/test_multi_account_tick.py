@@ -93,7 +93,7 @@ def test_current_run_id_is_reexported_from_multi_tick_main() -> None:
 
 
 def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> None:
-    from src.application import multi_account_tick as mod
+    from src.application import tick_account_execution as mod
 
     started: list[str] = []
     lock = threading.Lock()
@@ -107,7 +107,7 @@ def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> Non
         assert both_started.wait(1.0), "account runs did not overlap"
         return f"done-{acct}"
 
-    out = mod._run_account_outcomes(
+    out = mod.run_account_outcomes(
         account_ids=["lx", "sy"],
         max_workers=2,
         run_account_fn=run_account,
@@ -141,14 +141,14 @@ def test_default_account_must_be_active_account() -> None:
 def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
     import json
     from pathlib import Path
-    from src.application import multi_account_tick as mod
+    from src.application import tick_account_execution as mod
 
     base = tmp_path
     config = tmp_path / "config.us.json"
     config.write_text(json.dumps({"schedule": {"enabled": True}}), encoding="utf-8")
     state = tmp_path / "scheduler_state.json"
 
-    mod._mark_scanned_accounts(
+    mod.mark_scanned_accounts(
         base=base,
         config=config,
         state=state,

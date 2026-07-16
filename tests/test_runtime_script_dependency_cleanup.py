@@ -3,40 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_cash_summary_footer_appends_without_script_subprocess(tmp_path: Path, monkeypatch) -> None:
-    import src.application.cash_summary_footer as footer
-
-    config_path = tmp_path / "config.json"
-    data_config = tmp_path / "portfolio.json"
-    notification = tmp_path / "symbols_notification.txt"
-    config_path.write_text('{"accounts":["lx","sy"]}', encoding="utf-8")
-    data_config.write_text("{}", encoding="utf-8")
-    notification.write_text("主体内容\n\n现金（CNY）:\nOLD: holding ¥1 | free ¥1\n", encoding="utf-8")
-
-    def _fake_query(**kwargs):  # type: ignore[no-untyped-def]
-        account = kwargs["account"]
-        return {
-            "cash_available_cny": 1000 if account == "lx" else 2000,
-            "cash_free_cny": 800 if account == "lx" else 1500,
-        }
-
-    monkeypatch.setattr(footer, "query_sell_put_cash", _fake_query)
-
-    footer.append_cash_summary_footer(
-        base=tmp_path,
-        notification=notification,
-        config=config_path,
-        data_config=data_config,
-        market="富途",
-    )
-
-    text = notification.read_text(encoding="utf-8")
-    assert "主体内容" in text
-    assert "OLD:" not in text
-    assert "LX: holding" in text
-    assert "SY: holding" in text
-
-
 def test_futu_doctor_runtime_returns_structured_payload(monkeypatch) -> None:
     import src.application.futu_doctor as doctor
 

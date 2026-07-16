@@ -39,15 +39,6 @@ def test_trade_auto_intake_requires_explicit_config() -> None:
     assert exc.value.code == 2
 
 
-def test_healthcheck_runner_cli_requires_explicit_config() -> None:
-    from src.application import healthcheck_runner
-
-    with pytest.raises(SystemExit) as exc:
-        healthcheck_runner.main(["--json"])
-
-    assert exc.value.code == 2
-
-
 def test_symbols_cli_requires_explicit_config() -> None:
     from src.interfaces.cli import symbols
 

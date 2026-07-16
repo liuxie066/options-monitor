@@ -94,9 +94,9 @@ def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
 
     assert result.status == "dry_run"
     assert result.action == "open"
-    assert result.operations[0]["fields"]["account"] == "lx"
-    assert result.operations[0]["fields"]["side"] == "short"
-    assert "multiplier_source=cache" in result.operations[0]["fields"]["note"]
+    assert result.operations[0].to_payload()["fields"]["account"] == "lx"
+    assert result.operations[0].to_payload()["fields"]["side"] == "short"
+    assert "multiplier_source=cache" in result.operations[0].to_payload()["fields"]["note"]
 
 
 def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
@@ -104,8 +104,8 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
 
     assert result.status == "dry_run"
     assert result.action == "open"
-    assert result.operations[0]["fields"]["account"] == "lx"
-    assert result.operations[0]["fields"]["side"] == "long"
+    assert result.operations[0].to_payload()["fields"]["account"] == "lx"
+    assert result.operations[0].to_payload()["fields"]["side"] == "long"
 
 
 def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() -> None:
@@ -129,7 +129,7 @@ def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() 
     assert result.status == "dry_run"
     assert result.action == "open"
     assert result.diagnostics["position_effect_inference"]["decision"] == "open"
-    fields = result.operations[0]["fields"]
+    fields = result.operations[0].to_payload()["fields"]
     assert fields["side"] == "long"
     assert fields["strategy"] == "combo_yield"
     assert fields["leg_role"] == "enhancement_call"
@@ -164,7 +164,7 @@ def test_combo_yield_group_id_canonicalizes_hk_option_alias() -> None:
     result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False)
 
     assert result.status == "dry_run"
-    fields = result.operations[0]["fields"]
+    fields = result.operations[0].to_payload()["fields"]
     assert fields["strategy"] == "combo_yield"
     assert fields["strategy_group_id"] == "combo_yield:lx:0700.HK:2026-06-05"
 
@@ -189,7 +189,7 @@ def test_resolve_unknown_buy_call_without_companion_opens_pending_combo_yield_lo
     assert result.status == "dry_run"
     assert result.action == "open"
     assert result.diagnostics["position_effect_inference"]["open_reason"] == "buy_call_without_close_target"
-    fields = result.operations[0]["fields"]
+    fields = result.operations[0].to_payload()["fields"]
     assert fields["side"] == "long"
     assert fields["strategy"] == "combo_yield"
     assert fields["leg_role"] == "enhancement_call"
@@ -207,7 +207,7 @@ def test_resolve_trade_open_apply_creates_record() -> None:
     )
 
     assert result.status == "applied"
-    assert result.operations[0]["event_id"] == "deal-open-1"
+    assert result.operations[0].to_payload()["event_id"] == "deal-open-1"
     assert repo.created == []
 
 
@@ -225,7 +225,7 @@ def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Pa
     result = resolve_trade_deal(_deal(), repo=repo, state={}, apply_changes=True)
 
     assert result.status == "applied"
-    operation = result.operations[0]
+    operation = result.operations[0].to_payload()
     assert operation["action"] == "open"
     assert operation["event_id"] == "futu:lx:REAL_1:deal-open-1"
     assert operation["ledger_preflight"]["status"] == "ok"

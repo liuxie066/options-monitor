@@ -11,7 +11,11 @@ from domain.domain.strategy_vocab import (
 )
 from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
 from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_config import repo_base
+from src.application.agent_tool_config import resolve_output_root
 from src.application.symbol_aliases import symbol_aliases_from_config
 
 
@@ -78,25 +82,23 @@ _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 def _candidate_rank_explain_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return candidate_rank_explain_tool(
         payload,
-        repo_base=ctx.repo_base,
-        resolve_output_root=ctx.resolve_output_root,
-        mask_path=ctx.mask_path,
+        repo_base=repo_base,
+        resolve_output_root=resolve_output_root,
+        mask_path=mask_path,
     )
 
 
 def _candidate_filter_explain_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     config_path = None
     symbol_aliases = None
     if str(payload.get("config_key") or "").strip() or str(payload.get("config_path") or "").strip():
-        config_path, cfg = ctx.load_runtime_config(
+        config_path, cfg = load_runtime_config(
             config_key=payload.get("config_key"),
             config_path=payload.get("config_path"),
         )
@@ -108,13 +110,13 @@ def _candidate_filter_explain_tool(
 
     data, warnings, meta = candidate_filter_explain_tool(
         tool_payload,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        repo_base=repo_base,
+        mask_path=mask_path,
         symbol_aliases=symbol_aliases,
     )
     if config_path is not None:
         meta = dict(meta)
-        meta["config_path"] = ctx.mask_path(config_path)
+        meta["config_path"] = mask_path(config_path)
     return data, warnings, meta
 
 

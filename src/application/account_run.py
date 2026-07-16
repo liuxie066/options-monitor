@@ -18,7 +18,10 @@ from domain.domain.multi_tick import decide_should_notify
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 from src.application.close_advice_reallocation_shadow import write_close_advice_reallocation_shadow
-from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.application.config_sections import (
+    resolve_watchlist_config,
+    set_watchlist_config,
+)
 from src.application.close_advice_runner import run_close_advice
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read

@@ -1,59 +1,37 @@
 from __future__ import annotations
 
-import importlib
-import pkgutil
 from types import ModuleType
 from typing import Any
 
-import src.application.agent_tools as agent_tools_package
+from src.application.agent_tools import (
+    analysis,
+    candidate,
+    close_advice,
+    config,
+    diagnostics,
+    materialization,
+    notification_perception,
+    notifications,
+    positions,
+    runtime,
+)
 from src.application.agent_tools.base import AgentTool
 from src.application.agent_tools.permissions import write_tools_enabled_from_env as _write_tools_enabled_from_env
 
 AgentToolEntry = AgentTool
 
-_SKIP_AGENT_TOOL_MODULES: frozenset[str] = frozenset({"base", "permissions"})
-_PREFERRED_MODULE_ORDER: tuple[str, ...] = (
-    "diagnostics",
-    "runtime",
-    "config",
-    "analysis",
-    "materialization",
-    "candidate",
-    "positions",
-    "close_advice",
-    "notifications",
+AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
+    diagnostics,
+    runtime,
+    config,
+    analysis,
+    materialization,
+    candidate,
+    positions,
+    close_advice,
+    notifications,
+    notification_perception,
 )
-
-
-def _module_sort_key(module: ModuleType) -> tuple[int, str]:
-    name = module.__name__.rsplit(".", 1)[-1]
-    try:
-        preferred_index = _PREFERRED_MODULE_ORDER.index(name)
-    except ValueError:
-        preferred_index = len(_PREFERRED_MODULE_ORDER)
-    return preferred_index, name
-
-
-def _discover_tool_modules() -> tuple[ModuleType, ...]:
-    package_paths = getattr(agent_tools_package, "__path__", ())
-    prefix = f"{agent_tools_package.__name__}."
-    modules: list[ModuleType] = []
-    for module_info in pkgutil.iter_modules(package_paths):
-        module_name = module_info.name
-        if (
-            module_name.startswith("_")
-            or module_name in _SKIP_AGENT_TOOL_MODULES
-            or module_name.endswith("_impl")
-            or module_name.endswith("_helpers")
-        ):
-            continue
-        module = importlib.import_module(f"{prefix}{module_name}")
-        if hasattr(module, "TOOLS"):
-            modules.append(module)
-    return tuple(sorted(modules, key=_module_sort_key))
-
-
-AGENT_TOOL_MODULES: tuple[ModuleType, ...] = _discover_tool_modules()
 
 
 def _module_tools(module: ModuleType) -> tuple[AgentTool, ...]:

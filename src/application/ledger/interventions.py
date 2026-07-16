@@ -10,11 +10,11 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
-    normalize_currency,
     normalize_option_type,
     normalize_side,
     now_ms,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,
@@ -495,8 +495,8 @@ def persist_manual_repair_event(
         repair_reason=repair_reason,
         as_of_ms=as_of_ms,
     )
-    void_event = _preview_event_to_trade_event(preview["void_event"])
-    repair_event = _preview_event_to_trade_event(preview["repair_event"])
+    void_event = _preview_event_to_trade_event(preview.void_event)
+    repair_event = _preview_event_to_trade_event(preview.repair_event)
 
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
         if conn is not None:

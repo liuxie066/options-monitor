@@ -310,7 +310,7 @@ def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkey
 
     assert cli.main([
         "repair",
-        str(close_result["event_id"]),
+        str(close_result.event_id),
         "--record-id",
         second_lot["record_id"],
         "--close-target-source-event-id",
@@ -346,7 +346,7 @@ def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voi
     )
     _append_canonical_void_event(
         repo,
-        target_event_id=str(close_result["event_id"]),
+        target_event_id=str(close_result.event_id),
         event_id="canonical-void-close",
         event_time_ms=3000,
     )

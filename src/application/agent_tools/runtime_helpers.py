@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_sections import resolve_watchlist_config
+from src.application.config_validator import validate_config
 from src.application.futu_doctor import run_futu_doctor_checks
 from src.application.runtime_config_paths import (
     read_json_object_or_empty,
     resolve_data_config_ref,
-    resolve_local_path,
-    resolve_public_data_config_path,
+    resolve_local_path as _resolve_local_path,
+    resolve_public_data_config_path as _resolve_public_data_config_path,
     write_json_atomic,
 )
 from src.application.symbol_mutations import normalize_symbol_read
@@ -20,7 +23,7 @@ def normalize_broker(value: Any) -> str:
     return str(value or "富途").strip() or "富途"
 
 
-def symbol_fetch_config_map(cfg: dict[str, Any], *, resolve_watchlist_config: Callable[[dict[str, Any]], list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+def symbol_fetch_config_map(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for item in resolve_watchlist_config(cfg):
         symbol = normalize_symbol_read(item.get("symbol"))
@@ -45,8 +48,6 @@ def validate_runtime_config(
     cfg: dict[str, Any],
     *,
     allow_empty_symbols: bool = False,
-    resolve_watchlist_config: Callable[[dict[str, Any]], list[dict[str, Any]]],
-    validate_config: Callable[[dict[str, Any]], Any],
 ) -> list[str]:
     warnings: list[str] = []
     try:
@@ -83,12 +84,10 @@ def run_futu_doctor(
     port: int,
     symbols: list[str],
     timeout_sec: int,
-    repo_base: Callable[[], Path],
     telnet_host: str = "127.0.0.1",
     telnet_port: int = 22222,
 ) -> dict[str, Any]:
     try:
-        del repo_base
         return run_futu_doctor_checks(
             host=str(host),
             port=int(port),
@@ -101,7 +100,7 @@ def run_futu_doctor(
         return {"ok": False, "error_code": "DOCTOR_FAILED", "message": f"{type(exc).__name__}: {exc}"}
 
 
-def healthcheck_symbols_for_futu(cfg: dict[str, Any], *, resolve_watchlist_config: Callable[[dict[str, Any]], list[dict[str, Any]]]) -> list[str]:
+def healthcheck_symbols_for_futu(cfg: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for item in resolve_watchlist_config(cfg):
         fetch = item.get("fetch") if isinstance(item.get("fetch"), dict) else {}
@@ -115,6 +114,14 @@ def healthcheck_symbols_for_futu(cfg: dict[str, Any], *, resolve_watchlist_confi
         if len(out) >= 1:
             break
     return out
+
+
+def resolve_public_data_config_path(payload: dict[str, Any], portfolio_cfg: dict[str, Any]) -> Path:
+    return _resolve_public_data_config_path(payload, portfolio_cfg, repo_base=repo_base)
+
+
+def resolve_local_path(value: Any, *, default: Path) -> Path:
+    return _resolve_local_path(value, default=default, repo_base=repo_base)
 
 
 __all__ = [

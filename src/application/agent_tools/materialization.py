@@ -12,111 +12,126 @@ from src.application.agent_tools.materialization_impl import (
     scan_opportunities_tool,
     scan_summary_rows,
 )
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.agent_tools.runtime_helpers import as_float
+from src.application.agent_tools.runtime_helpers import extract_context_symbols
+from src.application.opend_symbol_fetching import fetch_symbol as fetch_symbol_opend
+from src.application.pipeline_context import load_option_positions_context
+from src.application.pipeline_context import load_portfolio_context
+from src.application.agent_tool_config import load_runtime_config
+from src.application.config_loader import load_config as load_runtime_pipeline_config
+from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tools.runtime_helpers import normalize_broker
+from src.application.cash_headroom_query import query_sell_put_cash
+from src.application.agent_tool_config import repo_base
+from src.application.agent_tools.runtime_helpers import resolve_data_config_ref
+from src.application.agent_tools.runtime_helpers import resolve_local_path
+from src.application.agent_tool_config import resolve_output_root
+from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from domain.domain.fetch_source import resolve_symbol_fetch_source
+from src.application.close_advice_runner import run_close_advice
+from src.application.pipeline_watchlist import run_watchlist_pipeline_default
+from src.infrastructure.io_utils import safe_read_csv
+from src.application.opend_symbol_outputs import save_outputs as save_required_data_opend
+from src.application.agent_tools.runtime_helpers import symbol_fetch_config_map
 
 
-def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
-    return ctx.mask_path(value) or "..."
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
 
 
 def _query_cash_headroom_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return query_cash_headroom_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        normalize_broker=ctx.normalize_broker,
-        resolve_output_root=ctx.resolve_output_root,
-        query_sell_put_cash=ctx.query_sell_put_cash,
-        repo_base=ctx.repo_base,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_output_root=resolve_output_root,
+        query_sell_put_cash=query_sell_put_cash,
+        repo_base=repo_base,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 
 def _get_portfolio_context_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return get_portfolio_context_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        normalize_broker=ctx.normalize_broker,
-        resolve_output_root=ctx.resolve_output_root,
-        load_portfolio_context=ctx.load_portfolio_context,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_output_root=resolve_output_root,
+        load_portfolio_context=load_portfolio_context,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
 def _scan_opportunities_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return scan_opportunities_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_data_config_ref=ctx.resolve_data_config_ref,
-        resolve_output_root=ctx.resolve_output_root,
-        repo_base=ctx.repo_base,
-        load_config=ctx.load_runtime_pipeline_config,
-        run_watchlist_pipeline_default=ctx.run_watchlist_pipeline_default,
-        scan_summary_rows_fn=lambda rows: scan_summary_rows(rows, as_float=ctx.as_float),
+        load_runtime_config=load_runtime_config,
+        resolve_data_config_ref=resolve_data_config_ref,
+        resolve_output_root=resolve_output_root,
+        repo_base=repo_base,
+        load_config=load_runtime_pipeline_config,
+        run_watchlist_pipeline_default=run_watchlist_pipeline_default,
+        scan_summary_rows_fn=lambda rows: scan_summary_rows(rows, as_float=as_float),
     )
 
 
 def _prepare_close_advice_inputs_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return prepare_close_advice_inputs_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        normalize_broker=ctx.normalize_broker,
-        resolve_output_root=ctx.resolve_output_root,
-        load_option_positions_context=ctx.load_option_positions_context,
-        symbol_fetch_config_map_fn=ctx.symbol_fetch_config_map,
-        extract_context_symbols_fn=ctx.extract_context_symbols,
-        resolve_symbol_fetch_source=ctx.resolve_symbol_fetch_source,
-        fetch_symbol_opend=ctx.fetch_symbol_opend,
-        save_required_data_opend=ctx.save_required_data_opend,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_output_root=resolve_output_root,
+        load_option_positions_context=load_option_positions_context,
+        symbol_fetch_config_map_fn=symbol_fetch_config_map,
+        extract_context_symbols_fn=extract_context_symbols,
+        resolve_symbol_fetch_source=resolve_symbol_fetch_source,
+        fetch_symbol_opend=fetch_symbol_opend,
+        save_required_data_opend=save_required_data_opend,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
 def _close_advice_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return close_advice_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_output_root=ctx.resolve_output_root,
-        resolve_local_path=ctx.resolve_local_path,
-        run_close_advice=ctx.run_close_advice,
+        load_runtime_config=load_runtime_config,
+        resolve_output_root=resolve_output_root,
+        resolve_local_path=resolve_local_path,
+        run_close_advice=run_close_advice,
         close_advice_rows_summary_fn=lambda csv_path, text_path: close_advice_rows_summary(
             csv_path,
             text_path,
-            safe_read_csv=ctx.safe_read_csv,
-            as_float=ctx.as_float,
+            safe_read_csv=safe_read_csv,
+            as_float=as_float,
         ),
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
 def _get_close_advice_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return get_close_advice_tool(
         payload,
-        prepare_close_advice_inputs_tool_fn=lambda tool_payload: _prepare_close_advice_inputs_tool(ctx, tool_payload),
-        close_advice_tool_fn=lambda tool_payload: _close_advice_tool(ctx, tool_payload),
+        prepare_close_advice_inputs_tool_fn=lambda tool_payload: _prepare_close_advice_inputs_tool(tool_payload),
+        close_advice_tool_fn=lambda tool_payload: _close_advice_tool(tool_payload),
     )
 
 

@@ -19,7 +19,10 @@ from domain.services import (
 )
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
-from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+from src.application.config_sections import (
+    resolve_templates_config,
+    resolve_watchlist_config,
+)
 from src.application.config_profiles import apply_profiles
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
@@ -39,7 +42,6 @@ from src.application.required_data_planning import (
 from src.application.required_data_prefetch_planning import (
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
-    strategy_prefetch_kwargs as _strategy_prefetch_kwargs,
 )
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,

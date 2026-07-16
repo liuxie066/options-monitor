@@ -13,8 +13,8 @@ from domain.domain.ledger.position_fields import (
     effective_strike,
     normalize_account,
     normalize_broker,
-    normalize_currency,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.lot_resolver import CloseTargetResolution
 from src.application.ledger.preflight import _current_record_fields, preflight_broker_trade_close
@@ -158,7 +158,7 @@ def _persist_lifecycle_close_events(
             record_id=record_id,
             contracts_to_close=contracts,
             event_type=normalized_event_type,
-            event_time_ms=int(ledger_preflight["event_time_ms"]),
+            event_time_ms=int(ledger_preflight.event_time_ms),
             source=source,
             case_id=case_id,
             evidence_ids=evidence_tuple,
@@ -191,7 +191,7 @@ def _persist_lifecycle_close_events(
                 evidence_ids=evidence_tuple,
             )
         )
-        as_of_ms = int(ledger_preflight["event_time_ms"]) + 1
+        as_of_ms = int(ledger_preflight.event_time_ms) + 1
     return writes
 
 

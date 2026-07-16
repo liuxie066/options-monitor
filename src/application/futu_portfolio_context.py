@@ -5,7 +5,8 @@ from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from src.infrastructure.futu_gateway import build_ready_futu_gateway
-from domain.domain.ledger.position_fields import normalize_account, normalize_currency
+from domain.domain.ledger.position_fields import normalize_account
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import (
     canonical_symbol,
     looks_like_option_contract_label,
@@ -282,13 +283,6 @@ def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any, *, account: str 
         if out.get("host") and out.get("port"):
             break
     return out
-
-
-def should_try_futu_portfolio(cfg: Mapping[str, Any] | Any, *, account: str | None) -> bool:
-    settings = infer_futu_portfolio_settings(cfg, account=account)
-    if not settings.get("host") or not settings.get("port"):
-        return False
-    return bool(resolve_futu_account_ids(cfg, account=account))
 
 
 def _filter_rows_for_account_ids(

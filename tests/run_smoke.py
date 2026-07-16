@@ -82,7 +82,6 @@ def test_cash_cap_is_best_effort() -> None:
 
 def test_agent_launcher_spec_contract() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
     om_agent = (base / "om-agent").resolve()
     p = subprocess.run(
         [str(om_agent), "spec"],
@@ -583,7 +582,6 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
 
 def test_agent_launcher_spec_prefers_broker_field() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
     om_agent = (base / "om-agent").resolve()
     p = subprocess.run(
         [str(om_agent), "spec"],
