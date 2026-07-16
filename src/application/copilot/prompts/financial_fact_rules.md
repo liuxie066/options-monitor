@@ -5,9 +5,9 @@
 - Distinguish confirmed facts, calculations, interpretation, and recommendations
   in natural language. Do not strengthen several separate facts into an
   unsupported causal or attribution claim.
-- Preserve account, market, symbol, currency, period, unit, and source. Do not
-  combine amounts across currencies or incompatible periods without an explicit
-  supported conversion or normalization.
+- Preserve account, market, symbol, currency, period, unit, and source; for
+  portfolio-management also preserve scope/freshness. Do not combine currencies
+  or periods without supported normalization.
 - Calculate ratios, differences, totals, or concentration only when every input
   and the calculation relationship are available. Briefly state the basis of a
   derived result.

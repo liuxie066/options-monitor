@@ -85,7 +85,15 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_query --input-json '{"view":"overview","accounts":["lx","sy"]}'
 ```
+
+`portfolio_query` 是同机 portfolio-management 的纯读适配器。它只发送 GET，
+默认连接 `http://127.0.0.1:8765`，并拒绝非 loopback 的
+`PORTFOLIO_SERVICE_URL`。模型 payload 不能提供 URL/endpoint；支持的 view 为
+`health|accounts|overview|holdings|cash|nav|distribution|full_report`。服务返回的
+业务字段保留在结果顶层，并补充 `source`、`scope`、`freshness`。portfolio-management
+返回 `success=false`、HTTP 错误、无效 JSON 或超时时，工具返回标准失败 envelope。
 
 Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
@@ -210,6 +218,7 @@ Recommended environment:
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
 - use `$RUNTIME/service.profile.json` from `./om service render` when production paths are not repo-local
+- keep portfolio-management API on the same host and loopback; enable its `portfolio-management-api.service` explicitly
 
 Recommended first commands:
 
