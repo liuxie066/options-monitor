@@ -945,3 +945,106 @@ def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> N
     assert bundle["runtime_runs"]["summary"]["total_count"] == 1
     assert bundle["runtime_runs"]["runs"][0]["run_id"] == "run-1"
     assert bundle["runtime_logs"]["summary"]["existing_file_count"] == 1
+
+
+def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
+
+    report_dir = tmp_path / "reports"
+    header = (
+        "run_id,account,diagnostic_scope,diagnostic_stage,accepted,reject_reasons,symbol,expiration,"
+        "put_contract_symbol,call_contract_symbol,call_delta,call_open_interest,call_volume,call_spread_ratio,"
+        "combo_net_credit,net_debit,net_credit_retention,annualized_net_credit_yield,combo_spread_ratio,"
+        "policy_call_min_delta,policy_call_max_delta,policy_call_min_open_interest,policy_call_min_volume,"
+        "policy_call_max_spread_ratio,policy_max_debit_native,policy_min_net_credit_retention,"
+        "policy_min_net_credit_annualized,policy_max_combo_spread_ratio\n"
+    )
+    for account in ("lx", "sy"):
+        account_dir = report_dir / "accounts" / account
+        account_dir.mkdir(parents=True)
+        rows = (
+            f"run-1,{account},call,call_filter,False,call_delta_below_min,NVDA,2026-08-21,,NVDA-C170,"
+            "0.04,100,10,0.10,,,,,,0.05,0.20,20,0,0.30,,,,\n"
+            f"run-1,{account},pair,pair_filter,False,annualized_net_credit_yield|min_net_credit_retention|combo_spread_ratio,"
+            "NVDA,2026-08-21,NVDA-P140,NVDA-C170,0.10,100,10,0.10,1.0,0,0.78,0.075,0.31,"
+            "0.05,0.20,20,0,0.30,,0.80,0.08,0.30\n"
+            f"run-1,{account},pair,pair_filter,True,,NVDA,2026-08-21,NVDA-P140,NVDA-C175,"
+            "0.08,100,10,0.10,1.2,0,0.85,0.09,0.20,0.05,0.20,20,0,0.30,,0.80,0.08,0.30\n"
+        )
+        if account == "sy":
+            rows += (
+                "run-1,sy,call,call_filter,False,call_delta_below_min,NVDA,2026-08-21,,NVDA-C170,"
+                "0.03,100,10,0.10,,,,,,0.05,0.20,20,0,0.30,,,,\n"
+            )
+        (account_dir / "nvda_combo_yield_pair_diagnostics.csv").write_text(header + rows, encoding="utf-8")
+
+    def _runtime_status(_payload):
+        return _runtime_status_data(), [], {}
+
+    kwargs = _tool_kwargs(tmp_path)
+    kwargs["load_runtime_config"] = _load_config(tmp_path, {"accounts": ["lx", "sy"], "symbols": []})
+    data, _warnings, _meta = research_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "candidate_report_dir": str(report_dir),
+            "scope": "candidate",
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "systemd",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-07-16T08:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **kwargs,
+    )
+
+    candidate = data["bundle"]["candidate_evidence"]
+    diagnostics = candidate["combo_yield_pair_diagnostics"]
+    summary = diagnostics["summary"]
+    assert summary["file_count"] == 2
+    assert summary["row_count"] == 7
+    assert summary["unique_market_row_count"] == 4
+    assert summary["status_counts"] == {"rejected": 5, "accepted": 2}
+    assert summary["unique_status_counts"] == {"rejected": 3, "accepted": 1}
+    assert summary["unique_reject_reason_counts"] == {
+        "call_delta_below_min": 2,
+        "annualized_net_credit_yield": 1,
+        "min_net_credit_retention": 1,
+        "combo_spread_ratio": 1,
+    }
+    assert summary["unique_rejection_funnel"] == [
+        {
+            "stage": "call_filter",
+            "row_count": 2,
+            "accepted_count": 0,
+            "rejected_count": 2,
+            "unknown_count": 0,
+            "reject_reason_counts": {"call_delta_below_min": 2},
+        },
+        {
+            "stage": "pair_filter",
+            "row_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1,
+            "unknown_count": 0,
+            "reject_reason_counts": {
+                "annualized_net_credit_yield": 1,
+                "min_net_credit_retention": 1,
+                "combo_spread_ratio": 1,
+            },
+        },
+    ]
+    assert candidate["summary"]["evidence_level"] == "pair_diagnostics"
+    assert candidate["summary"]["combo_yield_pair_diagnostic_unique_market_row_count"] == 4
+    delta_miss = diagnostics["nearest_misses"]["call_delta_below_min"][0]
+    assert round(delta_miss["gap"], 6) == 0.01
+    assert delta_miss["accounts"] == ["lx", "sy"]
+    assert round(diagnostics["nearest_misses"]["annualized_net_credit_yield"][0]["gap"], 6) == 0.005
+    assert round(diagnostics["nearest_misses"]["min_net_credit_retention"][0]["gap"], 6) == 0.02
+    assert round(diagnostics["nearest_misses"]["combo_spread_ratio"][0]["gap"], 6) == 0.01
+    assert "## Combo Yield Pair Diagnostics" in data["handoff_markdown"]
+    assert "unique_market_rows: 4" in data["handoff_markdown"]
+    assert "call_filter: rows=2 accepted=0 rejected=2" in data["handoff_markdown"]

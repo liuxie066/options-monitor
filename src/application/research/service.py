@@ -403,6 +403,7 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
     candidate_summary = _dict(candidate.get("summary"))
     ranking = _dict(candidate.get("ranking_evidence"))
     ranking_summary = _dict(ranking.get("summary"))
+    pair_diagnostics = _dict(candidate.get("combo_yield_pair_diagnostics"))
     lines = [
         "## Research Handoff",
         f"Scope: {manifest.get('scope')}",
@@ -435,6 +436,7 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
         f"- gap: {account_candidate.get('known_gap')}",
         "",
         *_render_ranking_evidence_lines(ranking),
+        *_render_combo_yield_pair_diagnostic_lines(pair_diagnostics),
         "## Runtime Quality",
         f"- status: {runtime_quality.get('status')}",
         f"- category: {runtime_quality.get('category')}",
@@ -464,6 +466,46 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
         "This bundle is redacted before handoff. Do not treat missing raw logs as proof that no online error occurred.",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_combo_yield_pair_diagnostic_lines(profile: dict[str, Any]) -> list[str]:
+    summary = _dict(profile.get("summary"))
+    lines = [
+        "## Combo Yield Pair Diagnostics",
+        f"- files: {summary.get('file_count')}",
+        f"- rows: {summary.get('row_count')}",
+        f"- unique_market_rows: {summary.get('unique_market_row_count')}",
+        f"- stages: {_format_counts(_dict(summary.get('unique_stage_counts')))}",
+        f"- rejection_reasons: {_format_counts(_dict(summary.get('unique_reject_reason_counts')))}",
+    ]
+    funnel = summary.get("unique_rejection_funnel")
+    funnel_items = funnel if isinstance(funnel, list) else []
+    if funnel_items:
+        lines.append("- rejection_funnel:")
+        for raw_item in funnel_items:
+            item = _dict(raw_item)
+            lines.append(
+                "  - "
+                f"{item.get('stage') or 'unknown'}: rows={item.get('row_count')} "
+                f"accepted={item.get('accepted_count')} rejected={item.get('rejected_count')} "
+                f"reasons={_format_counts(_dict(item.get('reject_reason_counts')))}"
+            )
+    nearest = _dict(profile.get("nearest_misses"))
+    if not nearest:
+        lines.extend(["- nearest_misses: <none>", ""])
+        return lines
+    lines.append("- nearest_misses:")
+    for reason, raw_items in nearest.items():
+        items = raw_items if isinstance(raw_items, list) else []
+        item = _dict(items[0]) if items else {}
+        lines.append(
+            "  - "
+            f"{reason}: gap={_fmt(item.get('gap'))} value={_fmt(item.get('value'))} "
+            f"threshold={_fmt(item.get('threshold'))} symbol={item.get('symbol') or '-'} "
+            f"exp={item.get('expiration') or '-'} accounts={','.join(item.get('accounts') or []) or '-'}"
+        )
+    lines.append("")
+    return lines
 
 
 def _render_ranking_evidence_lines(ranking: dict[str, Any]) -> list[str]:

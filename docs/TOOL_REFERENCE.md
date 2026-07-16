@@ -477,7 +477,7 @@ om-agent run --tool candidate_filter_explain --input-json '{"trace_path":"output
 ## 5.5.3 Offline Shadow Replay Evidence
 
 用途：
-- 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness
+- 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness；若 run 中存在 `*_combo_yield_pair_diagnostics.csv`，还会在 `candidate_evidence.combo_yield_pair_diagnostics` 输出配对阶段漏斗、跨账户去重计数、拒绝原因和按门槛距离排序的 nearest misses
 - 输出在 `candidate_evidence.shadow_replay`，用于检查 accepted/rejected universe 是否完整
 - `research shadow-replay status` / `list` 是只读 dataset readiness dashboard，会列出每个 dataset 的样本、mark、outcome 覆盖、采样新鲜度、路径采样点数量和下一步建议；`data_plan` 只包含 `collect_marks` / `settle`，`review_queue` 只提示可人工 `analyze` 的 dataset
 - `research shadow-replay run-data-plan` 消费 `status.data_plan`；默认 dry-run 且不写 receipt，显式 `--write` 才执行本地采样 / settle 并写本地 receipt；人工复盘仍走 `analyze`

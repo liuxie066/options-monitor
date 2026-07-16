@@ -322,7 +322,7 @@ om run tick --config config.us.json --accounts lx sy
 
 `./om research` 提供不改动生产状态的离线证据与复盘能力：
 
-- **`collect`**：从已有扫描 run 生成脱敏证据包，用于本地分析或 handoff。
+- **`collect`**：从已有扫描 run 生成脱敏证据包，用于本地分析或 handoff；若存在 Combo Yield pair diagnostics，会同时汇总配对拒绝漏斗、跨账户去重计数和最近未通过项。
 - **`shadow-replay`**：把历史扫描候选、拒绝原因和后续价格路径落地为本地 dataset，做反事实复盘与参数影响评估。
 - **`strategy-lab`**：在 Shadow Replay 之上做策略进化实验；Sell Put / Covered Call 生成受控 hypotheses（含历史百分位 IV/RV variants）并输出生产观测顺序 vs 去重承保排序对照，Combo Yield 只做 group-level outcome evaluator；候选变化只供审阅，只有严格 outcome dominance 才生成 advisory-only proposal。
 - **`archive`**：把远端 runtime 证据增量镜像到本地，便于磁盘有限的场景做离线复盘。
