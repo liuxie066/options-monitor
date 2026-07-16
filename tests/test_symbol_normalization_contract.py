@@ -24,7 +24,11 @@ def test_symbol_alias_contract_canonicalizes_pop_consistently() -> None:
     assert normalize_position_symbol("POP") == expected
 
 
-def test_trade_event_contract_canonicalizes_option_code_root_alias() -> None:
+def test_trade_event_contract_canonicalizes_option_code_root_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics",
+        lambda **_kwargs: (1000, "test", {"attempted_sources": []}),
+    )
     deal = normalize_trade_deal(
         {
             "deal_id": "deal-contract-1",
