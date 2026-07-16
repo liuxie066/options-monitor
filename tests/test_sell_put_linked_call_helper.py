@@ -597,6 +597,13 @@ def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_p
 
     assert rejected.empty
     assert rejected.attrs["reject_counts"]["annualized_net_credit_yield"] == 1
+    rejected_diagnostics = rejected.attrs["pair_diagnostics"]
+    rejected_pair = rejected_diagnostics.loc[rejected_diagnostics["diagnostic_scope"] == "pair"].iloc[0]
+    assert rejected_pair["put_contract_symbol"] == "NVDA_P95"
+    assert rejected_pair["call_contract_symbol"] == "NVDA_C112_LOW_CARRY"
+    assert "annualized_net_credit_yield" in rejected_pair["reject_reasons"]
+    assert float(rejected_pair["annualized_net_credit_yield"]) < 0.08
+    assert float(rejected_pair["policy_min_net_credit_annualized"]) == 0.08
     assert len(accepted) == 1
     assert float(accepted.iloc[0]["annualized_net_credit_yield"]) < 0.08
 
@@ -649,6 +656,15 @@ def test_yield_enhancement_aggregates_call_prefilter_rejections(tmp_path: Path) 
         "call_delta_above_max": 1,
         "call_expiration_unavailable": 1,
     }
+    diagnostics = pairs.attrs["pair_diagnostics"]
+    call_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "call"].iloc[0]
+    assert call_reject["call_contract_symbol"] == "NVDA_C110"
+    assert call_reject["reject_reasons"] == "call_delta_above_max"
+    assert float(call_reject["call_delta"]) == 0.30
+    assert float(call_reject["policy_call_max_delta"]) == 0.20
+    put_join_reject = diagnostics.loc[diagnostics["diagnostic_stage"] == "pair_join"].iloc[0]
+    assert put_join_reject["put_contract_symbol"] == "NVDA_P95"
+    assert put_join_reject["reject_reasons"] == "call_expiration_unavailable"
 
 
 def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
