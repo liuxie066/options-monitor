@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.403 - 2026-07-16
+
+### Fixed
+- Restored trade-intake state persistence and receipt notifications after typed ledger operations replaced dictionary payloads, preventing applied broker fills from failing before notification delivery.
+
 ## 1.2.402 - 2026-07-16
 
 ### Added
