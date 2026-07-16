@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.400 - 2026-07-16
+
+### Added
+- Added read-only Research summaries for Combo Yield pair diagnostics, including per-stage rejection funnels, cross-account market-row deduplication, and threshold-distance nearest misses.
+
+### Changed
+- Included Combo Yield pair diagnostics in candidate evidence and Research handoff Markdown while preserving existing strategy policy, ranking, notifications, and production state.
+
 ## 1.2.399 - 2026-07-16
 
 ### Removed

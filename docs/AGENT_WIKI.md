@@ -133,7 +133,7 @@ With a readiness snapshot:
 | Scope | Purpose |
 |---|---|
 | `ledger` | Trade intake, position maintenance, and ledger quality evidence |
-| `candidate` | Per-account candidate evidence, ranking samples, filter traces, and shadow replay readiness |
+| `candidate` | Per-account candidate evidence, ranking samples, filter traces, Combo Yield pair rejection funnel / nearest misses, and shadow replay readiness |
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
 | `full` | Combined default |
 

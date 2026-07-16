@@ -343,6 +343,7 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
     reject_log_paths = _explicit_paths(payload.get("reject_log_paths") or payload.get("reject_log_path"), base=base)
+    pair_diagnostic_paths: list[Path] = []
     mark_paths = _explicit_paths(payload.get("mark_paths") or payload.get("mark_path"), base=base)
     outcome_paths = _explicit_paths(payload.get("outcome_paths") or payload.get("outcome_path"), base=base)
     for directory in _candidate_dirs(source_paths, base=base):
@@ -350,6 +351,12 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
         candidate_paths.extend(found_candidates)
         reject_log_paths.extend(found_reject_logs)
         trace_paths.append(directory / "candidate_filter_trace.jsonl")
+        pair_diagnostic_paths.extend(
+            _glob_many(
+                directory,
+                ("*_combo_yield_pair_diagnostics.csv", "*_yield_enhancement_pair_diagnostics.csv"),
+            )
+        )
         mark_paths.extend(_glob_many(directory, ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv")))
         outcome_paths.extend(_glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv")))
 
@@ -358,11 +365,13 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
     candidate_paths = _unique_paths([path for path in candidate_paths if _is_candidate_report_path(path)])[:30]
     reject_log_paths = _unique_paths(reject_log_paths)[:30]
     trace_paths = _unique_paths(trace_paths)[:20]
+    pair_diagnostic_paths = _unique_paths(pair_diagnostic_paths)[:30]
     mark_paths = _unique_paths(mark_paths)[:30]
     outcome_paths = _unique_paths(outcome_paths)[:30]
     candidate_reports = [_candidate_csv_summary(path, base=base) for path in candidate_paths]
     reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
+    combo_yield_pair_diagnostics = _combo_yield_pair_diagnostics(pair_diagnostic_paths, base=base)
     ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
     ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
     shadow_replay = summarize_shadow_replay_readiness(
@@ -382,6 +391,7 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
         "candidate_reports": candidate_reports,
         "reject_logs": reject_logs,
         "filter_traces": filter_traces,
+        "combo_yield_pair_diagnostics": combo_yield_pair_diagnostics,
         "ranking_evidence": ranking_evidence,
         "shadow_replay": shadow_replay,
         "summary": {
@@ -390,10 +400,23 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
             "reject_log_file_count": sum(1 for item in reject_logs if item.get("exists")),
             "reject_log_row_count": total_reject_rows,
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
+            "combo_yield_pair_diagnostic_file_count": _nested(combo_yield_pair_diagnostics, "summary", "file_count"),
+            "combo_yield_pair_diagnostic_row_count": _nested(combo_yield_pair_diagnostics, "summary", "row_count"),
+            "combo_yield_pair_diagnostic_unique_market_row_count": _nested(
+                combo_yield_pair_diagnostics, "summary", "unique_market_row_count"
+            ),
             "ranking_report_count": _nested(_dict_or_empty(ranking_evidence), "summary", "report_count"),
             "ranking_top_row_count": _nested(_dict_or_empty(ranking_evidence), "summary", "top_row_count"),
             "shadow_replay_status": shadow_replay_status,
-            "evidence_level": "candidate_and_trace" if total_candidate_rows and any(item.get("exists") for item in filter_traces) else ("candidate_only" if total_candidate_rows else "limited"),
+            "evidence_level": (
+                "candidate_and_trace"
+                if total_candidate_rows and any(item.get("exists") for item in filter_traces)
+                else (
+                    "candidate_only"
+                    if total_candidate_rows
+                    else ("pair_diagnostics" if _nested(combo_yield_pair_diagnostics, "summary", "row_count") else "limited")
+                )
+            ),
         },
     }
 
@@ -458,6 +481,190 @@ def _candidate_and_reject_log_paths(directory: Path) -> tuple[list[Path], list[P
     candidates = [path for path in candidate_like if _is_candidate_report_path(path)]
     reject_logs = [path for path in [*candidate_like, *reject_like] if _is_reject_log_path(path)]
     return candidates, reject_logs
+
+
+_PAIR_DIAGNOSTIC_NEAREST_MISS_SPECS: dict[str, tuple[str, str | None, str]] = {
+    "call_delta_below_min": ("call_delta", "policy_call_min_delta", "below"),
+    "call_delta_above_max": ("call_delta", "policy_call_max_delta", "above"),
+    "call_open_interest_below_min": ("call_open_interest", "policy_call_min_open_interest", "below"),
+    "call_volume_below_min": ("call_volume", "policy_call_min_volume", "below"),
+    "call_spread_ratio_above_max": ("call_spread_ratio", "policy_call_max_spread_ratio", "above"),
+    "annualized_net_credit_yield": (
+        "annualized_net_credit_yield",
+        "policy_min_net_credit_annualized",
+        "below",
+    ),
+    "combo_spread_ratio": ("combo_spread_ratio", "policy_max_combo_spread_ratio", "above"),
+    "funding_mode_credit_or_even": ("combo_net_credit", None, "below"),
+    "max_debit_native": ("net_debit", "policy_max_debit_native", "above"),
+    "min_net_credit_retention": (
+        "net_credit_retention",
+        "policy_min_net_credit_retention",
+        "below",
+    ),
+}
+
+
+def _combo_yield_pair_diagnostics(paths: list[Path], *, base: Path) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    unique: dict[tuple[str, ...], dict[str, Any]] = {}
+    for path in paths:
+        account_hint = _account_hint(path)
+        file_info: dict[str, Any] = {
+            "path": _safe_rel(path, base=base),
+            "exists": path.exists(),
+            "account_hint": account_hint,
+            "row_count": 0,
+        }
+        try:
+            with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+                file_rows = list(csv.DictReader(fh))
+        except Exception as exc:
+            file_info["read_error"] = f"{type(exc).__name__}: {exc}"
+            files.append(file_info)
+            continue
+        file_info["row_count"] = len(file_rows)
+        files.append(file_info)
+        for row in file_rows:
+            item = dict(row)
+            account = _text(row.get("account") or account_hint).lower()
+            item["_account"] = account
+            rows.append(item)
+            key = _pair_diagnostic_key(item)
+            if key not in unique:
+                item["_accounts"] = {account} if account else set()
+                unique[key] = item
+            elif account:
+                unique[key]["_accounts"].add(account)
+
+    unique_rows = list(unique.values())
+    raw_counts = _pair_diagnostic_counts(rows)
+    unique_counts = _pair_diagnostic_counts(unique_rows)
+    return {
+        "schema_version": "combo_yield_pair_diagnostics_summary.v1",
+        "files": files,
+        "nearest_misses": _pair_diagnostic_nearest_misses(unique_rows),
+        "summary": {
+            "file_count": sum(1 for item in files if item.get("exists")),
+            "row_count": len(rows),
+            "unique_market_row_count": len(unique_rows),
+            **raw_counts,
+            "unique_status_counts": unique_counts["status_counts"],
+            "unique_stage_counts": unique_counts["stage_counts"],
+            "unique_reject_reason_counts": unique_counts["reject_reason_counts"],
+            "unique_rejection_funnel": unique_counts["rejection_funnel"],
+        },
+    }
+
+
+def _pair_diagnostic_key(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        f"{key}={_text(value)}"
+        for key, value in sorted(row.items(), key=lambda item: str(item[0]))
+        if str(key) not in {"account", "_account", "_accounts"}
+    )
+
+
+def _pair_diagnostic_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses: Counter[str] = Counter()
+    stages: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    accounts: Counter[str] = Counter()
+    symbols: Counter[str] = Counter()
+    funnel: dict[str, Counter[str]] = {}
+    funnel_reasons: dict[str, Counter[str]] = {}
+    for row in rows:
+        accepted = _bool_or_none(row.get("accepted"))
+        status = "accepted" if accepted else "rejected" if accepted is False else "unknown"
+        stage = _text(row.get("diagnostic_stage")) or "unknown"
+        row_reasons = _pair_diagnostic_reasons(row)
+        statuses[status] += 1
+        stages[stage] += 1
+        funnel.setdefault(stage, Counter()).update(("rows", status))
+        funnel_reasons.setdefault(stage, Counter()).update(row_reasons)
+        _count_text(accounts, row.get("_account") or row.get("account"))
+        _count_text(symbols, _text(row.get("symbol")).upper())
+        reasons.update(row_reasons)
+    return {
+        "status_counts": dict(statuses.most_common()),
+        "stage_counts": dict(stages.most_common()),
+        "reject_reason_counts": dict(reasons.most_common()),
+        "account_counts": dict(accounts.most_common()),
+        "symbol_counts": dict(symbols.most_common()),
+        "rejection_funnel": [
+            {
+                "stage": stage,
+                "row_count": counts["rows"],
+                "accepted_count": counts["accepted"],
+                "rejected_count": counts["rejected"],
+                "unknown_count": counts["unknown"],
+                "reject_reason_counts": dict(funnel_reasons[stage].most_common()),
+            }
+            for stage, counts in funnel.items()
+        ],
+    }
+
+
+def _pair_diagnostic_nearest_misses(rows: list[dict[str, Any]], *, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if _bool_or_none(row.get("accepted")) is not False:
+            continue
+        for reason in _pair_diagnostic_reasons(row):
+            spec = _PAIR_DIAGNOSTIC_NEAREST_MISS_SPECS.get(reason)
+            if spec is None:
+                continue
+            value_field, threshold_field, direction = spec
+            value = _float_or_none(row.get(value_field))
+            threshold = 0.0 if threshold_field is None else _float_or_none(row.get(threshold_field))
+            if value is None or threshold is None:
+                continue
+            gap = threshold - value if direction == "below" else value - threshold
+            if gap < -1e-12:
+                continue
+            out.setdefault(reason, []).append(
+                {
+                    "gap": max(0.0, gap),
+                    "value": value,
+                    "threshold": threshold,
+                    "direction": direction,
+                    "run_id": _text(row.get("run_id")) or None,
+                    "accounts": sorted(row.get("_accounts") or {_text(row.get("_account")).lower()} - {""}),
+                    "symbol": _text(row.get("symbol")).upper() or None,
+                    "expiration": _text(row.get("expiration")) or None,
+                    "diagnostic_stage": _text(row.get("diagnostic_stage")) or None,
+                    "put_contract_symbol": _text(row.get("put_contract_symbol")) or None,
+                    "call_contract_symbol": _text(row.get("call_contract_symbol")) or None,
+                }
+            )
+    for reason, items in out.items():
+        items.sort(
+            key=lambda item: (
+                float(item["gap"]),
+                str(item.get("symbol") or ""),
+                str(item.get("expiration") or ""),
+                str(item.get("put_contract_symbol") or ""),
+                str(item.get("call_contract_symbol") or ""),
+            )
+        )
+        out[reason] = items[:limit]
+    return dict(sorted(out.items()))
+
+
+def _pair_diagnostic_reasons(row: dict[str, Any]) -> list[str]:
+    return [reason.strip() for reason in _text(row.get("reject_reasons")).split("|") if reason.strip()]
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = _text(value).lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
 
 
 def _is_candidate_report_path(path: Path) -> bool:
