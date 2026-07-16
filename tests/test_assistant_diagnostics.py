@@ -44,6 +44,7 @@ def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> No
     assert out["summary"]["status"] == "disabled"
     assert out["llm"]["enabled"] is False
     assert "runtime_status" in out["capabilities"]["pure_read_tools"]
+    assert "portfolio_query" in out["capabilities"]["pure_read_tools"]
     assert "manual_trade_open" not in out["capabilities"]["pure_read_tools"]
     assert out["llm"]["api_key_configured"] is False
     checks = {item["name"]: item for item in out["checks"]}

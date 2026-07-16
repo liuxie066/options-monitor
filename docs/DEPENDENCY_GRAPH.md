@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 673 (`src`: 388, `domain`: 52, `scripts`: 7, `tests`: 226)
-- Internal import edges: 3782 total, 1787 production/script edges excluding tests
+- Python files scanned: 675 (`src`: 389, `domain`: 52, `scripts`: 7, `tests`: 227)
+- Internal import edges: 3789 total, 1790 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -43,7 +43,7 @@ flowchart LR
   scripts -->|7| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1398| application
+  tests -->|1402| application
   tests -->|284| domain
   tests -->|2| domain_services
   tests -->|97| infrastructure
@@ -73,7 +73,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1398 |
+| tests | application | 1402 |
 | tests | domain | 284 |
 | tests | interfaces | 170 |
 | tests | infrastructure | 97 |
@@ -173,7 +173,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 81 |
+| src.application.agent_tool_contracts | 82 |
 | src.application.agent_tool_config | 49 |
 | src.infrastructure.io_utils | 42 |
 | domain.domain.symbol_identity | 40 |

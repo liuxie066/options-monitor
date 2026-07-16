@@ -16,6 +16,12 @@ and Copilot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 autonomous Agent. Internal Copilot projects a pure-read subset from the same
 canonical registry.
 
+The `portfolio` toolset contains one pure-read tool, `portfolio_query`. It lets the
+same `om_chat` Copilot read portfolio-management `health`, `accounts`, `overview`,
+`holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
+loopback HTTP boundary. It does not expose portfolio writes, accept endpoint
+arguments, or add a second Scene/Agent.
+
 ## Deterministic Control
 
 Control handles only explicit protocol:
@@ -49,8 +55,8 @@ or expected tool sequence.
 Copilot must not:
 
 - receive write, confirm, cancel, or apply tools;
-- directly mutate config, positions, trade events, notifications, services, or
-  broker state;
+- directly mutate config, positions, trade events, notifications, services,
+  portfolio-management, or broker state;
 - fall back to a fixed evidence collection recipe;
 - define monthly-review or other business-specific runtime capabilities.
 
