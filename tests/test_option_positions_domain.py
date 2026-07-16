@@ -16,13 +16,15 @@ from domain.domain.ledger.position_fields import (
     build_position_lot_fields,
     effective_expiration_ymd,
     exp_ms_to_ymd,
-    infer_currency_from_symbol,
     normalize_broker,
     normalize_close_type,
-    normalize_currency,
     normalize_option_type,
     normalize_side,
     normalize_status,
+)
+from domain.domain.option_position_identity import (
+    infer_currency_from_symbol,
+    normalize_currency,
 )
 
 

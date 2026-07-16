@@ -8,7 +8,6 @@ from domain.domain.risk_capacity import compute_sell_call_share_capacity, comput
 
 from src.application.shadow_replay.common import (
     ANALYSIS_SCHEMA_VERSION,
-    abs_first_float,
     dataset_dir_from_arg,
     first_float,
     float_or_none,

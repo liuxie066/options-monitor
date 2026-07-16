@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from src.application.opend_fetch_config import (
     OpenDBatchConfig,
-    option_chain_fetch_kwargs,
     resolve_opend_batch_config,
     resolve_opend_fetch_config,
 )
@@ -71,22 +70,6 @@ def test_resolve_opend_fetch_config_prefers_unified_option_chain_limit() -> None
     )
 
     assert cfg["option_chain"] == {"max_calls": 3, "window_sec": 30.0, "max_wait_sec": 90.0}
-    assert option_chain_fetch_kwargs(
-        {
-            "runtime": {
-                "option_chain_fetch": {"max_calls": 13, "window_sec": 12, "max_wait_sec": 11},
-                "opend_rate_limits": {
-                    "get_option_chain": {"max_calls": 4, "window_sec": 31, "max_wait_sec": 91},
-                },
-            }
-        }
-    ) == {
-        "max_wait_sec": 91.0,
-        "option_chain_window_sec": 31.0,
-        "option_chain_max_calls": 4,
-    }
-
-
 def test_resolve_opend_fetch_config_keeps_legacy_option_chain_fetch() -> None:
     cfg = resolve_opend_fetch_config(
         {"runtime": {"option_chain_fetch": {"max_calls": 13, "window_sec": 12, "max_wait_sec": 11}}}

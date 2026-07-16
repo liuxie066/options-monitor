@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +66,14 @@ class _CatalogContext:
         return f".../{Path(value).name}" if value else None
 
 
+def _call_analysis_tool(tool, context: object, payload: dict[str, Any]):
+    with ExitStack() as stack:
+        for name in ("repo_base", "mask_path", "load_runtime_config", "list_symbol_rows", "collect_operation_timeline"):
+            if name in getattr(context, "__dict__", {}) or getattr(type(context), name, None) is not None:
+                stack.enter_context(patch.object(analysis_module, name, getattr(context, name)))
+        return tool.call(payload)
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + ("\n" if rows else ""), encoding="utf-8")
@@ -71,20 +81,20 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def test_analysis_query_rejects_write_sql_before_context_access() -> None:
     with pytest.raises(AgentToolError) as exc:
-        ANALYSIS_QUERY_TOOL.call(object(), {"sql": "delete from monthly_income_return_summary"})
+        _call_analysis_tool(ANALYSIS_QUERY_TOOL, object(), {"sql": "delete from monthly_income_return_summary"})
 
     assert exc.value.code == "PERMISSION_DENIED"
 
 
 def test_analysis_catalog_rejects_non_string_view_filter_before_context_access() -> None:
     with pytest.raises(AgentToolError) as exc:
-        ANALYSIS_CATALOG_TOOL.call(object(), {"views": {"monthly_income_return_summary": True}})
+        _call_analysis_tool(ANALYSIS_CATALOG_TOOL, object(), {"views": {"monthly_income_return_summary": True}})
 
     assert exc.value.code == "INPUT_ERROR"
 
 
 def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() -> None:
-    data, warnings, meta = ANALYSIS_CATALOG_TOOL.call(_CatalogContext(), {"views": "account_monthly_performance"})
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL, _CatalogContext(), {"views": "account_monthly_performance"})
 
     assert warnings == []
     assert meta == {"config_path": ".../config.us.json"}
@@ -127,7 +137,7 @@ def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() ->
 
 
 def test_analysis_catalog_exposes_p0_semantic_views() -> None:
-    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+    data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
         {"views": ["account_monthly_income_components", "assigned_stock_position_pnl", "assigned_stock_sale_events"]},
     )
@@ -144,7 +154,7 @@ def test_analysis_catalog_exposes_p0_semantic_views() -> None:
 
 
 def test_analysis_catalog_exposes_p1_semantic_views() -> None:
-    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+    data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
         {"views": ["open_option_exposure", "expiration_risk_buckets", "symbol_income_attribution", "strategy_config_by_symbol_account"]},
     )
@@ -156,7 +166,7 @@ def test_analysis_catalog_exposes_p1_semantic_views() -> None:
 
 
 def test_analysis_catalog_exposes_p2_semantic_views() -> None:
-    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+    data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
         {
             "views": [
@@ -185,7 +195,7 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
 
 
 def test_analysis_catalog_does_not_expose_task_recipes() -> None:
-    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+    data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
         {"views": ["account_monthly_performance", "symbol_income_attribution", "upgrade_operation_status"]},
     )
@@ -253,7 +263,7 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 10},
     )
@@ -286,7 +296,7 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {
             "views": ["account_monthly_performance", "open_option_exposure"],
@@ -338,7 +348,7 @@ def test_analysis_query_materializes_only_referenced_position_views(monkeypatch:
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select account, symbol, strategy from open_option_exposure", "limit": 10},
     )
@@ -364,7 +374,7 @@ def test_analysis_query_select_constant_materializes_no_views(monkeypatch: pytes
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(_AnalysisQueryContext(), {"sql": "select 1 as ok"})
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL, _AnalysisQueryContext(), {"sql": "select 1 as ok"})
 
     assert warnings == []
     assert calls == []
@@ -385,7 +395,7 @@ def test_analysis_query_candidate_filter_diagnostics_reads_trace_artifact(tmp_pa
         encoding="utf-8",
     )
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(tmp_path),
         {
             "sql": (
@@ -437,7 +447,7 @@ def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_
     pointer_dir.mkdir(parents=True)
     (pointer_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(repo),
         {
             "config_path": str(config_path),
@@ -475,7 +485,7 @@ def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_
         encoding="utf-8",
     )
 
-    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(repo, config_path=config_path),
         {
             "config_key": "hk",
@@ -572,7 +582,7 @@ def test_analysis_query_strategy_replay_read_surface_reads_research_artifacts(tm
         encoding="utf-8",
     )
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(tmp_path),
         {
             "sql": (
@@ -649,7 +659,7 @@ def test_analysis_query_strategy_replay_read_surface_reads_dataset_status(tmp_pa
     _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
     _write_jsonl(dataset / "outcome_facts.jsonl", [])
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(tmp_path),
         {
             "sql": (
@@ -677,7 +687,7 @@ def test_analysis_query_strategy_replay_read_surface_reads_dataset_status(tmp_pa
 
 
 def test_analysis_query_strategy_replay_read_surface_missing_artifact_returns_warning(tmp_path: Path) -> None:
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(tmp_path),
         {"sql": "select count(*) as row_count from strategy_replay_read_surface", "limit": 10},
     )
@@ -705,7 +715,7 @@ def test_analysis_query_close_advice_snapshot_missing_artifact_returns_warning(
 
     monkeypatch.setattr(analysis_module, "_call_close_advice_read_tool", fake_close_advice_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select count(*) as row_count from close_advice_snapshot", "limit": 10},
     )
@@ -741,7 +751,7 @@ def test_analysis_query_runtime_tick_status_uses_runtime_read_surface(monkeypatc
 
     monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select market, account, latest_run_id, freshness_status from runtime_tick_status", "limit": 10},
     )
@@ -779,7 +789,7 @@ def test_analysis_query_runtime_tick_status_surfaces_notification_conflict(monke
 
     monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select account, latest_status, notification_status from runtime_tick_status", "limit": 10},
     )
@@ -823,7 +833,7 @@ def test_analysis_query_runtime_tick_status_surfaces_scheduler_reason(monkeypatc
 
     monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {
             "sql": (
@@ -903,7 +913,7 @@ def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> No
 
     ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         ctx,
         {
             "sql": (
@@ -992,7 +1002,7 @@ def test_analysis_query_upgrade_operation_status_marks_status_conflict() -> None
 
     ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
 
-    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         ctx,
         {
             "sql": (
@@ -1056,7 +1066,7 @@ def test_analysis_query_upgrade_operation_status_extracts_release_publication_fi
 
     ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
 
-    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         ctx,
         {
             "sql": (
@@ -1097,7 +1107,7 @@ def test_analysis_query_upgrade_operation_status_reports_missing_audit_artifact(
 
     ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
 
-    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         ctx,
         {"sql": "select command_id, operation_status from upgrade_operation_status", "limit": 20},
     )
@@ -1120,7 +1130,7 @@ def test_analysis_query_upgrade_operation_status_reports_missing_command_log_art
 
     ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
 
-    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, _meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         ctx,
         {"sql": "select command_id, operation_status from upgrade_operation_status", "limit": 20},
     )
@@ -1150,7 +1160,7 @@ def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monke
 
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select symbol, market, source, quote_status, spot from quote_freshness", "limit": 10},
     )
@@ -1192,7 +1202,7 @@ def test_analysis_query_quote_freshness_gap_summary_includes_as_of(monkeypatch: 
 
     monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
 
-    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {"sql": "select symbol, quote_status, spot_time from quote_freshness", "limit": 10},
     )

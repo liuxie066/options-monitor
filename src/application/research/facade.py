@@ -54,7 +54,7 @@ def _run_research_collect(
         validate_runtime_config,
     )
     from src.application.agent_tools.runtime_status_impl import runtime_status_tool
-    from src.application.config_loader import resolve_watchlist_config
+    from src.application.config_sections import resolve_watchlist_config
     from src.application.config_validator import validate_config
     from src.application.futu_portfolio_context import infer_futu_portfolio_settings
     from src.application.ledger.api import open_position_ledger

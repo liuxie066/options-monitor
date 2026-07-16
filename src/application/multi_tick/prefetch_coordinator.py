@@ -348,7 +348,7 @@ class PrefetchCoordinator:
 
             while futures:
                 future = next(as_completed(futures))
-                symbol_cfg = futures.pop(future)
+                futures.pop(future)
                 payload = future.result()
                 result.audit_items.append(payload)
                 result.completed_count += 1

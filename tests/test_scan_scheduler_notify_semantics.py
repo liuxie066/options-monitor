@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 
 def test_scan_scheduler_emits_notify_window_for_downstream_delivery() -> None:
-    base = Path(__file__).resolve().parents[1]
-
     from src.application.scan_scheduler import decide
 
     schedule_cfg = {

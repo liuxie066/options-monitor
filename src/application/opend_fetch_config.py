@@ -289,15 +289,6 @@ def opend_discovery_kwargs(config: dict[str, Any] | None) -> dict[str, float | i
     return resolve_opend_fetch_limits(config).discovery_kwargs()
 
 
-def option_chain_fetch_kwargs(config: dict[str, Any] | None) -> dict[str, float | int]:
-    resolved = resolve_option_chain_fetch_config(config)
-    return {
-        "max_wait_sec": resolved["max_wait_sec"],
-        "option_chain_window_sec": resolved["window_sec"],
-        "option_chain_max_calls": resolved["max_calls"],
-    }
-
-
 def resolve_opend_batch_config(config: dict[str, Any] | None) -> OpenDBatchConfig:
     runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
     raw = runtime.get("opend_batch") if isinstance(runtime, dict) and isinstance(runtime.get("opend_batch"), dict) else {}

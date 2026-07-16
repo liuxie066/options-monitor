@@ -21,12 +21,12 @@ from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
     normalize_close_type,
-    normalize_currency,
     normalize_status,
     now_ms,
     parse_exp_to_ms,
     safe_float,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.errors import LedgerPreflightError
@@ -959,7 +959,7 @@ def auto_close_expired_positions(
                     option_evidence=option_evidence,
                     close_target_resolution=close_target_resolution,
                     contracts_to_close=contracts_to_close,
-                    event_time_ms=int(ledger_preflight["event_time_ms"]),
+                    event_time_ms=int(ledger_preflight.event_time_ms),
                 )
             else:
                 result = persist_expire_auto_close_event(
@@ -968,7 +968,7 @@ def auto_close_expired_positions(
                     fields=close_target_resolution.single_candidate.raw_fields,
                     contracts_to_close=contracts_to_close,
                     close_reason="expired",
-                    as_of_ms=int(ledger_preflight["event_time_ms"]),
+                    as_of_ms=int(ledger_preflight.event_time_ms),
                     exp_source=str(decision.effective_exp_source or ""),
                     grace_days=grace_days,
                     close_target_resolution=close_target_resolution.to_dict(),

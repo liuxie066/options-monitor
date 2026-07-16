@@ -5,7 +5,21 @@ from typing import Any
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import config_validate_tool, scheduler_status_tool
 from src.application.agent_tools.symbols_impl import find_symbol_entry, manage_symbols_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.account_config import accounts_from_config
+from src.application.agent_tools.symbols_impl import apply_symbol_mutation
+from copy import deepcopy as deepcopy_value
+from src.application.agent_tools.symbols_impl import list_symbol_rows
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import mask_path
+from src.application.account_config import normalize_accounts
+from src.application.scan_scheduler import read_state as read_scheduler_state
+from src.application.agent_tool_config import repo_base
+from src.application.config_sections import resolve_watchlist_config
+from src.application.scan_scheduler import decide as scheduler_decide
+from src.application.agent_tools.runtime_helpers import validate_runtime_config
+from src.application.agent_tools.runtime_helpers import write_json_atomic
+from src.application.agent_tool_config import write_tools_enabled
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
@@ -121,61 +135,58 @@ _MANAGE_SYMBOLS_SET_SCHEMA: dict[str, Any] = {
 }
 
 
-def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
-    return ctx.mask_path(value) or "..."
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
 
 
 def _config_validate_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return config_validate_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        validate_runtime_config=ctx.validate_runtime_config,
-        accounts_from_config=ctx.accounts_from_config,
-        resolve_watchlist_config=ctx.resolve_watchlist_config,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        load_runtime_config=load_runtime_config,
+        validate_runtime_config=validate_runtime_config,
+        accounts_from_config=accounts_from_config,
+        resolve_watchlist_config=resolve_watchlist_config,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 
 def _scheduler_status_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return scheduler_status_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        read_state=ctx.read_scheduler_state,
-        decide=ctx.scheduler_decide,
-        repo_base=ctx.repo_base,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        load_runtime_config=load_runtime_config,
+        read_state=read_scheduler_state,
+        decide=scheduler_decide,
+        repo_base=repo_base,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 
 def _manage_symbols_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return manage_symbols_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        deepcopy_fn=ctx.deepcopy_value,
-        write_tools_enabled=ctx.write_tools_enabled,
-        apply_symbol_mutation_fn=lambda cfg, tool_payload: ctx.apply_symbol_mutation(
+        load_runtime_config=load_runtime_config,
+        deepcopy_fn=deepcopy_value,
+        write_tools_enabled=write_tools_enabled,
+        apply_symbol_mutation_fn=lambda cfg, tool_payload: apply_symbol_mutation(
             cfg,
             tool_payload,
-            normalize_accounts=ctx.normalize_accounts,
-            resolve_watchlist_config=ctx.resolve_watchlist_config,
+            normalize_accounts=normalize_accounts,
+            resolve_watchlist_config=resolve_watchlist_config,
         ),
-        validate_runtime_config=ctx.validate_runtime_config,
-        list_symbol_rows_fn=lambda cfg: ctx.list_symbol_rows(
+        validate_runtime_config=validate_runtime_config,
+        list_symbol_rows_fn=lambda cfg: list_symbol_rows(
             cfg,
-            resolve_watchlist_config=ctx.resolve_watchlist_config,
-            normalize_accounts=ctx.normalize_accounts,
+            resolve_watchlist_config=resolve_watchlist_config,
+            normalize_accounts=normalize_accounts,
         ),
-        write_json_atomic=ctx.write_json_atomic,
-        mask_path=ctx.mask_path,
+        write_json_atomic=write_json_atomic,
+        mask_path=mask_path,
     )
 
 
@@ -223,10 +234,9 @@ _FIELD_ALIASES = {
 
 
 def _symbol_config_read_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    config_path, cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     raw_symbol = str(payload.get("symbol") or "").strip()
     if not raw_symbol:
         raise AgentToolError(
@@ -252,16 +262,16 @@ def _symbol_config_read_tool(
     )
     if symbol_market in {"us", "hk"} and symbol_market != config_market:
         sibling_path = config_path.with_name(f"config.{symbol_market}.json") if payload.get("config_path") else None
-        config_path, cfg = ctx.load_runtime_config(config_key=symbol_market, config_path=sibling_path)
+        config_path, cfg = load_runtime_config(config_key=symbol_market, config_path=sibling_path)
 
     canonical = str(calibration.canonical_symbol)
-    _idx, entry = find_symbol_entry(cfg, canonical, resolve_watchlist_config=ctx.resolve_watchlist_config)
+    _idx, entry = find_symbol_entry(cfg, canonical, resolve_watchlist_config=resolve_watchlist_config)
     base: dict[str, Any] = {
         "schema_version": "symbol_config_read.v1",
         "symbol": raw_symbol,
         "canonical_symbol": canonical,
         "calibration": calibration.public_payload(),
-        "config_path": ctx.mask_path(config_path),
+        "config_path": mask_path(config_path),
         "found": False,
     }
     if entry is None:
@@ -269,7 +279,7 @@ def _symbol_config_read_tool(
             **base,
             "missing_reason": "symbol_not_configured",
             "message": f"监控标的未配置：{canonical}",
-        }, [], {"config_path": ctx.mask_path(config_path)}
+        }, [], {"config_path": mask_path(config_path)}
 
     strategies = _symbol_strategy_configs(entry)
     strategy, field = _normalize_strategy_and_field(payload.get("strategy"), payload.get("field"))
@@ -290,7 +300,7 @@ def _symbol_config_read_tool(
                 "found": False,
                 "missing_reason": "strategy_not_supported",
                 "message": f"{canonical} 不支持策略配置：{strategy}",
-            }, [], {"config_path": ctx.mask_path(config_path)}
+            }, [], {"config_path": mask_path(config_path)}
         if field:
             exists, value = _read_nested_field(strategy_cfg, field)
             data.update({"field": field, "path": f"{strategy}.{field}"})
@@ -300,16 +310,16 @@ def _symbol_config_read_tool(
                     "found": False,
                     "missing_reason": "field_not_configured",
                     "message": f"{canonical} {strategy}.{field} 当前没有配置。",
-                }, [], {"config_path": ctx.mask_path(config_path)}
-            data["value"] = ctx.deepcopy_value(value)
-        return data, [], {"config_path": ctx.mask_path(config_path)}
+                }, [], {"config_path": mask_path(config_path)}
+            data["value"] = deepcopy_value(value)
+        return data, [], {"config_path": mask_path(config_path)}
 
     if field:
         matches = []
         for name, strategy_cfg in strategies.items():
             exists, value = _read_nested_field(strategy_cfg, field)
             if exists:
-                matches.append({"strategy": name, "field": field, "path": f"{name}.{field}", "value": ctx.deepcopy_value(value)})
+                matches.append({"strategy": name, "field": field, "path": f"{name}.{field}", "value": deepcopy_value(value)})
         data["field"] = field
         data["matches"] = matches
         if len(matches) == 1:
@@ -322,7 +332,7 @@ def _symbol_config_read_tool(
                     "strategy_config": dict(strategies.get(str(match["strategy"])) or {}),
                 }
             )
-            return data, [], {"config_path": ctx.mask_path(config_path)}
+            return data, [], {"config_path": mask_path(config_path)}
         return {
             **data,
             "found": False,
@@ -332,13 +342,12 @@ def _symbol_config_read_tool(
                 if len(matches) > 1
                 else f"{canonical} 当前没有配置字段：{field}。"
             ),
-        }, [], {"config_path": ctx.mask_path(config_path)}
+        }, [], {"config_path": mask_path(config_path)}
 
-    return data, [], {"config_path": ctx.mask_path(config_path)}
+    return data, [], {"config_path": mask_path(config_path)}
 
 
 def _symbol_resolve_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     raw_symbol = str(payload.get("symbol") or "").strip()
@@ -352,7 +361,7 @@ def _symbol_resolve_tool(
     cfg: dict[str, Any] | None = None
     config_path = None
     if str(payload.get("config_key") or "").strip() or str(payload.get("config_path") or "").strip():
-        config_path, cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+        config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
 
     calibration = calibrate_symbol(raw_symbol, config=cfg)
     data = {
@@ -363,7 +372,7 @@ def _symbol_resolve_tool(
     }
     meta: dict[str, Any] = {}
     if config_path is not None:
-        masked = ctx.mask_path(config_path)
+        masked = mask_path(config_path)
         data["config_path"] = masked
         meta["config_path"] = masked
     warnings = [] if data["resolved"] else ["symbol_unresolved"]

@@ -437,7 +437,7 @@ def test_context_compaction_keeps_native_tool_call_pairs() -> None:
 
     from src.application.copilot.engine import run_engine
 
-    result = run_engine(
+    run_engine(
         manifest,
         scene_input=contract.input,
         record_event=lambda *_args: None,

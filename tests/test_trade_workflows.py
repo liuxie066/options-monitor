@@ -27,7 +27,7 @@ def test_preview_trade_open_keeps_optional_note_values_out_of_string_none() -> N
             raw_payload={},
         )
     )
-    command = preview["command"]
+    command = preview.command
 
     assert command.symbol == "NVDA"
     assert command.currency == "USD"

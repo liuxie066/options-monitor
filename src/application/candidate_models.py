@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.ledger.position_fields import normalize_currency
+from domain.domain.option_position_identity import normalize_currency
 
 
 def _as_float(value: Any) -> float | None:

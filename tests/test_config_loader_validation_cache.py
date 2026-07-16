@@ -135,7 +135,7 @@ def test_resolve_data_config_path_ignores_legacy_om_pm_config(monkeypatch) -> No
 
 
 def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:
-    from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+    from src.application.config_sections import resolve_templates_config, resolve_watchlist_config
 
     cfg = {
         "symbols": [{"symbol": "0700.HK"}, {"symbol": "3690.HK"}],
@@ -147,7 +147,7 @@ def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None
 
 
 def test_resolve_watchlist_config_canonicalizes_legacy_market_to_broker() -> None:
-    from src.application.config_loader import resolve_watchlist_config
+    from src.application.config_sections import resolve_watchlist_config
 
     cfg = {
         "symbols": [
@@ -183,7 +183,7 @@ def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical()
 
 
 def test_set_watchlist_config_updates_symbols_only() -> None:
-    from src.application.config_loader import set_watchlist_config
+    from src.application.config_sections import set_watchlist_config
 
     cfg = {}
     out = set_watchlist_config(cfg, [{"symbol": "0700.HK"}])
@@ -192,7 +192,7 @@ def test_set_watchlist_config_updates_symbols_only() -> None:
 
 
 def test_set_watchlist_config_writes_broker_only() -> None:
-    from src.application.config_loader import set_watchlist_config
+    from src.application.config_sections import set_watchlist_config
 
     cfg = {}
     out = set_watchlist_config(cfg, [{"symbol": "0700.HK", "market": "HK"}])

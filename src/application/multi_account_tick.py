@@ -8,12 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from src.infrastructure.io_utils import (
-    read_json,
     utc_now,
 )
 from src.infrastructure.run_log import RunLogger
 from src.application.account_config import accounts_from_config
-from src.application.config_loader import resolve_watchlist_config
+from src.application.config_sections import resolve_watchlist_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 
 from src.application.multi_tick.opend_guard import (
@@ -34,8 +33,6 @@ from src.application.multi_tick.misc import (
     AccountResult,
     _safe_runlog_data,
 )
-from src.application.multi_tick.cash_footer import query_cash_footer
-from src.application.multi_tick.notify_format import build_account_message
 from domain.domain.config_contract import (
     ensure_runtime_canonical_config,
     ensure_runtime_schedule_matches_market,
@@ -49,11 +46,9 @@ from src.application.multi_tick_audit import MultiTickAuditHelper
 from src.application.tick_guard_flow import TickGuardRequest, run_tick_guard_flow
 from src.application.tick_account_execution import (
     TickAccountExecutionRequest,
-    mark_scanned_accounts as _mark_scanned_accounts,
     resolve_account_run_max_workers as _resolve_account_run_max_workers,
     resolve_default_account as _resolve_default_account,
     run_tick_account_execution,
-    run_account_outcomes as _run_account_outcomes,
 )
 from src.application.tick_notification_flow import (
     TickNotificationRequest,
@@ -81,7 +76,6 @@ from src.infrastructure.external_services import (
     run_scan_scheduler_cli,
     trading_day_via_futu,
 )
-from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
 from domain.storage.repositories import state_repo
 

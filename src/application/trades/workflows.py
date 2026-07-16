@@ -11,7 +11,7 @@ from src.application.ledger.api import (
     record_broker_trade_open,
 )
 from src.application.positions.workflows import (
-    BrokerAssignedStockSaleMatchError,
+    BrokerAssignedStockSaleMatchError as BrokerAssignedStockSaleMatchError,
     execute_broker_assigned_stock_sale as _execute_position_broker_assigned_stock_sale,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal

@@ -43,7 +43,6 @@ from src.application.channels.wechat_clawbot.message import (
     message_user_id,
 )
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
-from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.conversation_scope import wechat_window_conversation_id
 from src.application.copilot.host_store import CopilotHostStore

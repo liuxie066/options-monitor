@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 import tempfile
 
-from src.application.layered_config import build_layered_runtime_config
+from src.application.layered_config import build_layered_runtime_config_from_user_config
+from src.application.runtime_config_freshness import GENERATED_KEY, build_inline_generated_metadata
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -15,10 +16,20 @@ AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
 
 
 def _write_runtime_config(tmp_path: Path) -> Path:
-    cfg, _meta = build_layered_runtime_config(
+    user_path = BASE / "configs" / "examples" / "user.example.us.json"
+    user_config = json.loads(user_path.read_text(encoding="utf-8"))
+    cfg, _meta = build_layered_runtime_config_from_user_config(
         repo_root=BASE,
         market="us",
-        user_config_path=BASE / "configs" / "examples" / "user.example.us.json",
+        user_config=user_config,
+        user_config_ref=str(user_path),
+    )
+    cfg[GENERATED_KEY] = build_inline_generated_metadata(
+        repo_root=BASE,
+        market="us",
+        system_config_path=BASE / "configs" / "system.json",
+        user_config=user_config,
+        user_config_ref=str(user_path),
     )
     path = tmp_path / "config.us.json"
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -241,7 +252,20 @@ def test_auto_trade_intake_once_reports_multiple_account_sources(tmp_path: Path)
         + "\n",
         encoding="utf-8",
     )
-    cfg, _meta = build_layered_runtime_config(repo_root=BASE, market="us", user_config_path=user_path)
+    user_config = json.loads(user_path.read_text(encoding="utf-8"))
+    cfg, _meta = build_layered_runtime_config_from_user_config(
+        repo_root=BASE,
+        market="us",
+        user_config=user_config,
+        user_config_ref=str(user_path),
+    )
+    cfg[GENERATED_KEY] = build_inline_generated_metadata(
+        repo_root=BASE,
+        market="us",
+        system_config_path=BASE / "configs" / "system.json",
+        user_config=user_config,
+        user_config_ref=str(user_path),
+    )
     config_path = tmp_path / "config.us.json"
     config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     runtime_root = tmp_path / "runtime"

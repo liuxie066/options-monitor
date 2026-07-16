@@ -17,12 +17,12 @@ from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
     normalize_close_type,
-    normalize_currency,
     normalize_option_type,
     normalize_side,
     normalize_status,
     parse_exp_to_ms,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_data_config_path
 from src.application.settings import build_effective_env

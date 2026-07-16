@@ -40,7 +40,8 @@ def test_notification_perception_read_can_read_run_scoped_audit(tmp_path: Path) 
     assert data["events"][0]["source_path"] == "output_runs/run_2/state/audit_events.jsonl"
 
 
-def test_notification_perception_read_tool_is_registered_and_read_only(tmp_path: Path) -> None:
+def test_notification_perception_read_tool_is_registered_and_read_only(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tools.notification_perception as notification_tools
     from src.application.agent_tool_registry import get_tool_definition
 
     audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
@@ -50,7 +51,8 @@ def test_notification_perception_read_tool_is_registered_and_read_only(tmp_path:
     tool = get_tool_definition("notification_perception_read")
     assert tool is not None
     assert tool.is_pure_read()
-    data, warnings, meta = tool.call(_Context(tmp_path), {"limit": 1})
+    monkeypatch.setattr(notification_tools, "repo_base", lambda: tmp_path)
+    data, warnings, meta = tool.call({"limit": 1})
     assert warnings == []
     assert data["summary"]["returned_count"] == 1
     assert meta["audit_paths"]
@@ -63,7 +65,7 @@ def test_notification_perception_read_tool_rejects_explicit_audit_path(tmp_path:
     assert tool is not None
 
     with pytest.raises(AgentToolError) as exc:
-        tool.call(_Context(tmp_path), {"audit_path": str(tmp_path / "audit_events.jsonl")})
+        tool.call({"audit_path": str(tmp_path / "audit_events.jsonl")})
 
     assert exc.value.code == "INPUT_ERROR"
 
@@ -97,14 +99,3 @@ def _row(run_id: str, action: str, conversation_id: str) -> dict:
             "target": "must_not_leak",
         },
     }
-
-
-class _Context:
-    def __init__(self, base: Path) -> None:
-        self._base = base
-
-    def repo_base(self) -> Path:
-        return self._base
-
-    def mask_path(self, value) -> str:
-        return str(value)

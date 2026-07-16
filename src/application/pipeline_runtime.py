@@ -7,9 +7,9 @@ from pathlib import Path
 
 from src.application.cash_summary_footer import append_cash_summary_footer
 from src.application.config_loader import load_config as load_runtime_pipeline_config
-from src.application.config_loader import resolve_data_config_path, resolve_watchlist_config
+from src.application.config_loader import resolve_data_config_path
+from src.application.config_sections import resolve_watchlist_config
 from src.application.report_builders import build_symbols_digest, build_symbols_summary
-from src.infrastructure.subprocess_utils import run_cmd
 from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,

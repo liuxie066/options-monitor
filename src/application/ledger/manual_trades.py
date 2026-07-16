@@ -17,11 +17,11 @@ from domain.domain.ledger.position_fields import (
     exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
-    normalize_currency,
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.results import LedgerWriteResult

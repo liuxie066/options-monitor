@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_config import repo_base
+from src.application.agent_tool_config import resolve_output_root
 
 
 _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -39,17 +43,16 @@ _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 def _close_advice_read_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
 
     return close_advice_read_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_output_root=ctx.resolve_output_root,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        load_runtime_config=load_runtime_config,
+        resolve_output_root=resolve_output_root,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 

@@ -243,7 +243,7 @@ def test_yfinance_event_source_marks_all_source_failures_as_error(monkeypatch) -
     import pytest
 
     _add_repo_to_syspath()
-    from src.application.event_risk_filter import EventSourceError, fetch_symbol_events_yfinance
+    from src.application.events.source_yfinance import EventSourceError, fetch_symbol_events_yfinance
 
     class FailingTicker:
         def __init__(self, _symbol: str) -> None:

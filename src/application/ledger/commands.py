@@ -280,7 +280,7 @@ def persist_manual_adjust_event_with_ledger(
         strategy_group_id=strategy_group_id,
         yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
-        as_of_ms=int(ledger_preflight["event_time_ms"]),
+        as_of_ms=int(ledger_preflight.event_time_ms),
     )
     return ManualAdjustLedgerResult(
         result=LedgerWriteResult.from_payload(result),
@@ -425,7 +425,7 @@ def persist_manual_close_event_with_ledger(
                 read_model="legacy_trade_events",
                 fail_closed=False,
                 target_lot_id=resolved_record_id,
-                event_id=duplicate_result.get("event_id"),
+                event_id=duplicate_result.event_id,
             ),
             duplicate_checked_before_patch=True,
         )
@@ -439,7 +439,7 @@ def persist_manual_close_event_with_ledger(
         close_reason=close_reason,
         as_of_ms=as_of_ms,
     )
-    event_time_ms = int(ledger_preflight["event_time_ms"])
+    event_time_ms = int(ledger_preflight.event_time_ms)
     patch = build_close_patch_contract(
         current_fields,
         contracts_to_close=int(contracts_to_close),
@@ -1188,7 +1188,7 @@ def preview_manual_position_close(
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
-        as_of_ms=int(ledger_preflight["event_time_ms"]),
+        as_of_ms=int(ledger_preflight.event_time_ms),
     )
     return ManualClosePreviewResult(
         fields=fields,
@@ -1329,7 +1329,7 @@ def preview_manual_position_adjust(
         strategy_group_id=strategy_group_id,
         yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
-        as_of_ms=int(ledger_preflight["event_time_ms"]),
+        as_of_ms=int(ledger_preflight.event_time_ms),
     )
     return ManualAdjustPreviewResult(
         fields=fields,
@@ -1632,7 +1632,7 @@ def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[s
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
     preview = build_manual_void_preview(repo, target_event_id=event_id, void_reason=reason)
-    events = trade_event_log(repo) + [preview["void_event"]]
+    events = trade_event_log(repo) + [preview.void_event]
     ledger_preflight = preflight_manual_void(repo, target_event_id=event_id, void_reason=reason)
     preview_payload = preview.to_payload()
     return {
@@ -1668,7 +1668,7 @@ def preview_trade_event_repair(
         overrides=overrides,
         repair_reason=reason,
     )
-    events = trade_event_log(repo) + [preview["void_event"], preview["repair_event"]]
+    events = trade_event_log(repo) + [preview.void_event, preview.repair_event]
     ledger_preflight = preflight_manual_repair(
         repo,
         target_event_id=event_id,

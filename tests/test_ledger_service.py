@@ -96,16 +96,16 @@ def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
         ),
     )
 
-    assert result.ledger_preflight["status"] == "ok"
-    assert result.ledger_preflight["event_type"] == "open"
-    assert result.ledger_preflight["contracts_open_before"] == 0
-    assert result.ledger_preflight["contracts_open_after"] == 6
-    assert result.ledger_preflight["position_contracts_open_after"] == 6
-    assert result.result["created"] is True
-    assert result.result["record_id"] == result.ledger_preflight["target_lot_id"]
+    assert result.ledger_preflight.status == "ok"
+    assert result.ledger_preflight.event_type == "open"
+    assert result.ledger_preflight.contracts_open_before == 0
+    assert result.ledger_preflight.contracts_open_after == 6
+    assert result.ledger_preflight.position_contracts_open_after == 6
+    assert result.result.created is True
+    assert result.result.record_id == result.ledger_preflight.target_lot_id
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["record_id"] == result.ledger_preflight["target_lot_id"]
+    assert lots[0]["record_id"] == result.ledger_preflight.target_lot_id
     assert lots[0]["fields"]["contracts_open"] == 6
 
 
@@ -143,11 +143,11 @@ def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
         as_of_ms=2000,
     )
 
-    assert result.ledger_preflight["status"] == "ok"
-    assert result.ledger_preflight["target_lot_id"] == lot["record_id"]
-    assert result.ledger_preflight["contracts_open_before"] == 6
-    assert result.ledger_preflight["contracts_open_after"] == 4
-    assert result.result["created"] is True
+    assert result.ledger_preflight.status == "ok"
+    assert result.ledger_preflight.target_lot_id == lot["record_id"]
+    assert result.ledger_preflight.contracts_open_before == 6
+    assert result.ledger_preflight.contracts_open_after == 4
+    assert result.result.created is True
     lots = repo.list_position_lots()
     assert lots[0]["record_id"] == lot["record_id"]
     assert lots[0]["fields"]["contracts_open"] == 4
@@ -187,12 +187,12 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
         as_of_ms=2000,
     )
 
-    assert result.ledger_preflight["status"] == "ok"
-    assert result.ledger_preflight["event_type"] == "adjust"
-    assert result.ledger_preflight["target_lot_id"] == lot["record_id"]
-    assert result.ledger_preflight["contracts_open_before"] == 6
-    assert result.ledger_preflight["contracts_open_after"] == 5
-    assert result.result["created"] is True
+    assert result.ledger_preflight.status == "ok"
+    assert result.ledger_preflight.event_type == "adjust"
+    assert result.ledger_preflight.target_lot_id == lot["record_id"]
+    assert result.ledger_preflight.contracts_open_before == 6
+    assert result.ledger_preflight.contracts_open_after == 5
+    assert result.result.created is True
     adjusted = repo.get_record_fields(lot["record_id"])
     assert adjusted["contracts"] == 5
     assert adjusted["contracts_open"] == 5

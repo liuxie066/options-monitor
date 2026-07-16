@@ -138,23 +138,39 @@ def _futu_doctor_ok(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def _patch_agent_tool_context(monkeypatch, **overrides: Any) -> None:
-    from dataclasses import replace
+def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
+    import src.application.agent_tools.analysis as analysis_tools
+    import src.application.agent_tools.diagnostics as diagnostics_tools
+    import src.application.agent_tools.materialization as materialization_tools
+    import src.application.agent_tools.positions as positions_tools
+    import src.application.agent_tools.runtime as runtime_tools
 
-    import src.application.tool_execution as tool_execution
+    targets = {
+        "run_futu_doctor": (diagnostics_tools,),
+        "load_option_positions_repo": (diagnostics_tools,),
+        "load_portfolio_context": (materialization_tools,),
+        "get_exchange_rates": (analysis_tools, positions_tools),
+        "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
+        "repo_base": (runtime_tools,),
+        "check_version_update": (runtime_tools,),
+        "update_local_version": (runtime_tools,),
+        "run_close_advice": (materialization_tools,),
+        "load_option_positions_context": (materialization_tools,),
+        "fetch_symbol_opend": (materialization_tools,),
+        "save_required_data_opend": (materialization_tools,),
+    }
+    for name, value in overrides.items():
+        modules = targets.get(name)
+        if modules is None:
+            raise AssertionError(f"unknown agent tool dependency override: {name}")
+        for module in modules:
+            monkeypatch.setattr(module, name, value)
 
-    ctx = tool_execution.build_default_agent_tool_context()
-    monkeypatch.setattr(
-        tool_execution,
-        "build_default_agent_tool_context",
-        lambda: replace(ctx, **overrides),
-    )
 
-
-def _patch_healthcheck_context(monkeypatch, **overrides: Any) -> None:
+def _patch_healthcheck_dependencies(monkeypatch, **overrides: Any) -> None:
     deps = {"run_futu_doctor": _futu_doctor_ok}
     deps.update(overrides)
-    _patch_agent_tool_context(monkeypatch, **deps)
+    _patch_agent_tool_dependencies(monkeypatch, **deps)
 
 
 def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
@@ -173,7 +189,7 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
         encoding="utf-8",
     )
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -209,7 +225,7 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
     cfg["symbols"].append(msft)
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -227,7 +243,7 @@ def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path
     trace_path = tmp_path / "candidate_filter_trace.jsonl"
     trace_path.write_text('{"symbol":"NVDA","result":"accepted"}\n', encoding="utf-8")
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool(
         "healthcheck",
@@ -272,7 +288,7 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
     monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
     checks = {item["name"]: item for item in out["data"]["checks"]}
@@ -327,7 +343,7 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
         + "\n",
         encoding="utf-8",
     )
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool(
         "healthcheck",
@@ -372,7 +388,7 @@ def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tm
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
     monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_2")
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
     check = next(item for item in out["data"]["checks"] if item["name"] == "feishu_inbound")
@@ -396,7 +412,7 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
     cfg["account_settings"]["user1"]["futu"]["account_id"] = "REAL_12345678"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -423,7 +439,7 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
         encoding="utf-8",
     )
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -451,7 +467,7 @@ def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapp
     cfg["account_settings"]["user1"]["futu"] = {"account_id": "999999999999999999"}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -494,7 +510,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
         encoding="utf-8",
     )
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -529,7 +545,7 @@ def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tm
         bootstrap_status = "degraded_option_positions_repo_load_failed"
         bootstrap_message = "option positions repo load failed: sqlite unavailable"
 
-    _patch_healthcheck_context(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
+    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -559,7 +575,7 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
         bootstrap_status = "sqlite_only_no_feishu_bootstrap"
         bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
-    _patch_healthcheck_context(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
+    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -586,7 +602,7 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     }
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -601,7 +617,7 @@ def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path)
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = _write_healthcheck_config(tmp_path)
-    _patch_healthcheck_context(monkeypatch)
+    _patch_healthcheck_dependencies(monkeypatch)
     assistant_config = tmp_path / "resolved" / "config.assistant.json"
     assistant_config.parent.mkdir()
     assistant_config.write_text(
@@ -687,7 +703,7 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
             "stocks_by_symbol": {},
         }
 
-    _patch_agent_tool_context(monkeypatch, load_portfolio_context=_fake_load_portfolio_context)
+    _patch_agent_tool_dependencies(monkeypatch, load_portfolio_context=_fake_load_portfolio_context)
     out = run_tool("get_portfolio_context", {"config_path": str(cfg_path), "account": "user1"})
 
     assert out["ok"] is True
@@ -882,7 +898,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         refresh_calls.append(list(rows))
         return AssignedStockQuoteRefreshResult([], {"enabled": True, "status": "skipped_no_open_assigned_stock"}, [])
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         get_exchange_rates=_fake_get_exchange_rates,
         refresh_assigned_stock_quotes=_fake_refresh_quotes,
@@ -985,11 +1001,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
 
 
 def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
-    from dataclasses import replace
-
     import src.application.tool_execution as tool_execution
-
-    ctx = tool_execution.build_default_agent_tool_context()
 
     def _check_version_update(**kwargs: Any) -> dict[str, Any]:
         return {
@@ -1004,11 +1016,7 @@ def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
             "error": None,
         }
 
-    monkeypatch.setattr(
-        tool_execution,
-        "build_default_agent_tool_context",
-        lambda: replace(ctx, check_version_update=_check_version_update),
-    )
+    _patch_agent_tool_dependencies(monkeypatch, check_version_update=_check_version_update)
 
     out = tool_execution.execute_tool("version_check", {"remote_name": "origin"})
 
@@ -1022,7 +1030,7 @@ def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None
     from src.application.tool_execution import execute_tool as run_tool
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
 
     out = run_tool("version_update", {"bump": "patch"})
 
@@ -1041,7 +1049,7 @@ def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> Non
     from src.application.tool_execution import execute_tool as run_tool
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
     out = run_tool("version_update", {"target_version": "1.1.0", "apply": True, "confirm": True})
@@ -1058,7 +1066,7 @@ def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -
     from src.application.tool_execution import execute_tool as run_tool
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
 
     blocked = run_tool("version_update", {"target_version": "1.1.0", "apply": True})
     assert blocked["ok"] is False
@@ -1076,7 +1084,7 @@ def test_version_update_rejects_removed_version_alias(monkeypatch, tmp_path: Pat
     from src.application.tool_execution import execute_tool as run_tool
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
 
     out = run_tool("version_update", {"version": "1.1.0"})
 
@@ -1316,7 +1324,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
             warnings=[],
         )
 
-    _patch_agent_tool_context(monkeypatch, refresh_assigned_stock_quotes=_refresh_assigned_stock_quotes)
+    _patch_agent_tool_dependencies(monkeypatch, refresh_assigned_stock_quotes=_refresh_assigned_stock_quotes)
 
     refreshed_assigned_stock = run_tool(
         "option_positions_read",
@@ -1965,7 +1973,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
 
 
 def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     def _read_json(path: Path) -> dict[str, Any]:
         try:
@@ -2282,7 +2290,7 @@ def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) ->
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -2348,7 +2356,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
 
 
 def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp_path: Path) -> None:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -2406,7 +2414,7 @@ def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp
 
 
 def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_ambiguous(tmp_path: Path) -> None:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(
@@ -2447,7 +2455,7 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
 
 
 def test_runtime_status_service_profile_resolves_config_key_to_profile_config_path(tmp_path: Path) -> None:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     us_path = tmp_path / "config.us.json"
     hk_path = tmp_path / "config.hk.json"
@@ -2490,7 +2498,7 @@ def test_runtime_status_service_profile_resolves_config_key_to_profile_config_pa
 
 
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_runtime_status as runtime_status
+    import src.application.agent_tools.runtime_status_impl as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
@@ -2519,7 +2527,7 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
 
 
 def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_runtime_status as runtime_status
+    import src.application.agent_tools.runtime_status_impl as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path, target_version="v1.2.82")
 
@@ -2543,7 +2551,7 @@ def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_pa
 
 
 def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_runtime_status as runtime_status
+    import src.application.agent_tools.runtime_status_impl as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
@@ -3024,7 +3032,7 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
             "text": str((out_root / "reports" / "close_advice.txt")),
         }
 
-    _patch_agent_tool_context(monkeypatch, run_close_advice=_fake_run_close_advice)
+    _patch_agent_tool_dependencies(monkeypatch, run_close_advice=_fake_run_close_advice)
     out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(out_root)})
 
     assert out["ok"] is True
@@ -3367,7 +3375,7 @@ def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path:
 
 
 def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch, tmp_path: Path) -> None:
-    from src.application.agent_tool_close_advice_read import close_advice_read_tool
+    from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -3419,8 +3427,8 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
 
 def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
     from src.infrastructure.io_utils import safe_read_csv
-    from src.application.agent_tool_runtime import as_float
-    from src.application.agent_tool_scan import close_advice_rows_summary
+    from src.application.agent_tools.runtime_helpers import as_float
+    from src.application.agent_tools.materialization_impl import close_advice_rows_summary
 
     csv_path = tmp_path / "close_advice.csv"
     text_path = tmp_path / "close_advice.txt"
@@ -3439,7 +3447,7 @@ def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path
 
 
 def test_scan_summary_rows_normalizes_account_labels() -> None:
-    from src.application.agent_tool_scan import scan_summary_rows
+    from src.application.agent_tools.materialization_impl import scan_summary_rows
 
     summary = scan_summary_rows(
         [
@@ -3510,7 +3518,7 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
         )
         return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fake_fetch_symbol_opend,
@@ -3564,7 +3572,7 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
     def _fail_save_required_data_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("save_required_data_opend should not be called when cached coverage is complete")
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fail_fetch_symbol_opend,
@@ -3621,7 +3629,7 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
         )
         return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fake_fetch_symbol_opend,
@@ -3673,7 +3681,7 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
         )
         return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fake_fetch_symbol_opend,
@@ -3745,7 +3753,7 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
         )
         return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fake_fetch_symbol_opend,
@@ -3798,7 +3806,7 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
         )
         return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-    _patch_agent_tool_context(
+    _patch_agent_tool_dependencies(
         monkeypatch,
         load_option_positions_context=_fake_load_option_positions_context,
         fetch_symbol_opend=_fake_fetch_symbol_opend,
@@ -3839,7 +3847,7 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
     old_prepare = tools._prepare_close_advice_inputs_tool
     old_close = tools._close_advice_tool
     try:
-        def _fake_prepare(ctx, payload):  # type: ignore[no-untyped-def]
+        def _fake_prepare(payload):  # type: ignore[no-untyped-def]
             calls.append("prepare")
             assert payload["config_path"] == str(cfg_path)
             return (
@@ -3848,7 +3856,7 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
                 {"required_data_root": ".../required_data"},
             )
 
-        def _fake_close(ctx, payload):  # type: ignore[no-untyped-def]
+        def _fake_close(payload):  # type: ignore[no-untyped-def]
             calls.append("close")
             assert payload["config_path"] == str(cfg_path)
             return (

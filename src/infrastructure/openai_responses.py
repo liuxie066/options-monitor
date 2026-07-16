@@ -23,54 +23,6 @@ class OpenAIResponsesError(Exception):
         return self.message
 
 
-def create_structured_response(
-    *,
-    api_key: str,
-    base_url: str | None = None,
-    model: str,
-    input_text: str,
-    instructions: str,
-    json_schema: dict[str, Any],
-    timeout: int = 20,
-    max_output_tokens: int = 512,
-    temperature: float | None = 0.0,
-    http_post_json_fn: HttpPostJsonFn | None = None,
-) -> dict[str, Any]:
-    api_key_value = str(api_key or "").strip()
-    model_value = str(model or "").strip()
-    if not api_key_value:
-        raise ValueError("api_key is required")
-    if not model_value:
-        raise ValueError("model is required")
-
-    payload: dict[str, Any] = {
-        "model": model_value,
-        "instructions": str(instructions or "").strip(),
-        "input": str(input_text or ""),
-        "max_output_tokens": int(max_output_tokens),
-        "store": False,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "om_llm_intent",
-                "schema": dict(json_schema),
-                "strict": True,
-            }
-        },
-    }
-    if temperature is not None:
-        payload["temperature"] = float(temperature)
-    return (http_post_json_fn or _post_json)(
-        resolve_responses_url(base_url),
-        payload,
-        headers={
-            "Authorization": f"Bearer {api_key_value}",
-            "Content-Type": "application/json",
-        },
-        timeout=int(timeout),
-    )
-
-
 def create_response(
     *,
     api_key: str,
@@ -120,24 +72,6 @@ def resolve_responses_url(base_url: str | None) -> str:
     if normalized.endswith("/responses"):
         return normalized
     return f"{normalized}/responses"
-
-
-def extract_response_text(response: dict[str, Any]) -> str:
-    output_text = response.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    chunks: list[str] = []
-    for item in response.get("output") or []:
-        if not isinstance(item, dict):
-            continue
-        for content in item.get("content") or []:
-            if not isinstance(content, dict):
-                continue
-            text = content.get("text")
-            if isinstance(text, str) and text.strip():
-                chunks.append(text.strip())
-    return "\n".join(chunks).strip()
 
 
 def _post_json(

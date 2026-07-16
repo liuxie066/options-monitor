@@ -70,14 +70,8 @@ class LedgerPreflightResult:
         )
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_dict().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -101,8 +95,6 @@ class ManualAdjustPreflightResult:
             "ledger_preflight": self.ledger_preflight.to_dict(),
         }
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
 
 
 @dataclass(frozen=True)
@@ -151,14 +143,8 @@ class LedgerWriteResult:
         )
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_dict().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -216,14 +202,8 @@ class ProjectionRefreshResult:
         )
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_dict().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -240,14 +220,8 @@ class BrokerTradeOpenPreviewResult:
             "fields": dict(self.fields),
         }
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_payload().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_payload()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_payload()
 
 
 @dataclass(frozen=True)
@@ -361,14 +335,8 @@ class BrokerTradeOperation:
         )
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_payload().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_payload()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_payload()
 
 
 @dataclass(frozen=True)
@@ -454,14 +422,8 @@ class ExpiredCloseDecision:
             payload["patch"] = None
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_payload().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_payload()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_payload()
 
 
 @dataclass(frozen=True)
@@ -478,14 +440,8 @@ class ExpiredCloseApplyResult:
         payload["result"] = self.result.to_dict() if isinstance(self.result, LedgerWriteResult) else {}
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_payload().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_payload()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_payload()
 
 
 @dataclass(frozen=True)
@@ -545,14 +501,8 @@ class TradeEventInterventionPreview:
             payload["repair_event"] = dict(self.repair_event)
         return payload
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_payload().get(key, default)
 
-    def __getitem__(self, key: str) -> Any:
-        return self.to_payload()[key]
 
-    def __contains__(self, key: object) -> bool:
-        return key in self.to_payload()
 
 
 @dataclass(frozen=True)

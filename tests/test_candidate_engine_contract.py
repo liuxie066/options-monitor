@@ -430,7 +430,7 @@ def test_candidate_engine_stage3_rejects_missing_spread_when_threshold_enabled()
 
 
 def test_candidate_engine_stage4_rank_keys_match_put_call_policy() -> None:
-    from domain.domain.engine import build_candidate_rank_key, rank_candidate_rows
+    from domain.domain.engine import rank_candidate_rows
 
     put_rows = [
         {"contract_symbol": "A", "annualized_net_return_on_cash_basis": 0.12, "net_income": 100, "delta": -0.10},

@@ -269,7 +269,7 @@ def test_candidate_filter_explain_resolves_symbol_alias_before_matching_trace(tm
 
 
 def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_trace(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -315,7 +315,7 @@ def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_tra
 
 
 def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -361,7 +361,7 @@ def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Pat
 
 
 def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
 
     data, warnings, _meta = candidate_filter_explain_tool(
         {"runtime_root": str(tmp_path / "runtime"), "symbol": "NVDA"},
@@ -376,7 +376,7 @@ def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp
 
 
 def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -417,7 +417,7 @@ def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(t
 
 
 def test_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -458,7 +458,8 @@ def test_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path:
     assert meta["source_files"][0]["path"] == str(trace_path.resolve())
 
 
-def test_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discovery(tmp_path: Path) -> None:
+def test_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discovery(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tools.candidate as candidate_tools
     from src.application.agent_tools.candidate import CANDIDATE_FILTER_EXPLAIN_TOOL
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
@@ -489,19 +490,12 @@ def test_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discov
         ],
     )
 
-    class _Ctx:
-        def repo_base(self) -> Path:
-            return tmp_path / "repo"
-
-        def mask_path(self, value: object) -> str | None:
-            return str(value) if value else None
-
-        def load_runtime_config(self, **_kwargs: object) -> tuple[Path, dict[str, object]]:
-            return config_path, {}
+    monkeypatch.setattr(candidate_tools, "repo_base", lambda: tmp_path / "repo")
+    monkeypatch.setattr(candidate_tools, "mask_path", lambda value: str(value) if value else None)
+    monkeypatch.setattr(candidate_tools, "load_runtime_config", lambda **_kwargs: (config_path, {}))
 
     data, warnings, meta = CANDIDATE_FILTER_EXPLAIN_TOOL.call(
-        _Ctx(),
-        {"config_key": "hk", "symbol": "泡泡玛特"},
+        {"config_key": "hk", "symbol": "泡泡玛特"}
     )
 
     assert warnings == []
@@ -525,7 +519,7 @@ def test_symbol_resolve_tool_maps_name_alias_to_canonical_symbol() -> None:
 
 
 def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
     account_dir.mkdir(parents=True)
@@ -553,7 +547,7 @@ def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> 
 
 
 def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
     candidate_path.write_text(
@@ -587,7 +581,7 @@ def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tm
 
 
 def test_candidate_rank_explain_prioritizes_covered_call_upside_margin(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_call_candidates_labeled.csv"
     candidate_path.write_text(
@@ -616,7 +610,7 @@ def test_candidate_rank_explain_prioritizes_covered_call_upside_margin(tmp_path:
 
 
 def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path) -> None:
-    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     legacy_path = tmp_path / "legacy_sell_put_candidates_labeled.csv"
     underwriting_path = tmp_path / "underwriting_sell_put_candidates_labeled.csv"

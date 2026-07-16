@@ -11,12 +11,12 @@ from domain.domain.ledger.position_fields import (
     exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
-    normalize_currency,
     normalize_option_type,
     normalize_side,
     normalize_status,
     parse_exp_to_ms,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.ledger.repository import require_option_positions_read_repo
 from src.infrastructure.feishu_bitable import safe_float

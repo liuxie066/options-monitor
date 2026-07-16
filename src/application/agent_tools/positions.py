@@ -4,7 +4,20 @@ from typing import Any
 
 from src.application.agent_tools.operations_impl import option_positions_read_tool
 from src.application.agent_tools.materialization_impl import monthly_income_report_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.positions.inspection import build_lot_event_history
+from src.application.positions.reporting import build_monthly_income_report
+from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as get_exchange_rates
+from src.application.positions.inspection import inspect_projection_state
+from src.application.ledger.api import list_position_rows
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import mask_path
+from domain.domain.option_position_identity import normalize_account
+from src.application.agent_tools.runtime_helpers import normalize_broker
+from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
+from src.application.agent_tool_config import repo_base
+from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
+from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
 
 
 _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -182,45 +195,43 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 
-def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
-    return ctx.mask_path(value) or "..."
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
 
 
 def _monthly_income_report_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return monthly_income_report_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        normalize_broker=ctx.normalize_broker,
-        resolve_option_positions_repo=ctx.resolve_option_positions_repo,
-        build_monthly_income_report=ctx.build_monthly_income_report,
-        refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
-        get_exchange_rates=ctx.get_exchange_rates,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        build_monthly_income_report=build_monthly_income_report,
+        refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+        get_exchange_rates=get_exchange_rates,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
 def _option_positions_read_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return option_positions_read_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        normalize_broker=ctx.normalize_broker,
-        normalize_account=ctx.normalize_account,
-        refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
-        resolve_option_positions_repo=ctx.resolve_option_positions_repo,
-        list_position_rows=ctx.list_position_rows,
-        build_lot_event_history=ctx.build_lot_event_history,
-        inspect_projection_state=ctx.inspect_projection_state,
-        repo_base=ctx.repo_base,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        normalize_account=normalize_account,
+        refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        list_position_rows=list_position_rows,
+        build_lot_event_history=build_lot_event_history,
+        inspect_projection_state=inspect_projection_state,
+        repo_base=repo_base,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 

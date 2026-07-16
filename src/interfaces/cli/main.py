@@ -41,10 +41,8 @@ from src.interfaces.cli.config_ops import (
     get_runtime_config_value,
     handle_config_command,
     init_yaml_config,
-    load_runtime_config,
     preview_config_yaml_migration,
     set_yaml_symbol_config,
-    validate_config,
     validate_yaml_runtime_config,
 )
 from src.interfaces.cli.copilot_ops import add_copilot_commands, handle_copilot_command

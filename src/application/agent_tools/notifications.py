@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tools.notifications_impl import preview_notification_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.notify_symbols import build_notification
 
 
 _PREVIEW_NOTIFICATION_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -16,10 +17,9 @@ _PREVIEW_NOTIFICATION_OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 def _preview_notification_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return preview_notification_tool(payload, build_notification=ctx.build_notification)
+    return preview_notification_tool(payload, build_notification=build_notification)
 
 
 PREVIEW_NOTIFICATION_TOOL = build_agent_tool(

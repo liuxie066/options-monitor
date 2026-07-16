@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.399 - 2026-07-16
+
+### Removed
+- Removed unused healthcheck and pipeline runners, assistant memory, Agent Tool compatibility shims, legacy config/audit/cron/OpenD/OpenAI wrappers, and obsolete implementation-history tests.
+- Removed dictionary-style compatibility methods from typed ledger records and the unused `tabulate` runtime dependency.
+
+### Changed
+- Made Agent Tool registration explicit, made assistant and WeChat package imports side-effect-free, and migrated callers and tests to owning modules and typed attributes.
+- Regenerated the dependency graph after simplification; production modules remain cycle-free.
+
 ## 1.2.398 - 2026-07-16
 
 ### Added

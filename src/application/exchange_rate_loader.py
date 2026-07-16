@@ -7,7 +7,6 @@ This wraps the legacy rate-cache reading into a single helper.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 

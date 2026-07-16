@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import pure_read_tool_names, pure_read_toolsets
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.llm_provider_registry import (

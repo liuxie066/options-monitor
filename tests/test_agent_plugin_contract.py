@@ -376,8 +376,7 @@ def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) 
 
 
 def test_write_gate_uses_tool_write_policy(monkeypatch, tmp_path: Path) -> None:
-    from dataclasses import replace
-
+    import src.application.agent_tools.runtime as runtime_tools
     import src.application.tool_execution as tool_execution
 
     calls: list[dict[str, Any]] = []
@@ -393,12 +392,8 @@ def test_write_gate_uses_tool_write_policy(monkeypatch, tmp_path: Path) -> None:
             "version_path": tmp_path / "VERSION",
         }
 
-    ctx = tool_execution.build_default_agent_tool_context()
-    monkeypatch.setattr(
-        tool_execution,
-        "build_default_agent_tool_context",
-        lambda: replace(ctx, repo_base=lambda: tmp_path, update_local_version=_update_local_version),
-    )
+    monkeypatch.setattr(runtime_tools, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(runtime_tools, "update_local_version", _update_local_version)
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
@@ -449,7 +444,7 @@ def test_agent_tool_system_exit_becomes_config_error(monkeypatch) -> None:
     definition = tool_execution.get_tool_definition("runtime_status")
     assert definition is not None
 
-    def reject_config(_ctx, _payload):
+    def reject_config(_payload):
         raise SystemExit("[CONFIG_ERROR] retired assistant fields")
 
     monkeypatch.setattr(

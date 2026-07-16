@@ -221,7 +221,6 @@ def test_default_position_read_paths_do_not_fallback_to_legacy_records() -> None
         repo_root / "src" / "application" / "ledger" / "read_model.py",
         repo_root / "src" / "application" / "positions" / "workflows.py",
         repo_root / "src" / "application" / "trades" / "resolver.py",
-        repo_root / "src" / "application" / "agent_tool_scan.py",
     ]
     offenders: list[str] = []
     for path in checked:

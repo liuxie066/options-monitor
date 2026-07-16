@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.ledger.position_fields import normalize_currency
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter

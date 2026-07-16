@@ -24,50 +24,6 @@ class OpenAIChatCompletionsError(Exception):
         return self.message
 
 
-def create_json_chat_completion(
-    *,
-    api_key: str = "",
-    base_url: str | None = None,
-    model: str,
-    input_text: str,
-    instructions: str,
-    json_schema: dict[str, Any],
-    timeout: int = 20,
-    max_output_tokens: int = 512,
-    temperature: float | None = 0.0,
-    thinking: dict[str, Any] | None = DEFAULT_CHAT_COMPLETIONS_THINKING,
-    http_post_json_fn: HttpPostJsonFn | None = None,
-) -> dict[str, Any]:
-    api_key_value = str(api_key or "").strip()
-    model_value = str(model or "").strip()
-    if not model_value:
-        raise ValueError("model is required")
-
-    payload: dict[str, Any] = {
-        "model": model_value,
-        "messages": [
-            {
-                "role": "system",
-                "content": _system_content(instructions=instructions, json_schema=json_schema),
-            },
-            {"role": "user", "content": str(input_text or "")},
-        ],
-        "max_tokens": int(max_output_tokens),
-        "response_format": {"type": "json_object"},
-        "stream": False,
-    }
-    if thinking is not None:
-        payload["thinking"] = dict(thinking)
-    if temperature is not None:
-        payload["temperature"] = float(temperature)
-    return (http_post_json_fn or _post_json)(
-        resolve_chat_completions_url(base_url),
-        payload,
-        headers=_request_headers(api_key_value),
-        timeout=int(timeout),
-    )
-
-
 def create_chat_completion(
     *,
     api_key: str = "",
@@ -116,38 +72,11 @@ def resolve_chat_completions_url(base_url: str | None) -> str:
     return f"{normalized}/chat/completions"
 
 
-def extract_chat_completion_text(response: dict[str, Any]) -> str:
-    choices = response.get("choices")
-    if not isinstance(choices, list):
-        return ""
-    chunks: list[str] = []
-    for choice in choices:
-        if not isinstance(choice, dict):
-            continue
-        message = choice.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            chunks.append(content.strip())
-    return "\n".join(chunks).strip()
-
-
 def _request_headers(api_key: str) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
-
-
-def _system_content(*, instructions: str, json_schema: dict[str, Any]) -> str:
-    return "\n\n".join(
-        [
-            str(instructions or "").strip(),
-            "Return a single JSON object matching this JSON Schema:",
-            json.dumps(dict(json_schema), ensure_ascii=False, sort_keys=True),
-        ]
-    ).strip()
 
 
 def _post_json(

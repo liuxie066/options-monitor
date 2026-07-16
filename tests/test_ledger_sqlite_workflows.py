@@ -676,7 +676,7 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
     records = repo.list_records(page_size=10)
     assert len(records) == 1
     assert records[0]["fields"]["symbol"] == "TSLA"
-    assert created["created"] is True
+    assert created.created is True
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
@@ -857,8 +857,8 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     first = ledger_writer.persist_trade_event(repo, open_deal)
     second = ledger_writer.persist_trade_event(repo, close_deal)
 
-    assert first["created"] is True
-    assert second["created"] is True
+    assert first.created is True
+    assert second.created is True
     events = repo.list_trade_events()
     open_event_id = "futu:lx:REAL_1:deal-open-1"
     close_event_id = "futu:lx:REAL_1:deal-close-1"
@@ -1079,14 +1079,14 @@ def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp
     result = ledger_writer.rebuild_position_lots_from_trade_events(repo)
 
     lots = repo.list_position_lots()
-    assert result["trade_event_count"] == 2
-    assert result["position_lot_count"] == 1
+    assert result.trade_event_count == 2
+    assert result.position_lot_count == 1
     assert lots[0]["record_id"] == "rec_lx_seed"
     assert lots[0]["fields"]["contracts_open"] == 0
     assert lots[0]["fields"]["contracts_closed"] == 1
     assert lots[0]["fields"]["status"] == "close"
     assert lots[0]["fields"]["last_close_event_id"] == "manual-close-rec-lx-seed"
-    assert result["unmatched_explicit_close_count"] == 0
+    assert result.unmatched_explicit_close_count == 0
 
 
 def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_projection_source_event_id_drifted(
@@ -1188,7 +1188,7 @@ def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_p
     assert lot["fields"]["contracts_open"] == 0
     assert lot["fields"]["contracts_closed"] == 1
     assert lot["fields"]["status"] == "close"
-    assert result["unmatched_explicit_close_count"] == 0
+    assert result.unmatched_explicit_close_count == 0
 
 
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
@@ -1849,12 +1849,12 @@ def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
         ),
     )
 
-    assert result["created"] is True
-    assert result["record_id"] is not None
-    assert str(result["record_id"]).startswith("lot_manual-open-")
+    assert result.created is True
+    assert result.record_id is not None
+    assert str(result.record_id).startswith("lot_manual-open-")
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["record_id"] == result["record_id"]
+    assert lots[0]["record_id"] == result.record_id
     assert lots[0]["fields"]["contracts_open"] == 2
     assert lots[0]["fields"]["status"] == "open"
 
@@ -1882,9 +1882,9 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
     result1 = ledger_manual_trades.persist_manual_open_event(repo, command)
     result2 = ledger_manual_trades.persist_manual_open_event(repo, command)
 
-    assert result1["created"] is True
-    assert result2["created"] is False
-    assert result1["event_id"] == result2["event_id"]
+    assert result1.created is True
+    assert result2.created is False
+    assert result1.event_id == result2.event_id
     lots = repo.list_position_lots()
     assert len(lots) == 1
     events = repo.list_trade_events()
@@ -1915,9 +1915,9 @@ def test_persist_manual_open_event_id_distinguishes_multiplier(tmp_path: Path) -
     result1 = ledger_manual_trades.persist_manual_open_event(repo, command)
     result2 = ledger_manual_trades.persist_manual_open_event(repo, replace(command, multiplier=1000))
 
-    assert result1["created"] is True
-    assert result2["created"] is True
-    assert result1["event_id"] != result2["event_id"]
+    assert result1.created is True
+    assert result2.created is True
+    assert result1.event_id != result2.event_id
     events = repo.list_trade_events()
     assert len(events) == 2
     lots = repo.list_position_lots()
@@ -1960,7 +1960,7 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
         as_of_ms=2000,
     )
 
-    assert result["created"] is True
+    assert result.created is True
     lots = repo.list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["contracts_open"] == 1
@@ -2016,9 +2016,9 @@ def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> No
         as_of_ms=3000,
     )
 
-    assert result1["created"] is True
-    assert result2["created"] is False
-    assert result1["event_id"] == result2["event_id"]
+    assert result1.created is True
+    assert result2.created is False
+    assert result1.event_id == result2.event_id
     lots = repo.list_position_lots()
     assert lots[0]["fields"]["contracts_open"] == 1
     assert lots[0]["fields"]["contracts_closed"] == 1
@@ -2226,7 +2226,7 @@ def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Pa
 
     void_result = ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(open_result["event_id"]),
+        target_event_id=str(open_result.event_id),
         void_reason="opened_by_mistake",
         as_of_ms=2000,
     )
@@ -2235,8 +2235,8 @@ def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Pa
     events = repo.list_trade_events()
     assert len(events) == 2
     assert events[-1]["position_effect"] == "void"
-    assert events[-1]["raw_payload"]["void_target_event_id"] == open_result["event_id"]
-    assert void_result["position_lot_count"] == 0
+    assert events[-1]["raw_payload"]["void_target_event_id"] == open_result.event_id
+    assert void_result.position_lot_count == 0
 
 
 def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_path: Path) -> None:
@@ -2273,17 +2273,17 @@ def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_pat
 
     void_result = ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(close_result["event_id"]),
+        target_event_id=str(close_result.event_id),
         void_reason="close_recorded_by_mistake",
         as_of_ms=2000,
     )
 
     rebuilt_lot = repo.list_position_lots()[0]
-    assert rebuilt_lot["record_id"] == f"lot_{open_result['event_id']}"
+    assert rebuilt_lot["record_id"] == f"lot_{open_result.event_id}"
     assert rebuilt_lot["fields"]["contracts_open"] == 2
     assert rebuilt_lot["fields"]["contracts_closed"] == 0
     assert rebuilt_lot["fields"]["status"] == "open"
-    assert void_result["position_lot_count"] == 1
+    assert void_result.position_lot_count == 1
 
 
 def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: Path) -> None:
@@ -2323,7 +2323,7 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
     )
 
     adjusted = repo.get_position_lot_fields(lot["record_id"])
-    assert result["created"] is True
+    assert result.created is True
     assert adjusted["contracts"] == 2
     assert adjusted["contracts_open"] == 2
     assert adjusted["strike"] == 105.0
@@ -2371,9 +2371,9 @@ def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> N
         as_of_ms=3000,
     )
 
-    assert result1["created"] is True
-    assert result2["created"] is False
-    assert result1["event_id"] == result2["event_id"]
+    assert result1.created is True
+    assert result2.created is False
+    assert result1.event_id == result2.event_id
     assert repo.get_position_lot_fields(lot["record_id"])["premium"] == 3.1
     assert len(repo.list_trade_events()) == 2
 
@@ -2459,7 +2459,7 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
     )
     ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(adjust_result["event_id"]),
+        target_event_id=str(adjust_result.event_id),
         void_reason="adjustment_was_wrong",
         as_of_ms=3000,
     )
@@ -2703,7 +2703,7 @@ def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(
     assert lots[0]["fields"]["contracts_open"] == 0
     assert lots[0]["fields"]["contracts_closed"] == 2
     assert lots[0]["fields"]["status"] == "close"
-    assert rebuild_result["unmatched_explicit_close_count"] == 0
+    assert rebuild_result.unmatched_explicit_close_count == 0
 
     context = build_context(lots, broker="富途", account="sy", rates={})
     assert context["open_positions_min"] == []

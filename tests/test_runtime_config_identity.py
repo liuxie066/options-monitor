@@ -8,7 +8,6 @@ import pytest
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml import build_yaml_runtime_config_file
-from src.application.layered_config import build_layered_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
 
@@ -84,29 +83,6 @@ def test_load_runtime_config_rejects_missing_generated_metadata(tmp_path: Path) 
     assert "missing generation metadata" in exc.value.message
 
 
-def test_load_runtime_config_rejects_legacy_source_by_default(tmp_path: Path) -> None:
-    user_path = _write_json(
-        tmp_path / "user.us.json",
-        {
-            "account_settings": {
-                "lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}},
-            },
-            "symbols": [{"symbol": "NVDA"}],
-        },
-    )
-    cfg, _meta = build_layered_runtime_config(
-        repo_root=REPO_ROOT,
-        market="us",
-        user_config_path=user_path,
-    )
-    path = _write_json(tmp_path / "config.us.json", cfg)
-
-    with pytest.raises(AgentToolError) as exc:
-        load_runtime_config(config_path=path)
-
-    assert exc.value.details["errors"][0]["code"] == "source_format_mismatch"
-
-
 def test_config_validate_infers_market_from_yaml_runtime_path(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
@@ -141,39 +117,3 @@ markets:
     assert payload["source_format"] == "yaml"
     assert payload["schedule_contract"]["validated"] is True
     assert payload["freshness"]["ok"] is True
-
-
-def test_config_validate_rejects_legacy_runtime_without_explicit_source(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli.main import main
-
-    user_path = _write_json(
-        tmp_path / "user.us.json",
-        {
-            "account_settings": {
-                "lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}},
-            },
-            "symbols": [{"symbol": "NVDA"}],
-        },
-    )
-    cfg, _meta = build_layered_runtime_config(
-        repo_root=REPO_ROOT,
-        market="us",
-        user_config_path=user_path,
-    )
-    runtime_path = _write_json(tmp_path / "config.us.json", cfg)
-
-    rc = main(["config", "validate", "--config-path", str(runtime_path)])
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 2
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "CONFIG_ERROR"
-    assert payload["error"]["details"]["errors"][0]["code"] == "source_format_mismatch"
-
-    rc = main(["config", "validate", "--source", "legacy", "--config-path", str(runtime_path)])
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 2
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "INPUT_ERROR"
-    assert payload["error"]["details"]["allowed"] == ["runtime", "yaml"]

@@ -14,10 +14,10 @@ from domain.domain.ledger.position_fields import (
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
     build_position_id,
     build_position_lot_fields,
-    normalize_currency,
     parse_exp_to_ms,
     strategy_metadata_fields_from_payload,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.event_codec import import_stored_trade_events, trade_event_payload_dict
 from src.application.ledger.position_records import PositionLotRecord

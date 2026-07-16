@@ -7,8 +7,8 @@ from domain.domain.ledger.position_fields import (
     effective_strike,
     normalize_account,
     normalize_broker,
-    normalize_currency,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 

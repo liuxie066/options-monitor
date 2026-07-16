@@ -9,7 +9,10 @@ from domain.domain.error_policy import classify_failure
 from domain.domain.engine import build_opend_unhealthy_execution_plan, resolve_multi_tick_engine_entrypoint
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.storage.repositories import state_repo
-from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.application.config_sections import (
+    resolve_watchlist_config,
+    set_watchlist_config,
+)
 from src.application.multi_tick.misc import _safe_runlog_data
 from src.application.multi_tick.opend_guard import (
     clear_opend_phone_verify_pending,

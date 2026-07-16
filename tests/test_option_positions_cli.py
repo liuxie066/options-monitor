@@ -1384,7 +1384,7 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
                 str(data_config),
                 "void-event",
                 "--event-id",
-                str(open_result["event_id"]),
+                str(open_result.event_id),
                 "--confirm",
             ],
         )
@@ -1392,7 +1392,7 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
     cli_mod.main()
 
     out = capsys.readouterr().out
-    assert f"[DONE] voided event_id={open_result['event_id']}" in out
+    assert f"[DONE] voided event_id={open_result.event_id}" in out
     assert repo.list_position_lots() == []
 
 
@@ -1549,13 +1549,13 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     )
     ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(close_result["event_id"]),
+        target_event_id=str(close_result.event_id),
         void_reason="close_was_wrong",
         as_of_ms=2500,
     )
     ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(adjust_result["event_id"]),
+        target_event_id=str(adjust_result.event_id),
         void_reason="adjust_was_wrong",
         as_of_ms=2600,
     )
@@ -1579,8 +1579,8 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     assert event_ids[2].startswith("manual-adjust-")
     assert rows[0]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
     assert rows[1]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
-    assert rows[3]["void_target_event_id"] == close_result["event_id"]
-    assert rows[4]["void_target_event_id"] == adjust_result["event_id"]
+    assert rows[3]["void_target_event_id"] == close_result.event_id
+    assert rows[4]["void_target_event_id"] == adjust_result.event_id
 
 
 def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: Path, capsys) -> None:

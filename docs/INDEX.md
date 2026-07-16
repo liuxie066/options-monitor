@@ -17,7 +17,6 @@
 - [ARCHITECTURE.md](ARCHITECTURE.md)：当前系统架构和入口边界；说明 CLI、Tool Gateway、Inbound Assistant 的职责
 - [INBOUND_CONTROL.md](INBOUND_CONTROL.md)：`./om assistant handle` 远程消息入口的安全控制层
 - [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md)：当前自由问答 Copilot v2 的架构、运行合同和交付门槛
-- [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md)：人工接受的长期偏好记忆与 Copilot 会话记忆边界
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：`./om-agent` Tool Gateway JSON 集成合同
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Tool Gateway 工具快速开始
 - [AGENT_WIKI.md](AGENT_WIKI.md)：本地 agent 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）

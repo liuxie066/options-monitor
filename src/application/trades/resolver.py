@@ -9,7 +9,6 @@ from src.application.strategy_policy import YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 from src.application.ledger.api import (
     BrokerTradeOperation,
     CloseTargetResolution,
-    LotCloseCandidate as CloseCandidate,
     LotCloseMatch as CloseMatch,
     LotCloseResolutionError,
     find_unique_open_position_lot,

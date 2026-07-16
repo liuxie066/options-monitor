@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.domain.ledger.position_fields import normalize_currency, normalize_option_type
+from domain.domain.ledger.position_fields import normalize_option_type
+from domain.domain.option_position_identity import normalize_currency
 from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,
@@ -15,7 +16,6 @@ from domain.domain.trade_contract_identity import (
 )
 from src.application.trades.account_mapping import resolve_internal_account
 from domain.domain.trade_account_identity import (
-    ACCOUNT_ID_KEYS,
     extract_primary_account_id,
     extract_visible_account_fields,
 )
