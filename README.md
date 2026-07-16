@@ -534,6 +534,7 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 - 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%
 - candidates 同时输出 Put-only 与 Combo 的净权利金、breakeven、安全垫损耗、彩票预算占比，以及 1.5σ / 2.0σ Call 尾部回报倍数；缺少 expected move 时尾部倍数字段为空，不因此拒绝组合
 - `<report-dir>/<symbol>_combo_yield_rank_shadow.csv` 对比当前生产排序与彩票参与度 Shadow 排序；Shadow 结果只用于研究，不改变生产推荐、inline linked call 或通知顺序
+- `<report-dir>/<symbol>_combo_yield_pair_diagnostics.csv` 保留 Call 预筛和 Put+Call 配对尝试的逐行通过/拒绝证据及关键经济性指标；该文件只用于研究诊断，不会把拒绝项提升为候选
 
 ### Close Advice
 

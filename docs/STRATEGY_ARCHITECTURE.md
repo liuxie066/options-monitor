@@ -209,6 +209,8 @@ Combo Yield 仍复用事件注释，并默认按 `reject_event_risk=true`、`eve
 
 当前生产排序保持上述顺序不变。研究侧另生成 `<symbol>_combo_yield_rank_shadow.csv`：同一 Funding Put 下按 Call Delta、1.5σ / 2.0σ 尾部回报倍数、spread、OI 选择彩票；不同已选组合再按接货安全垫、Put-only 年化、Call 参与度、执行质量和剩余净权利金排序。artifact 使用 `baseline_rank`、`shadow_rank`、`baseline_selected`、`shadow_selected`、`rank_changed` 对比两套结果，不影响生产推荐和通知。
 
+`<symbol>_combo_yield_pair_diagnostics.csv` 记录 Call 预筛、Put 匹配和 Put+Call 配对阶段的逐行通过/拒绝结果，包括 `diagnostic_scope`、`diagnostic_stage`、`reject_reasons` 以及可计算的 Delta、流动性、融资和组合经济性字段。它只补充研究可观测性，不改变硬筛、生产排序、通知或配置。
+
 组合候选同时输出 `put_only_net_credit`、`put_only_breakeven`、`combo_breakeven`、`downside_breakeven_penalty`、`lottery_budget_ratio`、`residual_premium_ratio`、`call_payoff_multiple_at_1_5_sigma` 和 `call_payoff_multiple_at_2_0_sigma`，用于明确比较 Sell Put Only 与 Sell Put + Long Call。缺少 expected move 时尾部赔率为 null，不作为硬拒绝原因。
 
 ## 当前实现边界
