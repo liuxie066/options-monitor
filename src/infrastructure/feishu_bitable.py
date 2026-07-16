@@ -21,7 +21,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit

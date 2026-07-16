@@ -12,7 +12,26 @@ from typing import Any
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import option_positions_read_tool
 from src.application.agent_tools.materialization_impl import monthly_income_report_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.account_config import accounts_from_config
+from src.application.positions.inspection import build_lot_event_history
+from src.application.positions.reporting import build_monthly_income_report
+from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as get_exchange_rates
+from src.application.positions.inspection import inspect_projection_state
+from src.application.ledger.api import list_position_rows
+from src.application.agent_tools.symbols_impl import list_symbol_rows
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import mask_path
+from domain.domain.option_position_identity import normalize_account
+from src.application.account_config import normalize_accounts
+from src.application.agent_tools.runtime_helpers import normalize_broker
+from src.application.agent_tools.runtime_helpers import read_json_object_or_empty
+from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
+from src.application.agent_tool_config import repo_base
+from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
+from src.application.agent_tool_config import resolve_output_root
+from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from src.application.config_sections import resolve_watchlist_config
 from src.application.agent_tools.candidate_filter_trace_discovery import find_candidate_filter_trace_paths
 from src.application.candidate_filter_trace import infer_trace_scope_from_path, read_candidate_filter_trace
 
@@ -24,6 +43,12 @@ MAX_INPUT_SQL_CHARS = 4000
 SQLITE_PROGRESS_OPCODE_LIMIT = 20000
 MAX_STRATEGY_REPLAY_ARTIFACTS = 200
 MAX_STRATEGY_REPLAY_ARTIFACT_BYTES = 5_000_000
+
+
+def collect_operation_timeline(**kwargs: Any) -> dict[str, Any]:
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline as collect
+
+    return collect(**kwargs)
 ALLOWED_SQL_FUNCTIONS = {
     "abs",
     "avg",
@@ -1102,11 +1127,10 @@ _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 def _analysis_catalog_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     views_filter = _requested_views(payload.get("views") or payload.get("view"))
-    config_path, _cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    config_path, _cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     specs = {
         name: dict(spec)
         for name, spec in VIEW_SPECS.items()
@@ -1169,7 +1193,7 @@ def _analysis_catalog_tool(
             "Do not sum account_monthly_income_components across component values; that view is legacy and non-additive.",
             "Do not join views unless the join fields are listed in each view's safe_join_keys.",
         ],
-    }, [], {"config_path": ctx.mask_path(config_path)}
+    }, [], {"config_path": mask_path(config_path)}
 
 
 def _catalog_field_types(specs: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
@@ -1210,19 +1234,18 @@ def _catalog_join_policies(specs: dict[str, dict[str, Any]]) -> dict[str, dict[s
 
 
 def _analysis_query_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     limit = _bounded_limit(payload.get("limit"))
     warnings: list[str] = []
     if not payload.get("sql") and not payload.get("query") and (payload.get("views") or payload.get("view")):
         requested_views = _requested_analysis_views_from_payload(payload)
-        views = _materialize_views(ctx, payload, warnings=warnings, requested_views=requested_views)
+        views = _materialize_views(payload, warnings=warnings, requested_views=requested_views)
         return _analysis_views_mode_result(payload=payload, views=views, warnings=warnings, limit=limit)
 
     sql = _validated_sql(payload.get("sql") or payload.get("query"))
     requested_views = set(_referenced_analysis_views(sql))
-    views = _materialize_views(ctx, payload, warnings=warnings, requested_views=requested_views)
+    views = _materialize_views(payload, warnings=warnings, requested_views=requested_views)
     rows, columns, views_used = _execute_select(sql, views, limit=limit)
     truncated = len(rows) > limit
     rows = rows[:limit]
@@ -1458,7 +1481,6 @@ def _bounded_limit(value: Any) -> int:
 
 
 def _materialize_views(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
     *,
     warnings: list[str],
@@ -1487,15 +1509,15 @@ def _materialize_views(
                 "account": payload.get("account"),
                 "include_rows": True,
             },
-            load_runtime_config=ctx.load_runtime_config,
-            resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-            normalize_broker=ctx.normalize_broker,
-            resolve_option_positions_repo=ctx.resolve_option_positions_repo,
-            build_monthly_income_report=ctx.build_monthly_income_report,
-            refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
-            get_exchange_rates=ctx.get_exchange_rates,
-            repo_base=ctx.repo_base,
-            mask_path=ctx.mask_path,
+            load_runtime_config=load_runtime_config,
+            resolve_public_data_config_path=resolve_public_data_config_path,
+            normalize_broker=normalize_broker,
+            resolve_option_positions_repo=resolve_option_positions_repo,
+            build_monthly_income_report=build_monthly_income_report,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+            get_exchange_rates=get_exchange_rates,
+            repo_base=repo_base,
+            mask_path=mask_path,
         )
         warnings.extend(str(item) for item in monthly_warnings if str(item).strip())
 
@@ -1509,17 +1531,17 @@ def _materialize_views(
                 "status": "all",
                 "limit": MAX_MATERIALIZED_ROWS,
             },
-            load_runtime_config=ctx.load_runtime_config,
-            resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-            normalize_broker=ctx.normalize_broker,
-            normalize_account=ctx.normalize_account,
-            refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
-            resolve_option_positions_repo=ctx.resolve_option_positions_repo,
-            list_position_rows=ctx.list_position_rows,
-            build_lot_event_history=ctx.build_lot_event_history,
-            inspect_projection_state=ctx.inspect_projection_state,
-            repo_base=ctx.repo_base,
-            mask_path=lambda value: ctx.mask_path(value) or "...",
+            load_runtime_config=load_runtime_config,
+            resolve_public_data_config_path=resolve_public_data_config_path,
+            normalize_broker=normalize_broker,
+            normalize_account=normalize_account,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+            resolve_option_positions_repo=resolve_option_positions_repo,
+            list_position_rows=list_position_rows,
+            build_lot_event_history=build_lot_event_history,
+            inspect_projection_state=inspect_projection_state,
+            repo_base=repo_base,
+            mask_path=lambda value: mask_path(value) or "...",
         )
         warnings.extend(str(item) for item in position_warnings if str(item).strip())
 
@@ -1532,50 +1554,50 @@ def _materialize_views(
                 "action": "events",
                 "limit": MAX_MATERIALIZED_ROWS,
             },
-            load_runtime_config=ctx.load_runtime_config,
-            resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-            normalize_broker=ctx.normalize_broker,
-            normalize_account=ctx.normalize_account,
-            refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
-            resolve_option_positions_repo=ctx.resolve_option_positions_repo,
-            list_position_rows=ctx.list_position_rows,
-            build_lot_event_history=ctx.build_lot_event_history,
-            inspect_projection_state=ctx.inspect_projection_state,
-            repo_base=ctx.repo_base,
-            mask_path=lambda value: ctx.mask_path(value) or "...",
+            load_runtime_config=load_runtime_config,
+            resolve_public_data_config_path=resolve_public_data_config_path,
+            normalize_broker=normalize_broker,
+            normalize_account=normalize_account,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+            resolve_option_positions_repo=resolve_option_positions_repo,
+            list_position_rows=list_position_rows,
+            build_lot_event_history=build_lot_event_history,
+            inspect_projection_state=inspect_projection_state,
+            repo_base=repo_base,
+            mask_path=lambda value: mask_path(value) or "...",
         )
         warnings.extend(str(item) for item in event_warnings if str(item).strip())
 
     if requested & _CONFIG_SOURCE_VIEWS:
-        config_path, cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+        config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
         symbol_rows = _symbol_strategy_rows(
-            ctx.list_symbol_rows(
+            list_symbol_rows(
                 cfg,
-                resolve_watchlist_config=ctx.resolve_watchlist_config,
-                normalize_accounts=ctx.normalize_accounts,
+                resolve_watchlist_config=resolve_watchlist_config,
+                normalize_accounts=normalize_accounts,
             )
         )
         if not config_path:
             warnings.append("runtime config path unavailable; symbol strategy config may be incomplete")
 
     if requested & {"candidate_filter_diagnostics"}:
-        candidate_rows, candidate_warnings = _candidate_filter_diagnostic_rows(ctx, payload)
+        candidate_rows, candidate_warnings = _candidate_filter_diagnostic_rows(payload)
         warnings.extend(candidate_warnings)
 
     if requested & {"close_advice_snapshot"}:
-        close_advice_rows, close_advice_warnings = _close_advice_snapshot_rows(ctx, payload)
+        close_advice_rows, close_advice_warnings = _close_advice_snapshot_rows(payload)
         warnings.extend(close_advice_warnings)
 
     if requested & {"runtime_tick_status"}:
-        runtime_rows, runtime_warnings = _runtime_tick_status_rows(ctx, payload)
+        runtime_rows, runtime_warnings = _runtime_tick_status_rows(payload)
         warnings.extend(runtime_warnings)
 
     if requested & {"strategy_replay_read_surface"}:
-        strategy_replay_rows, strategy_replay_warnings = _strategy_replay_read_surface_rows(ctx, payload)
+        strategy_replay_rows, strategy_replay_warnings = _strategy_replay_read_surface_rows(payload)
         warnings.extend(strategy_replay_warnings)
 
     if requested & _OPERATION_SOURCE_VIEWS:
-        upgrade_operation_rows, upgrade_warnings = _upgrade_operation_status_rows(ctx, payload)
+        upgrade_operation_rows, upgrade_warnings = _upgrade_operation_status_rows(payload)
         warnings.extend(upgrade_warnings)
 
     open_option_exposure_rows = _open_option_exposure_rows(position_data.get("rows"))
@@ -2214,8 +2236,8 @@ def _symbol_strategy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _candidate_filter_diagnostic_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    paths = _candidate_filter_trace_paths(ctx, _payload_with_resolved_config_path(ctx, payload))
+def _candidate_filter_diagnostic_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    paths = _candidate_filter_trace_paths(_payload_with_resolved_config_path(payload))
     if not paths:
         return [], ["candidate_filter_diagnostics missing: no candidate_filter_trace.jsonl artifacts found"]
     rows: list[dict[str, Any]] = []
@@ -2239,14 +2261,14 @@ def _candidate_filter_diagnostic_rows(ctx: AgentToolContext, payload: dict[str, 
     return rows, warnings
 
 
-def _candidate_filter_trace_paths(ctx: AgentToolContext, payload: dict[str, Any]) -> list[Path]:
-    return find_candidate_filter_trace_paths(payload, repo_base=ctx.repo_base)
+def _candidate_filter_trace_paths(payload: dict[str, Any]) -> list[Path]:
+    return find_candidate_filter_trace_paths(payload, repo_base=repo_base)
 
 
-def _payload_with_resolved_config_path(ctx: AgentToolContext, payload: dict[str, Any]) -> dict[str, Any]:
+def _payload_with_resolved_config_path(payload: dict[str, Any]) -> dict[str, Any]:
     if str(payload.get("config_path") or "").strip() or not str(payload.get("config_key") or "").strip():
         return payload
-    config_path, _cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=None)
+    config_path, _cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=None)
     out = dict(payload)
     out["config_path"] = str(config_path)
     return out
@@ -2272,7 +2294,7 @@ def _candidate_filter_diagnostic_row(row: dict[str, Any], *, scope: dict[str, st
     }
 
 
-def _close_advice_snapshot_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _close_advice_snapshot_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     tool_payload = {
         "config_key": payload.get("config_key"),
         "config_path": payload.get("config_path"),
@@ -2287,10 +2309,10 @@ def _close_advice_snapshot_rows(ctx: AgentToolContext, payload: dict[str, Any]) 
     try:
         data, tool_warnings, _meta = _call_close_advice_read_tool(
             {key: value for key, value in tool_payload.items() if value not in (None, "")},
-            load_runtime_config=ctx.load_runtime_config,
-            resolve_output_root=ctx.resolve_output_root,
-            repo_base=ctx.repo_base,
-            mask_path=ctx.mask_path,
+            load_runtime_config=load_runtime_config,
+            resolve_output_root=resolve_output_root,
+            repo_base=repo_base,
+            mask_path=mask_path,
         )
     except AgentToolError as exc:
         if exc.code in {"DEPENDENCY_MISSING", "READ_ERROR"}:
@@ -2343,7 +2365,7 @@ def _close_advice_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
     return {field: out.get(field) for field in CLOSE_ADVICE_SNAPSHOT_FIELDS}
 
 
-def _runtime_tick_status_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _runtime_tick_status_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     try:
         data, tool_warnings, _meta = _call_runtime_status_tool(
             {
@@ -2354,12 +2376,12 @@ def _runtime_tick_status_rows(ctx: AgentToolContext, payload: dict[str, Any]) ->
                 "run_id": payload.get("run_id"),
                 "max_notification_chars": 0,
             },
-            load_runtime_config=ctx.load_runtime_config,
-            normalize_accounts=ctx.normalize_accounts,
-            accounts_from_config=ctx.accounts_from_config,
-            read_json_object_or_empty=ctx.read_json_object_or_empty,
-            repo_base=ctx.repo_base,
-            mask_path=ctx.mask_path,
+            load_runtime_config=load_runtime_config,
+            normalize_accounts=normalize_accounts,
+            accounts_from_config=accounts_from_config,
+            read_json_object_or_empty=read_json_object_or_empty,
+            repo_base=repo_base,
+            mask_path=mask_path,
         )
     except AgentToolError as exc:
         return [], [f"runtime_tick_status unavailable: {exc.message}"]
@@ -2435,12 +2457,12 @@ def _run_id_from_runtime_summary(summary: dict[str, Any]) -> str | None:
     return None
 
 
-def _strategy_replay_read_surface_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    roots = _strategy_replay_roots(ctx, payload)
+def _strategy_replay_read_surface_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    roots = _strategy_replay_roots(payload)
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     for root in roots:
-        root_rows, root_warnings = _strategy_replay_rows_for_root(ctx, root, payload)
+        root_rows, root_warnings = _strategy_replay_rows_for_root(root, payload)
         rows.extend(root_rows)
         warnings.extend(root_warnings)
         if len(rows) >= MAX_MATERIALIZED_ROWS:
@@ -2452,16 +2474,16 @@ def _strategy_replay_read_surface_rows(ctx: AgentToolContext, payload: dict[str,
     return rows, warnings
 
 
-def _strategy_replay_roots(ctx: AgentToolContext, payload: dict[str, Any]) -> list[Path]:
+def _strategy_replay_roots(payload: dict[str, Any]) -> list[Path]:
     roots: list[Path] = []
     try:
-        roots.append(ctx.repo_base().expanduser().resolve())
+        roots.append(repo_base().expanduser().resolve())
     except Exception:
         pass
     config_path = payload.get("config_path")
     if not str(config_path or "").strip() and str(payload.get("config_key") or "").strip():
         try:
-            config_path, _cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=None)
+            config_path, _cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=None)
         except Exception:
             config_path = None
     if str(config_path or "").strip():
@@ -2481,13 +2503,12 @@ def _strategy_replay_roots(ctx: AgentToolContext, payload: dict[str, Any]) -> li
 
 
 def _strategy_replay_rows_for_root(
-    ctx: AgentToolContext,
     root: Path,
     payload: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
-    rows.extend(_shadow_replay_dataset_status_rows(ctx, root, payload, warnings=warnings))
+    rows.extend(_shadow_replay_dataset_status_rows(root, payload, warnings=warnings))
     for path in _strategy_replay_artifact_paths(root):
         if len(rows) >= MAX_MATERIALIZED_ROWS:
             break
@@ -2496,14 +2517,13 @@ def _strategy_replay_rows_for_root(
         except Exception as exc:
             warnings.append(f"strategy_replay_read_surface read_error: {path.name}: {type(exc).__name__}: {exc}")
             continue
-        row = _strategy_replay_artifact_row(ctx, root=root, path=path, artifact=artifact)
+        row = _strategy_replay_artifact_row(root=root, path=path, artifact=artifact)
         if row:
             rows.append(row)
     return rows, warnings
 
 
 def _shadow_replay_dataset_status_rows(
-    ctx: AgentToolContext,
     root: Path,
     payload: dict[str, Any],
     *,
@@ -2519,7 +2539,7 @@ def _shadow_replay_dataset_status_rows(
         return []
     datasets = data.get("datasets") if isinstance(data.get("datasets"), list) else []
     rows = [
-        _strategy_replay_dataset_status_row(ctx, root=root, status_payload=data, dataset=row)
+        _strategy_replay_dataset_status_row(root=root, status_payload=data, dataset=row)
         for row in datasets
         if isinstance(row, dict)
     ]
@@ -2564,7 +2584,6 @@ def _read_strategy_replay_json(path: Path) -> dict[str, Any]:
 
 
 def _strategy_replay_artifact_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path,
@@ -2572,28 +2591,26 @@ def _strategy_replay_artifact_row(
 ) -> dict[str, Any] | None:
     schema = str(artifact.get("schema_version") or "").strip()
     if schema == "shadow_replay_candidate_impact.v1":
-        return _strategy_replay_candidate_impact_row(ctx, root=root, path=path, artifact=artifact, source="shadow_replay_candidate_impact")
+        return _strategy_replay_candidate_impact_row(root=root, path=path, artifact=artifact, source="shadow_replay_candidate_impact")
     if schema == "shadow_replay_candidate_impact_report.v1":
         result = artifact.get("candidate_impact_result")
         if isinstance(result, dict):
             return _strategy_replay_candidate_impact_row(
-                ctx,
                 root=root,
                 path=path,
                 artifact={**result, "schema_version": schema},
                 source="shadow_replay_candidate_impact_report",
             )
     if schema == "strategy_lab_readiness.v1":
-        return _strategy_lab_readiness_row(ctx, root=root, path=path, artifact=artifact)
+        return _strategy_lab_readiness_row(root=root, path=path, artifact=artifact)
     if schema == "strategy_lab_experiment.v1":
-        return _strategy_lab_experiment_row(ctx, root=root, path=path, artifact=artifact)
+        return _strategy_lab_experiment_row(root=root, path=path, artifact=artifact)
     if schema == "strategy_lab_proposal.v1":
-        return _strategy_lab_proposal_row(ctx, root=root, path=path, artifact=artifact)
+        return _strategy_lab_proposal_row(root=root, path=path, artifact=artifact)
     return None
 
 
 def _strategy_replay_dataset_status_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     status_payload: dict[str, Any],
@@ -2605,7 +2622,6 @@ def _strategy_replay_dataset_status_row(
     candidate_count = _int_or_none(dataset.get("candidate_snapshot_count"))
     evidence_checks = dataset.get("evidence_checks") if isinstance(dataset.get("evidence_checks"), dict) else {}
     return _strategy_replay_base_row(
-        ctx,
         root=root,
         path=Path(str(dataset.get("dataset_dir") or "")) if str(dataset.get("dataset_dir") or "").strip() else None,
         artifact_kind="shadow_replay_dataset",
@@ -2633,7 +2649,6 @@ def _strategy_replay_dataset_status_row(
 
 
 def _strategy_replay_candidate_impact_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path,
@@ -2649,7 +2664,6 @@ def _strategy_replay_candidate_impact_row(
     candidate_impact = artifact.get("candidate_impact") if isinstance(artifact.get("candidate_impact"), dict) else {}
     recommendation = artifact.get("recommendation") if isinstance(artifact.get("recommendation"), dict) else {}
     return _strategy_replay_base_row(
-        ctx,
         root=root,
         path=path,
         artifact_kind="shadow_replay_candidate_impact",
@@ -2687,7 +2701,6 @@ def _strategy_replay_candidate_impact_row(
 
 
 def _strategy_lab_readiness_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path,
@@ -2700,7 +2713,6 @@ def _strategy_lab_readiness_row(
     source_scope = input_scope.get("source") if isinstance(input_scope.get("source"), dict) else {}
     filters = input_scope.get("filters") if isinstance(input_scope.get("filters"), dict) else {}
     return _strategy_replay_base_row(
-        ctx,
         root=root,
         path=path,
         artifact_kind="strategy_lab_readiness",
@@ -2729,7 +2741,6 @@ def _strategy_lab_readiness_row(
 
 
 def _strategy_lab_experiment_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path,
@@ -2747,7 +2758,6 @@ def _strategy_lab_experiment_row(
     scorecard = artifact.get("scorecard") if isinstance(artifact.get("scorecard"), dict) else {}
     best = scorecard.get("best_variant") if isinstance(scorecard.get("best_variant"), dict) else {}
     return _strategy_replay_base_row(
-        ctx,
         root=root,
         path=path,
         artifact_kind="strategy_lab_experiment",
@@ -2783,7 +2793,6 @@ def _strategy_lab_experiment_row(
 
 
 def _strategy_lab_proposal_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path,
@@ -2793,7 +2802,6 @@ def _strategy_lab_proposal_row(
     impact = artifact.get("impact") if isinstance(artifact.get("impact"), dict) else {}
     dry_run_patch = artifact.get("dry_run_patch") if isinstance(artifact.get("dry_run_patch"), dict) else {}
     return _strategy_replay_base_row(
-        ctx,
         root=root,
         path=path,
         artifact_kind="strategy_lab_proposal",
@@ -2820,7 +2828,6 @@ def _strategy_lab_proposal_row(
 
 
 def _strategy_replay_base_row(
-    ctx: AgentToolContext,
     *,
     root: Path,
     path: Path | None,
@@ -2860,10 +2867,10 @@ def _strategy_replay_base_row(
     safety_summary: Any = None,
 ) -> dict[str, Any]:
     return {
-        "source_root": _mask_strategy_replay_path(ctx, root),
+        "source_root": _mask_strategy_replay_path(root),
         "artifact_kind": artifact_kind,
         "artifact_id": artifact_id,
-        "artifact_path": _mask_strategy_replay_path(ctx, path) if path is not None else None,
+        "artifact_path": _mask_strategy_replay_path(path) if path is not None else None,
         "schema_version": schema_version,
         "generated_at_utc": generated_at_utc,
         "status": status,
@@ -2914,11 +2921,11 @@ def _strategy_replay_artifact_id(*, root: Path, path: Path) -> str:
         return path.name
 
 
-def _mask_strategy_replay_path(ctx: AgentToolContext, path: Path | str | None) -> str | None:
+def _mask_strategy_replay_path(path: Path | str | None) -> str | None:
     if path is None:
         return None
     try:
-        return ctx.mask_path(path) or str(path)
+        return mask_path(path) or str(path)
     except Exception:
         return str(path)
 
@@ -2997,9 +3004,9 @@ def _market_from_symbol(symbol: Any) -> str:
     return ""
 
 
-def _upgrade_operation_status_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _upgrade_operation_status_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     try:
-        data = ctx.collect_operation_timeline(
+        data = collect_operation_timeline(
             audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
             channel=payload.get("channel"),
             sender_id=payload.get("sender_id"),

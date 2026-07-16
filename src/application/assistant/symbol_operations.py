@@ -8,7 +8,10 @@ from typing import Any
 from src.application.account_config import normalize_accounts
 from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.application.config_sections import (
+    resolve_watchlist_config,
+    set_watchlist_config,
+)
 from src.application.config_validator import validate_config
 from src.application.config_yaml import RESOLVED_KEY, load_yaml_config_file
 from src.application.config_yaml_symbols import set_yaml_symbol_config

@@ -7,6 +7,7 @@ import time
 import pytest
 
 from src.application.multi_tick import required_data_prefetch as mod
+from src.application.required_data_prefetch_planning import strategy_prefetch_kwargs
 
 
 class _Gateway:
@@ -228,7 +229,7 @@ def test_prefetch_worker_count_invalid_value_falls_back_to_default() -> None:
 
 
 def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
-    out = mod._strategy_prefetch_kwargs(
+    out = strategy_prefetch_kwargs(
         {
             "symbol": "0700.HK",
             "sell_put": {
@@ -255,7 +256,7 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
 
 
 def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_return_first() -> None:
-    out = mod._strategy_prefetch_kwargs(
+    out = strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
             "sell_put": {"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "max_strike": 95},
@@ -275,7 +276,7 @@ def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_
 
 def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() -> None:
     try:
-        mod._strategy_prefetch_kwargs(
+        strategy_prefetch_kwargs(
             {
                 "symbol": "NVDA",
                 "use": ["put_base"],
@@ -290,7 +291,7 @@ def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() 
 
 
 def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_underwriting() -> None:
-    out = mod._strategy_prefetch_kwargs(
+    out = strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
             "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
@@ -304,7 +305,7 @@ def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_underwriting() -> Non
 
 
 def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_underwriting() -> None:
-    out = mod._strategy_prefetch_kwargs(
+    out = strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
             "sell_put": {"enabled": False},
@@ -350,7 +351,7 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
+    mod.prefetch_required_data(
         vpy=tmp_path / "python",
         base=tmp_path,
         cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},

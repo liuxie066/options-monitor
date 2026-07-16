@@ -15,13 +15,13 @@ from domain.domain.ledger.position_fields import (
     effective_strike,
     normalize_account,
     normalize_broker,
-    normalize_currency,
     normalize_status,
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
     strategy_metadata_fields_from_payload,
 )
+from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import import_stored_trade_events, stored_trade_event_to_ledger_event
 from src.application.ledger.external_event_key import broker_external_event_key
@@ -220,7 +220,7 @@ def _preflight_manual_void_payload(
     )
     ledger_preflight = _preflight_trade_event_append(
         repo,
-        appended_events=[preview["void_event"]],
+        appended_events=[preview.void_event],
         target_event_id=target_event_id,
         event_type="void",
         source="manual_void_preflight",
@@ -248,7 +248,7 @@ def _preflight_manual_repair_payload(
     )
     ledger_preflight = _preflight_trade_event_append(
         repo,
-        appended_events=[preview["void_event"], preview["repair_event"]],
+        appended_events=[preview.void_event, preview.repair_event],
         target_event_id=target_event_id,
         event_type="repair",
         source="manual_repair_preflight",

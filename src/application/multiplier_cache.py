@@ -493,7 +493,7 @@ def main():
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_list = sub.add_parser("list")
+    sub.add_parser("list")
 
     p_get = sub.add_parser("get")
     p_get.add_argument("symbol")

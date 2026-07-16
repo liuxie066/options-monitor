@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from src.application.account_config import normalize_accounts
-from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.application.config_sections import (
+    resolve_watchlist_config,
+    set_watchlist_config,
+)
 from src.application.config_validator import validate_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry

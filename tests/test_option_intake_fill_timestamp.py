@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
 
 from src.application.parse_option_message import parse_fill_timestamp, parse_option_message_text
 

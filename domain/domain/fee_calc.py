@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.ledger.position_fields import normalize_currency
+from domain.domain.option_position_identity import normalize_currency
 
 
 FUTU_US_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_283"

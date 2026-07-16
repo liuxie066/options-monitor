@@ -5,7 +5,7 @@ from typing import Any, Sequence
 
 from domain.domain.fee_calc import extract_actual_fees
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.ledger.position_fields import normalize_currency
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,

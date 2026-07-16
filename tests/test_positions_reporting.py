@@ -760,7 +760,7 @@ def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -
     )
     ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(open_result["event_id"]),
+        target_event_id=str(open_result.event_id),
         void_reason="opened_by_mistake",
         as_of_ms=_ms("2026-04-04"),
     )
@@ -851,7 +851,7 @@ def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premiu
     )
     ledger_interventions.persist_manual_void_event(
         repo,
-        target_event_id=str(close_result["event_id"]),
+        target_event_id=str(close_result.event_id),
         void_reason="close_recorded_by_mistake",
         as_of_ms=_ms("2026-04-21"),
     )

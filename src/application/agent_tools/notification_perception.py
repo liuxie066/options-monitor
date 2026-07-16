@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_config import repo_base
 from src.application.notification_perception_read import read_notification_perception_events
 
 
@@ -29,11 +31,10 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
 
 
 def _notification_perception_read_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     data = read_notification_perception_events(
-        repo_root=ctx.repo_base(),
+        repo_root=repo_base(),
         run_id=payload.get("run_id"),
         conversation_id=payload.get("conversation_id"),
         event_kind=payload.get("event_kind"),
@@ -56,7 +57,7 @@ def _notification_perception_read_tool(
         "kind": "audit_snapshot",
         "latest_event_at_utc": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
     }
-    return data, [], {"audit_paths": [ctx.mask_path(path) for path in data.get("audit_paths") or []]}
+    return data, [], {"audit_paths": [mask_path(path) for path in data.get("audit_paths") or []]}
 
 
 def _notification_perception_input_validator(payload: dict[str, Any]) -> None:

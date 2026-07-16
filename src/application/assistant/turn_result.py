@@ -29,7 +29,6 @@ def assistant_turn_result_from_response(
 ) -> AssistantTurnResult:
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
     meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
-    result_data = _control_result_data(data)
     trace = {"route": route}
     copilot_trace = copilot_trace_from_response_data(data)
     if copilot_trace:

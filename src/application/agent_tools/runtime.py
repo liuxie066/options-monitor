@@ -4,7 +4,13 @@ from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import version_check_tool, version_update_tool
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.version_check import check_version_update
+from src.application.runtime_logs_cli import collect_runtime_logs
+from src.application.runtime_runs_cli import collect_runtime_runs
+from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_config import repo_base
+from src.application.version_check import update_local_version
 
 
 _VERSION_CHECK_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -67,31 +73,29 @@ _RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 
-def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
-    return ctx.mask_path(value) or "..."
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
 
 
 def _version_check_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return version_check_tool(
         payload,
-        check_version_update=ctx.check_version_update,
-        repo_base=ctx.repo_base,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        check_version_update=check_version_update,
+        repo_base=repo_base,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 
 def _version_update_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return version_update_tool(
         payload,
-        update_local_version=ctx.update_local_version,
-        repo_base=ctx.repo_base,
-        mask_path=lambda value: _mask_path_str(ctx, value),
+        update_local_version=update_local_version,
+        repo_base=repo_base,
+        mask_path=lambda value: _mask_path_str(value),
     )
 
 
@@ -100,12 +104,11 @@ def _version_update_write_requested(payload: dict[str, Any]) -> bool:
 
 
 def _runtime_runs_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
-    data = ctx.collect_runtime_runs(
-        repo_root=ctx.repo_base(),
+    data = collect_runtime_runs(
+        repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
         profile_path=payload.get("profile_path"),
         limit=payload.get("limit") or 10,
@@ -113,17 +116,16 @@ def _runtime_runs_tool(
         run_dir=payload.get("run_dir"),
         scanned_only=bool(payload.get("scanned_only")),
     )
-    return data, [], {"runs_root": ctx.mask_path(data.get("runs_root"))}
+    return data, [], {"runs_root": mask_path(data.get("runs_root"))}
 
 
 def _runtime_logs_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
     _reject_removed_payload_alias(payload, alias="file", replacement="log_file")
-    data = ctx.collect_runtime_logs(
-        repo_root=ctx.repo_base(),
+    data = collect_runtime_logs(
+        repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
         logs_root=payload.get("logs_root"),
         profile_path=payload.get("profile_path"),
@@ -134,8 +136,8 @@ def _runtime_logs_tool(
         log_file=payload.get("log_file"),
     )
     return data, [], {
-        "runs_root": ctx.mask_path(data.get("runs_root")),
-        "logs_root": ctx.mask_path(data.get("logs_root")),
+        "runs_root": mask_path(data.get("runs_root")),
+        "logs_root": mask_path(data.get("logs_root")),
     }
 
 

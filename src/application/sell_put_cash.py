@@ -19,9 +19,8 @@ from domain.domain.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from domain.domain.ledger.position_fields import normalize_currency
+from domain.domain.option_position_identity import normalize_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.infrastructure.io_utils import safe_read_csv
 
 log = logging.getLogger(__name__)
 

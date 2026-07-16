@@ -115,7 +115,7 @@ def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
 
 
 def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() -> None:
-    from src.application.sell_put_strategy_risk import build_portfolio_risk_context
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     risk = build_portfolio_risk_context(

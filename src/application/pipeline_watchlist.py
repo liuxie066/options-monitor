@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from src.application.config_profiles import deep_merge
-from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+from src.application.config_sections import (
+    resolve_templates_config,
+    resolve_watchlist_config,
+)
 from domain.domain.candidate_defaults import resolve_event_risk_config
 from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 from domain.domain.sell_put_config import resolve_min_annualized_net_return

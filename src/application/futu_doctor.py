@@ -231,70 +231,9 @@ def run_futu_doctor_checks(
     }
 
 
-def build_human_text(result: dict[str, Any]) -> str:
-    lines: list[str] = [
-        "# Futu Data Source Doctor",
-        "",
-        f"endpoint: {result.get('host')}:{result.get('port')}",
-        "",
-    ]
-
-    sdk = result.get("sdk") if isinstance(result.get("sdk"), dict) else {}
-    lines.append("[OK] SDK importable: futu" if sdk.get("ok") else "[FAIL] SDK not importable: install futu-api")
-
-    wd = result.get("watchdog") if isinstance(result.get("watchdog"), dict) else {}
-    if wd.get("ok"):
-        lines.append("[OK] Futu/OpenD gateway healthy")
-    else:
-        code = wd.get("error_code") or "FUTU_GATEWAY_UNHEALTHY"
-        msg = wd.get("message") or wd.get("error") or result.get("watchdog_raw") or "unknown error"
-        lines.append(f"[FAIL] Futu/OpenD gateway unhealthy: {code}: {msg}")
-        action = wd.get("action_taken")
-        if action:
-            lines.append(f"  action: {action}")
-
-    telnet = result.get("telnet") if isinstance(result.get("telnet"), dict) else {}
-    if telnet:
-        endpoint = f"{telnet.get('host')}:{telnet.get('port')}"
-        if telnet.get("ok"):
-            lines.append(f"[OK] OpenD Telnet listening: {endpoint}")
-        else:
-            lines.append(f"[WARN] OpenD Telnet unavailable: {endpoint}")
-            lines.append("  enable telnet_ip=127.0.0.1 and telnet_port=22222 in FutuOpenD.xml, then use Telnet to submit phone verification codes.")
-
-    fields = result.get("required_fields") if isinstance(result.get("required_fields"), dict) else None
-    if fields is not None:
-        rows = fields.get("results") if isinstance(fields.get("results"), list) else []
-        if not rows:
-            lines.append("[WARN] Symbol field check returned no rows")
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            status = "OK" if row.get("ok") else "FAIL"
-            lines.append(
-                f"[{status}] {row.get('symbol')} underlier={row.get('underlier_code')} "
-                f"chain={row.get('chain_rows')} snap={row.get('snap_rows')} spot={row.get('spot')}"
-            )
-            missing = row.get("missing_snapshot_cols") if isinstance(row.get("missing_snapshot_cols"), list) else []
-            if missing:
-                lines.append(f"  missing: {', '.join(str(x) for x in missing)}")
-            if row.get("note"):
-                lines.append(f"  note: {row.get('note')}")
-            if row.get("error"):
-                lines.append(f"  error: {row.get('error')}")
-
-    lines.append("")
-    if result.get("ok"):
-        lines.append('[OK] 富途数据源可用。配置里可使用 fetch.source = "futu"。')
-    else:
-        lines.append("[FAIL] 富途数据源尚不可用。请按上面的失败项处理后重试。")
-    return "\n".join(lines)
-
-
 __all__ = [
     "REQUIRED_SNAPSHOT_COLS",
     "SymbolFieldResult",
-    "build_human_text",
     "check_required_option_fields",
     "required_fields_ok",
     "run_futu_doctor_checks",

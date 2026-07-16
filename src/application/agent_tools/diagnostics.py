@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.account_config import accounts_from_config
+from src.application.agent_tools.runtime_helpers import healthcheck_symbols_for_futu
+from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.account_config import list_account_config_views
+from src.application.ledger.api import open_position_ledger as load_option_positions_repo
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tools.runtime_helpers import mask_account_id
+from src.application.agent_tool_contracts import mask_path
+from src.application.account_config import normalize_accounts
+from src.application.agent_tools.runtime_helpers import read_json_object_or_empty
+from src.application.agent_tool_config import repo_base
+from src.application.agent_tools.runtime_helpers import resolve_data_config_ref
+from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from src.application.agent_tools.runtime_helpers import run_futu_doctor
+from src.application.agent_tools.runtime_helpers import validate_runtime_config
+from src.application.agent_tool_config import write_tools_enabled
 
 
 _OPERATION_TIMELINE_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -65,58 +81,57 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     "model_preview_fields": ["summary", "freshness", "account_summary", "warnings"],
 }
 
-def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
-    return ctx.mask_path(value) or "..."
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
 
 
 def _healthcheck_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     from src.application.agent_tools.healthcheck_impl import run_healthcheck_tool
 
     return run_healthcheck_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        validate_runtime_config=ctx.validate_runtime_config,
-        normalize_accounts=ctx.normalize_accounts,
-        accounts_from_config=ctx.accounts_from_config,
-        resolve_data_config_ref=ctx.resolve_data_config_ref,
-        resolve_public_data_config_path=ctx.resolve_public_data_config_path,
-        read_json_object_or_empty=ctx.read_json_object_or_empty,
-        mask_path=lambda value: _mask_path_str(ctx, value),
-        list_account_config_views=ctx.list_account_config_views,
-        mask_account_id=ctx.mask_account_id,
-        infer_futu_portfolio_settings=ctx.infer_futu_portfolio_settings,
-        load_option_positions_repo=ctx.load_option_positions_repo,
-        run_futu_doctor=ctx.run_futu_doctor,
-        healthcheck_symbols_for_futu=ctx.healthcheck_symbols_for_futu,
-        write_tools_enabled=ctx.write_tools_enabled,
+        load_runtime_config=load_runtime_config,
+        validate_runtime_config=validate_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        resolve_data_config_ref=resolve_data_config_ref,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        read_json_object_or_empty=read_json_object_or_empty,
+        mask_path=lambda value: _mask_path_str(value),
+        list_account_config_views=list_account_config_views,
+        mask_account_id=mask_account_id,
+        infer_futu_portfolio_settings=infer_futu_portfolio_settings,
+        load_option_positions_repo=load_option_positions_repo,
+        run_futu_doctor=run_futu_doctor,
+        healthcheck_symbols_for_futu=healthcheck_symbols_for_futu,
+        write_tools_enabled=write_tools_enabled,
     )
 
 
 def _runtime_status_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     return runtime_status_tool(
         payload,
-        load_runtime_config=ctx.load_runtime_config,
-        normalize_accounts=ctx.normalize_accounts,
-        accounts_from_config=ctx.accounts_from_config,
-        read_json_object_or_empty=ctx.read_json_object_or_empty,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
+        load_runtime_config=load_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        read_json_object_or_empty=read_json_object_or_empty,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
 def _operation_timeline_tool(
-    ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    data = ctx.collect_operation_timeline(
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+
+    data = collect_operation_timeline(
         audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
         channel=payload.get("channel"),
         sender_id=payload.get("sender_id"),

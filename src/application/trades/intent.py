@@ -4,7 +4,11 @@ from dataclasses import asdict, dataclass, field
 import re
 from typing import Any
 
-from domain.domain.ledger.position_fields import normalize_currency, normalize_option_type, normalize_side
+from domain.domain.ledger.position_fields import (
+    normalize_option_type,
+    normalize_side,
+)
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,

@@ -19,14 +19,13 @@ from domain.domain.ledger.events import validate_trade_event
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
-    effective_multiplier,
     normalize_account,
     normalize_broker,
-    normalize_currency,
     normalize_option_type,
     normalize_status,
     norm_symbol,
 )
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import normalize_trade_side
 
 

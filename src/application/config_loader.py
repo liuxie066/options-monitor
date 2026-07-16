@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.settings import build_effective_env
 

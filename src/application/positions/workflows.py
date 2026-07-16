@@ -17,9 +17,9 @@ from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     normalize_account,
     normalize_broker,
-    normalize_currency,
     norm_symbol,
 )
+from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.api import (
     LotCloseResolutionError,
     preview_manual_assignment,

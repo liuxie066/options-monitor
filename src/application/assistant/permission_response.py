@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.contracts import AssistantRequest, ControlCommand

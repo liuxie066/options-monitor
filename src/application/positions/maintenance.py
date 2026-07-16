@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.ledger.position_fields import (

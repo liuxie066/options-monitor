@@ -4,14 +4,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import argparse
-import json
 from datetime import datetime, timezone
 from typing import Any
 
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
-from domain.domain.ledger.position_fields import normalize_account, normalize_broker, normalize_currency
+from domain.domain.ledger.position_fields import (
+    normalize_account,
+    normalize_broker,
+)
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.risk_capacity import (
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
