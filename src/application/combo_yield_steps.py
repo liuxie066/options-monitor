@@ -26,6 +26,7 @@ from src.application.sell_put_call_helper import (
     attach_best_linked_calls,
     build_yield_enhancement_rank_shadow,
     find_sell_put_yield_enhancement_pairs,
+    get_yield_enhancement_pair_diagnostics,
     select_best_yield_enhancement_pairs,
 )
 from src.application.yield_enhancement_config import (
@@ -228,6 +229,16 @@ def run_combo_yield_scan_and_summarize(
         global_yield_enhancement_liquidity=(symbol_cfg.get("_global_yield_enhancement_liquidity") or {}),
         output_path=None,
     )
+    scope = infer_trace_scope_from_path(result.candidates_path)
+    pair_diagnostics_path = (report_dir / f"{symbol_lower}_combo_yield_pair_diagnostics.csv").resolve()
+    try:
+        pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
+        pair_diagnostics["run_id"] = scope.get("run_id")
+        pair_diagnostics["account"] = scope.get("account")
+        pair_diagnostics.to_csv(pair_diagnostics_path, index=False)
+    except Exception as exc:
+        log.warning("combo_yield_steps: failed to write pair diagnostics for %s: %s", symbol, exc)
+
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
     rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
     try:
@@ -235,7 +246,6 @@ def run_combo_yield_scan_and_summarize(
     except Exception as exc:
         log.warning("combo_yield_steps: failed to write shadow rank artifact for %s: %s", symbol, exc)
 
-    scope = infer_trace_scope_from_path(result.candidates_path)
     trace_rows = [
         build_candidate_filter_trace_row(
             run_id=scope.get("run_id"),

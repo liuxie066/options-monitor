@@ -464,6 +464,111 @@ def _write_pairs_df(pairs_df: pd.DataFrame, output_path: Path | None) -> None:
         pass
 
 
+_PAIR_DIAGNOSTIC_COLUMNS = (
+    "run_id account diagnostic_scope diagnostic_stage accepted reject_reasons "
+    "symbol expiration dte spot currency multiplier "
+    "put_contract_symbol put_strike put_bid put_ask put_mid put_delta put_open_interest put_volume put_spread_ratio "
+    "call_contract_symbol call_strike call_bid call_ask call_mid call_delta call_open_interest call_volume "
+    "call_spread_ratio put_only_net_credit put_net_credit call_total_cost combo_net_credit net_credit net_debit "
+    "net_credit_retention call_cost_to_put_credit annualized_net_credit_yield combo_spread_ratio funding_accepted "
+    "funding_reject_reasons expected_move lottery_budget_ratio residual_premium_ratio "
+    "call_payoff_multiple_at_1_5_sigma call_payoff_multiple_at_2_0_sigma funding_put_min_annualized_return "
+    "put_only_annualized_net_return yield_enhancement_mode put_strategy_profile "
+    "policy_call_min_delta policy_call_max_delta policy_call_min_strike policy_call_max_strike "
+    "policy_call_min_open_interest policy_call_min_volume policy_call_max_spread_ratio policy_funding_mode "
+    "policy_max_debit_native policy_min_net_credit_retention policy_min_net_credit_annualized "
+    "policy_max_combo_spread_ratio"
+).split()
+
+
+def _leg_diagnostic_fields(leg: YieldEnhancementLeg, *, prefix: str) -> dict[str, Any]:
+    return {
+        f"{prefix}_contract_symbol": leg.contract_symbol,
+        f"{prefix}_strike": leg.strike,
+        f"{prefix}_bid": leg.bid,
+        f"{prefix}_ask": leg.ask,
+        f"{prefix}_mid": leg.mid,
+        f"{prefix}_delta": leg.delta,
+        f"{prefix}_open_interest": leg.open_interest,
+        f"{prefix}_volume": leg.volume,
+        f"{prefix}_spread_ratio": leg.spread_ratio,
+    }
+
+
+def _diagnostic_row(
+    *,
+    scope: str,
+    stage: str,
+    accepted: bool,
+    reject_reasons: tuple[str, ...] = (),
+    put_leg: YieldEnhancementLeg | None = None,
+    call_leg: YieldEnhancementLeg | None = None,
+    candidate: dict[str, Any] | None = None,
+    raw_call: pd.Series | None = None,
+) -> dict[str, Any]:
+    row = dict(candidate or {})
+    source_leg = put_leg or call_leg
+    if source_leg is not None:
+        row.setdefault("symbol", source_leg.symbol)
+        row.setdefault("expiration", source_leg.expiration)
+        row.setdefault("dte", source_leg.dte)
+        row.setdefault("spot", source_leg.spot)
+        row.setdefault("currency", source_leg.currency)
+        row.setdefault("multiplier", source_leg.multiplier)
+    if put_leg is not None:
+        for key, value in _leg_diagnostic_fields(put_leg, prefix="put").items():
+            row.setdefault(key, value)
+    if call_leg is not None:
+        for key, value in _leg_diagnostic_fields(call_leg, prefix="call").items():
+            row.setdefault(key, value)
+    if raw_call is not None:
+        row.setdefault("symbol", raw_call.get("symbol"))
+        row.setdefault("expiration", raw_call.get("expiration"))
+        row.setdefault("dte", raw_call.get("dte"))
+        row.setdefault("spot", raw_call.get("spot"))
+        row.setdefault("currency", raw_call.get("currency") or raw_call.get("option_ccy"))
+        row.setdefault("multiplier", raw_call.get("multiplier"))
+        for source, target in (
+            ("contract_symbol", "call_contract_symbol"),
+            ("strike", "call_strike"),
+            ("bid", "call_bid"),
+            ("ask", "call_ask"),
+            ("mid", "call_mid"),
+            ("delta", "call_delta"),
+            ("open_interest", "call_open_interest"),
+            ("volume", "call_volume"),
+            ("spread_ratio", "call_spread_ratio"),
+        ):
+            row.setdefault(target, raw_call.get(source))
+    row.update(
+        {
+            "diagnostic_scope": scope,
+            "diagnostic_stage": stage,
+            "accepted": bool(accepted),
+            "reject_reasons": "|".join(dict.fromkeys(reject_reasons)),
+        }
+    )
+    return row
+
+
+def _pair_diagnostics_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=_PAIR_DIAGNOSTIC_COLUMNS)
+    diagnostics = pd.DataFrame(rows)
+    columns = [
+        *_PAIR_DIAGNOSTIC_COLUMNS,
+        *(column for column in diagnostics.columns if column not in _PAIR_DIAGNOSTIC_COLUMNS),
+    ]
+    return diagnostics.reindex(columns=columns)
+
+
+def get_yield_enhancement_pair_diagnostics(pairs_df: pd.DataFrame) -> pd.DataFrame:
+    diagnostics = pairs_df.attrs.get("pair_diagnostics")
+    if isinstance(diagnostics, pd.DataFrame):
+        return diagnostics.copy()
+    return _pair_diagnostics_df([])
+
+
 def _load_yield_enhancement_call_legs_by_expiration(
     *,
     input_root: Path,
@@ -471,51 +576,95 @@ def _load_yield_enhancement_call_legs_by_expiration(
     call_cfg: dict[str, Any],
     window: Any,
     liquidity: Any,
+    diagnostics: list[dict[str, Any]],
 ) -> tuple[dict[str, list[YieldEnhancementLeg]], Counter[str]]:
     raw_calls = _load_required_data_calls(input_root=input_root, symbol=symbol)
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
     reject_counts: Counter[str] = Counter()
     if raw_calls.empty:
         reject_counts["call_universe_empty"] += 1
+        diagnostics.append(
+            _diagnostic_row(
+                scope="call",
+                stage="call_filter",
+                accepted=False,
+                reject_reasons=("call_universe_empty",),
+                candidate={"symbol": symbol},
+            )
+        )
         return call_legs_by_expiration, reject_counts
     min_call_delta = _safe_float(call_cfg.get("min_delta"))
     max_call_delta = _safe_float(call_cfg.get("max_delta"))
     configured_min_strike = _safe_float(call_cfg.get("min_strike"))
     configured_max_strike = _safe_float(call_cfg.get("max_strike"))
+    diagnostic_policy = {
+        "policy_call_min_delta": min_call_delta,
+        "policy_call_max_delta": max_call_delta,
+        "policy_call_min_strike": configured_min_strike,
+        "policy_call_max_strike": configured_max_strike,
+        "policy_call_min_open_interest": liquidity.min_open_interest,
+        "policy_call_min_volume": liquidity.min_volume,
+        "policy_call_max_spread_ratio": liquidity.max_spread_ratio,
+    }
     for _, raw in raw_calls.iterrows():
         leg = _call_leg_from_required_data(raw)
         if leg is None:
             reject_counts["call_leg_invalid"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="call",
+                    stage="call_filter",
+                    accepted=False,
+                    reject_reasons=("call_leg_invalid",),
+                    candidate=diagnostic_policy,
+                    raw_call=raw,
+                )
+            )
             continue
+        reject_reason: str | None = None
         if not _passes_range(leg.dte, int(window.min_dte), int(window.max_dte)):
-            reject_counts["call_dte_out_of_range"] += 1
-            continue
+            reject_reason = "call_dte_out_of_range"
         effective_min_strike = max(value for value in (configured_min_strike, leg.spot) if value is not None)
-        if leg.strike < effective_min_strike:
-            reject_counts["call_strike_below_min"] += 1
-            continue
-        if configured_max_strike is not None and leg.strike > configured_max_strike:
-            reject_counts["call_strike_above_max"] += 1
-            continue
+        if reject_reason is None and leg.strike < effective_min_strike:
+            reject_reason = "call_strike_below_min"
+        if reject_reason is None and configured_max_strike is not None and leg.strike > configured_max_strike:
+            reject_reason = "call_strike_above_max"
         call_delta = _safe_float(leg.delta)
-        if call_delta is None and (min_call_delta is not None or max_call_delta is not None):
-            reject_counts["call_delta_missing"] += 1
+        if reject_reason is None and call_delta is None and (min_call_delta is not None or max_call_delta is not None):
+            reject_reason = "call_delta_missing"
+        if reject_reason is None and min_call_delta is not None and call_delta < float(min_call_delta):
+            reject_reason = "call_delta_below_min"
+        if reject_reason is None and max_call_delta is not None and call_delta > float(max_call_delta):
+            reject_reason = "call_delta_above_max"
+        if reject_reason is None:
+            reject_reason = _liquidity_reject_reason(
+                leg,
+                min_open_interest=liquidity.min_open_interest,
+                min_volume=liquidity.min_volume,
+                max_spread_ratio=liquidity.max_spread_ratio,
+            )
+        if reject_reason:
+            reject_counts[reject_reason] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="call",
+                    stage="call_filter",
+                    accepted=False,
+                    reject_reasons=(reject_reason,),
+                    call_leg=leg,
+                    candidate=diagnostic_policy,
+                )
+            )
             continue
-        if min_call_delta is not None and call_delta < float(min_call_delta):
-            reject_counts["call_delta_below_min"] += 1
-            continue
-        if max_call_delta is not None and call_delta > float(max_call_delta):
-            reject_counts["call_delta_above_max"] += 1
-            continue
-        liquidity_reject = _liquidity_reject_reason(
-            leg,
-            min_open_interest=liquidity.min_open_interest,
-            min_volume=liquidity.min_volume,
-            max_spread_ratio=liquidity.max_spread_ratio,
+        diagnostics.append(
+            _diagnostic_row(
+                scope="call",
+                stage="call_filter",
+                accepted=True,
+                call_leg=leg,
+                candidate=diagnostic_policy,
+            )
         )
-        if liquidity_reject:
-            reject_counts[liquidity_reject] += 1
-            continue
         call_legs_by_expiration.setdefault(leg.expiration, []).append(leg)
     return call_legs_by_expiration, reject_counts
 
@@ -562,28 +711,89 @@ def _build_yield_enhancement_pair_rows(
     max_debit_native: float | None,
     min_net_credit_retention: float | None,
     reject_counts: Counter[str],
+    diagnostics: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
+    diagnostic_policy = {
+        "policy_funding_mode": funding_mode,
+        "policy_max_debit_native": max_debit_native,
+        "policy_min_net_credit_retention": min_net_credit_retention,
+        "policy_min_net_credit_annualized": _safe_float(cfg.get("min_net_credit_annualized")),
+        "policy_max_combo_spread_ratio": _safe_float(cfg.get("max_combo_spread_ratio")),
+    }
     for _, raw in df.iterrows():
         put_leg = _put_leg_from_sell_put_row(raw)
         if put_leg is None:
             reject_counts["put_leg_invalid"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_filter",
+                    accepted=False,
+                    reject_reasons=("put_leg_invalid",),
+                    candidate={
+                        "symbol": raw.get("symbol"),
+                        "expiration": raw.get("expiration"),
+                        "dte": raw.get("dte"),
+                        "put_contract_symbol": raw.get("contract_symbol"),
+                        "put_strike": raw.get("strike"),
+                    },
+                )
+            )
             continue
         if not _passes_range(put_leg.dte, int(window.min_dte), int(window.max_dte)):
             reject_counts["put_dte_out_of_range"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_filter",
+                    accepted=False,
+                    reject_reasons=("put_dte_out_of_range",),
+                    put_leg=put_leg,
+                )
+            )
             continue
         if not _put_leg_passes_assignment_bounds(put_leg, sell_put_cfg):
             reject_counts["put_assignment_bounds"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_filter",
+                    accepted=False,
+                    reject_reasons=("put_assignment_bounds",),
+                    put_leg=put_leg,
+                )
+            )
             continue
 
         call_legs = call_legs_by_expiration.get(put_leg.expiration, [])
         if not call_legs:
             reject_counts["call_expiration_unavailable"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="pair_join",
+                    accepted=False,
+                    reject_reasons=("call_expiration_unavailable",),
+                    put_leg=put_leg,
+                )
+            )
             continue
         for call_leg in call_legs:
             pair_rejects = validate_yield_enhancement_pair(put_leg, call_leg)
             if pair_rejects:
                 reject_counts.update(pair_rejects)
+                diagnostics.append(
+                    _diagnostic_row(
+                        scope="pair",
+                        stage="pair_structure",
+                        accepted=False,
+                        reject_reasons=pair_rejects,
+                        put_leg=put_leg,
+                        call_leg=call_leg,
+                        candidate=diagnostic_policy,
+                    )
+                )
                 continue
             expected_iv = _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
             try:
@@ -597,7 +807,21 @@ def _build_yield_enhancement_pair_rows(
                 )
             except Exception:
                 reject_counts["pair_metrics_error"] += 1
+                diagnostics.append(
+                    _diagnostic_row(
+                        scope="pair",
+                        stage="pair_metrics",
+                        accepted=False,
+                        reject_reasons=("pair_metrics_error",),
+                        put_leg=put_leg,
+                        call_leg=call_leg,
+                        candidate=diagnostic_policy,
+                    )
+                )
                 continue
+            candidate.update(put_strategy_fields)
+            candidate.update(policy_fields)
+            candidate.update(_put_risk_fields(raw))
             pair_rejects = _candidate_pair_reject_reasons(
                 candidate,
                 funding_mode=funding_mode,
@@ -606,10 +830,28 @@ def _build_yield_enhancement_pair_rows(
             )
             if pair_rejects:
                 reject_counts.update(pair_rejects)
+                diagnostics.append(
+                    _diagnostic_row(
+                        scope="pair",
+                        stage="pair_filter",
+                        accepted=False,
+                        reject_reasons=pair_rejects,
+                        put_leg=put_leg,
+                        call_leg=call_leg,
+                        candidate={**candidate, **diagnostic_policy},
+                    )
+                )
                 continue
-            candidate.update(put_strategy_fields)
-            candidate.update(policy_fields)
-            candidate.update(_put_risk_fields(raw))
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="pair",
+                    stage="pair_filter",
+                    accepted=True,
+                    put_leg=put_leg,
+                    call_leg=call_leg,
+                    candidate={**candidate, **diagnostic_policy},
+                )
+            )
             pair_rows.append(candidate)
     return pair_rows
 
@@ -632,8 +874,10 @@ def find_sell_put_yield_enhancement_pairs(
     )
     cfg = policy.to_config()
     cfg["_max_call_cost_to_put_credit_explicit"] = "max_call_cost_to_put_credit" in set(policy.explicit_fields)
+    diagnostics: list[dict[str, Any]] = []
     if df.empty or not policy.enabled:
         pairs_df = _empty_pairs_df()
+        pairs_df.attrs["pair_diagnostics"] = _pair_diagnostics_df(diagnostics)
         _write_pairs_df(pairs_df, output_path)
         return pairs_df
 
@@ -661,6 +905,7 @@ def find_sell_put_yield_enhancement_pairs(
         call_cfg=call_cfg,
         window=window,
         liquidity=liquidity,
+        diagnostics=diagnostics,
     )
 
     pair_rows = _build_yield_enhancement_pair_rows(
@@ -676,11 +921,13 @@ def find_sell_put_yield_enhancement_pairs(
         max_debit_native=max_debit_native,
         min_net_credit_retention=min_net_credit_retention,
         reject_counts=reject_counts,
+        diagnostics=diagnostics,
     )
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)
     pairs_df = pd.DataFrame(ranked_pairs) if ranked_pairs else _empty_pairs_df()
     pairs_df.attrs["reject_counts"] = dict(sorted(reject_counts.items()))
+    pairs_df.attrs["pair_diagnostics"] = _pair_diagnostics_df(diagnostics)
     _write_pairs_df(pairs_df, output_path)
     return pairs_df
 

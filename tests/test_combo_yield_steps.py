@@ -117,6 +117,19 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     def rejected_pairs(**_kwargs):
         out = pd.DataFrame()
         out.attrs["reject_counts"] = {"min_net_credit_retention": 3}
+        out.attrs["pair_diagnostics"] = pd.DataFrame(
+            [
+                {
+                    "diagnostic_scope": "pair",
+                    "diagnostic_stage": "pair_filter",
+                    "accepted": False,
+                    "reject_reasons": "min_net_credit_retention",
+                    "put_contract_symbol": "NVDA260821P00100000",
+                    "call_contract_symbol": "NVDA260821C00120000",
+                    "net_credit_retention": 0.72,
+                }
+            ]
+        )
         return out
 
     captured, trace, _scan_kwargs = _run(
@@ -130,6 +143,57 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     assert len(pair_rows) == 1
     assert pair_rows[0]["rule"] == "min_net_credit_retention"
     assert pair_rows[0]["metric_value"] == 3
+    diagnostics = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_pair_diagnostics.csv")
+    assert diagnostics[["put_contract_symbol", "call_contract_symbol"]].to_dict("records") == [
+        {
+            "put_contract_symbol": "NVDA260821P00100000",
+            "call_contract_symbol": "NVDA260821C00120000",
+        }
+    ]
+    assert diagnostics.loc[0, "reject_reasons"] == "min_net_credit_retention"
+    assert {"run_id", "account"}.issubset(diagnostics.columns)
+
+
+def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pairs(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    parsed = tmp_path / "required_data" / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-08-21",
+                "dte": 35,
+                "contract_symbol": "NVDA260821C00120000",
+                "strike": 120.0,
+                "spot": 110.0,
+                "bid": 0.9,
+                "ask": 1.0,
+                "mid": 0.95,
+                "open_interest": 500,
+                "volume": 50,
+                "implied_volatility": 0.40,
+                "currency": "USD",
+                "delta": 0.30,
+                "multiplier": 100,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
+        find_pairs_fn=find_sell_put_yield_enhancement_pairs,
+    )
+
+    diagnostics = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_pair_diagnostics.csv")
+    call_reject = diagnostics.loc[diagnostics["diagnostic_scope"] == "call"].iloc[0]
+    assert call_reject["call_contract_symbol"] == "NVDA260821C00120000"
+    assert call_reject["reject_reasons"] == "call_delta_above_max"
+    assert float(call_reject["policy_call_max_delta"]) == 0.20
+    assert int(diagnostics["accepted"].sum()) == 0
 
 
 def test_combo_yield_uses_standalone_sell_put_return_floor_and_annotations(tmp_path: Path) -> None:

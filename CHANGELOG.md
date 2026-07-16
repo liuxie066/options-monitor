@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.398 - 2026-07-16
+
+### Added
+- Added a research-only Combo Yield pair diagnostics artifact that records Call prefiltering, Put matching, pair-level rejection reasons, economic metrics, and active policy thresholds without changing production filtering, ranking, notifications, or runtime config.
+
 ## 1.2.397 - 2026-07-16
 
 ### Added
