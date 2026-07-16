@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.402 - 2026-07-16
+
+### Added
+- Added fail-closed `assistant.copilot.toolsets.portfolio` configuration so operators can explicitly share the existing pure-read portfolio-management toolset with Copilot.
+
+### Changed
+- Removed `portfolio_query` from the default Copilot Scene projection while keeping the external `./om-agent` tool contract unchanged; current assistant config is reapplied when building and resuming Copilot runs.
+
 ## 1.2.401 - 2026-07-16
 
 ### Added

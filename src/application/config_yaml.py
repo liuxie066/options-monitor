@@ -700,6 +700,9 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
         "context_window_messages": 8,
         "copilot": {
             "enabled": False,
+            "toolsets": {
+                "portfolio": False,
+            },
         },
         "llm": {
             "provider": "",

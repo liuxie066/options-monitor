@@ -165,7 +165,9 @@ tool and not a shell bridge. It performs sender allowlist checks, message
 idempotency, and SQLite audit. Explicit commands and pending-operation replies
 enter deterministic Control; every other message enters the single read-first
 `om_chat` Copilot Scene when `assistant.copilot.enabled` is true. Copilot gets
-canonical pure-read tools and may request one validated deterministic Control
+canonical pure-read tools; the optional `portfolio` toolset is projected only
+when `assistant.copilot.toolsets.portfolio` is also true. This setting does not
+unregister `portfolio_query` from `./om-agent`. Copilot may request one validated deterministic Control
 preview; it cannot confirm, cancel, apply, or receive direct notification,
 config-write, ledger/trade, broker-write, service-control, or upgrade tools.
 

@@ -41,6 +41,8 @@ assistant:
   context_window_messages: 8
   copilot:
     enabled: true
+    toolsets:
+      portfolio: false
   active_model: deepseek-default
   models:
     deepseek-default:

@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant.settings import AssistantSettings
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
 from src.application.config_profiles import apply_profiles
 from src.application.config_validator import validate_config
@@ -514,6 +515,7 @@ inbound:
 
     assert cfg["assistant"]["enabled"] is True
     assert cfg["assistant"]["copilot"]["enabled"] is False
+    assert cfg["assistant"]["copilot"]["toolsets"]["portfolio"] is False
     assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
@@ -732,7 +734,10 @@ assistant:
 
     cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assert cfg["assistant"]["copilot"] == {"enabled": True}
+    assert cfg["assistant"]["copilot"] == {
+        "enabled": True,
+        "toolsets": {"portfolio": False},
+    }
     assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [
         "retired assistant.copilot keys omitted: channel_scenes, human_review"
     ]
@@ -794,6 +799,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
     assert payload["assistant"]["enabled"] is True
     assert payload["assistant"]["copilot"]["enabled"] is True
+    assert payload["assistant"]["copilot"]["toolsets"]["portfolio"] is False
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
@@ -811,6 +817,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert assistant_cfg["assistant"]["enabled"] is True
     assert assistant_cfg["assistant"]["copilot"]["enabled"] is True
+    assert assistant_cfg["assistant"]["copilot"]["toolsets"]["portfolio"] is False
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]
     assert "active_model" not in assistant_cfg["assistant"]
@@ -1091,6 +1098,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
     assert "agent" not in payload
     assert payload["assistant"]["enabled"] is True
     assert payload["assistant"]["copilot"]["enabled"] is True
+    assert AssistantSettings.from_runtime_config(payload).enabled_copilot_toolsets == frozenset()
     assert payload["assistant"]["context_window_messages"] == 6
     assert payload["assistant"]["llm"] == {
         "provider": "deepseek",
@@ -1115,6 +1123,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
     assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=migrated_path)
     assert assistant_cfg["assistant"]["enabled"] is True
     assert assistant_cfg["assistant"]["copilot"]["enabled"] is True
+    assert AssistantSettings.from_runtime_config(assistant_cfg).enabled_copilot_toolsets == frozenset()
     assert "enabled" not in assistant_cfg["assistant"]["llm"]
 
 

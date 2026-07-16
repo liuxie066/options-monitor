@@ -12,14 +12,22 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
+CONFIGURABLE_COPILOT_TOOLSETS = frozenset({"portfolio"})
 
 
 @dataclass(frozen=True)
 class CopilotSettings:
     enabled: bool = False
+    toolsets: frozenset[str] = frozenset()
 
     def public_payload(self) -> dict[str, Any]:
-        return {"enabled": bool(self.enabled)}
+        return {
+            "enabled": bool(self.enabled),
+            "toolsets": {
+                name: name in self.toolsets
+                for name in sorted(CONFIGURABLE_COPILOT_TOOLSETS)
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -62,8 +70,14 @@ class AssistantSettings:
         assistant_cfg = _dict(cfg.get("assistant"))
         enabled = _assistant_enabled(assistant_cfg)
         copilot_cfg = _dict(assistant_cfg.get("copilot"))
+        copilot_toolsets = _dict(copilot_cfg.get("toolsets"))
         configured_copilot = CopilotSettings(
             enabled=_bool(copilot_cfg.get("enabled"), default=False),
+            toolsets=frozenset(
+                name
+                for name in CONFIGURABLE_COPILOT_TOOLSETS
+                if _bool(copilot_toolsets.get(name), default=False)
+            ),
         )
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
@@ -87,6 +101,13 @@ class AssistantSettings:
             "copilot": self.copilot.public_payload(),
             "llm": self.llm.public_payload(),
         }
+
+    @property
+    def enabled_copilot_toolsets(self) -> frozenset[str]:
+        if not self.enabled or not self.copilot.enabled:
+            return frozenset()
+        return self.copilot.toolsets
+
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}

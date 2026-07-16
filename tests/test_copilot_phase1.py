@@ -110,7 +110,8 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "never confirm, apply, or cancel" in definition["system_prompt"]
     assert "analysis_query" in manifest.allowed_tools
     assert "runtime_status" in manifest.allowed_tools
-    assert "portfolio_query" in manifest.allowed_tools
+    assert "portfolio_query" not in manifest.allowed_tools
+    assert definition["tool_selection"]["optional_names"] == ["portfolio"]
     assert "symbol_config_update" not in manifest.allowed_tools
     assert manifest.limits["max_model_turns"] == definition["runtime"]["max_iterations"]
 
@@ -119,7 +120,8 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
     from src.application.agent_tool_registry import pure_read_toolsets
 
     definition = load_general_scene()
-    selected = tuple(definition["tool_selection"]["names"])
+    optional = set(definition["tool_selection"]["optional_names"])
+    selected = tuple(name for name in definition["tool_selection"]["names"] if name not in optional)
     manifest = build_scene_manifest(_contract(), "run_toolsets")
     expected = {
         name
@@ -128,9 +130,16 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
     }
 
     assert set(manifest.allowed_tools) == expected
-    assert "portfolio" in selected
-    assert "portfolio_query" in expected
+    assert "portfolio" not in selected
+    assert "portfolio_query" not in expected
     assert "symbol_config_update" not in expected
+
+    enabled_manifest = build_scene_manifest(
+        _contract(),
+        "run_toolsets_enabled",
+        enabled_optional_toolsets=frozenset({"portfolio"}),
+    )
+    assert "portfolio_query" in enabled_manifest.allowed_tools
 
 
 def test_agent_tool_view_exposes_result_contract() -> None:
@@ -328,6 +337,105 @@ def test_tool_result_is_returned_as_standard_tool_message(monkeypatch) -> None:
     assert projected["status"] == "healthy"
     assert "ok" not in projected
     assert "value" not in projected
+
+
+def test_disabled_portfolio_toolset_blocks_model_attempt_before_tool_execution(monkeypatch) -> None:
+    calls: list[str] = []
+    turns = iter(
+        (
+            ModelTurn(tool_calls=(_call("portfolio_query", {"view": "health"}),)),
+            ModelTurn(text="portfolio 工具未开放。"),
+        )
+    )
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        calls.append(name)
+        return {"ok": True, "data": {"status": "healthy"}}
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    result = run_contract(_contract("查询 portfolio"), model_runner=lambda _request: next(turns))
+
+    assert result.status == "answered"
+    assert calls == []
+    assert any(
+        event.type == "tool_result"
+        and event.payload.get("error") == "POLICY_ERROR"
+        for event in result.events
+    )
+
+
+def test_enabled_portfolio_toolset_reaches_tool_execution(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+    turns = iter(
+        (
+            ModelTurn(tool_calls=(_call("portfolio_query", {"view": "health"}),)),
+            ModelTurn(text="portfolio 服务正常。"),
+        )
+    )
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        calls.append((name, dict(payload)))
+        return {"ok": True, "data": {"status": "healthy"}}
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    result = run_contract(
+        _contract("查询 portfolio"),
+        model_runner=lambda _request: next(turns),
+        enabled_optional_toolsets=frozenset({"portfolio"}),
+    )
+
+    assert result.status == "answered"
+    assert calls == [("portfolio_query", {"view": "health"})]
+
+
+def test_prepared_contract_reloads_current_portfolio_toolset_on_resume(monkeypatch, tmp_path) -> None:
+    from src.application.copilot import local_harness
+
+    config_path = tmp_path / "config.assistant.json"
+    calls: list[str] = []
+
+    def write_config(portfolio_enabled: bool) -> None:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "assistant": {
+                        "enabled": True,
+                        "copilot": {
+                            "enabled": True,
+                            "toolsets": {"portfolio": portfolio_enabled},
+                        },
+                        "llm": {},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def model(request: ModelRequest) -> ModelTurn:
+        if any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(text="portfolio 检查完成。")
+        return ModelTurn(tool_calls=(_call("portfolio_query", {"view": "health"}),))
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        calls.append(name)
+        return {"ok": True, "data": {"status": "healthy"}}
+
+    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    prepared = _contract("查询 portfolio")
+
+    write_config(True)
+    first = local_harness.run_prepared_contract(prepared, assistant_config_path=str(config_path))
+    write_config(False)
+    resumed = local_harness.run_prepared_contract(
+        prepared,
+        assistant_config_path=str(config_path),
+        resumed_from=first.run_id,
+    )
+
+    assert first.status == "answered"
+    assert resumed.status == "answered"
+    assert calls == ["portfolio_query"]
 
 
 def test_model_arguments_are_not_dropped_by_tool_wrapper(monkeypatch) -> None:

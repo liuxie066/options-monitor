@@ -11,7 +11,11 @@ from src.application.copilot.eval_fixtures import fixture_observations
 from src.application.copilot.host import run_contract
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
-from src.application.copilot.model_config import load_assistant_llm_config, model_api_key_configured
+from src.application.copilot.model_config import (
+    load_assistant_copilot_toolsets,
+    load_assistant_llm_config,
+    model_api_key_configured,
+)
 from src.application.copilot.service import prepare_contract
 
 
@@ -60,6 +64,12 @@ def run_prepared_contract(
     resumed_from: str | None = None,
     recovered_observations: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
+    enabled_optional_toolsets, settings_error = load_assistant_copilot_toolsets(
+        config_path=assistant_config_path,
+        require_config=bool(str(assistant_config_path or "").strip()),
+    )
+    if settings_error or enabled_optional_toolsets is None:
+        return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
     model_runner, model_error = _resolve_model_runner(
         model_config_json=model_config_json,
         assistant_config_path=assistant_config_path,
@@ -84,6 +94,7 @@ def run_prepared_contract(
         control_preview_specs=control_preview_specs,
         resumed_from=resumed_from,
         recovered_observations=recovered_observations,
+        enabled_optional_toolsets=enabled_optional_toolsets,
     )
 
 

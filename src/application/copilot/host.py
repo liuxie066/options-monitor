@@ -132,6 +132,7 @@ def run_contract(
     control_preview_specs: tuple[dict[str, Any], ...] = (),
     resumed_from: str | None = None,
     recovered_observations: tuple[dict[str, Any], ...] = (),
+    enabled_optional_toolsets: frozenset[str] = frozenset(),
 ) -> AppResult:
     run_id = new_id("run")
     if host_store is not None:
@@ -170,8 +171,17 @@ def run_contract(
             ),
         )
     try:
+        scene_manifest = (
+            build_scene_manifest(
+                contract,
+                run_id,
+                enabled_optional_toolsets=enabled_optional_toolsets,
+            )
+            if enabled_optional_toolsets
+            else build_scene_manifest(contract, run_id)
+        )
         manifest = _manifest_with_tool_descriptions(
-            build_scene_manifest(contract, run_id),
+            scene_manifest,
             control_preview_specs=control_preview_specs if contract.execution_environment == "channel" else (),
         )
     except Exception:

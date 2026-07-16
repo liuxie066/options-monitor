@@ -17,6 +17,57 @@ def load_assistant_llm_config(
     repo_root: str | Path | None = None,
     require_config: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    payload, load_error = _load_assistant_config(
+        config_path=config_path,
+        repo_root=repo_root,
+        require_config=require_config,
+    )
+    if load_error or payload is None:
+        return None, load_error
+
+    assistant = payload.get("assistant")
+    assistant_cfg = assistant if isinstance(assistant, dict) else {}
+    if assistant_cfg.get("enabled") is False:
+        return None, None
+    llm = assistant_cfg.get("llm")
+    llm_cfg = llm if isinstance(llm, dict) else {}
+    if not str(llm_cfg.get("provider") or "").strip() or not str(llm_cfg.get("model") or "").strip():
+        return None, None
+    return dict(llm_cfg), None
+
+
+def load_assistant_copilot_toolsets(
+    *,
+    config_path: str | Path | None = None,
+    repo_root: str | Path | None = None,
+    require_config: bool = False,
+) -> tuple[frozenset[str] | None, str | None]:
+    payload, load_error = _load_assistant_config(
+        config_path=config_path,
+        repo_root=repo_root,
+        require_config=require_config,
+    )
+    if load_error:
+        return None, load_error
+    assistant = (payload or {}).get("assistant")
+    assistant_cfg = assistant if isinstance(assistant, dict) else {}
+    if assistant_cfg.get("enabled") is False:
+        return frozenset(), None
+    copilot = assistant_cfg.get("copilot")
+    copilot_cfg = copilot if isinstance(copilot, dict) else {}
+    if copilot_cfg.get("enabled") is not True:
+        return frozenset(), None
+    toolsets = copilot_cfg.get("toolsets")
+    toolset_cfg = toolsets if isinstance(toolsets, dict) else {}
+    return frozenset(str(name) for name, enabled in toolset_cfg.items() if enabled is True), None
+
+
+def _load_assistant_config(
+    *,
+    config_path: str | Path | None,
+    repo_root: str | Path | None,
+    require_config: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
     path = _assistant_config_path(config_path=config_path, repo_root=repo_root)
     if not path.exists():
         if require_config:
@@ -32,16 +83,7 @@ def load_assistant_llm_config(
         validate_assistant_config(payload)
     except SystemExit:
         return None, "invalid_assistant_config"
-
-    assistant = payload.get("assistant")
-    assistant_cfg = assistant if isinstance(assistant, dict) else {}
-    if assistant_cfg.get("enabled") is False:
-        return None, None
-    llm = assistant_cfg.get("llm")
-    llm_cfg = llm if isinstance(llm, dict) else {}
-    if not str(llm_cfg.get("provider") or "").strip() or not str(llm_cfg.get("model") or "").strip():
-        return None, None
-    return dict(llm_cfg), None
+    return payload, None
 
 
 def model_api_key_configured(raw: dict[str, Any], *, environ: dict[str, str] | None = None) -> tuple[bool, str | None]:
