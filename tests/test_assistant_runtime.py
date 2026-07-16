@@ -23,6 +23,19 @@ def _request(tmp_path: Path, text: str, *, message_id: str = "m_runtime") -> Ass
     )
 
 
+def test_portfolio_toolset_is_disabled_by_default_and_requires_all_gates() -> None:
+    assert AssistantSettings.from_runtime_config({}).enabled_copilot_toolsets == frozenset()
+    assert AssistantSettings.from_runtime_config(
+        {"assistant": {"copilot": {"enabled": True, "toolsets": {"portfolio": True}}}}
+    ).enabled_copilot_toolsets == frozenset({"portfolio"})
+    assert AssistantSettings.from_runtime_config(
+        {"assistant": {"enabled": False, "copilot": {"enabled": True, "toolsets": {"portfolio": True}}}}
+    ).enabled_copilot_toolsets == frozenset()
+    assert AssistantSettings.from_runtime_config(
+        {"assistant": {"copilot": {"enabled": False, "toolsets": {"portfolio": True}}}}
+    ).enabled_copilot_toolsets == frozenset()
+
+
 def test_freeform_turn_goes_directly_to_copilot(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant import inbound_service
 

@@ -22,7 +22,8 @@
       "positions",
       "portfolio",
       "runtime"
-    ]
+    ],
+    "optional_names": ["portfolio"]
   },
   "runtime": {
     "max_iterations": 16,

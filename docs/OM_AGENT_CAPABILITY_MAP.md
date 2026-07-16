@@ -20,7 +20,9 @@ The `portfolio` toolset contains one pure-read tool, `portfolio_query`. It lets 
 same `om_chat` Copilot read portfolio-management `health`, `accounts`, `overview`,
 `holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
 loopback HTTP boundary. It does not expose portfolio writes, accept endpoint
-arguments, or add a second Scene/Agent.
+arguments, or add a second Scene/Agent. The toolset is optional and defaults off
+for internal Copilot projection; `./om-agent` continues to expose the canonical
+tool independently of this Copilot setting.
 
 ## Deterministic Control
 
@@ -69,8 +71,14 @@ assistant:
   enabled: true
   copilot:
     enabled: true
+    toolsets:
+      portfolio: false
   active_model: deepseek-default
 ```
+
+Set `assistant.copilot.toolsets.portfolio: true` to expose `portfolio_query` to
+Copilot. Effective access requires the assistant, Copilot, and portfolio toolset
+flags to all be true. Missing toolset configuration is fail-closed.
 
 `assistant.models` and `assistant.active_model` resolve the provider used by
 Copilot. `assistant.planner`, `assistant.agent_loop`, and per-scene channel

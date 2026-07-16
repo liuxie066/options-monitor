@@ -62,6 +62,9 @@ def check_assistant_llm(
             "ok": ok,
             "status": status,
             "enabled": bool(settings.enabled),
+            "assistant_copilot_portfolio_enabled": (
+                "portfolio" in runtime_settings.enabled_copilot_toolsets
+            ),
             "live_checked": bool(live),
             "error_count": sum(1 for item in checks if item.get("status") == "error"),
             "warning_count": sum(1 for item in checks if item.get("status") == "warn"),
