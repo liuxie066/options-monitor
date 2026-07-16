@@ -5,8 +5,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.application.multiplier_cache import save_cache
 from src.application.trades.normalizer import normalize_trade_deal
+
+
+@pytest.fixture(autouse=True)
+def _keep_multiplier_resolution_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.application.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
+    )
 
 
 def test_normalize_trade_deal_maps_core_fields() -> None:
