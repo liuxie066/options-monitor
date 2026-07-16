@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.397 - 2026-07-16
+
+### Added
+- Added Put-only versus Combo breakeven, downside-penalty, lottery-budget, and residual-premium metrics, plus 1.5σ and 2.0σ Call payoff multiples.
+- Added a research-only Combo Yield Shadow ranking artifact with baseline and shadow ranks without changing production recommendations.
+
+### Changed
+- Required each Funding Put leg to independently satisfy the Sell Put annualized net-return floor while retaining separate event, cash, strike, and liquidity gates.
+
 ## 1.2.396 - 2026-07-15
 
 ### Changed
