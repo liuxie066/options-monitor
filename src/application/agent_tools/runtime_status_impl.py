@@ -2342,6 +2342,16 @@ def runtime_status_tool(
         else {}
     )
     data["summary"]["assistant_copilot_enabled"] = bool(assistant_copilot.get("enabled"))
+    assistant_copilot_toolsets = (
+        assistant_copilot.get("toolsets")
+        if isinstance(assistant_copilot.get("toolsets"), dict)
+        else {}
+    )
+    data["summary"]["assistant_copilot_portfolio_enabled"] = bool(
+        assistant_config_summary.get("enabled")
+        and assistant_copilot.get("enabled")
+        and assistant_copilot_toolsets.get("portfolio")
+    )
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")

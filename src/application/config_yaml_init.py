@@ -113,6 +113,9 @@ def _starter_yaml_payload(
             "context_window_messages": 8,
             "copilot": {
                 "enabled": True,
+                "toolsets": {
+                    "portfolio": False,
+                },
             },
             "active_model": "deepseek-default",
             "models": {

@@ -11,7 +11,11 @@ from src.application.assistant.diagnostics import check_assistant_llm
 from src.application.copilot.model_config import model_api_key_configured
 
 
-def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
+def _assistant_config(
+    *,
+    llm: dict[str, Any] | None = None,
+    portfolio_enabled: bool = False,
+) -> dict[str, Any]:
     llm_cfg = dict(llm or {"enabled": False})
     enabled = bool(llm_cfg.pop("enabled", False))
     return {
@@ -19,7 +23,10 @@ def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
             "enabled": True,
             "context_window_messages": 8,
             "default_market_scope": "us",
-            "copilot": {"enabled": enabled},
+            "copilot": {
+                "enabled": enabled,
+                "toolsets": {"portfolio": portfolio_enabled},
+            },
             "llm": llm_cfg,
         },
     }
@@ -42,6 +49,7 @@ def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> No
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
+    assert out["summary"]["assistant_copilot_portfolio_enabled"] is False
     assert out["llm"]["enabled"] is False
     assert "runtime_status" in out["capabilities"]["pure_read_tools"]
     assert "portfolio_query" in out["capabilities"]["pure_read_tools"]
@@ -51,6 +59,24 @@ def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> No
     assert checks["enabled"]["status"] == "warn"
     assert checks["provider"]["status"] == "skipped"
     assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _assistant_config(
+            portfolio_enabled=True,
+            llm={"enabled": True, "provider": "ollama", "model": "gpt-oss:20b"},
+        ),
+    )
+
+    out = check_assistant_llm(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        include_local_env_file=False,
+    )
+
+    assert out["summary"]["assistant_copilot_portfolio_enabled"] is True
 
 
 def test_ollama_model_config_does_not_require_api_key() -> None:

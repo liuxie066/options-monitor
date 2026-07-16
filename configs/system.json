@@ -143,7 +143,10 @@
       "enabled": true,
       "context_window_messages": 8,
       "copilot": {
-        "enabled": false
+        "enabled": false,
+        "toolsets": {
+          "portfolio": false
+        }
       },
       "llm": {
         "provider": "",

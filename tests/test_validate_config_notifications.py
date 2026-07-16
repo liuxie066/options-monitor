@@ -149,6 +149,44 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     except SystemExit as exc:
         assert "assistant.llm.provider must be a string" in str(exc)
 
+
+def test_validate_config_accepts_known_boolean_copilot_toolsets() -> None:
+    import src.application.config_validator as mod
+
+    for enabled in (True, False):
+        cfg = _base_cfg()
+        cfg["assistant"] = {
+            "enabled": True,
+            "copilot": {"enabled": True, "toolsets": {"portfolio": enabled}},
+        }
+        mod.validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_copilot_toolsets() -> None:
+    import src.application.config_validator as mod
+
+    cases = (
+        ({"portfolio": "yes"}, "assistant.copilot.toolsets.portfolio must be a boolean"),
+        ({"portfolio": None}, "assistant.copilot.toolsets.portfolio must be a boolean"),
+        ({"unknown": True}, "assistant.copilot.toolsets contains unsupported keys: unknown"),
+    )
+    for toolsets, expected in cases:
+        cfg = _base_cfg()
+        cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": toolsets}}
+        try:
+            mod.validate_config(cfg)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert expected in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": ["portfolio"]}}
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.copilot.toolsets must be an object" in str(exc)
+
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
 

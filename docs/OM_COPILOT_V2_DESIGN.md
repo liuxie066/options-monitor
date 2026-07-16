@@ -44,8 +44,11 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 - Service does not parse month, symbol, account, or intent from free text.
 - Host owns execution governance; Agent owns generic model/tool iteration.
 - Agent and Engine contain no OM task routing or strategy-specific branches.
-- Copilot receives canonical pure-read tools only. The `portfolio` toolset is one
-  such read boundary, not a second Copilot, Scene, router, or Agent runtime.
+- Copilot receives canonical pure-read tools only. The `portfolio` toolset is an
+  optional read boundary, disabled by default and projected only when
+  `assistant.enabled`, `assistant.copilot.enabled`, and
+  `assistant.copilot.toolsets.portfolio` are all true. It is not a second
+  Copilot, Scene, router, or Agent runtime.
 - The model may request a validated Control preview but cannot confirm, cancel,
   apply, or call a direct mutation tool.
 - Explicit commands and pending-operation replies remain deterministic Control.
@@ -111,7 +114,7 @@ src/application/copilot/om_chat.scene.json
 It declares:
 
 - static prompt fragments;
-- canonical read toolsets;
+- canonical read toolsets plus the optional `portfolio` toolset declaration;
 - model/tool/context/time budgets;
 - conversation limits.
 
@@ -177,6 +180,10 @@ be fixed at the owning tool definition. Copilot must not maintain a second tool
 catalog or question-specific evidence recipe. `portfolio_query` accepts only
 view and query scope; it rejects model-provided endpoints and non-loopback service
 URLs, exposes no portfolio write endpoint, and preserves source/scope/freshness.
+Disabling the optional toolset removes both its model-visible description and
+its Host allowlist entry before Agent execution. Engine allowlist enforcement
+still rejects a model-emitted call that was not projected. Resume rebuilds the
+Scene from current assistant config, so a later disable revokes resumed access.
 
 ## Deterministic Control
 

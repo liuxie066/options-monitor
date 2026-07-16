@@ -24,6 +24,9 @@ def load_general_scene() -> dict[str, Any]:
         raise ValueError("om_chat scene manifest is incomplete")
     if tool_selection.get("mode") != "toolsets" or not isinstance(tool_selection.get("names"), list):
         raise ValueError("om_chat scene must declare read-only toolsets")
+    optional_names = tool_selection.get("optional_names") or []
+    if not isinstance(optional_names, list) or not set(optional_names).issubset(set(tool_selection["names"])):
+        raise ValueError("om_chat scene optional toolsets must be selected toolsets")
     raw["system_prompt"] = _load_prompt_fragments(raw.get("prompt_fragments"))
     return raw
 
@@ -45,11 +48,26 @@ def _load_prompt_fragments(value: Any) -> str:
     return "\n\n".join(parts)
 
 
-def build_scene_manifest(contract: ExecutionContract, run_id: str) -> SceneManifest:
+def build_scene_manifest(
+    contract: ExecutionContract,
+    run_id: str,
+    *,
+    enabled_optional_toolsets: frozenset[str] = frozenset(),
+) -> SceneManifest:
     if contract.scene_name != GENERAL_SCENE:
         raise ValueError(f"unsupported Copilot scene: {contract.scene_name}")
     definition = load_general_scene()
     runtime = dict(definition["runtime"])
+    selection = dict(definition["tool_selection"])
+    optional_toolsets = frozenset(str(item) for item in selection.get("optional_names") or ())
+    unknown_enabled_toolsets = enabled_optional_toolsets - optional_toolsets
+    if unknown_enabled_toolsets:
+        raise ValueError(f"unsupported optional Copilot toolsets: {sorted(unknown_enabled_toolsets)}")
+    selected_toolsets = tuple(
+        str(item)
+        for item in selection["names"]
+        if str(item) not in optional_toolsets or str(item) in enabled_optional_toolsets
+    )
     history = contract.input.get("messages")
     messages = [dict(item) for item in history if isinstance(item, dict)] if isinstance(history, list) else []
     if not messages:
@@ -64,7 +82,7 @@ def build_scene_manifest(contract: ExecutionContract, run_id: str) -> SceneManif
             *([{"role": "system", "content": runtime_context}] if runtime_context else []),
             *messages,
         ],
-        allowed_tools=list(available_read_tools(tuple(str(item) for item in definition["tool_selection"]["names"]))),
+        allowed_tools=list(available_read_tools(selected_toolsets)),
         limits={
             "max_model_turns": _positive_int(runtime.get("max_iterations"), 16),
             "max_tool_calls": _positive_int(runtime.get("max_tool_calls"), 12),

@@ -46,6 +46,9 @@ contracts with `/confirm trade <operation_id>`.
 
 Messages that are not explicit Control protocol enter Copilot when both
 `assistant.enabled` and `assistant.copilot.enabled` are true.
+Portfolio-management access is a separate fail-closed projection: `portfolio_query`
+is available to Copilot only when `assistant.copilot.toolsets.portfolio` is also
+true. Missing values mean disabled.
 
 Copilot uses:
 
@@ -87,8 +90,14 @@ assistant:
   enabled: true
   copilot:
     enabled: true
+    toolsets:
+      portfolio: false
   active_model: deepseek-default
 ```
+
+Change `portfolio` to `true` to share the portfolio-management pure-read toolset
+with Copilot. This does not start the portfolio-management API service and does
+not change the external `./om-agent` Tool Gateway contract.
 
 `assistant.models` defines model profiles. Generated
 `resolved/config.assistant.json` must be rebuilt after authoring changes.

@@ -109,6 +109,7 @@ ASSISTANT_CONFIG_KEYS = {
     'llm',
     'models',
 }
+COPILOT_TOOLSET_KEYS = {'portfolio'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -271,15 +272,27 @@ def _validate_assistant_config(cfg: dict) -> None:
         die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
     if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
         die('assistant.enabled must be a boolean')
-    copilot = assistant.get('copilot') or {}
-    if copilot and not isinstance(copilot, dict):
+    copilot = assistant.get('copilot')
+    if copilot is None:
+        copilot = {}
+    if not isinstance(copilot, dict):
         die('assistant.copilot must be an object')
-    if isinstance(copilot, dict):
-        unsupported_copilot = sorted(str(key) for key in copilot if key != 'enabled')
-        if unsupported_copilot:
-            die(f'assistant.copilot contains unsupported keys: {", ".join(unsupported_copilot)}')
-        if 'enabled' in copilot and copilot.get('enabled') is not None and not isinstance(copilot.get('enabled'), bool):
-            die('assistant.copilot.enabled must be a boolean')
+    unsupported_copilot = sorted(str(key) for key in copilot if key not in {'enabled', 'toolsets'})
+    if unsupported_copilot:
+        die(f'assistant.copilot contains unsupported keys: {", ".join(unsupported_copilot)}')
+    if 'enabled' in copilot and copilot.get('enabled') is not None and not isinstance(copilot.get('enabled'), bool):
+        die('assistant.copilot.enabled must be a boolean')
+    toolsets = copilot.get('toolsets')
+    if toolsets is None:
+        toolsets = {}
+    if not isinstance(toolsets, dict):
+        die('assistant.copilot.toolsets must be an object')
+    unsupported_toolsets = sorted(str(key) for key in toolsets if key not in COPILOT_TOOLSET_KEYS)
+    if unsupported_toolsets:
+        die(f'assistant.copilot.toolsets contains unsupported keys: {", ".join(unsupported_toolsets)}')
+    for name, value in toolsets.items():
+        if not isinstance(value, bool):
+            die(f'assistant.copilot.toolsets.{name} must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
