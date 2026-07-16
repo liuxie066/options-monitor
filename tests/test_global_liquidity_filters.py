@@ -935,7 +935,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert 'require_bid_ask' not in kwargs
 
 
-def test_sell_put_steps_combo_yield_put_universe_ignores_sell_put_return_floor() -> None:
+def test_sell_put_steps_combo_yield_put_universe_reuses_sell_put_return_floor() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
@@ -986,7 +986,7 @@ def test_sell_put_steps_combo_yield_put_universe_ignores_sell_put_return_floor()
     assert len(calls) == 2
     assert calls[0]['min_annualized_net_return'] == 0.25
     assert calls[0]['min_net_income'] == 70.0
-    assert calls[1]['min_annualized_net_return'] == 0.0
+    assert calls[1]['min_annualized_net_return'] == 0.25
     assert calls[1]['min_net_income'] == 0.0
     assert calls[1]['min_dte'] == 7
     assert calls[1]['max_dte'] == 45
@@ -1044,7 +1044,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
     assert len(calls) == 2
     assert calls[0]["min_annualized_net_return"] == 0.25
     assert calls[0]["min_net_income"] == 500.0
-    assert calls[1]["min_annualized_net_return"] == 0.0
+    assert calls[1]["min_annualized_net_return"] == 0.25
     assert calls[1]["min_net_income"] == 0.0
 
 

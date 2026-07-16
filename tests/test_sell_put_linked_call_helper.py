@@ -166,33 +166,39 @@ def _write_single_call(
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
 
 
-def _single_put_df(*, dte: int, bid: float = 3.0, ask: float = 3.01, implied_volatility: float = 0.80) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "dte": dte,
-                "contract_symbol": "NVDA_P95",
-                "multiplier": 100,
-                "currency": "USD",
-                "strike": 95.0,
-                "spot": 100.0,
-                "bid": bid,
-                "ask": ask,
-                "mid": (bid + ask) / 2,
-                "open_interest": 1200,
-                "volume": 80,
-                "implied_volatility": implied_volatility,
-                "delta": -0.25,
-            }
-        ]
-    )
+def _single_put_df(
+    *,
+    dte: int,
+    bid: float = 3.0,
+    ask: float = 3.01,
+    implied_volatility: float = 0.80,
+    **overrides,
+) -> pd.DataFrame:
+    row = {
+        "symbol": "NVDA",
+        "expiration": "2026-06-19",
+        "dte": dte,
+        "contract_symbol": "NVDA_P95",
+        "multiplier": 100,
+        "currency": "USD",
+        "strike": 95.0,
+        "spot": 100.0,
+        "bid": bid,
+        "ask": ask,
+        "mid": (bid + ask) / 2,
+        "open_interest": 1200,
+        "volume": 80,
+        "implied_volatility": implied_volatility,
+        "delta": -0.25,
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
 
 
 def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
         attach_best_linked_calls,
+        build_yield_enhancement_rank_shadow,
         find_sell_put_yield_enhancement_pairs,
         select_best_yield_enhancement_pairs,
     )
@@ -287,6 +293,7 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
         output_path=tmp_path / "sell_put_linked_calls.csv",
     )
     selected = select_best_yield_enhancement_pairs(pairs)
+    shadow = build_yield_enhancement_rank_shadow(pairs)
     out = attach_best_linked_calls(
         df_candidates=df,
         pairs_df=pairs,
@@ -296,6 +303,9 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     assert len(selected) == 1
     assert selected.iloc[0]["call_contract_symbol"] == "NVDA_C112"
     assert int(selected.iloc[0]["call_candidate_count"]) == 2
+    assert shadow.loc[shadow["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C112"]
+    assert shadow.loc[shadow["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
+    assert shadow["rank_changed"].all()
 
     row = out.iloc[0]
     assert row["linked_call_contract"] == "2026-06-19 112C"
@@ -303,6 +313,12 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     assert round(float(row["linked_call_scenario_score"]), 4) > 0.03
     assert round(float(row["linked_call_expected_move"]), 1) == 14.1
     assert int(row["linked_call_count"]) == 2
+    assert float(row["linked_call_put_only_breakeven"]) < float(row["linked_call_combo_breakeven"])
+    assert float(row["linked_call_downside_breakeven_penalty"]) > 0
+    assert float(row["linked_call_lottery_budget_ratio"]) > 0
+    assert float(row["linked_call_payoff_multiple_at_2_0_sigma"]) > float(
+        row["linked_call_payoff_multiple_at_1_5_sigma"]
+    )
 
     persisted_pairs = pd.read_csv(tmp_path / "sell_put_linked_calls.csv")
     assert set(persisted_pairs["call_contract_symbol"]) == {"NVDA_C110", "NVDA_C112"}
@@ -372,6 +388,8 @@ def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Pa
     assert len(pairs) == 1
     row = pairs.iloc[0]
     assert row["expected_move"] is None
+    assert row["call_payoff_multiple_at_1_5_sigma"] is None
+    assert row["call_payoff_multiple_at_2_0_sigma"] is None
     assert bool(row["funding_accepted"]) is True
 
 
@@ -736,3 +754,162 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
     )
 
     assert pairs.empty
+
+
+def test_yield_enhancement_exposes_put_only_counterfactual_and_tail_payoff(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(
+        tmp_path,
+        dte=44,
+        contract_symbol="NVDA_C112_COUNTERFACTUAL",
+        strike=112.0,
+        bid=0.24,
+        ask=0.25,
+        implied_volatility=0.80,
+        delta=0.15,
+    )
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(
+            dte=44,
+            implied_volatility=0.80,
+            funding_put_eligible=True,
+            funding_put_min_annualized_return=0.10,
+            put_only_annualized_net_return=0.14,
+            annualized_net_return_on_cash_basis=0.14,
+        ),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "return_first",
+            "min_dte": 20,
+            "max_dte": 60,
+        },
+    )
+
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    multiplier = float(row["multiplier"])
+    call_cost = float(row["call_total_cost"])
+    put_credit = float(row["put_only_net_credit"])
+    expected_move = float(row["expected_move"])
+    expected_1_5 = max(float(row["spot"]) + 1.5 * expected_move - float(row["call_strike"]), 0.0)
+    expected_1_5 = expected_1_5 * multiplier / call_cost
+    expected_2_0 = max(float(row["spot"]) + 2.0 * expected_move - float(row["call_strike"]), 0.0)
+    expected_2_0 = expected_2_0 * multiplier / call_cost
+
+    assert float(row["put_only_net_credit"]) == float(row["put_net_credit"])
+    assert bool(row["funding_put_eligible"]) is True
+    assert float(row["funding_put_min_annualized_return"]) == 0.10
+    assert float(row["put_only_annualized_net_return"]) == 0.14
+    assert float(row["combo_breakeven"]) == float(row["downside_breakeven"])
+    assert abs(
+        float(row["combo_breakeven"])
+        - float(row["put_only_breakeven"])
+        - float(row["downside_breakeven_penalty"])
+    ) < 2e-6
+    assert abs(float(row["lottery_budget_ratio"]) - call_cost / put_credit) < 1e-6
+    assert abs(float(row["residual_premium_ratio"]) - float(row["combo_net_credit"]) / put_credit) < 1e-6
+    assert abs(float(row["call_payoff_multiple_at_1_5_sigma"]) - expected_1_5) < 1e-6
+    assert abs(float(row["call_payoff_multiple_at_2_0_sigma"]) - expected_2_0) < 1e-6
+
+
+def test_yield_enhancement_shadow_rank_tolerates_missing_expected_move() -> None:
+    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+
+    rows = pd.DataFrame(
+        [
+            {
+                "put_contract_symbol": "NVDA_P95",
+                "call_contract_symbol": "NVDA_C110",
+                "funding_accepted": True,
+                "premium_funding_score": 1.0,
+                "net_credit_retention": 0.82,
+                "call_cost_to_put_credit": 0.18,
+                "call_delta": 0.15,
+                "call_spread_ratio": 0.10,
+                "call_open_interest": 500,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.12,
+                "combo_spread_ratio": 0.15,
+                "annualized_net_credit_yield": 0.09,
+                "residual_premium_ratio": 0.82,
+            },
+            {
+                "put_contract_symbol": "NVDA_P95",
+                "call_contract_symbol": "NVDA_C115",
+                "funding_accepted": True,
+                "premium_funding_score": 1.1,
+                "net_credit_retention": 0.85,
+                "call_cost_to_put_credit": 0.15,
+                "call_delta": 0.10,
+                "call_spread_ratio": 0.08,
+                "call_open_interest": 800,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.12,
+                "combo_spread_ratio": 0.12,
+                "annualized_net_credit_yield": 0.10,
+                "residual_premium_ratio": 0.85,
+            },
+        ]
+    )
+
+    shadow = build_yield_enhancement_rank_shadow(rows)
+
+    assert shadow.loc[shadow["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
+    assert shadow.loc[shadow["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
+
+
+def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() -> None:
+    from src.application.sell_put_call_helper import build_yield_enhancement_rank_shadow
+
+    rows = pd.DataFrame(
+        [
+            {
+                "put_contract_symbol": "NVDA_P95",
+                "call_contract_symbol": "NVDA_C110",
+                "funding_accepted": True,
+                "premium_funding_score": 2.0,
+                "net_credit_retention": 0.82,
+                "call_cost_to_put_credit": 0.18,
+                "call_delta": 0.15,
+                "call_payoff_multiple_at_1_5_sigma": 2.0,
+                "call_payoff_multiple_at_2_0_sigma": 5.0,
+                "call_spread_ratio": 0.10,
+                "call_open_interest": 500,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.14,
+                "combo_spread_ratio": 0.15,
+                "annualized_net_credit_yield": 0.10,
+                "residual_premium_ratio": 0.82,
+            },
+            {
+                "put_contract_symbol": "NVDA_P90",
+                "call_contract_symbol": "NVDA_C112",
+                "funding_accepted": True,
+                "premium_funding_score": 1.0,
+                "net_credit_retention": 0.82,
+                "call_cost_to_put_credit": 0.18,
+                "call_delta": 0.15,
+                "call_payoff_multiple_at_1_5_sigma": 2.0,
+                "call_payoff_multiple_at_2_0_sigma": 5.0,
+                "call_spread_ratio": 0.10,
+                "call_open_interest": 500,
+                "put_assignment_margin_pct": 0.10,
+                "put_only_annualized_net_return": 0.12,
+                "combo_spread_ratio": 0.15,
+                "annualized_net_credit_yield": 0.10,
+                "residual_premium_ratio": 0.82,
+            },
+        ]
+    )
+
+    shadow = build_yield_enhancement_rank_shadow(rows)
+    baseline_order = shadow.dropna(subset=["baseline_rank"]).sort_values("baseline_rank")
+    shadow_order = shadow.dropna(subset=["shadow_rank"]).sort_values("shadow_rank")
+
+    assert baseline_order["put_contract_symbol"].tolist() == ["NVDA_P95", "NVDA_P90"]
+    assert shadow_order["put_contract_symbol"].tolist() == ["NVDA_P90", "NVDA_P95"]
+    assert shadow["rank_changed"].all()

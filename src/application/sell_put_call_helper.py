@@ -13,7 +13,9 @@ from domain.domain.engine import (
     YieldEnhancementLeg,
     compute_yield_enhancement_funding_decision,
     compute_yield_enhancement_metrics,
+    rank_yield_enhancement_call_lottery_rows,
     rank_yield_enhancement_rows,
+    rank_yield_enhancement_shadow_rows,
     validate_yield_enhancement_pair,
 )
 from domain.domain.candidate_defaults import (
@@ -278,17 +280,25 @@ def _build_pair_row(
         "call_buy_fee": call_buy_fee,
         "net_credit": metrics.net_credit,
         "net_debit": metrics.net_debit,
+        "put_only_net_credit": metrics.put_only_net_credit,
         "net_credit_yield": metrics.net_credit_yield,
         "annualized_net_credit_yield": metrics.annualized_net_credit_yield,
         "funding_ratio": metrics.funding_ratio,
         "net_income": metrics.net_credit,
         "cash_required": metrics.cash_required,
+        "put_only_breakeven": metrics.put_only_breakeven,
+        "combo_breakeven": metrics.combo_breakeven,
+        "downside_breakeven_penalty": metrics.downside_breakeven_penalty,
+        "lottery_budget_ratio": metrics.lottery_budget_ratio,
+        "residual_premium_ratio": metrics.residual_premium_ratio,
         "downside_breakeven": metrics.downside_breakeven,
         "upside_breakeven": metrics.upside_breakeven,
         "max_loss_if_zero": metrics.max_loss_if_zero,
         "annualized_return": metrics.annualized_net_credit_yield,
         "expected_move_iv": metrics.expected_move_iv,
         "expected_move": metrics.expected_move,
+        "call_payoff_multiple_at_1_5_sigma": metrics.call_payoff_multiple_at_1_5_sigma,
+        "call_payoff_multiple_at_2_0_sigma": metrics.call_payoff_multiple_at_2_0_sigma,
         "scenario_score": metrics.scenario_score,
         "annualized_scenario_score": metrics.annualized_scenario_score,
         "put_otm_pct": metrics.put_otm_pct,
@@ -338,10 +348,18 @@ def _empty_pairs_df() -> pd.DataFrame:
             "call_strike",
             "call_ask",
             "net_credit",
+            "put_only_net_credit",
             "net_credit_yield",
             "annualized_net_credit_yield",
             "expected_move_iv",
             "expected_move",
+            "put_only_breakeven",
+            "combo_breakeven",
+            "downside_breakeven_penalty",
+            "lottery_budget_ratio",
+            "residual_premium_ratio",
+            "call_payoff_multiple_at_1_5_sigma",
+            "call_payoff_multiple_at_2_0_sigma",
             "scenario_score",
             "annualized_scenario_score",
             "call_candidate_count",
@@ -382,6 +400,10 @@ def _sell_put_strategy_fields(sell_put_cfg: dict[str, Any] | None) -> dict[str, 
 
 def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
     fields = (
+        "funding_put_eligible",
+        "funding_put_min_annualized_return",
+        "put_only_annualized_net_return",
+        "annualized_net_return_on_cash_basis",
         "short_vol_thesis_status",
         "short_vol_reason",
         "short_vol_mode",
@@ -680,6 +702,68 @@ def select_best_yield_enhancement_pairs(
     return pd.DataFrame(ranked_selected) if ranked_selected else _empty_pairs_df()
 
 
+def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        *pairs_df.columns,
+        "baseline_rank",
+        "shadow_rank",
+        "baseline_selected",
+        "shadow_selected",
+        "rank_changed",
+    ]
+    if pairs_df.empty:
+        return pd.DataFrame(columns=list(dict.fromkeys(columns)))
+
+    rows = pairs_df.to_dict("records")
+
+    def pair_key(row: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(row.get("put_contract_symbol") or ""),
+            str(row.get("call_contract_symbol") or ""),
+        )
+
+    baseline_selected_rows: list[dict[str, Any]] = []
+    shadow_selected_rows: list[dict[str, Any]] = []
+    source = pd.DataFrame(rows)
+    for _put_contract_symbol, group in source.groupby("put_contract_symbol", sort=False):
+        group_rows = group.to_dict("records")
+        baseline_selected_rows.append(rank_yield_enhancement_rows(group_rows)[0])
+        shadow_selected_rows.append(rank_yield_enhancement_call_lottery_rows(group_rows)[0])
+
+    ranked_baseline_selected = rank_yield_enhancement_rows(baseline_selected_rows)
+    ranked_shadow_selected = rank_yield_enhancement_shadow_rows(shadow_selected_rows)
+    baseline_rank = {pair_key(row): index for index, row in enumerate(ranked_baseline_selected, start=1)}
+    shadow_rank = {pair_key(row): index for index, row in enumerate(ranked_shadow_selected, start=1)}
+    baseline_selected = set(baseline_rank)
+    shadow_selected = set(shadow_rank)
+
+    out: list[dict[str, Any]] = []
+    for row in rank_yield_enhancement_rows(rows):
+        key = pair_key(row)
+        baseline_is_selected = key in baseline_selected
+        shadow_is_selected = key in shadow_selected
+        baseline_position = baseline_rank.get(key)
+        shadow_position = shadow_rank.get(key)
+        out.append(
+            {
+                **row,
+                "baseline_rank": baseline_position,
+                "shadow_rank": shadow_position,
+                "baseline_selected": baseline_is_selected,
+                "shadow_selected": shadow_is_selected,
+                "rank_changed": (
+                    baseline_is_selected != shadow_is_selected
+                    or (
+                        baseline_position is not None
+                        and shadow_position is not None
+                        and baseline_position != shadow_position
+                    )
+                ),
+            }
+        )
+    return pd.DataFrame(out)
+
+
 def _ensure_selected_yield_enhancement_pairs(pairs_df: pd.DataFrame) -> pd.DataFrame:
     if pairs_df.empty:
         return _empty_pairs_df()
@@ -728,6 +812,18 @@ def attach_best_linked_calls(
                 "linked_call_annualized_net_credit_yield": _safe_float(top.get("annualized_net_credit_yield")),
                 "linked_call_expected_move": _safe_float(top.get("expected_move")),
                 "linked_call_expected_move_iv": _safe_float(top.get("expected_move_iv")),
+                "linked_call_put_only_net_credit": _safe_float(top.get("put_only_net_credit")),
+                "linked_call_put_only_breakeven": _safe_float(top.get("put_only_breakeven")),
+                "linked_call_combo_breakeven": _safe_float(top.get("combo_breakeven")),
+                "linked_call_downside_breakeven_penalty": _safe_float(top.get("downside_breakeven_penalty")),
+                "linked_call_lottery_budget_ratio": _safe_float(top.get("lottery_budget_ratio")),
+                "linked_call_residual_premium_ratio": _safe_float(top.get("residual_premium_ratio")),
+                "linked_call_payoff_multiple_at_1_5_sigma": _safe_float(
+                    top.get("call_payoff_multiple_at_1_5_sigma")
+                ),
+                "linked_call_payoff_multiple_at_2_0_sigma": _safe_float(
+                    top.get("call_payoff_multiple_at_2_0_sigma")
+                ),
                 "linked_call_scenario_score": _safe_float(top.get("scenario_score")),
                 "linked_call_annualized_scenario_score": _safe_float(top.get("annualized_scenario_score")),
                 "linked_call_count": int(_safe_float(top.get("call_candidate_count")) or 1),
