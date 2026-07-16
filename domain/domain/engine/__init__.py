@@ -78,7 +78,9 @@ from .yield_enhancement import (
     YieldEnhancementMetrics,
     compute_yield_enhancement_funding_decision,
     compute_yield_enhancement_metrics,
+    rank_yield_enhancement_call_lottery_rows,
     rank_yield_enhancement_rows,
+    rank_yield_enhancement_shadow_rows,
     validate_yield_enhancement_pair,
     yield_enhancement_rank_key,
 )
@@ -157,7 +159,9 @@ __all__ = [
     'YieldEnhancementMetrics',
     'compute_yield_enhancement_funding_decision',
     'compute_yield_enhancement_metrics',
+    'rank_yield_enhancement_call_lottery_rows',
     'rank_yield_enhancement_rows',
+    'rank_yield_enhancement_shadow_rows',
     'validate_yield_enhancement_pair',
     'yield_enhancement_rank_key',
 ]

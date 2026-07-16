@@ -150,7 +150,7 @@ Covered Call 的 `premium_edge_score` 使用与 Sell Put 相同的去重补偿�
 
 Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。
 
-当前 runtime key 是 `combo_yield`，历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义已经按 Combo Yield 独立处理，技术上不继承 Sell Put / Covered Call 的 `insurance_underwriting` RV、event 或 underwriting gate。
+当前 runtime key 是 `combo_yield`，历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义已经按 Combo Yield 独立处理，技术上不继承 Sell Put / Covered Call 的完整 `insurance_underwriting` IV/RV gate；Combo 自己应用事件 fail-closed、现金和流动性约束。
 
 核心目标：用一张可接受接货义务的 short put，融资同 symbol、同到期的 long call，形成“保留净权利金，同时获得有限成本上行参与”的组合。
 
@@ -158,6 +158,7 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 
 - put leg: option type 为 put，DTE 使用 Sell Put 窗口。
 - put strike 使用 Sell Put 接货边界：`min_strike` 可空；上界是 `min(spot, max_strike)`，如果 `max_strike` 为空则上界是 spot。
+- Funding Put 必须先独立通过 Sell Put 的 `min_annualized_net_return`；搭配 long call 不会把该门槛重置为 0。
 - call leg: option type 为 call，同 symbol、同到期、同 multiplier。
 - call strike 使用结构边界：`strike >= max(spot, call.min_strike)`，`call.max_strike` 可空。
 - call delta 可用作上行参与区间，默认保留低 delta 参与，不再用 OTM 百分比做召回控制。
@@ -205,6 +206,10 @@ Combo Yield 仍复用事件注释，并默认按 `reject_event_risk=true`、`eve
 12. min(`put_open_interest`, `call_open_interest`) 降序
 
 这里的排序刻意不把 IV/RV 放在核心位置。Combo Yield 的关键不是哪张保单 IV 最贵，而是哪组组合最像“用可接受接货价格，低成本买到上行参与，同时不牺牲太多权利金和执行质量”。
+
+当前生产排序保持上述顺序不变。研究侧另生成 `<symbol>_combo_yield_rank_shadow.csv`：同一 Funding Put 下按 Call Delta、1.5σ / 2.0σ 尾部回报倍数、spread、OI 选择彩票；不同已选组合再按接货安全垫、Put-only 年化、Call 参与度、执行质量和剩余净权利金排序。artifact 使用 `baseline_rank`、`shadow_rank`、`baseline_selected`、`shadow_selected`、`rank_changed` 对比两套结果，不影响生产推荐和通知。
+
+组合候选同时输出 `put_only_net_credit`、`put_only_breakeven`、`combo_breakeven`、`downside_breakeven_penalty`、`lottery_budget_ratio`、`residual_premium_ratio`、`call_payoff_multiple_at_1_5_sigma` 和 `call_payoff_multiple_at_2_0_sigma`，用于明确比较 Sell Put Only 与 Sell Put + Long Call。缺少 expected move 时尾部赔率为 null，不作为硬拒绝原因。
 
 ## 当前实现边界
 

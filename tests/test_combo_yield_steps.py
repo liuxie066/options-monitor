@@ -39,12 +39,14 @@ def _run(
     *,
     candidates: list[dict],
     find_pairs_fn,
+    yield_sp: dict | None = None,
 ):
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     captured: dict[str, pd.DataFrame] = {}
 
     def run_put_scan_fn(**kwargs):
+        captured["scan_kwargs"] = kwargs
         pd.DataFrame(candidates).to_csv(kwargs["output"], index=False)
 
     def label_put_candidates_fn(_base, input_path, output_path):
@@ -62,7 +64,13 @@ def _run(
         symbol_lower="nvda",
         symbol_cfg={"symbol": "NVDA", "combo_yield": {"enabled": True}},
         yield_enhancement_cfg={"enabled": True},
-        yield_sp={"strategy": "return_first", "reject_event_risk": True, "event_source_fail_closed": True},
+        yield_sp={
+            "strategy": "return_first",
+            "min_annualized_net_return": 0.10,
+            "reject_event_risk": True,
+            "event_source_fail_closed": True,
+            **(yield_sp or {}),
+        },
         yield_enhancement_policy=policy,
         df_sell_put_labeled=pd.DataFrame(),
         sell_put_labeled_path=report_dir / "nvda_sell_put_candidates_labeled.csv",
@@ -86,11 +94,11 @@ def _run(
         for line in (report_dir / "candidate_filter_trace.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    return captured["df"], trace
+    return captured["df"], trace, captured["scan_kwargs"]
 
 
 def test_combo_yield_event_gate_fails_closed_without_iv_rv_underwriting(tmp_path: Path) -> None:
-    captured, trace = _run(
+    captured, trace, _scan_kwargs = _run(
         tmp_path,
         candidates=[
             _candidate(event_source_status="error"),
@@ -111,7 +119,7 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
         out.attrs["reject_counts"] = {"min_net_credit_retention": 3}
         return out
 
-    captured, trace = _run(
+    captured, trace, _scan_kwargs = _run(
         tmp_path,
         candidates=[_candidate()],
         find_pairs_fn=rejected_pairs,
@@ -122,3 +130,92 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
     assert len(pair_rows) == 1
     assert pair_rows[0]["rule"] == "min_net_credit_retention"
     assert pair_rows[0]["metric_value"] == 3
+
+
+def test_combo_yield_uses_standalone_sell_put_return_floor_and_annotations(tmp_path: Path) -> None:
+    captured, trace, scan_kwargs = _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        yield_sp={"strategy": "insurance_underwriting", "min_annualized_net_return": 0.15},
+    )
+
+    assert scan_kwargs["min_annualized_net_return"] == 0.15
+    assert scan_kwargs["min_net_income"] == 0.0
+    assert len(captured) == 1
+    row = captured.iloc[0]
+    assert bool(row["funding_put_eligible"]) is True
+    assert float(row["funding_put_min_annualized_return"]) == 0.15
+    assert float(row["put_only_annualized_net_return"]) == 0.18
+    assert "combo_yield_no_pair" in {item["rule"] for item in trace}
+
+
+def test_combo_yield_traces_when_no_funding_put_is_eligible(tmp_path: Path) -> None:
+    _captured, trace, scan_kwargs = _run(
+        tmp_path,
+        candidates=[],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        yield_sp={"min_annualized_net_return": 0.16},
+    )
+
+    assert scan_kwargs["min_annualized_net_return"] == 0.16
+    row = next(item for item in trace if item["stage"] == "post_filter")
+    assert row["rule"] == "combo_yield_no_funding_put_eligible"
+    assert row["threshold"] == 0.16
+
+
+def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_path: Path) -> None:
+    pairs = pd.DataFrame(
+        [
+            {
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C110",
+                "funding_accepted": True,
+                "premium_funding_score": 0.9,
+                "net_credit_retention": 0.80,
+                "call_cost_to_put_credit": 0.20,
+                "call_delta": 0.18,
+                "call_spread_ratio": 0.12,
+                "call_open_interest": 500,
+                "call_payoff_multiple_at_1_5_sigma": 1.8,
+                "call_payoff_multiple_at_2_0_sigma": 4.0,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.14,
+                "combo_spread_ratio": 0.20,
+                "annualized_net_credit_yield": 0.09,
+                "residual_premium_ratio": 0.80,
+            },
+            {
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C115",
+                "funding_accepted": True,
+                "premium_funding_score": 1.1,
+                "net_credit_retention": 0.88,
+                "call_cost_to_put_credit": 0.12,
+                "call_delta": 0.10,
+                "call_spread_ratio": 0.08,
+                "call_open_interest": 900,
+                "call_payoff_multiple_at_1_5_sigma": 1.0,
+                "call_payoff_multiple_at_2_0_sigma": 3.0,
+                "put_assignment_margin_pct": 0.05,
+                "put_only_annualized_net_return": 0.14,
+                "combo_spread_ratio": 0.15,
+                "annualized_net_credit_yield": 0.11,
+                "residual_premium_ratio": 0.88,
+            },
+        ]
+    )
+
+    def find_pairs(**_kwargs):
+        return pairs.copy()
+
+    _captured, _trace, _scan_kwargs = _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.14)],
+        find_pairs_fn=find_pairs,
+    )
+
+    artifact = pd.read_csv(tmp_path / "reports" / "nvda_combo_yield_rank_shadow.csv")
+    assert artifact.loc[artifact["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
+    assert artifact.loc[artifact["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
+    assert artifact["rank_changed"].all()
