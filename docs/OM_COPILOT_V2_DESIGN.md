@@ -19,6 +19,8 @@ Channel / CLI UI
 -> Copilot Host
 -> generic Agent / Engine
 -> canonical pure-read tools
+   -> OM local read models
+   -> portfolio_query -> portfolio-management loopback HTTP API
 
 Agent
 -> request_control_preview
@@ -42,7 +44,8 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 - Service does not parse month, symbol, account, or intent from free text.
 - Host owns execution governance; Agent owns generic model/tool iteration.
 - Agent and Engine contain no OM task routing or strategy-specific branches.
-- Copilot receives canonical pure-read tools only.
+- Copilot receives canonical pure-read tools only. The `portfolio` toolset is one
+  such read boundary, not a second Copilot, Scene, router, or Agent runtime.
 - The model may request a validated Control preview but cannot confirm, cancel,
   apply, or call a direct mutation tool.
 - Explicit commands and pending-operation replies remain deterministic Control.
@@ -165,11 +168,15 @@ not a reason for Host to run a hidden business workflow.
 - merges safe defaults and explicit Scene scope;
 - executes only Host-allowed pure-read tools;
 - converts canonical results into flat Agent-friendly observations;
+- exposes `portfolio_query` through the `portfolio` toolset using GET-only stdlib
+  HTTP against `PORTFOLIO_SERVICE_URL` (default `http://127.0.0.1:8765`);
 - provides compact previews and continuation metadata.
 
 Tool descriptions, defaults, validation, error hints, and output contracts should
 be fixed at the owning tool definition. Copilot must not maintain a second tool
-catalog or question-specific evidence recipe.
+catalog or question-specific evidence recipe. `portfolio_query` accepts only
+view and query scope; it rejects model-provided endpoints and non-loopback service
+URLs, exposes no portfolio write endpoint, and preserves source/scope/freshness.
 
 ## Deterministic Control
 

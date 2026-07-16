@@ -33,6 +33,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_logs" in tool_names
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
+    assert "portfolio_query" in tool_names
     assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
@@ -73,6 +74,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "run_id" in notification_perception["input_schema"]
     assert "conversation_id" in notification_perception["input_schema"]
     assert "audit_path" not in notification_perception["input_schema"]
+    portfolio_query = next(item for item in spec["tools"] if item["name"] == "portfolio_query")
+    assert portfolio_query["risk_level"] == "read_only"
+    assert portfolio_query["requires_confirm"] is False
+    assert portfolio_query["side_effects"] == []
+    assert portfolio_query["safe_default_input"] == {"view": "health"}
+    assert "view" in portfolio_query["input_schema"]
+    assert "url" not in portfolio_query["input_schema"]
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -212,6 +220,10 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert tools["query_cash_headroom"]["side_effects"] == []
     assert "view_names[]" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
     assert "investigation_recipes[].name" not in tools["analysis_catalog"]["output_contract"]["fact_fields"]
+    assert tools["portfolio_query"]["output_contract"]["freshness_fields"] == [
+        "freshness.status",
+        "freshness.observed_at",
+    ]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None
@@ -305,6 +317,7 @@ def test_agent_registry_collects_domain_tool_modules() -> None:
         "materialization",
         "notifications",
         "positions",
+        "portfolio",
         "runtime",
     }
 
@@ -327,6 +340,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "query_cash_headroom" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
+    assert "portfolio_query" in PURE_READ_TOOLS
     assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS

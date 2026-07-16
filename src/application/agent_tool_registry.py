@@ -13,6 +13,7 @@ from src.application.agent_tools import (
     notification_perception,
     notifications,
     positions,
+    portfolio,
     runtime,
 )
 from src.application.agent_tools.base import AgentTool
@@ -28,6 +29,7 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     materialization,
     candidate,
     positions,
+    portfolio,
     close_advice,
     notifications,
     notification_perception,

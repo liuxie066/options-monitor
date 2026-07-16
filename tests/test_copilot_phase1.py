@@ -102,6 +102,7 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "Keep recommendations temporally possible" in definition["system_prompt"]
     assert "A local ledger state warning proves a local consistency problem only" in definition["system_prompt"]
     assert "Treat an explicit `not_observed` evidence scope as a hard claim boundary" in definition["system_prompt"]
+    assert "portfolio-management" in definition["system_prompt"]
     assert "Tool success results are flat JSON business data" in definition["system_prompt"]
     assert "A short follow-up such as" in definition["system_prompt"]
     assert "read-first options-monitor assistant" in definition["system_prompt"]
@@ -109,6 +110,7 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "never confirm, apply, or cancel" in definition["system_prompt"]
     assert "analysis_query" in manifest.allowed_tools
     assert "runtime_status" in manifest.allowed_tools
+    assert "portfolio_query" in manifest.allowed_tools
     assert "symbol_config_update" not in manifest.allowed_tools
     assert manifest.limits["max_model_turns"] == definition["runtime"]["max_iterations"]
 
@@ -126,6 +128,8 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
     }
 
     assert set(manifest.allowed_tools) == expected
+    assert "portfolio" in selected
+    assert "portfolio_query" in expected
     assert "symbol_config_update" not in expected
 
 
