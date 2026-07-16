@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.401 - 2026-07-16
+
+### Added
+- Added the pure-read `portfolio_query` tool to the existing `om_chat` Copilot so it can read portfolio-management health, accounts, overview, holdings, cash, NAV, distribution, and full-report views through same-host loopback HTTP.
+
+### Changed
+- Kept the cross-product boundary GET-only and loopback-only, rejected model-provided endpoints, and added explicit source, scope, freshness, and standardized upstream-error evidence.
+- Updated the Copilot Scene, financial-fact guidance, Agent capability documentation, and public tool contracts without adding a second Copilot or portfolio write path.
+
 ## 1.2.400 - 2026-07-16
 
 ### Added
