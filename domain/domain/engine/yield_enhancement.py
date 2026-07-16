@@ -31,10 +31,16 @@ class YieldEnhancementLeg:
 class YieldEnhancementMetrics:
     net_credit: float
     net_debit: float
+    put_only_net_credit: float
     net_credit_yield: float
     annualized_net_credit_yield: float | None
     funding_ratio: float | None
     cash_required: float
+    put_only_breakeven: float
+    combo_breakeven: float
+    downside_breakeven_penalty: float
+    lottery_budget_ratio: float | None
+    residual_premium_ratio: float | None
     downside_breakeven: float
     upside_breakeven: float
     max_loss_if_zero: float
@@ -45,6 +51,8 @@ class YieldEnhancementMetrics:
     combo_spread_ratio: float | None
     expected_move_iv: float | None = None
     expected_move: float | None = None
+    call_payoff_multiple_at_1_5_sigma: float | None = None
+    call_payoff_multiple_at_2_0_sigma: float | None = None
     scenario_score: float | None = None
     annualized_scenario_score: float | None = None
 
@@ -157,6 +165,8 @@ def compute_yield_enhancement_metrics(
     net_credit = put_proceeds - call_cost
     net_debit = max(-net_credit, 0.0)
     funding_ratio = (put_proceeds / call_cost) if call_cost > 0 else None
+    lottery_budget_ratio = (call_cost / put_proceeds) if put_proceeds > 0 else None
+    residual_premium_ratio = (net_credit / put_proceeds) if put_proceeds > 0 else None
     iv = _positive(expected_move_iv)
     expected_move = spot * iv * sqrt(float(dte) / 365.0) if iv is not None and dte > 0 else None
 
@@ -166,9 +176,21 @@ def compute_yield_enhancement_metrics(
     net_credit_yield = net_credit / cash_required
     annualized_net_credit_yield = net_credit_yield * (365.0 / float(dte)) if dte > 0 else None
 
-    downside_breakeven = float(put_leg.strike) - net_credit / multiplier
+    put_only_breakeven = float(put_leg.strike) - put_proceeds / multiplier
+    combo_breakeven = float(put_leg.strike) - net_credit / multiplier
+    downside_breakeven_penalty = call_cost / multiplier
+    downside_breakeven = combo_breakeven
     upside_breakeven = float(call_leg.strike) + net_debit / multiplier
     max_loss_if_zero = float(put_leg.strike) * multiplier - net_credit
+    call_payoff_multiple_at_1_5_sigma = None
+    call_payoff_multiple_at_2_0_sigma = None
+    if expected_move is not None and call_cost > 0:
+        call_payoff_multiple_at_1_5_sigma = (
+            max(spot + 1.5 * expected_move - float(call_leg.strike), 0.0) * multiplier / call_cost
+        )
+        call_payoff_multiple_at_2_0_sigma = (
+            max(spot + 2.0 * expected_move - float(call_leg.strike), 0.0) * multiplier / call_cost
+        )
     scenario_score = None
     annualized_scenario_score = None
     if cash_required > 0 and expected_move is not None:
@@ -200,6 +222,7 @@ def compute_yield_enhancement_metrics(
     return YieldEnhancementMetrics(
         net_credit=round(net_credit, 6),
         net_debit=round(net_debit, 6),
+        put_only_net_credit=round(put_proceeds, 6),
         net_credit_yield=round(net_credit_yield, 6),
         annualized_net_credit_yield=(
             round(annualized_net_credit_yield, 6)
@@ -208,6 +231,11 @@ def compute_yield_enhancement_metrics(
         ),
         funding_ratio=(round(funding_ratio, 6) if funding_ratio is not None else None),
         cash_required=round(cash_required, 6),
+        put_only_breakeven=round(put_only_breakeven, 6),
+        combo_breakeven=round(combo_breakeven, 6),
+        downside_breakeven_penalty=round(downside_breakeven_penalty, 6),
+        lottery_budget_ratio=_round_optional(lottery_budget_ratio),
+        residual_premium_ratio=_round_optional(residual_premium_ratio),
         downside_breakeven=round(downside_breakeven, 6),
         upside_breakeven=round(upside_breakeven, 6),
         max_loss_if_zero=round(max_loss_if_zero, 6),
@@ -218,6 +246,8 @@ def compute_yield_enhancement_metrics(
         combo_spread_ratio=(round(combo_spread_ratio, 6) if combo_spread_ratio is not None else None),
         expected_move_iv=(round(iv, 6) if iv is not None else None),
         expected_move=(round(expected_move, 6) if expected_move is not None else None),
+        call_payoff_multiple_at_1_5_sigma=_round_optional(call_payoff_multiple_at_1_5_sigma),
+        call_payoff_multiple_at_2_0_sigma=_round_optional(call_payoff_multiple_at_2_0_sigma),
         scenario_score=(round(scenario_score, 6) if scenario_score is not None else None),
         annualized_scenario_score=(round(annualized_scenario_score, 6) if annualized_scenario_score is not None else None),
     )
@@ -354,3 +384,55 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
 
 def rank_yield_enhancement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted([dict(row) for row in rows], key=yield_enhancement_rank_key)
+
+
+def yield_enhancement_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    def f(key: str, default: float = 0.0) -> float:
+        value = _safe_float(row.get(key))
+        return float(default if value is None else value)
+
+    raw_call_delta = _safe_float(row.get("call_delta"))
+    call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
+    return (
+        -call_delta,
+        -f("call_payoff_multiple_at_1_5_sigma", default=-1.0),
+        -f("call_payoff_multiple_at_2_0_sigma", default=-1.0),
+        f("call_spread_ratio", default=999.0),
+        -f("call_open_interest"),
+        str(row.get("call_contract_symbol") or ""),
+    )
+
+
+def yield_enhancement_pair_shadow_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    def f(key: str, default: float = 0.0) -> float:
+        value = _safe_float(row.get(key))
+        return float(default if value is None else value)
+
+    assignment_margin = f("put_assignment_margin_pct")
+    if assignment_margin == 0.0:
+        assignment_margin = f("put_otm_pct")
+    put_only_annualized_return = f("put_only_annualized_net_return", default=-1.0)
+    if put_only_annualized_return < 0:
+        put_only_annualized_return = f("annualized_net_return_on_cash_basis", default=-1.0)
+    raw_call_delta = _safe_float(row.get("call_delta"))
+    call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
+    return (
+        -assignment_margin,
+        -put_only_annualized_return,
+        -call_delta,
+        -f("call_payoff_multiple_at_1_5_sigma", default=-1.0),
+        -f("call_payoff_multiple_at_2_0_sigma", default=-1.0),
+        f("combo_spread_ratio", default=999.0),
+        -f("annualized_net_credit_yield", default=-1.0),
+        -f("residual_premium_ratio", default=-1.0),
+        str(row.get("put_contract_symbol") or ""),
+        str(row.get("call_contract_symbol") or ""),
+    )
+
+
+def rank_yield_enhancement_call_lottery_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(row) for row in rows], key=yield_enhancement_call_lottery_rank_key)
+
+
+def rank_yield_enhancement_shadow_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(row) for row in rows], key=yield_enhancement_pair_shadow_rank_key)

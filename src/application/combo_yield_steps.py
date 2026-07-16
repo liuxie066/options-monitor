@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -10,6 +11,7 @@ import pandas as pd
 
 from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
 from domain.domain.insurance_underwriting import evaluate_event_risk_candidate
+from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -22,6 +24,7 @@ from src.application.report_summaries import summarize_yield_enhancement
 from src.application.scan_sell_put import run_sell_put_scan
 from src.application.sell_put_call_helper import (
     attach_best_linked_calls,
+    build_yield_enhancement_rank_shadow,
     find_sell_put_yield_enhancement_pairs,
     select_best_yield_enhancement_pairs,
 )
@@ -35,6 +38,7 @@ from src.infrastructure.io_utils import safe_read_csv
 
 
 COMBO_YIELD_FAMILY = "combo_yield"
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -165,6 +169,9 @@ def run_combo_yield_scan_and_summarize(
     symbol_yield_put_universe_cash_filtered = (
         report_dir / f"{symbol_lower}_combo_yield_put_universe_cash_filtered.csv"
     ).resolve()
+    funding_put_min_annualized_return = resolve_min_annualized_net_return(
+        symbol_cfg={"sell_put": yield_sp},
+    )
 
     run_put_scan_fn(
         symbols=[sym],
@@ -172,7 +179,7 @@ def run_combo_yield_scan_and_summarize(
         output=symbol_yield_put_universe,
         min_dte=yield_window.min_dte,
         max_dte=yield_window.max_dte,
-        min_annualized_net_return=0.0,
+        min_annualized_net_return=funding_put_min_annualized_return,
         min_net_income=0.0,
         min_strike=_optional_float(yield_sp, "min_strike"),
         max_strike=_optional_float(yield_sp, "max_strike"),
@@ -187,6 +194,12 @@ def run_combo_yield_scan_and_summarize(
     )
     label_put_candidates_fn(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
     df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+    if not df_yield_put_universe.empty:
+        df_yield_put_universe["funding_put_eligible"] = True
+        df_yield_put_universe["funding_put_min_annualized_return"] = funding_put_min_annualized_return
+        df_yield_put_universe["put_only_annualized_net_return"] = df_yield_put_universe.get(
+            "annualized_net_return_on_cash_basis"
+        )
     df_yield_put_event_filtered = _filter_combo_yield_event_risk(
         df_yield_put_universe,
         symbol=symbol,
@@ -216,6 +229,11 @@ def run_combo_yield_scan_and_summarize(
         output_path=None,
     )
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
+    rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
+    try:
+        build_yield_enhancement_rank_shadow(raw_yield_pairs_df).to_csv(rank_shadow_path, index=False)
+    except Exception as exc:
+        log.warning("combo_yield_steps: failed to write shadow rank artifact for %s: %s", symbol, exc)
 
     scope = infer_trace_scope_from_path(result.candidates_path)
     trace_rows = [
@@ -234,14 +252,19 @@ def run_combo_yield_scan_and_summarize(
             threshold=0,
             message=f"combo yield pair rejection count: {reason}",
             evidence_path=result.candidates_path.name,
-            config_values=yield_enhancement_policy.to_fields(),
+            config_values={
+                **yield_enhancement_policy.to_fields(),
+                "funding_put_min_annualized_return": funding_put_min_annualized_return,
+            },
         )
         for reason, count in sorted(dict(raw_yield_pairs_df.attrs.get("reject_counts") or {}).items())
         if int(count) > 0
     ]
+    yield_threshold: float | int = 1
     if df_yield_put_universe.empty:
-        yield_rule = "combo_yield_put_universe_empty"
+        yield_rule = "combo_yield_no_funding_put_eligible"
         yield_status = "post_filtered"
+        yield_threshold = funding_put_min_annualized_return
     elif df_yield_put_event_filtered.empty:
         yield_rule = "combo_yield_put_event_filtered"
         yield_status = "post_filtered"
@@ -270,10 +293,13 @@ def run_combo_yield_scan_and_summarize(
             stage="post_filter",
             rule=yield_rule,
             metric_value=len(recommended_yield_pairs_df),
-            threshold=1,
+            threshold=yield_threshold,
             message="combo yield pair selection",
             evidence_path=result.candidates_path.name,
-            config_values=yield_enhancement_policy.to_fields(),
+            config_values={
+                **yield_enhancement_policy.to_fields(),
+                "funding_put_min_annualized_return": funding_put_min_annualized_return,
+            },
         )
     )
     append_candidate_filter_trace_rows(candidate_trace_path_for_output(result.candidates_path), trace_rows)
