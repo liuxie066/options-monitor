@@ -103,8 +103,8 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 0 · 平仓 0\n" in message
-    assert "候选\n- 无符合承保条件候选" in message
+    assert "Put 0 · Call 0 · 平仓 0\n" in message
+    assert "## 候选\n- 无符合承保条件候选" in message
     assert "- 主要过滤：" not in message
     assert "通过 184 条" not in message
     assert "组合收益 1" not in message
@@ -137,9 +137,36 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 1 · 组合收益 1 · 平仓 0\n" in message
-    assert "候选\nCovered Call" in message
+    assert "Put 0 · Call 1 · 组合 1 · 平仓 0\n" in message
+    assert "## 候选\nCall" in message
     assert "- 主要过滤：" not in message
+
+
+def test_compact_account_overview_does_not_count_combo_legs_as_put_or_call() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+
+    notif = (
+        "### 组合\n"
+        "🧩 组合·跨期 PDD 100P+120C\n"
+        "- Put 卖 100P · 08-21/35天 · bid 2.35 · 估算净收 228 USD\n"
+        "- Call 买 120C · 10-16/91天 · ask 2.1 · Δ 0.31 · 估算成本 218 USD\n"
+        "- 组合 覆盖 104.59% · 净现金流 10 USD\n"
+    )
+
+    message = build_account_message_compact(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-07-17 10:00:24',
+        cash_footer_lines=[],
+    )
+
+    assert "Put 0 · Call 0 · 组合 1 · 平仓 0" in message
 
 
 def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
@@ -170,8 +197,8 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 1 · 平仓 0 · 待补 1" in message
-    assert "持仓\n- 无高/中优先级平仓建议\n- 待补:" in message
+    assert "Put 0 · Call 1 · 平仓 0 · 待补 1" in message
+    assert "## 持仓\n- 无平仓建议\n- 待补:" in message
     assert "9992.HK Call 2026-07-30 200.00C · 持仓对应合约已定位，但当前未取得可用价格" in message
     assert "0700.HK Call 2026-07-30 520.00C" not in message
     assert "价差过宽" not in message
@@ -202,6 +229,6 @@ def test_compact_account_overview_hides_non_data_gap_count() -> None:
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 0 · 平仓 0\n" in message
+    assert "Put 0 · Call 0 · 平仓 0\n" in message
     assert "待补" not in message
     assert "价差过宽" not in message

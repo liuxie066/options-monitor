@@ -7,7 +7,7 @@ import json
 import pandas as pd
 
 
-def _render_via_alert_engine(summary_row: dict) -> str:
+def _render_via_alert_engine(summary_row: dict, *, render_style: str = "legacy") -> str:
     from domain.domain import normalize_processor_row
     from src.application.alert_engine import build_alert_text
     from src.application.notify_symbols import build_notification
@@ -15,7 +15,39 @@ def _render_via_alert_engine(summary_row: dict) -> str:
     normalized = normalize_processor_row(summary_row)
     df = pd.DataFrame([normalized])
     alerts = build_alert_text(df)
-    return build_notification("", alerts, account_label="SY")
+    return build_notification("", alerts, account_label="SY", render_style=render_style)
+
+
+def _staggered_combo_summary() -> dict:
+    return {
+        "symbol": "NVDA",
+        "strategy": "combo_yield",
+        "candidate_count": 1,
+        "top_contract": "2026-08-21 100P + 2026-10-16 120C",
+        "structure_mode": "staggered_expiry_pair",
+        "put_expiration": "2026-08-21",
+        "put_dte": 35,
+        "call_expiration": "2026-10-16",
+        "call_dte": 91,
+        "expiry_gap_days": 56,
+        "put_strike": 100.0,
+        "call_strike": 120.0,
+        "put_bid": 2.35,
+        "call_ask": 2.10,
+        "call_delta": 0.31,
+        "put_net_credit": 228.0,
+        "call_total_cost": 218.0,
+        "combo_net_credit": 10.0,
+        "net_credit": 10.0,
+        "call_cost_to_put_credit": 218.0 / 228.0,
+        "funding_ratio": 228.0 / 218.0,
+        "funding_accepted": True,
+        "strike_safety_margin_pct": 0.18,
+        "cash_required_usd": 10000.0,
+        "option_ccy": "USD",
+        "annualized_return": None,
+        "net_income": 10.0,
+    }
 
 
 def test_notify_symbols_markdown_put_layout() -> None:
@@ -449,7 +481,7 @@ def test_yield_enhancement_notification_ignores_option_contract_display_name(tmp
 
     assert "PDD 260626 91.00C" not in alerts
     assert "PDD 260626 91.00C" not in out
-    assert "💎 组合收益 PDD 78P+88C @ 06-26" in out
+    assert "💎 组合·同期 PDD 78P+88C · 06-26" in out
 
 
 def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
@@ -572,8 +604,8 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
 
     out = build_notification("", alerts, account_label="LX")
 
-    assert out.count("· 卖Put") == 4
-    assert "PUT5" not in out
+    assert out.count("· 卖Put") == 5
+    assert "PUT5" in out
     assert "PUT6" not in out
     assert "CALL1" in out
     assert out.count("· Covered Call") == 1
@@ -606,46 +638,30 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
 
 
 def test_notify_symbols_staggered_combo_is_high_priority_and_uses_separate_leg_copy() -> None:
-    out = _render_via_alert_engine(
-        {
-            "symbol": "NVDA",
-            "strategy": "combo_yield",
-            "candidate_count": 1,
-            "top_contract": "2026-08-21 100P + 2026-10-16 120C",
-            "structure_mode": "staggered_expiry_pair",
-            "put_expiration": "2026-08-21",
-            "put_dte": 35,
-            "call_expiration": "2026-10-16",
-            "call_dte": 91,
-            "expiry_gap_days": 56,
-            "put_strike": 100.0,
-            "call_strike": 120.0,
-            "put_bid": 2.35,
-            "call_ask": 2.10,
-            "call_delta": 0.31,
-            "put_net_credit": 228.0,
-            "call_total_cost": 218.0,
-            "combo_net_credit": 10.0,
-            "net_credit": 10.0,
-            "call_cost_to_put_credit": 218.0 / 228.0,
-            "funding_ratio": 228.0 / 218.0,
-            "funding_accepted": True,
-            "strike_safety_margin_pct": 0.18,
-            "cash_required_usd": 10000.0,
-            "option_ccy": "USD",
-            "annualized_return": None,
-            "net_income": 10.0,
-        }
-    )
+    out = _render_via_alert_engine(_staggered_combo_summary())
 
-    assert "### [sy] NVDA · 组合收益 · 错期全额融资" in out
-    assert "Put按费用模型估算净收入=228.0 USD" in out
-    assert "Call按费用模型估算总成本=218.0 USD" in out
-    assert "卖 100P @ 2026-08-21 | DTE=35" in out
-    assert "买 120C @ 2026-10-16 | DTE=91" in out
-    assert "资金利用率=95.61%" in out
+    assert "### [sy] NVDA · 组合收益" in out
+    assert "卖 100P | 2026-08-21/35天 | bid=2.35 | 估算净收=228 USD" in out
+    assert "买 120C | 2026-10-16/91天 | ask=2.1 | delta=0.31 | 估算成本=218 USD" in out
     assert "覆盖率=104.59%" in out
-    assert "Call比Put晚56天 | 两腿各1张" in out
+    assert "净现金流=10 USD" in out
+    assert "Put安全边界=18% | 现金=$10,000 | Call晚56天" in out
+    assert "备注:" not in out
+    assert "资金利用率" not in out
+    assert "两腿各1张" not in out
     assert "当前组合收益推荐未通过优先级阈值" not in out
     assert "场景评分" not in out
     assert "预期波动" not in out
+
+
+def test_notify_symbols_staggered_combo_compact_copy_is_concise() -> None:
+    out = _render_via_alert_engine(_staggered_combo_summary(), render_style="compact")
+
+    assert "🧩 组合·跨期 NVDA 100P+120C" in out
+    assert "Put 卖 100P · 08-21/35天 · bid 2.35 · 估算净收 228 USD" in out
+    assert "Call 买 120C · 10-16/91天 · ask 2.1 · Δ 0.31 · 估算成本 218 USD" in out
+    assert "组合 覆盖 104.59% · 净现金流 10 USD" in out
+    assert "安全边界 18% · 现金 $10,000 · Call晚56天" in out
+    assert "备注:" not in out
+    assert "资金利用率" not in out
+    assert "两腿各1张" not in out
