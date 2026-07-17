@@ -16,13 +16,15 @@ and Copilot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 autonomous Agent. Internal Copilot projects a pure-read subset from the same
 canonical registry.
 
-The `portfolio` toolset contains one pure-read tool, `portfolio_query`. It lets the
+The `portfolio` toolset contains two pure-read tools. `portfolio_query` lets the
 same `om_chat` Copilot read portfolio-management `health`, `accounts`, `overview`,
 `holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
-loopback HTTP boundary. It does not expose portfolio writes, accept endpoint
-arguments, or add a second Scene/Agent. The toolset is optional and defaults off
-for internal Copilot projection; `./om-agent` continues to expose the canonical
-tool independently of this Copilot setting.
+loopback HTTP boundary. `portfolio_capital_bridge` combines the PM capital-facts
+endpoint with the shared OM option ledger to return MTD/YTD waterfall `steps[]`
+and Markdown `fallback_text`; it does not render an image. Neither tool exposes
+portfolio writes, accepts endpoint arguments, or adds a second Scene/Agent. The
+toolset is optional and defaults off for internal Copilot projection; `./om-agent`
+continues to expose both canonical tools independently of this Copilot setting.
 
 ## Deterministic Control
 
@@ -76,7 +78,7 @@ assistant:
   active_model: deepseek-default
 ```
 
-Set `assistant.copilot.toolsets.portfolio: true` to expose `portfolio_query` to
+Set `assistant.copilot.toolsets.portfolio: true` to expose both portfolio tools to
 Copilot. Effective access requires the assistant, Copilot, and portfolio toolset
 flags to all be true. Missing toolset configuration is fail-closed.
 
