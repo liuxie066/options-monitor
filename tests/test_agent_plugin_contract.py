@@ -34,6 +34,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
     assert "portfolio_query" in tool_names
+    assert "portfolio_capital_bridge" in tool_names
     assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
@@ -81,6 +82,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert portfolio_query["safe_default_input"] == {"view": "health"}
     assert "view" in portfolio_query["input_schema"]
     assert "url" not in portfolio_query["input_schema"]
+    portfolio_bridge = next(item for item in spec["tools"] if item["name"] == "portfolio_capital_bridge")
+    assert portfolio_bridge["risk_level"] == "read_only"
+    assert portfolio_bridge["requires_confirm"] is False
+    assert portfolio_bridge["side_effects"] == []
+    assert portfolio_bridge["safe_default_input"] == {}
+    assert set(portfolio_bridge["input_json_schema"]["required"]) == {"period", "as_of_month", "accounts"}
+    assert "url" not in portfolio_bridge["input_schema"]
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -224,6 +232,9 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
         "freshness.status",
         "freshness.observed_at",
     ]
+    assert tools["portfolio_capital_bridge"]["output_contract"]["schema_version"] == "portfolio.capital_bridge.v1"
+    assert "accounts[].steps" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
+    assert "fallback_text" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None
@@ -341,6 +352,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "portfolio_query" in PURE_READ_TOOLS
+    assert "portfolio_capital_bridge" in PURE_READ_TOOLS
     assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
