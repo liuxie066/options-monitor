@@ -87,6 +87,9 @@ OUTPUT_COLUMNS = [
     "multiplier",
     "capture_ratio",
     "remaining_premium",
+    "estimated_pnl_if_close_gross",
+    "estimated_close_fee",
+    "estimated_pnl_if_close_net",
     "realized_if_close",
     "buy_to_close_fee",
     "buy_to_close_cost",
@@ -1382,9 +1385,15 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception:
         return _with_extra_flags(row, ["fee_calc_unavailable"])
-    realized = safe_float(row.get("realized_if_close"))
-    if realized is not None:
-        row["realized_if_close"] = realized - float(fee)
+    gross = safe_float(row.get("estimated_pnl_if_close_gross"))
+    if gross is None:
+        gross = safe_float(row.get("realized_if_close"))
+    row["estimated_pnl_if_close_gross"] = gross
+    row["estimated_close_fee"] = float(fee)
+    net = gross - float(fee) if gross is not None else None
+    row["estimated_pnl_if_close_net"] = net
+    # Deprecated compatibility alias: historically this field was net after the runner applied fees.
+    row["realized_if_close"] = net
     row["close_fee"] = float(fee)
     if is_long_close:
         row["sell_to_close_fee"] = float(fee)
