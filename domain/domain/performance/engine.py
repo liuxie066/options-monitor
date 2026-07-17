@@ -34,6 +34,8 @@ _MONETARY_KINDS = frozenset(
         "option_fee_cash",
         "stock_settlement_cash_gross",
         "stock_settlement_fee_cash",
+        "assigned_stock_sale_cash_gross",
+        "assigned_stock_sale_fee_cash",
         "realized_gross",
         "realized_net",
         "opening_unrealized_gross",
@@ -48,6 +50,8 @@ _CASH_NET_KINDS = frozenset(
         "option_fee_cash",
         "stock_settlement_cash_gross",
         "stock_settlement_fee_cash",
+        "assigned_stock_sale_cash_gross",
+        "assigned_stock_sale_fee_cash",
     }
 )
 
@@ -136,6 +140,7 @@ class PeriodPerformance:
     activity: Mapping[str, Any]
     cash: Mapping[str, Any]
     pnl: Mapping[str, Any]
+    assigned_stock: Mapping[str, Any]
     breakdowns: Mapping[str, Any]
     quality: MetricQuality
     facts: tuple[PerformanceFact, ...]
@@ -148,6 +153,7 @@ class PeriodPerformance:
             "activity": dict(self.activity),
             "cash": dict(self.cash),
             "pnl": dict(self.pnl),
+            "assigned_stock": dict(self.assigned_stock),
             "breakdowns": dict(self.breakdowns),
             "quality": self.quality.to_dict(),
         }
@@ -168,6 +174,8 @@ def build_period_performance(
     ending_positions: Sequence[OptionValuationPosition] = (),
     valuation_marks: Sequence[ValuationMarkFact] = (),
     fx_rates: Sequence[FXRateFact] = (),
+    opening_assigned_stock: Mapping[str, Any] | None = None,
+    ending_assigned_stock: Mapping[str, Any] | None = None,
 ) -> PeriodPerformance:
     account_filter = normalize_account(account) if account else ""
     broker_filter = normalize_broker(broker) if broker else ""
@@ -231,6 +239,13 @@ def build_period_performance(
             prefix="ending",
         )
     )
+    facts.extend(
+        _assigned_stock_period_facts(
+            opening_assigned_stock or {},
+            ending_assigned_stock or {},
+            period=period,
+        )
+    )
 
     ordered_facts = tuple(
         sorted(
@@ -254,12 +269,17 @@ def build_period_performance(
         "accounts": _breakdown(ordered_facts, key_name="account", key_fn=lambda fact: fact.account, fx_rates=fx_rates),
         "symbols": _breakdown(ordered_facts, key_name="symbol", key_fn=lambda fact: fact.symbol, fx_rates=fx_rates),
     }
+    assigned_scope_rows = [
+        *_assigned_stock_rows(opening_assigned_stock or {}, "assigned_stock_lots"),
+        *_assigned_stock_rows(ending_assigned_stock or {}, "assigned_stock_lots"),
+    ]
     accounts = sorted(
         {
             *[event.contract_key.account for event in period_events],
             *[allocation.contract_key.account for allocation in scoped_allocations],
             *[position.account for position in scoped_opening_positions],
             *[position.account for position in scoped_ending_positions],
+            *[str(row.get("account") or "") for row in assigned_scope_rows if str(row.get("account") or "")],
         }
     )
     brokers = sorted(
@@ -268,6 +288,7 @@ def build_period_performance(
             *[allocation.contract_key.broker for allocation in scoped_allocations],
             *[position.broker for position in scoped_opening_positions],
             *[position.broker for position in scoped_ending_positions],
+            *[str(row.get("broker") or "") for row in assigned_scope_rows if str(row.get("broker") or "")],
         }
     )
     symbols = sorted(
@@ -276,6 +297,7 @@ def build_period_performance(
             *[allocation.contract_key.underlying_symbol for allocation in scoped_allocations],
             *[position.symbol for position in scoped_opening_positions],
             *[position.symbol for position in scoped_ending_positions],
+            *[str(row.get("symbol") or "") for row in assigned_scope_rows if str(row.get("symbol") or "")],
         }
     )
     relevant_event_ids = {
@@ -283,9 +305,14 @@ def build_period_performance(
         *[allocation.open_event_id for allocation in scoped_allocations],
         *[allocation.close_event_id for allocation in scoped_allocations],
     }
+    combined_diagnostics = [
+        *diagnostics,
+        *_assigned_stock_diagnostics(opening_assigned_stock or {}),
+        *_assigned_stock_diagnostics(ending_assigned_stock or {}),
+    ]
     relevant_diagnostics = [
         item
-        for item in diagnostics
+        for item in combined_diagnostics
         if _diagnostic_is_relevant(
             item,
             event_ids=relevant_event_ids,
@@ -327,6 +354,12 @@ def build_period_performance(
         activity=summary["activity"],
         cash=summary["cash"],
         pnl=summary["pnl"],
+        assigned_stock=_assigned_stock_report_summary(
+            opening_assigned_stock or {},
+            ending_assigned_stock or {},
+            facts=ordered_facts,
+            fx_rates=fx_rates,
+        ),
         breakdowns=breakdowns,
         quality=quality,
         facts=ordered_facts,
@@ -565,9 +598,21 @@ def _stock_settlement_facts(event: TradeEvent) -> list[PerformanceFact]:
         cash_amount = None
         cash_reason = f"stock settlement cash unavailable: {exc}"
     fee_raw = raw.get("fees") if raw.get("fees") not in (None, "") else raw.get("fee")
-    if fee_raw in (None, ""):
+    fee_provenance = raw.get("fee_provenance") if isinstance(raw.get("fee_provenance"), Mapping) else {}
+    fee_basis = str(fee_provenance.get("basis") or "").strip().lower()
+    if fee_basis != FeeBasis.ACTUAL.value:
         fee_amount = None
-        fee_reason = "stock settlement fee is missing"
+        fee_reason = str(
+            fee_provenance.get("reason")
+            or (
+                f"stock settlement fee basis is {fee_basis}"
+                if fee_basis in {FeeBasis.ESTIMATED.value, FeeBasis.MISSING.value}
+                else "stock settlement fee lacks actual provenance"
+            )
+        )
+    elif fee_raw in (None, ""):
+        fee_amount = None
+        fee_reason = "actual stock settlement fee amount is missing"
     else:
         try:
             fee = to_decimal(fee_raw, field_name="stock settlement fee")
@@ -596,6 +641,264 @@ def _stock_settlement_facts(event: TradeEvent) -> list[PerformanceFact]:
             **stock_common,
         ),
     ]
+
+
+def _assigned_stock_period_facts(
+    opening: Mapping[str, Any],
+    ending: Mapping[str, Any],
+    *,
+    period: PeriodWindow,
+) -> list[PerformanceFact]:
+    facts: list[PerformanceFact] = []
+    opening_lots = {
+        str(row.get("stock_lot_id") or ""): row
+        for row in _assigned_stock_rows(opening, "assigned_stock_lots")
+        if str(row.get("stock_lot_id") or "")
+    }
+    ending_lots = {
+        str(row.get("stock_lot_id") or ""): row
+        for row in _assigned_stock_rows(ending, "assigned_stock_lots")
+        if str(row.get("stock_lot_id") or "")
+    }
+    for row in ending_lots.values():
+        assigned_at = _row_int(row, "assigned_at_ms", "opened_at_ms")
+        if assigned_at is None or not period.contains(assigned_at):
+            continue
+        common = _assigned_stock_fact_kwargs(row, source_event_id=str(row.get("source_assignment_event_id") or ""))
+        facts.append(
+            PerformanceFact(
+                fact_kind="assigned_stock_shares_opened",
+                effective_at_ms=assigned_at,
+                quantity=max(0, int(row.get("shares_opened") or 0)),
+                **common,
+            )
+        )
+        fee = _assigned_stock_fee(row, component="assignment_stock_fee")
+        fee_amount = _actual_fee_amount(fee)
+        facts.append(
+            PerformanceFact(
+                fact_kind="realized_net",
+                effective_at_ms=assigned_at,
+                amount=None if fee_amount is None else -fee_amount,
+                missing_reason=None if fee_amount is not None else _fee_missing_reason(fee),
+                **common,
+            )
+        )
+    for row in _assigned_stock_rows(ending, "assigned_stock_sale_rows"):
+        event_at = _row_int(row, "event_at", "trade_time_ms")
+        if event_at is None or not period.contains(event_at):
+            continue
+        common = _assigned_stock_fact_kwargs(row, source_event_id=str(row.get("stock_event_id") or ""))
+        proceeds = _decimal_or_none(row.get("cash_in_gross"))
+        basis = _decimal_or_none(row.get("stock_principal_basis_sold"))
+        gross = quantize_money(proceeds - basis) if proceeds is not None and basis is not None else None
+        fee = {
+            "basis": row.get("fee_basis"),
+            "amount": row.get("fees"),
+            "reason": row.get("fee_reason"),
+        }
+        fee_amount = _actual_fee_amount(fee)
+        net = quantize_money(gross - fee_amount) if gross is not None and fee_amount is not None else None
+        gross_reason = None if gross is not None else "assigned-stock sale proceeds or cost basis is unavailable"
+        net_reason = None if net is not None else gross_reason or _fee_missing_reason(fee)
+        evidence_ids = tuple(str(row.get("evidence_fact_id") or "").split())
+        facts.extend(
+            [
+                PerformanceFact(
+                    fact_kind="assigned_stock_shares_sold",
+                    effective_at_ms=event_at,
+                    quantity=max(0, int(row.get("shares") or 0)),
+                    **common,
+                ),
+                PerformanceFact(
+                    fact_kind="assigned_stock_sale_cash_gross",
+                    effective_at_ms=event_at,
+                    amount=proceeds,
+                    missing_reason=None if proceeds is not None else "assigned-stock sale proceeds are unavailable",
+                    evidence_fact_ids=evidence_ids,
+                    **common,
+                ),
+                PerformanceFact(
+                    fact_kind="assigned_stock_sale_fee_cash",
+                    effective_at_ms=event_at,
+                    amount=None if fee_amount is None else -fee_amount,
+                    missing_reason=None if fee_amount is not None else _fee_missing_reason(fee),
+                    **common,
+                ),
+                PerformanceFact(
+                    fact_kind="realized_gross",
+                    effective_at_ms=event_at,
+                    amount=gross,
+                    missing_reason=gross_reason,
+                    **common,
+                ),
+                PerformanceFact(
+                    fact_kind="realized_net",
+                    effective_at_ms=event_at,
+                    amount=net,
+                    missing_reason=net_reason,
+                    **common,
+                ),
+            ]
+        )
+    facts.extend(
+        _assigned_stock_unrealized_facts(
+            opening_lots.values(),
+            at_ms=period.valuation_open_at_ms,
+            prefix="opening",
+        )
+    )
+    facts.extend(
+        _assigned_stock_unrealized_facts(
+            ending_lots.values(),
+            at_ms=period.valuation_end_at_ms,
+            prefix="ending",
+        )
+    )
+    return facts
+
+
+def _assigned_stock_unrealized_facts(
+    rows: Any,
+    *,
+    at_ms: int,
+    prefix: str,
+) -> list[PerformanceFact]:
+    facts: list[PerformanceFact] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or int(row.get("shares_remaining") or 0) <= 0:
+            continue
+        amount = _decimal_or_none(row.get("assigned_stock_unrealized_pnl_gross"))
+        reason = None if amount is not None else "assigned-stock valuation mark is unavailable"
+        fact_id = str(row.get("quote_evidence_fact_id") or "")
+        common = _assigned_stock_fact_kwargs(row, source_event_id=str(row.get("stock_lot_id") or ""))
+        for suffix in ("gross", "net"):
+            facts.append(
+                PerformanceFact(
+                    fact_kind=f"{prefix}_unrealized_{suffix}",
+                    effective_at_ms=at_ms,
+                    amount=amount,
+                    missing_reason=reason,
+                    evidence_fact_ids=(fact_id,) if fact_id else (),
+                    **common,
+                )
+            )
+    return facts
+
+
+def _assigned_stock_fact_kwargs(row: Mapping[str, Any], *, source_event_id: str) -> dict[str, Any]:
+    return {
+        "account": str(row.get("account") or ""),
+        "broker": str(row.get("broker") or ""),
+        "symbol": str(row.get("symbol") or ""),
+        "currency": str(row.get("currency") or "") or None,
+        "source_event_id": source_event_id,
+    }
+
+
+def _assigned_stock_fee(row: Mapping[str, Any], *, component: str) -> Mapping[str, Any]:
+    for item in row.get("fee_evidence") or []:
+        if isinstance(item, Mapping) and str(item.get("component") or "") == component:
+            return item
+    return {"basis": "missing", "reason": f"{component} is missing"}
+
+
+def _actual_fee_amount(fee: Mapping[str, Any]) -> Decimal | None:
+    if str(fee.get("basis") or "").strip().lower() != FeeBasis.ACTUAL.value:
+        return None
+    amount = _decimal_or_none(fee.get("amount"))
+    return amount if amount is not None and amount >= 0 else None
+
+
+def _fee_missing_reason(fee: Mapping[str, Any]) -> str:
+    return str(fee.get("reason") or f"fee basis is {fee.get('basis') or 'missing'}")
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        return quantize_money(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_int(row: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        try:
+            value = int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _assigned_stock_rows(projection: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+    value = projection.get(key)
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _assigned_stock_diagnostics(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    lots = {
+        str(row.get("stock_lot_id") or ""): row
+        for row in _assigned_stock_rows(projection, "assigned_stock_lots")
+    }
+    for row in _assigned_stock_rows(projection, "assigned_stock_review_rows"):
+        lot = lots.get(str(row.get("stock_lot_id") or ""), {})
+        payload = {
+            "context": "assigned_stock",
+            "code": str(row.get("status") or "assigned_stock_review_required"),
+            "message": str(row.get("message") or "assigned-stock lifecycle is incomplete"),
+            "event_id": str(row.get("event_id") or row.get("stock_event_id") or ""),
+            "event_time_ms": _row_int(lot, "assigned_at_ms", "opened_at_ms") or 0,
+            "account": str(row.get("account") or lot.get("account") or ""),
+            "broker": str(row.get("broker") or lot.get("broker") or ""),
+        }
+        diagnostics.append(payload)
+    return diagnostics
+
+
+def _assigned_stock_report_summary(
+    opening: Mapping[str, Any],
+    ending: Mapping[str, Any],
+    *,
+    facts: Sequence[PerformanceFact],
+    fx_rates: Sequence[FXRateFact],
+) -> dict[str, Any]:
+    stock_source_ids = {
+        str(row.get("stock_event_id") or row.get("source_assignment_event_id") or row.get("stock_lot_id") or "")
+        for row in [
+            *_assigned_stock_rows(ending, "assigned_stock_lots"),
+            *_assigned_stock_rows(ending, "assigned_stock_sale_rows"),
+        ]
+    }
+    stock_facts = [
+        fact
+        for fact in facts
+        if fact.fact_kind.startswith("assigned_stock_")
+        or (
+            fact.source_event_id in stock_source_ids
+            and fact.fact_kind
+            in {
+                "realized_gross",
+                "realized_net",
+                "opening_unrealized_gross",
+                "opening_unrealized_net",
+                "ending_unrealized_gross",
+                "ending_unrealized_net",
+            }
+        )
+    ]
+    return {
+        "opening_lots": _assigned_stock_rows(opening, "assigned_stock_lots"),
+        "ending_lots": _assigned_stock_rows(ending, "assigned_stock_lots"),
+        "sales": _assigned_stock_rows(ending, "assigned_stock_sale_rows"),
+        "review": _assigned_stock_rows(ending, "assigned_stock_review_rows"),
+        "unsupported_inventory": _assigned_stock_rows(ending, "unsupported_inventory_rows"),
+        "period": _summarize(stock_facts, fx_rates=fx_rates),
+    }
 
 
 def _option_valuation_facts(
@@ -701,11 +1004,26 @@ def _summarize(
             "premium_paid_gross": _metric(facts, {"premium_paid_gross"}, fx_rates=fx_rates).to_dict(),
             "contracts_opened": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_opened"),
             "contracts_closed": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_closed"),
+            "assigned_stock_shares_opened": sum(
+                fact.quantity or 0 for fact in facts if fact.fact_kind == "assigned_stock_shares_opened"
+            ),
+            "assigned_stock_shares_sold": sum(
+                fact.quantity or 0 for fact in facts if fact.fact_kind == "assigned_stock_shares_sold"
+            ),
         },
         "cash": {
             "option_trade_cash_gross": _metric(facts, {"option_trade_cash_gross"}, fx_rates=fx_rates).to_dict(),
             "option_fee_cash": _metric(facts, {"option_fee_cash"}, fx_rates=fx_rates).to_dict(),
             "stock_settlement_cash_gross": _metric(facts, {"stock_settlement_cash_gross"}, fx_rates=fx_rates).to_dict(),
+            "stock_settlement_fee_cash": _metric(
+                facts, {"stock_settlement_fee_cash"}, fx_rates=fx_rates
+            ).to_dict(),
+            "assigned_stock_sale_cash_gross": _metric(
+                facts, {"assigned_stock_sale_cash_gross"}, fx_rates=fx_rates
+            ).to_dict(),
+            "assigned_stock_sale_fee_cash": _metric(
+                facts, {"assigned_stock_sale_fee_cash"}, fx_rates=fx_rates
+            ).to_dict(),
             "total_cash_change_net": _metric(facts, _CASH_NET_KINDS, fx_rates=fx_rates).to_dict(),
         },
         "pnl": {
