@@ -134,6 +134,31 @@ Opening and ending assigned-stock projections use the same restated boundary sem
 
 Covered-call lifecycle attribution prefers an explicit `stock_lot_id` link. If no explicit link exists, FIFO attribution is allowed only when the available inventory is entirely attributable to assigned-stock lots; it is labelled `heuristic` and downgrades lifecycle quality. Mixed ordinary/assigned inventory fails closed. Reservations prevent one stock share from backing two overlapping calls. Closed-call realized PnL and open-call marked unrealized PnL are both visible in the lifecycle projection, but they are not added again to top-level performance because canonical option facts already own those economics.
 
+## Capital Exposure and Efficiency
+
+The report exposes capital only as continuous-time notional-days under the explicit basis
+`notional_days_v1`. Each exposure is a half-open interval `[start_at_ms, end_at_ms)` and is
+intersected with the normalized report window using exact milliseconds:
+
+```text
+capital_days = notional * overlap_ms / 86_400_000
+```
+
+Short puts use strike * multiplier * remaining contracts. Long options use the remaining
+opening premium debit. Assigned stock uses remaining stock cost basis and reduces both shares
+and basis at the exact sale timestamp. A Sell Put assignment closes put exposure and opens
+assigned-stock exposure at the same timestamp. The shared assigned-stock projector publishes
+the covered-call allocation identities it already validated, allowing attributed covered calls
+to contribute an explicit zero-incremental segment without reimplementing attribution in the
+performance engine. Naked or otherwise unallocated short calls remain unavailable.
+
+`capital.period_total_net_annualized_efficiency` and
+`capital.period_realized_net_annualized_efficiency` are reported per native currency only when
+both the corresponding net PnL and a positive denominator are complete. Zero denominators,
+missing net PnL, unsupported inventory basis, and unknown short-call capital are explicit in
+`capital.coverage` or the efficiency envelope. No NAV, margin return, integer-day approximation,
+or unqualified `return_rate` is introduced.
+
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.
@@ -141,4 +166,5 @@ Covered-call lifecycle attribution prefers an explicit `stock_lot_id` link. If n
 - S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
 - S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
 - S5: shared Sell Put assigned-stock projection, legal ledger API boundary, partial/full sales, stock marks, actual-fee net semantics, covered-call attribution quality, unsupported inventory diagnostics, and legacy delegation implemented.
-- S6-S10: pending their Gateflow implementation/review gates.
+- S6: continuous-time option/assigned-stock notional-days, exact partial transitions, assignment handoff, covered-call zero-incremental treatment, and net annualized efficiency coverage implemented.
+- S7-S10: pending their Gateflow implementation/review gates.

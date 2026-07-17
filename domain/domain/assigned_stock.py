@@ -584,6 +584,7 @@ def _attribute_covered_calls(
     stock_holdings: list[dict[str, Any]] | None,
     as_of_ms: int,
     review_rows: list[dict[str, Any]],
+    allocation_rows: list[dict[str, Any]],
 ) -> None:
     event_by_id = {
         str(event.get("event_id") or "").strip(): event
@@ -707,6 +708,20 @@ def _attribute_covered_calls(
                 lot["_covered_call_evidence_fact_ids"].add(evidence_fact_id)
             lot_id = str(lot.get("stock_lot_id") or "")
             reservations.setdefault(lot_id, []).append((opened_at, reservation_end, allocated))
+            allocation_rows.append(
+                {
+                    "open_event_id": open_id,
+                    "stock_lot_id": lot_id,
+                    "account": key[0],
+                    "broker": key[1],
+                    "symbol": key[2],
+                    "currency": str(lot.get("currency") or ""),
+                    "shares": allocated,
+                    "start_at_ms": opened_at,
+                    "end_at_ms": reservation_end,
+                    "allocation_status": allocation_status,
+                }
+            )
             remaining_shares -= allocated
 
         if remaining > 0 and open_unrealized is None:
@@ -1104,6 +1119,7 @@ def project_assigned_stock_lifecycle(
         lot["_sale_rows"].append(sale_row)
 
     effective_as_of_ms = int(as_of_ms) if as_of_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    covered_call_allocation_rows: list[dict[str, Any]] = []
     _attribute_covered_calls(
         lots_by_id,
         trade_events=_active_trade_events(trade_events),
@@ -1112,6 +1128,7 @@ def project_assigned_stock_lifecycle(
         stock_holdings=stock_holdings,
         as_of_ms=effective_as_of_ms,
         review_rows=review_rows,
+        allocation_rows=covered_call_allocation_rows,
     )
 
     quote_rows = _normalize_quote_snapshots(quote_snapshots)
@@ -1345,6 +1362,14 @@ def project_assigned_stock_lifecycle(
                 if row.get("status") == "incomplete_inventory_basis" and _review_row_in_month(row, month)
             ],
             key=_assigned_stock_row_sort_key,
+        ),
+        "covered_call_allocations": sorted(
+            covered_call_allocation_rows,
+            key=lambda row: (
+                int(row.get("start_at_ms") or 0),
+                str(row.get("open_event_id") or ""),
+                str(row.get("stock_lot_id") or ""),
+            ),
         ),
         "warnings": warnings,
     }
