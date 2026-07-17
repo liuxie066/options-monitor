@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import csv
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
+from zoneinfo import ZoneInfo
 import json
 
 from src.application.agent_tool_contracts import AgentToolError
 from domain.domain.close_advice import TIER_PRIORITY
 from domain.domain.ledger.position_fields import normalize_account
+from domain.domain.performance.period import PeriodRequest, PeriodWindow, normalize_period
 from domain.domain.strategy_vocab import (
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
@@ -23,6 +26,14 @@ from domain.domain.trade_contract_identity import (
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import assigned_stock_event_log, list_canonical_position_lot_snapshots, trade_event_log
+from src.application.account_config import accounts_from_config
+from src.application.performance.adapters import (
+    assigned_stock_instruments,
+    load_assigned_stock_projection,
+    load_ledger_performance_inputs,
+    load_option_valuation_inputs,
+)
+from src.application.performance.evidence_collection import collect_current_performance_evidence
 from src.application.symbol_mutations import normalize_symbol_read
 
 
@@ -324,6 +335,274 @@ def query_cash_headroom_tool(
     return result, [], {"config_path": mask_path(config_path), "output_dir": mask_path(out_dir)}
 
 
+_OPTION_PERFORMANCE_INPUT_FIELDS = frozenset(
+    {
+        "config_key",
+        "config_path",
+        "data_config",
+        "account",
+        "broker",
+        "period",
+        "as_of_date",
+        "month",
+        "year",
+        "start_date",
+        "end_date",
+        "include_rows",
+        "refresh_quotes",
+    }
+)
+
+
+def normalize_option_performance_request(
+    payload: dict[str, Any],
+    *,
+    normalize_broker,
+    now_ms: int | None = None,
+) -> tuple[dict[str, Any], PeriodWindow]:
+    extras = sorted(str(key) for key in payload if key not in _OPTION_PERFORMANCE_INPUT_FIELDS)
+    if extras:
+        raise AgentToolError(
+            "INVALID_ARGUMENT",
+            f"option_performance_report does not accept: {', '.join(extras)}",
+        )
+    config_key = str(payload.get("config_key") or "us").strip().lower()
+    if config_key not in {"us", "hk"}:
+        raise AgentToolError("INVALID_ARGUMENT", "config_key must be us or hk")
+    for field in ("include_rows", "refresh_quotes"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, bool):
+            raise AgentToolError("INVALID_ARGUMENT", f"{field} must be a boolean")
+    try:
+        period_request = PeriodRequest.from_mapping(payload)
+        window = normalize_period(period_request, now_ms=now_ms)
+    except ValueError as exc:
+        raise AgentToolError("INVALID_ARGUMENT", str(exc)) from exc
+
+    raw_account = str(payload.get("account") or "").strip()
+    account = normalize_account(raw_account) if raw_account else None
+    if raw_account and not account:
+        raise AgentToolError("INVALID_ARGUMENT", "account is invalid")
+    raw_broker = str(payload.get("broker") or "").strip()
+    broker = normalize_broker(raw_broker) if raw_broker else None
+    normalized = {
+        "config_key": config_key,
+        "config_path": payload.get("config_path"),
+        "data_config": payload.get("data_config"),
+        "account": account,
+        "broker": broker,
+        "period": period_request.period,
+        "as_of_date": period_request.as_of_date,
+        "month": period_request.month,
+        "year": period_request.year,
+        "start_date": period_request.start_date,
+        "end_date": period_request.end_date,
+        "include_rows": bool(payload.get("include_rows", False)),
+        "refresh_quotes": bool(payload.get("refresh_quotes", True)),
+    }
+    return normalized, window
+
+
+def _row_order_key(row: dict[str, Any]) -> tuple[int, str, str, str]:
+    try:
+        effective_at_ms = int(row.get("effective_at_ms") or 0)
+    except (TypeError, ValueError):
+        effective_at_ms = 0
+    return (
+        effective_at_ms,
+        str(row.get("fact_kind") or ""),
+        str(row.get("source_event_id") or ""),
+        str(row.get("allocation_id") or ""),
+    )
+
+
+def _public_option_performance_report(
+    report: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    data = dict(report)
+    data["schema_version"] = "option_performance_report.output.v1"
+    data["assignment_lifecycle"] = data.pop("assigned_stock", {})
+    scope = dict(data.get("scope") or {})
+    scope["config_key"] = request["config_key"]
+    observed_accounts = {
+        str(item).strip().lower()
+        for item in scope.get("accounts") or []
+        if str(item).strip()
+    }
+    if request.get("account"):
+        scope["accounts"] = sorted({str(request["account"]), *observed_accounts})
+    else:
+        configured_accounts = set(accounts_from_config(cfg, fallback=()))
+        scope["accounts"] = sorted(configured_accounts | observed_accounts)
+    data["scope"] = scope
+
+    quality = dict(data.get("quality") or {})
+    diagnostics = [dict(item) for item in quality.get("diagnostics") or [] if isinstance(item, dict)]
+    if request["include_rows"]:
+        rows = sorted(
+            [dict(item) for item in data.get("rows") or [] if isinstance(item, dict)],
+            key=_row_order_key,
+        )
+        original_count = len(rows)
+        truncated = original_count > 1000
+        data["rows"] = rows[:1000]
+        if truncated:
+            diagnostics.append(
+                {
+                    "code": "rows_truncated",
+                    "original_count": original_count,
+                    "returned_count": 1000,
+                }
+            )
+        quality["rows_truncated"] = truncated
+        quality["row_count"] = len(data["rows"])
+        quality["row_count_before_limit"] = original_count
+    else:
+        data.pop("rows", None)
+        quality["rows_truncated"] = False
+        quality["row_count"] = 0
+    quality["diagnostics"] = diagnostics
+    data["quality"] = quality
+    return data
+
+
+def option_performance_report_tool(
+    payload: dict[str, Any],
+    *,
+    load_runtime_config,
+    resolve_public_data_config_path,
+    normalize_broker,
+    resolve_option_positions_repo,
+    open_performance_evidence_repository,
+    build_option_period_performance,
+    repo_base,
+    mask_path,
+    now_ms: int | None = None,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    request, window = normalize_option_performance_request(
+        payload,
+        normalize_broker=normalize_broker,
+        now_ms=now_ms,
+    )
+    config_path, cfg = load_runtime_config(
+        config_key=request["config_key"],
+        config_path=request.get("config_path"),
+    )
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_path = resolve_public_data_config_path(request, portfolio_cfg)
+    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
+    evidence_repo = open_performance_evidence_repository(repo)
+    report = build_option_period_performance(
+        repo,
+        period=window,
+        account=request.get("account"),
+        broker=request.get("broker"),
+        now_ms=now_ms,
+        include_rows=request["include_rows"],
+        evidence_repo=evidence_repo,
+        refresh_quotes=request["refresh_quotes"],
+        collection_cfg=cfg,
+        collection_base_dir=config_path.parent,
+    )
+    data = _public_option_performance_report(report, request=request, cfg=cfg)
+    return data, [], {
+        "config_path": mask_path(config_path),
+        "data_config": mask_path(data_config_path),
+        "period_status": window.status,
+    }
+
+
+def capture_option_performance_evidence(
+    payload: dict[str, Any],
+    *,
+    apply: bool,
+    load_runtime_config,
+    resolve_public_data_config_path,
+    normalize_broker,
+    resolve_option_positions_repo,
+    open_performance_evidence_repository,
+    repo_base,
+    mask_path,
+    now_ms: int | None = None,
+    evidence_collector=collect_current_performance_evidence,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    report_payload = {
+        "config_key": payload.get("config_key") or "us",
+        "config_path": payload.get("config_path"),
+        "data_config": payload.get("data_config"),
+        "account": payload.get("account"),
+        "broker": payload.get("broker"),
+        "period": "mtd",
+        "include_rows": False,
+        "refresh_quotes": True,
+    }
+    request, window = normalize_option_performance_request(
+        report_payload,
+        normalize_broker=normalize_broker,
+        now_ms=now_ms,
+    )
+    if window.status != "partial_current":
+        raise AgentToolError("INVALID_ARGUMENT", "evidence capture only supports the current period")
+    config_path, cfg = load_runtime_config(
+        config_key=request["config_key"],
+        config_path=request.get("config_path"),
+    )
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_path = resolve_public_data_config_path(request, portfolio_cfg)
+    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
+    evidence_repo = open_performance_evidence_repository(repo)
+    inputs = load_ledger_performance_inputs(repo)
+    ending = load_option_valuation_inputs(
+        inputs,
+        as_of_ms=window.valuation_end_at_ms,
+        account=request.get("account"),
+        broker=request.get("broker"),
+    )
+    existing = evidence_repo.read_all()
+    ending_assigned_stock = load_assigned_stock_projection(
+        inputs,
+        as_of_ms=window.valuation_end_at_ms,
+        valuation_marks=existing.valuation_marks,
+        account=request.get("account"),
+        broker=request.get("broker"),
+    )
+    collection = evidence_collector(
+        period_status=window.status,
+        refresh_quotes=True,
+        option_positions=ending.positions,
+        stock_instruments=assigned_stock_instruments(ending_assigned_stock),
+        now_ms=int(now_ms if now_ms is not None else window.valuation_end_at_ms),
+        cfg=cfg,
+        base_dir=config_path.parent,
+    )
+    migrated_at_ms = int(
+        now_ms
+        if now_ms is not None
+        else datetime.now(timezone.utc).timestamp() * 1000
+    )
+    imported = evidence_repo.import_envelope(
+        collection.envelope,
+        apply=bool(apply),
+        migrated_at_ms=migrated_at_ms,
+    )
+    data = imported.to_dict()
+    data["schema_version"] = "option_performance_evidence_capture.output.v1"
+    data["dry_run"] = not bool(apply)
+    data["collection"] = collection.to_dict()
+    data["scope"] = {
+        "config_key": request["config_key"],
+        "account": request.get("account"),
+        "broker": request.get("broker"),
+    }
+    return data, [], {
+        "config_path": mask_path(config_path),
+        "data_config": mask_path(data_config_path),
+    }
+
+
 def load_monthly_income_inputs(
     payload: dict[str, Any],
     *,
@@ -370,6 +649,56 @@ def load_monthly_income_inputs(
     }
 
 
+def _legacy_metric_amount(metric: Any) -> tuple[dict[str, float], float | None]:
+    value = metric if isinstance(metric, dict) else {}
+    by_currency = value.get("by_currency") if isinstance(value.get("by_currency"), dict) else {}
+    return dict(by_currency), value.get("cny")
+
+
+def _legacy_monthly_rows(report: dict[str, Any], *, account: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    monthly = report.get("breakdowns", {}).get("monthly") if isinstance(report.get("breakdowns"), dict) else []
+    summary: list[dict[str, Any]] = []
+    returns: list[dict[str, Any]] = []
+    for item in monthly if isinstance(monthly, list) else []:
+        if not isinstance(item, dict):
+            continue
+        activity = item.get("activity") if isinstance(item.get("activity"), dict) else {}
+        cash = item.get("cash") if isinstance(item.get("cash"), dict) else {}
+        pnl = item.get("pnl") if isinstance(item.get("pnl"), dict) else {}
+        premium_by_ccy, premium_cny = _legacy_metric_amount(activity.get("premium_collected_gross"))
+        realized_by_ccy, realized_cny = _legacy_metric_amount(pnl.get("realized_gross"))
+        net_by_ccy, net_cny = _legacy_metric_amount(cash.get("option_trade_cash_gross"))
+        month = str(item.get("month") or "")
+        summary.append(
+            {
+                "month": month,
+                "account": account,
+                "net_cashflow_gross": net_by_ccy,
+                "assignment_stock_net_cashflow_gross": {},
+            }
+        )
+        returns.append(
+            {
+                "month": month,
+                "account": account,
+                "realized_pnl_cny": realized_cny,
+                "realized_pnl_by_ccy": realized_by_ccy,
+                "realized_return_rate": None,
+                "annualized_realized_return_rate": None,
+                "premium_income_cny": premium_cny,
+                "premium_income_by_ccy": premium_by_ccy,
+                "premium_return_rate": None,
+                "cash_secured_cny": None,
+                "cash_secured_by_ccy": {},
+                "net_income_cny": net_cny,
+                "net_income_by_ccy": net_by_ccy,
+                "net_return_rate": None,
+                "annualized_net_return_rate": None,
+            }
+        )
+    return summary, returns
+
+
 def monthly_income_report_tool(
     payload: dict[str, Any],
     *,
@@ -377,156 +706,177 @@ def monthly_income_report_tool(
     resolve_public_data_config_path,
     normalize_broker,
     resolve_option_positions_repo,
-    build_monthly_income_report,
-    refresh_assigned_stock_quotes,
-    get_exchange_rates,
+    build_monthly_income_report=None,
+    refresh_assigned_stock_quotes=None,
+    get_exchange_rates=None,
     repo_base,
     mask_path,
+    open_performance_evidence_repository=None,
+    build_option_period_performance=None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    inputs, warnings, meta = load_monthly_income_inputs(
-        payload,
+    del build_monthly_income_report, refresh_assigned_stock_quotes, get_exchange_rates
+    if open_performance_evidence_repository is None:
+        from src.application.ledger.api import open_performance_evidence_repository
+    if build_option_period_performance is None:
+        from src.application.performance.service import build_option_period_performance
+
+    month = str(payload.get("month") or "").strip() or None
+    legacy_time_warnings: list[str] = []
+    as_of_date: str | None = None
+    as_of_raw = payload.get("as_of_ms")
+    if as_of_raw not in (None, ""):
+        try:
+            as_of_ms = int(as_of_raw)
+            as_of_date = datetime.fromtimestamp(
+                as_of_ms / 1000,
+                tz=ZoneInfo("Asia/Shanghai"),
+            ).date().isoformat()
+        except (TypeError, ValueError, OSError) as exc:
+            raise AgentToolError(
+                "INVALID_ARGUMENT",
+                "as_of_ms must be an integer timestamp in milliseconds",
+            ) from exc
+        if month:
+            legacy_time_warnings.append(
+                "Legacy as_of_ms cannot preserve an intraday cutoff with period=month; the adapter uses the requested natural month"
+            )
+        else:
+            legacy_time_warnings.append(
+                "Legacy as_of_ms is mapped to an MTD as_of_date in Asia/Shanghai"
+            )
+    request = {
+        "config_key": payload.get("config_key") or "us",
+        "config_path": payload.get("config_path"),
+        "data_config": payload.get("data_config"),
+        "account": payload.get("account"),
+        "broker": payload.get("broker"),
+        "period": "month" if month else "mtd",
+        "as_of_date": None if month else as_of_date,
+        "month": month,
+        "include_rows": bool(payload.get("include_rows", False)),
+        "refresh_quotes": False if as_of_date else bool(payload.get("refresh_quotes", True)),
+    }
+    report, report_warnings, meta = option_performance_report_tool(
+        request,
         load_runtime_config=load_runtime_config,
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
         resolve_option_positions_repo=resolve_option_positions_repo,
-        get_exchange_rates=get_exchange_rates,
+        open_performance_evidence_repository=open_performance_evidence_repository,
+        build_option_period_performance=build_option_period_performance,
         repo_base=repo_base,
         mask_path=mask_path,
     )
-    config_path = inputs["config_path"]
-    cfg = inputs["config"]
-    broker = str(inputs["broker"])
-    rates = inputs["rates"]
-    trade_events = inputs["trade_events"]
-    assigned_stock_events = inputs["assigned_stock_events"]
-    records = inputs["records"]
-    account = str(payload.get("account") or "").strip() or None
-    month = str(payload.get("month") or "").strip() or None
-    include_rows = bool(payload.get("include_rows", False))
-    try:
-        as_of_ms = int(payload["as_of_ms"]) if payload.get("as_of_ms") not in (None, "") else None
-    except Exception as exc:
-        raise AgentToolError("INVALID_ARGUMENT", "as_of_ms must be an integer timestamp in milliseconds") from exc
-    refresh_flag = payload.get("refresh_quotes")
-    refresh_quotes = bool(refresh_flag is True or (as_of_ms is None and refresh_flag is not False))
-
-    report = build_monthly_income_report(
-        records,
-        account=account,
-        broker=broker,
-        month=month,
-        rates=rates,
-        trade_events=trade_events,
-        assigned_stock_events=assigned_stock_events,
-        as_of_ms=as_of_ms,
-    )
-    quote_refresh: dict[str, Any] = {"enabled": False}
-    if refresh_quotes:
-        if as_of_ms is not None:
-            quote_refresh = {
-                "enabled": False,
-                "status": "skipped_historical_as_of",
-                "reason": "historical as-of queries require supplied quote snapshots or saved marks",
-            }
-            warnings.append("refresh_quotes ignored because as_of_ms was provided")
-        else:
-            lifecycle_rows = [row for row in report.get("assignment_lifecycle_rows") or [] if isinstance(row, dict)]
-            try:
-                refreshed = refresh_assigned_stock_quotes(
-                    lifecycle_rows,
-                    cfg=cfg,
-                    account=account,
-                    base_dir=repo_base(),
-                    state_base_dir=config_path.parent,
-                )
-            except Exception as exc:
-                quote_refresh = {
-                    "enabled": True,
-                    "status": "source_error",
-                    "quote_source": "opend_realtime",
-                    "errors": [{"error_code": type(exc).__name__, "message": str(exc)}],
-                }
-                warnings.append(f"assigned stock quote refresh failed: {type(exc).__name__}: {exc}")
-            else:
-                quote_refresh = dict(getattr(refreshed, "diagnostics", {}) or {})
-                quote_refresh.setdefault("enabled", True)
-                warnings.extend(str(item) for item in (getattr(refreshed, "warnings", []) or []) if str(item).strip())
-                quote_snapshots = list(getattr(refreshed, "quote_snapshots", []) or [])
-                if quote_snapshots:
-                    report = build_monthly_income_report(
-                        records,
-                        account=account,
-                        broker=broker,
-                        month=month,
-                        rates=rates,
-                        trade_events=trade_events,
-                        assigned_stock_events=assigned_stock_events,
-                        quote_snapshots=quote_snapshots,
-                    )
-    report_warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
-    warnings.extend(report_warnings)
-
-    rows = report.get("rows") if isinstance(report.get("rows"), list) else []
-    premium_rows = report.get("premium_rows") if isinstance(report.get("premium_rows"), list) else []
+    account = normalize_account(payload.get("account")) if payload.get("account") else None
+    summary, return_summary = _legacy_monthly_rows(report, account=account)
+    semantic_warnings = [
+        "DEPRECATED: monthly_income_report will be removed after the option_performance_report migration window",
+        "Legacy return-rate fields are unavailable under the v1 performance contract and are null",
+        "Legacy net_income fields map to gross option trade cash and must not be interpreted as profit",
+        *legacy_time_warnings,
+    ]
+    quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
+    diagnostics = [
+        {
+            "month": row.get("month"),
+            "account": account,
+            "income_record_status": "deprecated_adapter",
+            "income_amount_status": "reported" if row.get("realized_pnl_by_ccy") else "not_reported",
+            "position_lot_snapshots_count": None,
+            "missing_fields": [
+                "realized_return_rate",
+                "annualized_realized_return_rate",
+                "premium_return_rate",
+                "cash_secured_cny",
+                "cash_secured_by_ccy",
+                "net_return_rate",
+                "annualized_net_return_rate",
+            ],
+            "warnings": semantic_warnings,
+        }
+        for row in return_summary
+    ]
     data: dict[str, Any] = {
-        "source": {"label": "OM local option ledger", "kind": "ledger_snapshot"},
+        "source": {"label": "OM option performance v1 adapter", "kind": "ledger_snapshot"},
         "scope": {
-            "config_key": str(payload.get("config_key") or "").strip() or None,
-            "broker": broker,
+            "config_key": request["config_key"],
+            "broker": report.get("scope", {}).get("broker"),
             "account": account,
             "month": month,
         },
-        "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
-        "return_summary": report.get("return_summary") if isinstance(report.get("return_summary"), list) else [],
-        "combined_return_summary": report.get("combined_return_summary")
-        if isinstance(report.get("combined_return_summary"), list)
-        else [],
-        "diagnostics": report.get("diagnostics") if isinstance(report.get("diagnostics"), list) else [],
-        "filters": dict(report.get("filters") or {}),
-        "calculation_method": str(report.get("calculation_method") or ""),
-        "row_count": len(rows),
-        "premium_row_count": len(premium_rows),
-        "report_warnings": report_warnings,
-        "quote_refresh": quote_refresh,
+        "summary": summary,
+        "return_summary": return_summary,
+        "combined_return_summary": list(return_summary),
+        "diagnostics": diagnostics,
+        "filters": {"month": month, "account": account},
+        "calculation_method": "deprecated_adapter_over_option_performance_report_v1",
+        "summary_count": len(summary),
+        "return_summary_count": len(return_summary),
+        "coverage": {
+            "diagnostic_scope_count": len(diagnostics),
+            "reported_scope_count": sum(
+                1 for item in diagnostics if item.get("income_amount_status") == "reported"
+            ),
+            "unreported_scope_count": sum(
+                1 for item in diagnostics if item.get("income_amount_status") != "reported"
+            ),
+        },
+        "freshness": {
+            "kind": "ledger_snapshot",
+            "market_quotes_included": bool(
+                report.get("evidence", {}).get("live_unpersisted_valuation_mark_count")
+            ),
+        },
+        "quote_refresh": report.get("evidence", {}).get("collection", {}),
+        "report_warnings": semantic_warnings,
+        "deprecation": {
+            "status": "deprecated",
+            "replacement": "option_performance_report",
+            "semantic_warnings": semantic_warnings[1:],
+        },
+        "quality": quality,
     }
-    diagnostics = data["diagnostics"]
-    data["summary_count"] = len(data["summary"])
-    data["return_summary_count"] = len(data["return_summary"])
-    data["coverage"] = {
-        "diagnostic_scope_count": len(diagnostics),
-        "reported_scope_count": sum(
-            1
-            for item in diagnostics
-            if isinstance(item, dict) and str(item.get("income_amount_status") or "") == "reported"
-        ),
-        "unreported_scope_count": sum(
-            1
-            for item in diagnostics
-            if isinstance(item, dict) and str(item.get("income_amount_status") or "") != "reported"
-        ),
-    }
-    data["freshness"] = {"kind": "ledger_snapshot", "market_quotes_included": False}
-    if include_rows:
+    rows = report.get("rows") if isinstance(report.get("rows"), list) else []
+    data["row_count"] = len(rows)
+    data["premium_row_count"] = sum(
+        1 for row in rows if isinstance(row, dict) and row.get("fact_kind") == "premium_collected_gross"
+    )
+    if request["include_rows"]:
         data["rows"] = rows
-        data["premium_rows"] = premium_rows
+        data["premium_rows"] = [
+            row for row in rows if isinstance(row, dict) and row.get("fact_kind") == "premium_collected_gross"
+        ]
+        data["cashflow_rows"] = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("fact_kind")
+            in {
+                "option_trade_cash_gross",
+                "option_fee_cash",
+                "stock_settlement_cash_gross",
+                "stock_settlement_fee_cash",
+                "assigned_stock_sale_cash_gross",
+                "assigned_stock_sale_fee_cash",
+            }
+        ]
+        lifecycle = report.get("assignment_lifecycle") if isinstance(report.get("assignment_lifecycle"), dict) else {}
+        data["assignment_lifecycle_rows"] = list(lifecycle.get("ending_lots") or [])
+        data["assigned_stock_lots"] = list(lifecycle.get("ending_lots") or [])
+        data["assigned_stock_sale_rows"] = list(lifecycle.get("sales") or [])
+        data["assigned_stock_review_rows"] = list(lifecycle.get("review") or [])
+        data["realized_rows"] = [
+            row for row in rows if isinstance(row, dict) and row.get("fact_kind") == "realized_gross"
+        ]
         for key in (
-            "cashflow_rows",
             "stock_settlement_rows",
-            "assignment_lifecycle_rows",
             "lifecycle_efficiency_rows",
             "lifecycle_efficiency_summary",
-            "assigned_stock_lots",
-            "assigned_stock_sale_rows",
-            "assigned_stock_review_rows",
-            "realized_rows",
             "open_basis_rows",
             "enhancement_rows",
         ):
-            value = report.get(key)
-            data[key] = value if isinstance(value, list) else []
-
-    return data, warnings, meta
-
+            data[key] = []
+    return data, [*report_warnings, *semantic_warnings], meta
 
 def get_portfolio_context_tool(
     payload: dict[str, Any],

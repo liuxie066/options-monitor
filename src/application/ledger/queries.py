@@ -69,6 +69,12 @@ def open_position_ledger_from_runtime_config(
     return resolved_data_config, repo
 
 
+def open_performance_evidence_repository(repo: Any) -> Any:
+    from src.application.ledger.read_model import open_performance_evidence_repository as _impl
+
+    return _impl(repo)
+
+
 def normalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
     from src.application.ledger.read_model import canonicalize_position_lot_fields as _impl
 

@@ -112,6 +112,19 @@ def resolve_position_data_config_path(
     )
 
 
+def open_performance_evidence_repository(repo: Any) -> Any:
+    """Open the performance-evidence repository that shares the ledger SQLite file."""
+    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+
+    db_path = getattr(repo, "db_path", None)
+    if db_path in (None, ""):
+        ledger_store = getattr(repo, "ledger_store", None)
+        db_path = getattr(ledger_store, "sqlite_path", None)
+    if db_path in (None, ""):
+        raise ValueError("position ledger does not expose its SQLite path")
+    return PerformanceEvidenceSQLiteRepository(Path(db_path))
+
+
 def canonicalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
     raw = dict(fields or {})
     note = str(raw.get("note") or "")
