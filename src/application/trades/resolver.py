@@ -719,23 +719,31 @@ def _with_staggered_combo_yield_payload(
     strategy_group_id: str,
 ) -> dict[str, Any]:
     payload = dict(raw_payload or {})
-    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
-    payload.setdefault("leg_role", leg_role)
-    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
-    payload.setdefault("structure_mode", STAGGERED_EXPIRY_PAIR)
-    payload.setdefault("pair_intent_id", pair_intent_id)
-    payload.setdefault("strategy_group_id", strategy_group_id)
+    payload.update(
+        {
+            "strategy": STRATEGY_COMBO_YIELD,
+            "leg_role": leg_role,
+            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+            "structure_mode": STAGGERED_EXPIRY_PAIR,
+            "pair_intent_id": pair_intent_id,
+            "strategy_group_id": strategy_group_id,
+        }
+    )
 
     raw_snapshot = payload.get("strategy_snapshot")
     snapshot = dict(raw_snapshot) if isinstance(raw_snapshot, dict) else {}
-    snapshot.setdefault("strategy", STRATEGY_COMBO_YIELD)
-    snapshot.setdefault("strategy_family", STRATEGY_COMBO_YIELD)
-    snapshot.setdefault("strategy_source", "explicit_trade_intent")
-    snapshot.setdefault("leg_role", leg_role)
-    snapshot.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
-    snapshot.setdefault("structure_mode", STAGGERED_EXPIRY_PAIR)
-    snapshot.setdefault("pair_intent_id", pair_intent_id)
-    snapshot.setdefault("strategy_group_id", strategy_group_id)
+    snapshot.update(
+        {
+            "strategy": STRATEGY_COMBO_YIELD,
+            "strategy_family": STRATEGY_COMBO_YIELD,
+            "strategy_source": "explicit_trade_intent",
+            "leg_role": leg_role,
+            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+            "structure_mode": STAGGERED_EXPIRY_PAIR,
+            "pair_intent_id": pair_intent_id,
+            "strategy_group_id": strategy_group_id,
+        }
+    )
     payload["strategy_snapshot"] = snapshot
     return payload
 

@@ -1055,6 +1055,12 @@ def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_pat
     assert row["put_leg_role"] == "funding_put"
     assert row["call_leg_role"] == "participation_call"
     assert row["annualized_net_credit_yield"] is None
+    assert row["combo_breakeven"] is None
+    assert row["downside_breakeven_penalty"] is None
+    assert row["downside_breakeven"] is None
+    assert row["upside_breakeven"] is None
+    assert row["max_loss_if_zero"] is None
+    assert row["upside_breakeven_pct_above_spot"] is None
     assert float(row["funding_ratio"]) >= 1.0
     assert float(row["call_cost_to_put_credit"]) <= 1.0
     assert row["candidate_pair_id"].endswith(

@@ -367,6 +367,7 @@ def _build_manual_adjust_event(
     *,
     record_id: str,
     fields: dict[str, Any],
+    current_fields: dict[str, Any] | None = None,
     contracts: int | None = None,
     strike: float | None = None,
     expiration_ymd: str | None = None,
@@ -385,6 +386,7 @@ def _build_manual_adjust_event(
         record_id=record_id,
         fields=fields,
         operation="manual_adjust",
+        current_fields=current_fields,
     )
     target_source_event_id = str(fields.get("source_event_id") or "").strip()
     patch_contract = build_open_adjustment_patch_contract(
@@ -503,7 +505,7 @@ def persist_manual_adjust_events(
 ) -> list[LedgerWriteResult]:
     """Persist multiple lot adjustments and refresh projection in one transaction."""
 
-    prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
+    validated: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     seen_record_ids: set[str] = set()
     for raw in adjustments:
         item = dict(raw or {})
@@ -515,19 +517,51 @@ def persist_manual_adjust_events(
             raise ValueError(f"manual adjustment batch contains duplicate record_id: {record_id}")
         if not isinstance(fields, dict):
             raise ValueError(f"manual adjustment batch requires fields for record_id={record_id}")
-        event, patch_contract = _build_manual_adjust_event(
-            repo,
-            record_id=record_id,
-            fields=dict(fields),
-            **item,
-        )
-        prepared.append((record_id, event, patch_contract))
+        validated.append((record_id, dict(fields), item))
         seen_record_ids.add(record_id)
 
-    if not prepared:
+    if not validated:
         raise ValueError("manual adjustment batch requires at least one adjustment")
 
     def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
+        current_events = (
+            sqlite_repo.list_trade_events(conn=conn)
+            if conn is not None
+            else sqlite_repo.list_trade_events()
+        )
+        current_projection = project_stored_trade_events_to_position_lots(current_events)
+        current_by_record_id = {
+            str(lot.record_id or "").strip(): dict(lot.fields)
+            for lot in current_projection.lots
+            if str(lot.record_id or "").strip()
+        }
+        desired_group_ids = {
+            str(item.get("strategy_group_id") or "").strip()
+            for _record_id, _fields, item in validated
+            if str(item.get("strategy_group_id") or "").strip()
+        }
+        for record_id, fields in current_by_record_id.items():
+            if record_id in seen_record_ids:
+                continue
+            if str(fields.get("strategy_group_id") or "").strip() in desired_group_ids:
+                raise ValueError(
+                    f"strategy_group_id is already assigned to another position lot: record_id={record_id}"
+                )
+
+        prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
+        for record_id, fields, item in validated:
+            current_fields = current_by_record_id.get(record_id)
+            if current_fields is None:
+                raise ValueError(f"manual adjustment batch target lot not found: {record_id}")
+            event, patch_contract = _build_manual_adjust_event(
+                sqlite_repo,
+                record_id=record_id,
+                fields=fields,
+                current_fields=current_fields,
+                **item,
+            )
+            prepared.append((record_id, event, patch_contract))
+
         created_flags: list[bool] = []
         for _record_id, event, _patch_contract in prepared:
             created_flags.append(

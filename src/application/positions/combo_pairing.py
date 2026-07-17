@@ -281,6 +281,20 @@ def execute_staggered_combo_yield_pairing(
         pair=pair,
         strategy_group_id=strategy_group_id,
     )
+    put_snapshot = _strategy_snapshot(
+        pair.put_fields,
+        leg_role=FUNDING_PUT_ROLE,
+        counterpart_record_id=pair.call_record_id,
+        pair_intent_id=intent_id,
+        strategy_group_id=strategy_group_id,
+    )
+    call_snapshot = _strategy_snapshot(
+        pair.call_fields,
+        leg_role=PARTICIPATION_CALL_ROLE,
+        counterpart_record_id=pair.put_record_id,
+        pair_intent_id=intent_id,
+        strategy_group_id=strategy_group_id,
+    )
     adjustments = [
         {
             "record_id": pair.put_record_id,
@@ -294,13 +308,7 @@ def execute_staggered_combo_yield_pairing(
             "leg_role": FUNDING_PUT_ROLE,
             "strategy_group_id": strategy_group_id,
             "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
-            "strategy_snapshot": _strategy_snapshot(
-                pair.put_fields,
-                leg_role=FUNDING_PUT_ROLE,
-                counterpart_record_id=pair.call_record_id,
-                pair_intent_id=intent_id,
-                strategy_group_id=strategy_group_id,
-            ),
+            "strategy_snapshot": put_snapshot,
         },
         {
             "record_id": pair.call_record_id,
@@ -314,13 +322,7 @@ def execute_staggered_combo_yield_pairing(
             "leg_role": PARTICIPATION_CALL_ROLE,
             "strategy_group_id": strategy_group_id,
             "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
-            "strategy_snapshot": _strategy_snapshot(
-                pair.call_fields,
-                leg_role=PARTICIPATION_CALL_ROLE,
-                counterpart_record_id=pair.put_record_id,
-                pair_intent_id=intent_id,
-                strategy_group_id=strategy_group_id,
-            ),
+            "strategy_snapshot": call_snapshot,
         },
     ]
 
@@ -354,8 +356,36 @@ def execute_staggered_combo_yield_pairing(
         mode = "already_paired"
     elif dry_run:
         results = [
-            preview_manual_position_adjust(repo, **adjustment).to_payload()
-            for adjustment in adjustments
+            preview_manual_position_adjust(
+                repo,
+                record_id=pair.put_record_id,
+                contracts=None,
+                strike=None,
+                expiration_ymd=None,
+                premium_per_share=None,
+                multiplier=None,
+                opened_at_ms=None,
+                strategy=STRATEGY_COMBO_YIELD,
+                leg_role=FUNDING_PUT_ROLE,
+                strategy_group_id=strategy_group_id,
+                yield_enhancement_mode=YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+                strategy_snapshot=put_snapshot,
+            ).to_payload(),
+            preview_manual_position_adjust(
+                repo,
+                record_id=pair.call_record_id,
+                contracts=None,
+                strike=None,
+                expiration_ymd=None,
+                premium_per_share=None,
+                multiplier=None,
+                opened_at_ms=None,
+                strategy=STRATEGY_COMBO_YIELD,
+                leg_role=PARTICIPATION_CALL_ROLE,
+                strategy_group_id=strategy_group_id,
+                yield_enhancement_mode=YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+                strategy_snapshot=call_snapshot,
+            ).to_payload(),
         ]
         mode = "dry_run"
     else:
