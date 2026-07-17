@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from domain.domain.ledger import ContractKey, OptionEconomicAllocation, TradeEvent, fee_fact_for_event
+from domain.domain.assigned_stock import project_assigned_stock_lifecycle
+from domain.domain.ledger import ContractKey, OptionEconomicAllocation, PositionLot, TradeEvent, fee_fact_for_event
 from domain.domain.performance.models import (
     FeeBasis,
     OptionInstrumentKey,
+    StockInstrumentKey,
+    ValuationMarkFact,
+    select_valuation_mark,
     OptionValuationPosition,
     quantize_money,
 )
@@ -18,6 +22,8 @@ class LedgerPerformanceInputs:
     rows: tuple[dict[str, Any], ...]
     events: tuple[TradeEvent, ...]
     allocations: tuple[OptionEconomicAllocation, ...]
+    position_lots: tuple[PositionLot, ...]
+    assigned_stock_events: tuple[dict[str, Any], ...]
     diagnostics: tuple[dict[str, Any], ...]
 
 
@@ -56,10 +62,14 @@ def load_ledger_performance_inputs(repo: Any) -> LedgerPerformanceInputs:
         payload.update(metadata_by_event_id.get(item.event_id, {}))
         diagnostics.append(payload)
     diagnostics.extend(adapter_diagnostics)
+    assigned_stock_log = ledger_api.assigned_stock_event_log(repo)
+    diagnostics.extend(dict(item) for item in assigned_stock_log.diagnostics)
     return LedgerPerformanceInputs(
         rows=tuple(dict(row) for row in rows),
         events=tuple(events),
         allocations=tuple(projection.ledger_projection.allocations),
+        position_lots=tuple(projection.ledger_projection.lots),
+        assigned_stock_events=tuple(dict(item) for item in assigned_stock_log.events),
         diagnostics=tuple(_dedupe_diagnostics(diagnostics)),
     )
 
@@ -279,9 +289,236 @@ def _dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def load_assigned_stock_projection(
+    inputs: LedgerPerformanceInputs,
+    *,
+    as_of_ms: int,
+    valuation_marks: tuple[ValuationMarkFact, ...] | list[ValuationMarkFact] = (),
+    account: str | None = None,
+    broker: str | None = None,
+    stock_holdings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    instant = int(as_of_ms)
+    rows = [
+        row
+        for row in inputs.rows
+        if _row_event_time_ms(row) <= instant or ledger_api.valid_void_target_event_id(row) is not None
+    ]
+    projection = ledger_api.project_trade_event_log(rows).ledger_projection
+    selected_event_ids = {
+        str(row.get("event_id") or "").strip()
+        for row in rows
+        if str(row.get("event_id") or "").strip()
+    }
+    event_rows = [
+        _trade_event_to_lifecycle_payload(event)
+        for event in inputs.events
+        if event.event_id in selected_event_ids
+    ]
+    allocation_rows = [_allocation_to_lifecycle_row(item) for item in projection.allocations]
+    option_lot_rows = [
+        _position_lot_to_lifecycle_row(
+            item,
+            valuation_marks=valuation_marks,
+            at_ms=instant,
+        )
+        for item in projection.lots
+    ]
+    quote_rows = _stock_quote_rows(valuation_marks, at_ms=instant)
+    return project_assigned_stock_lifecycle(
+        event_rows,
+        assignment_option_rows=allocation_rows,
+        option_open_lots=option_lot_rows,
+        assigned_stock_events=[
+            dict(item)
+            for item in inputs.assigned_stock_events
+            if _assigned_stock_event_time_ms(item) <= instant
+        ],
+        quote_snapshots=quote_rows,
+        stock_holdings=stock_holdings,
+        account_norm=str(account or "").strip().lower() or None,
+        broker_norm=str(broker or "").strip() or None,
+        month=None,
+        as_of_ms=instant,
+    )
+
+
+def assigned_stock_instruments(projection: dict[str, Any]) -> tuple[StockInstrumentKey, ...]:
+    instruments: dict[str, StockInstrumentKey] = {}
+    for row in projection.get("assigned_stock_lots") or []:
+        if not isinstance(row, dict) or int(row.get("shares_remaining") or 0) <= 0:
+            continue
+        try:
+            instrument = StockInstrumentKey(symbol=row.get("symbol"), currency=row.get("currency"))
+        except ValueError:
+            continue
+        instruments[instrument.instrument_key] = instrument
+    return tuple(instruments[key] for key in sorted(instruments))
+
+
+def _trade_event_to_lifecycle_payload(event: TradeEvent) -> dict[str, Any]:
+    is_open = event.event_type == "open"
+    is_close = event.event_type in {"close", "expire_close", "assignment", "exercise"}
+    side = (
+        "sell"
+        if (is_open and event.contract_key.position_side == "short")
+        or (is_close and event.contract_key.position_side == "long")
+        else "buy"
+    )
+    payload = dict(event.raw_payload or {})
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "event_time_ms": event.event_time_ms,
+        "trade_time_ms": event.event_time_ms,
+        "target_event_id": event.target_event_id,
+        "contract_key": event.contract_key.to_dict(),
+        "broker": event.contract_key.broker,
+        "account": event.contract_key.account,
+        "symbol": event.contract_key.underlying_symbol,
+        "option_type": event.contract_key.option_type,
+        "side": side,
+        "position_effect": "open" if is_open else "close" if is_close else event.event_type,
+        "contracts": event.contracts,
+        "price": event.price,
+        "strike": event.contract_key.strike,
+        "expiration_ymd": event.contract_key.expiration_ymd,
+        "currency": event.currency,
+        "multiplier": event.multiplier,
+        "fees": event.fees,
+        "target_lot_id": event.target_lot_id,
+        "raw_payload": payload,
+    }
+
+
+def _allocation_to_lifecycle_row(allocation: OptionEconomicAllocation) -> dict[str, Any]:
+    return {
+        "event_id": allocation.close_event_id,
+        "open_event_id": allocation.open_event_id,
+        "source_record_id": allocation.target_lot_id,
+        "close_type": allocation.close_type,
+        "contracts_closed": allocation.contracts,
+        "realized_pnl_gross": float(allocation.realized_pnl_gross),
+        "realized_pnl_net": None if allocation.realized_pnl_net is None else float(allocation.realized_pnl_net),
+        "closed_at": allocation.closed_at_ms,
+    }
+
+
+def _position_lot_to_lifecycle_row(
+    lot: PositionLot,
+    *,
+    valuation_marks: tuple[ValuationMarkFact, ...] | list[ValuationMarkFact],
+    at_ms: int,
+) -> dict[str, Any]:
+    row = {
+        "record_id": lot.lot_id,
+        "open_event_id": lot.open_event_id,
+        "opened_at": lot.opened_at_ms,
+        "account": lot.contract_key.account,
+        "broker": lot.contract_key.broker,
+        "symbol": lot.contract_key.underlying_symbol,
+        "option_type": lot.contract_key.option_type,
+        "position_side": lot.contract_key.position_side,
+        "currency": lot.currency,
+        "contracts": lot.contracts_opened,
+        "remaining": lot.contracts_open,
+        "price": lot.premium_open,
+        "multiplier": lot.multiplier,
+        "strike": lot.contract_key.strike,
+        "expiration_ymd": lot.contract_key.expiration_ymd,
+    }
+    if int(lot.contracts_open) <= 0:
+        row.update(
+            {
+                "unrealized_pnl_gross": 0.0,
+                "valuation_status": "not_required",
+                "valuation_evidence_fact_id": None,
+            }
+        )
+        return row
+    try:
+        instrument = OptionInstrumentKey.from_contract_key(
+            lot.contract_key,
+            currency=lot.currency,
+            multiplier=lot.multiplier,
+        )
+        selection = select_valuation_mark(
+            list(valuation_marks),
+            instrument_key=instrument.instrument_key,
+            at_ms=at_ms,
+        )
+    except (TypeError, ValueError):
+        selection = None
+    fact = selection.fact if selection is not None else None
+    if fact is None:
+        row.update(
+            {
+                "unrealized_pnl_gross": None,
+                "valuation_status": "missing_mark" if selection is None else selection.status,
+                "valuation_evidence_fact_id": None,
+            }
+        )
+        return row
+    open_value = float(lot.premium_open) * float(lot.multiplier) * int(lot.contracts_open)
+    mark_value = float(fact.price) * float(lot.multiplier) * int(lot.contracts_open)
+    gross = open_value - mark_value if lot.contract_key.position_side == "short" else mark_value - open_value
+    row.update(
+        {
+            "unrealized_pnl_gross": float(quantize_money(gross)),
+            "valuation_status": selection.status,
+            "valuation_evidence_fact_id": fact.fact_id,
+        }
+    )
+    return row
+
+
+def _stock_quote_rows(valuation_marks: tuple[ValuationMarkFact, ...] | list[ValuationMarkFact], *, at_ms: int) -> list[dict[str, Any]]:
+    stock_instruments = {
+        item.instrument_key: item.instrument
+        for item in valuation_marks
+        if isinstance(item.instrument, StockInstrumentKey)
+    }
+    rows: list[dict[str, Any]] = []
+    for key in sorted(stock_instruments):
+        instrument = stock_instruments[key]
+        selection = select_valuation_mark(
+            list(valuation_marks),
+            instrument_key=instrument.instrument_key,
+            at_ms=at_ms,
+        )
+        fact = selection.fact
+        if fact is None or not isinstance(fact, ValuationMarkFact):
+            continue
+        rows.append(
+            {
+                "symbol": instrument.symbol,
+                "currency": instrument.currency,
+                "spot": float(fact.price),
+                "quote_time_ms": fact.effective_at_ms,
+                "quote_source": fact.source,
+                "quote_status": "stale" if selection.status == "stale" else "fresh",
+                "evidence_fact_id": fact.fact_id,
+            }
+        )
+    return rows
+
+
+def _assigned_stock_event_time_ms(item: dict[str, Any]) -> int:
+    for key in ("trade_time_ms", "event_time_ms", "sold_at_ms", "closed_at_ms"):
+        try:
+            value = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
 __all__ = [
     "LedgerPerformanceInputs",
     "OptionValuationInputs",
+    "assigned_stock_instruments",
+    "load_assigned_stock_projection",
     "load_ledger_performance_inputs",
     "load_option_valuation_inputs",
 ]
