@@ -264,6 +264,9 @@ def persist_manual_adjust_event_with_ledger(
         operation_label="manual adjust",
     )
     ledger_preflight = preflight_result.ledger_preflight
+    event_time_ms = ledger_preflight.event_time_ms
+    if event_time_ms is None:
+        raise RuntimeError("manual adjust ledger preflight did not provide event_time_ms")
     current_fields = preflight_result.fields
     patch = preflight_result.patch_contract
     result = persist_manual_adjust_event(
@@ -281,7 +284,7 @@ def persist_manual_adjust_event_with_ledger(
         strategy_group_id=strategy_group_id,
         yield_enhancement_mode=yield_enhancement_mode,
         strategy_snapshot=strategy_snapshot,
-        as_of_ms=int(ledger_preflight.event_time_ms),
+        as_of_ms=int(event_time_ms),
     )
     return ManualAdjustLedgerResult(
         result=LedgerWriteResult.from_payload(result),
@@ -319,13 +322,16 @@ def record_manual_position_adjustments(
             operation_label="manual adjustment batch",
             **item,
         )
+        event_time_ms = preflight_result.ledger_preflight.event_time_ms
+        if event_time_ms is None:
+            raise RuntimeError("manual adjustment batch preflight did not provide event_time_ms")
         preflight_results.append(preflight_result)
         prepared.append(
             {
                 "record_id": record_id,
                 **item,
                 "fields": preflight_result.fields,
-                "as_of_ms": int(preflight_result.ledger_preflight.event_time_ms),
+                "as_of_ms": int(event_time_ms),
             }
         )
 

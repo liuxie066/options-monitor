@@ -37,17 +37,17 @@ class YieldEnhancementMetrics:
     funding_ratio: float | None
     cash_required: float
     put_only_breakeven: float
-    combo_breakeven: float
-    downside_breakeven_penalty: float
+    combo_breakeven: float | None
+    downside_breakeven_penalty: float | None
     lottery_budget_ratio: float | None
     residual_premium_ratio: float | None
-    downside_breakeven: float
-    upside_breakeven: float
-    max_loss_if_zero: float
+    downside_breakeven: float | None
+    upside_breakeven: float | None
+    max_loss_if_zero: float | None
     put_otm_pct: float
     call_otm_pct: float
     gap_width_pct: float
-    upside_breakeven_pct_above_spot: float
+    upside_breakeven_pct_above_spot: float | None
     combo_spread_ratio: float | None
     expected_move_iv: float | None = None
     expected_move: float | None = None
@@ -169,6 +169,7 @@ def compute_yield_enhancement_metrics(
 
     multiplier = float(put_leg.multiplier)
     spot = float(put_leg.spot)
+    is_staggered = str(structure_mode or "same_expiry_pair").strip().lower() == "staggered_expiry_pair"
     dte = int(min(put_leg.dte, call_leg.dte))
     put_proceeds = float(put_leg.bid) * multiplier - float(put_sell_fee)
     call_cost = float(call_leg.ask) * multiplier + float(call_buy_fee)
@@ -187,11 +188,11 @@ def compute_yield_enhancement_metrics(
     annualized_net_credit_yield = net_credit_yield * (365.0 / float(dte)) if dte > 0 else None
 
     put_only_breakeven = float(put_leg.strike) - put_proceeds / multiplier
-    combo_breakeven = float(put_leg.strike) - net_credit / multiplier
-    downside_breakeven_penalty = call_cost / multiplier
+    combo_breakeven = None if is_staggered else float(put_leg.strike) - net_credit / multiplier
+    downside_breakeven_penalty = None if is_staggered else call_cost / multiplier
     downside_breakeven = combo_breakeven
-    upside_breakeven = float(call_leg.strike) + net_debit / multiplier
-    max_loss_if_zero = float(put_leg.strike) * multiplier - net_credit
+    upside_breakeven = None if is_staggered else float(call_leg.strike) + net_debit / multiplier
+    max_loss_if_zero = None if is_staggered else float(put_leg.strike) * multiplier - net_credit
     call_payoff_multiple_at_1_5_sigma = None
     call_payoff_multiple_at_2_0_sigma = None
     if expected_move is not None and call_cost > 0:
@@ -219,7 +220,11 @@ def compute_yield_enhancement_metrics(
     put_otm_pct = _pct_distance(spot - float(put_leg.strike), spot)
     call_otm_pct = _pct_distance(float(call_leg.strike) - spot, spot)
     gap_width_pct = _pct_distance(float(call_leg.strike) - float(put_leg.strike), spot)
-    upside_breakeven_pct_above_spot = _pct_distance(upside_breakeven - spot, spot)
+    upside_breakeven_pct_above_spot = (
+        _pct_distance(upside_breakeven - spot, spot)
+        if upside_breakeven is not None
+        else None
+    )
 
     put_spread = _safe_float(put_leg.spread)
     call_spread = _safe_float(call_leg.spread)
@@ -242,17 +247,17 @@ def compute_yield_enhancement_metrics(
         funding_ratio=(round(funding_ratio, 6) if funding_ratio is not None else None),
         cash_required=round(cash_required, 6),
         put_only_breakeven=round(put_only_breakeven, 6),
-        combo_breakeven=round(combo_breakeven, 6),
-        downside_breakeven_penalty=round(downside_breakeven_penalty, 6),
+        combo_breakeven=_round_optional(combo_breakeven),
+        downside_breakeven_penalty=_round_optional(downside_breakeven_penalty),
         lottery_budget_ratio=_round_optional(lottery_budget_ratio),
         residual_premium_ratio=_round_optional(residual_premium_ratio),
-        downside_breakeven=round(downside_breakeven, 6),
-        upside_breakeven=round(upside_breakeven, 6),
-        max_loss_if_zero=round(max_loss_if_zero, 6),
+        downside_breakeven=_round_optional(downside_breakeven),
+        upside_breakeven=_round_optional(upside_breakeven),
+        max_loss_if_zero=_round_optional(max_loss_if_zero),
         put_otm_pct=round(put_otm_pct, 6),
         call_otm_pct=round(call_otm_pct, 6),
         gap_width_pct=round(gap_width_pct, 6),
-        upside_breakeven_pct_above_spot=round(upside_breakeven_pct_above_spot, 6),
+        upside_breakeven_pct_above_spot=_round_optional(upside_breakeven_pct_above_spot),
         combo_spread_ratio=(round(combo_spread_ratio, 6) if combo_spread_ratio is not None else None),
         expected_move_iv=(round(iv, 6) if iv is not None else None),
         expected_move=(round(expected_move, 6) if expected_move is not None else None),
@@ -333,7 +338,8 @@ def compute_yield_enhancement_funding_decision(
     spread_penalty = max(combo_spread_ratio or 0.0, 0.0) * 0.10
     cost_penalty = max(call_cost_ratio or 0.0, 0.0)
     net_credit_retention = (combo_net_credit / put_net_credit) if put_net_credit > 0 else 0.0
-    call_delta = abs(float(call_leg.delta)) if _safe_float(call_leg.delta) is not None else 0.0
+    normalized_call_delta = _safe_float(call_leg.delta)
+    call_delta = abs(normalized_call_delta) if normalized_call_delta is not None else 0.0
     participation_score = call_delta if call_delta > 0 else max(0.0, 1.0 - max(float(combo_metrics.call_otm_pct), 0.0) / 0.20)
     components = {
         "annualized_net_credit_yield": float(annualized_net_credit_yield or 0.0),

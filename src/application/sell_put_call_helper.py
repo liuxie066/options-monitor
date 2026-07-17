@@ -692,9 +692,19 @@ def _load_yield_enhancement_call_legs_by_expiration(
         if reject_reason is None and call_delta is None and (min_call_delta is not None or max_call_delta is not None):
             reject_reason = "call_delta_missing"
         absolute_call_delta = abs(call_delta) if call_delta is not None else None
-        if reject_reason is None and min_call_delta is not None and absolute_call_delta < float(min_call_delta):
+        if (
+            reject_reason is None
+            and min_call_delta is not None
+            and absolute_call_delta is not None
+            and absolute_call_delta < float(min_call_delta)
+        ):
             reject_reason = "call_delta_below_min"
-        if reject_reason is None and max_call_delta is not None and absolute_call_delta > float(max_call_delta):
+        if (
+            reject_reason is None
+            and max_call_delta is not None
+            and absolute_call_delta is not None
+            and absolute_call_delta > float(max_call_delta)
+        ):
             reject_reason = "call_delta_above_max"
         if reject_reason is None:
             reject_reason = _liquidity_reject_reason(

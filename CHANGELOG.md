@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.406 - 2026-07-17
+
+### Fixed
+- Prevented broker trade payloads from overriding canonical staggered Combo Yield strategy and leg relationship metadata.
+- Revalidated Combo Yield lot state and strategy-group uniqueness inside the SQLite write transaction before recording paired adjustments.
+- Removed same-expiry breakeven and max-loss metrics from staggered-expiry Combo Yield candidates.
+
 ## 1.2.405 - 2026-07-17
 
 ### Changed

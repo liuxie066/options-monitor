@@ -583,3 +583,54 @@ def test_staggered_combo_yield_pair_intent_can_come_from_strategy_snapshot() -> 
     assert fields["strategy_group_id"] == "combo_yield:lx:intent-from-snapshot"
     assert fields["leg_role"] == "funding_put"
     assert fields["strategy_snapshot"]["pair_intent_id"] == "intent-from-snapshot"
+
+
+def test_staggered_combo_yield_overrides_conflicting_relation_metadata() -> None:
+    result = resolve_trade_deal(
+        _deal(
+            symbol="PDD",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            expiration_ymd="2026-08-21",
+            currency="USD",
+            raw_payload={
+                "structure_mode": "staggered_expiry_pair",
+                "pair_intent_id": "intent-authoritative",
+                "strategy": "sell_put",
+                "leg_role": "participation_call",
+                "yield_enhancement_mode": "attacker-mode",
+                "strategy_group_id": "attacker-group",
+                "strategy_snapshot": {
+                    "strategy": "sell_put",
+                    "strategy_family": "sell_put",
+                    "strategy_source": "attacker-source",
+                    "leg_role": "participation_call",
+                    "yield_enhancement_mode": "attacker-mode",
+                    "structure_mode": "same_expiry_pair",
+                    "pair_intent_id": "attacker-intent",
+                    "strategy_group_id": "attacker-group",
+                },
+            },
+        ),
+        repo=FakeRepo(),
+        state={},
+        apply_changes=False,
+    )
+
+    fields = result.operations[0].to_payload()["fields"]
+    expected_group_id = "combo_yield:lx:intent-authoritative"
+    assert fields["strategy"] == "combo_yield"
+    assert fields["leg_role"] == "funding_put"
+    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert fields["strategy_group_id"] == expected_group_id
+    snapshot = fields["strategy_snapshot"]
+    assert snapshot["strategy"] == "combo_yield"
+    assert snapshot["strategy_family"] == "combo_yield"
+    assert snapshot["strategy_source"] == "explicit_trade_intent"
+    assert snapshot["leg_role"] == "funding_put"
+    assert snapshot["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert snapshot["structure_mode"] == "staggered_expiry_pair"
+    assert snapshot["pair_intent_id"] == "intent-authoritative"
+    assert snapshot["strategy_group_id"] == expected_group_id
