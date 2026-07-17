@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 
 from domain.domain.option_position_lots import OpenPositionCommand
-from src.application.ledger.manual_trades import persist_manual_open_event
+from src.application.ledger import commands as ledger_commands
+from src.application.ledger.manual_trades import persist_manual_close_event, persist_manual_open_event
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.positions.combo_pairing import execute_staggered_combo_yield_pairing
 
@@ -191,6 +192,46 @@ def test_staggered_combo_yield_pairing_rolls_back_if_projection_write_fails(
         )
 
     assert repo.list_trade_events() == before_events
+
+
+def test_staggered_combo_yield_pairing_rechecks_open_lots_inside_write_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "positions.sqlite3")
+    put_id, call_id = _pair_lots(repo)
+    original_persist = ledger_commands.persist_manual_adjust_events
+
+    def close_call_before_batch_write(repo_arg: Any, adjustments: list[dict[str, Any]]):
+        call_fields = repo.get_record_fields(call_id)
+        persist_manual_close_event(
+            repo,
+            record_id=call_id,
+            fields=call_fields,
+            contracts_to_close=1,
+            close_price=0.5,
+            close_reason="race_regression",
+            as_of_ms=3000,
+        )
+        return original_persist(repo_arg, adjustments)
+
+    monkeypatch.setattr(ledger_commands, "persist_manual_adjust_events", close_call_before_batch_write)
+
+    with pytest.raises(ValueError, match="target fields do not match current lot state"):
+        execute_staggered_combo_yield_pairing(
+            repo,
+            put_record_id=put_id,
+            call_record_id=call_id,
+            pair_intent_id="intent-race",
+            dry_run=False,
+        )
+
+    lots = {str(item["record_id"]): item["fields"] for item in repo.list_position_lots()}
+    assert lots[call_id]["status"] == "close"
+    assert int(lots[call_id]["contracts_open"]) == 0
+    assert "strategy_group_id" not in lots[put_id]
+    assert "strategy_group_id" not in lots[call_id]
+    assert len(repo.list_trade_events()) == 3
 
 
 def test_staggered_combo_yield_pairing_rejects_reusing_intent_for_other_lots(tmp_path: Path) -> None:

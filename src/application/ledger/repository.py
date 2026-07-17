@@ -692,6 +692,8 @@ def with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
     try:
+        if conn is not None:
+            conn.execute("BEGIN IMMEDIATE")
         result = fn(sqlite_repo, conn)
         if conn is not None:
             conn.commit()
