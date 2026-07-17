@@ -111,6 +111,7 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "analysis_query" in manifest.allowed_tools
     assert "runtime_status" in manifest.allowed_tools
     assert "portfolio_query" not in manifest.allowed_tools
+    assert "portfolio_capital_bridge" not in manifest.allowed_tools
     assert definition["tool_selection"]["optional_names"] == ["portfolio"]
     assert "symbol_config_update" not in manifest.allowed_tools
     assert manifest.limits["max_model_turns"] == definition["runtime"]["max_iterations"]
@@ -132,6 +133,7 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
     assert set(manifest.allowed_tools) == expected
     assert "portfolio" not in selected
     assert "portfolio_query" not in expected
+    assert "portfolio_capital_bridge" not in expected
     assert "symbol_config_update" not in expected
 
     enabled_manifest = build_scene_manifest(
@@ -140,6 +142,7 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
         enabled_optional_toolsets=frozenset({"portfolio"}),
     )
     assert "portfolio_query" in enabled_manifest.allowed_tools
+    assert "portfolio_capital_bridge" in enabled_manifest.allowed_tools
 
 
 def test_agent_tool_view_exposes_result_contract() -> None:
