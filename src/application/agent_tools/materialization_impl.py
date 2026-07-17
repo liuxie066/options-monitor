@@ -324,6 +324,48 @@ def query_cash_headroom_tool(
     return result, [], {"config_path": mask_path(config_path), "output_dir": mask_path(out_dir)}
 
 
+def load_monthly_income_inputs(
+    payload: dict[str, Any],
+    *,
+    load_runtime_config,
+    resolve_public_data_config_path,
+    normalize_broker,
+    resolve_option_positions_repo,
+    get_exchange_rates,
+    repo_base,
+    mask_path,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
+    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
+
+    warnings: list[str] = []
+    rate_cache_path = (config_path.parent / "output_shared" / "state" / "rate_cache.json").resolve()
+    rates = get_exchange_rates(cache_path=rate_cache_path, log=warnings.append)
+    if rates is None:
+        warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
+
+    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
+    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
+    inputs = {
+        "config_path": config_path,
+        "config": cfg,
+        "data_config_path": data_config_path,
+        "repo": repo,
+        "broker": normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途"),
+        "rates": rates,
+        "trade_events": trade_event_log(repo),
+        "assigned_stock_events": raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None,
+        "records": list_canonical_position_lot_snapshots(repo, base=repo_base()),
+    }
+    return inputs, warnings, {
+        "config_path": mask_path(config_path),
+        "data_config": mask_path(data_config_path),
+        "rate_cache": mask_path(rate_cache_path),
+    }
+
+
 def monthly_income_report_tool(
     payload: dict[str, Any],
     *,
@@ -337,12 +379,23 @@ def monthly_income_report_tool(
     repo_base,
     mask_path,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
-    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
-
-    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
+    inputs, warnings, meta = load_monthly_income_inputs(
+        payload,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        get_exchange_rates=get_exchange_rates,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+    config_path = inputs["config_path"]
+    cfg = inputs["config"]
+    broker = str(inputs["broker"])
+    rates = inputs["rates"]
+    trade_events = inputs["trade_events"]
+    assigned_stock_events = inputs["assigned_stock_events"]
+    records = inputs["records"]
     account = str(payload.get("account") or "").strip() or None
     month = str(payload.get("month") or "").strip() or None
     include_rows = bool(payload.get("include_rows", False))
@@ -353,17 +406,6 @@ def monthly_income_report_tool(
     refresh_flag = payload.get("refresh_quotes")
     refresh_quotes = bool(refresh_flag is True or (as_of_ms is None and refresh_flag is not False))
 
-    warnings: list[str] = []
-    rate_cache_path = (config_path.parent / "output_shared" / "state" / "rate_cache.json").resolve()
-    rates = get_exchange_rates(cache_path=rate_cache_path, log=warnings.append)
-    if rates is None:
-        warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
-
-    trade_events = trade_event_log(repo)
-    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
-    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
-    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None
-    records = list_canonical_position_lot_snapshots(repo, base=repo_base())
     report = build_monthly_income_report(
         records,
         account=account,
@@ -479,11 +521,6 @@ def monthly_income_report_tool(
             value = report.get(key)
             data[key] = value if isinstance(value, list) else []
 
-    meta = {
-        "config_path": mask_path(config_path),
-        "data_config": mask_path(data_config_path),
-        "rate_cache": mask_path(rate_cache_path),
-    }
     return data, warnings, meta
 
 
