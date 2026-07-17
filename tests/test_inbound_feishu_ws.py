@@ -136,7 +136,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
-            ack_reaction="SMILE",
+            ack_reaction="Typing",
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
         reply_fn=_reply,
@@ -149,7 +149,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert out["data"]["reply"]["reason"] == "sent"
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
     assert reactions[0]["message_id"] == "msg_1"
-    assert reactions[0]["emoji_type"] == "SMILE"
+    assert reactions[0]["emoji_type"] == "Typing"
     assert replies[0]["message_id"] == "msg_1"
     assert replies[0]["text"].startswith("收益统计完成")
     assert out["data"]["reply"]["outbound_message_id"] == "reply_1"
@@ -617,6 +617,25 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.assistant_llm.confidence_min == 0.8
     assert settings.assistant_llm.timeout_seconds == 31
     assert settings.assistant_llm.max_output_tokens == 769
+
+
+def test_feishu_ws_settings_preserves_official_mixed_case_reaction(tmp_path: Path) -> None:
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
+        json.dumps({"inbound": {"feishu_ws": {"ack_reaction": "Typing"}}}),
+        encoding="utf-8",
+    )
+
+    settings = build_feishu_ws_settings(
+        assistant_config_path=str(assistant_config_path),
+        environ={
+            "OM_FEISHU_BOT_APP_ID": "bot_app",
+            "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
+            "OM_FEISHU_BOT_ALLOWED_OPEN_IDS": "ou_1",
+        },
+    )
+
+    assert settings.ack_reaction == "Typing"
 
 
 def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -> None:
@@ -1108,7 +1127,7 @@ def test_feishu_ws_service_sends_one_ack_and_keeps_reply_flow(tmp_path: Path) ->
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
-            ack_reaction="SMILE",
+            ack_reaction="Typing",
             audit_db=str(tmp_path / "send-once.sqlite3"),
         ),
         reaction_fn=_reaction,
@@ -1124,6 +1143,7 @@ def test_feishu_ws_service_sends_one_ack_and_keeps_reply_flow(tmp_path: Path) ->
 
     assert len(reactions) == 1
     assert reactions[0]["message_id"] == "msg_1"
+    assert reactions[0]["emoji_type"] == "Typing"
     assert len(replies) == 1
 
 

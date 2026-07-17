@@ -154,7 +154,7 @@ def build_feishu_ws_settings(
             behavior_cfg.get("max_reply_chars"),
             default=DEFAULT_FEISHU_REPLY_MAX_CHARS,
         ),
-        ack_reaction=str(behavior_cfg.get("ack_reaction") or "").strip().upper(),
+        ack_reaction=_normalize_ack_reaction(behavior_cfg.get("ack_reaction")),
         queue_size=_config_positive_int(
             queue_size,
             behavior_cfg.get("queue_size"),
@@ -302,7 +302,7 @@ def serve_feishu_ws(
             reaction_fn=reaction_fn,
             execute_tool_fn=execute_tool_fn,
         )
-        emoji_type = str(settings.ack_reaction or "").strip().upper()
+        emoji_type = _normalize_ack_reaction(settings.ack_reaction)
         ack_worker = (
             _FeishuAckWorker(settings=settings, reaction_fn=reaction_fn)
             if emoji_type
@@ -634,7 +634,7 @@ def _maybe_react(
         if _permission_denied_should_stay_silent(inbound_result):
             return {"attempted": False, "ok": True, "reason": "permission_denied"}
 
-    emoji_type = str(settings.ack_reaction or "").strip().upper()
+    emoji_type = _normalize_ack_reaction(settings.ack_reaction)
     if not emoji_type:
         return {"attempted": False, "ok": True, "reason": "reaction_disabled"}
     if not (settings.app_id and settings.app_secret):
@@ -945,6 +945,15 @@ def _config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bo
     if value in {"0", "false", "no", "n", "off"}:
         return False
     return bool(default)
+
+
+def _normalize_ack_reaction(value: Any) -> str:
+    emoji_type = str(value or "").strip()
+    if not emoji_type:
+        return ""
+    if any(char.islower() for char in emoji_type) and any(char.isupper() for char in emoji_type):
+        return emoji_type
+    return emoji_type.upper()
 
 
 def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:
