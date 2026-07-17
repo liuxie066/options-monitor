@@ -7,6 +7,7 @@ from typing import Any
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
+    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     resolve_candidate_window,
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
@@ -267,12 +268,17 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
 
     if want_yield_call:
         call_cfg = dict(_as_dict(ye.get("call")))
-        call_cfg.pop("min_dte", None)
-        call_cfg.pop("max_dte", None)
-        for key in ("min_dte", "max_dte"):
-            if key in sp:
-                call_cfg[key] = sp.get(key)
-        min_dte, max_dte = _window_values(call_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
+        structure_mode = str(ye.get("structure_mode") or "same_expiry_pair").strip().lower()
+        if structure_mode == "staggered_expiry_pair":
+            window_defaults = DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW
+        else:
+            call_cfg.pop("min_dte", None)
+            call_cfg.pop("max_dte", None)
+            for key in ("min_dte", "max_dte"):
+                if key in sp:
+                    call_cfg[key] = sp.get(key)
+            window_defaults = DEFAULT_SELL_PUT_WINDOW
+        min_dte, max_dte = _window_values(call_cfg, defaults=window_defaults)
         min_dtes.append(min_dte)
         max_dtes.append(max_dte)
         if "call" not in option_types:

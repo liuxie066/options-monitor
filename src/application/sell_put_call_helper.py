@@ -14,6 +14,7 @@ from domain.domain.engine import (
     compute_yield_enhancement_funding_decision,
     compute_yield_enhancement_metrics,
     rank_yield_enhancement_call_lottery_rows,
+    rank_yield_enhancement_calls_for_put,
     rank_yield_enhancement_rows,
     rank_yield_enhancement_shadow_rows,
     validate_yield_enhancement_pair,
@@ -232,6 +233,8 @@ def _build_pair_row(
     enhancement_cfg: dict[str, Any],
     sell_put_cfg: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    structure_mode = str(enhancement_cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
+    is_staggered = structure_mode == "staggered_expiry_pair"
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
     call_buy_fee = calc_futu_option_fee(call_leg.currency, call_leg.ask, contracts=1, multiplier=multiplier, is_sell=False)
@@ -242,6 +245,7 @@ def _build_pair_row(
         call_buy_fee=call_buy_fee,
         expected_move_iv=expected_move_iv,
         min_combo_notional_floor=min_combo_notional_floor,
+        structure_mode=structure_mode,
     )
     risk = classify_sell_put_risk(metrics.put_otm_pct)
     max_strike = _safe_float((sell_put_cfg or {}).get("max_strike")) if isinstance(sell_put_cfg, dict) else None
@@ -250,8 +254,24 @@ def _build_pair_row(
         put_assignment_margin_pct = (max_strike - put_leg.strike) / max_strike
     row = {
         "symbol": put_leg.symbol,
+        "strategy_family": "combo_yield",
+        "structure_mode": structure_mode,
         "expiration": put_leg.expiration,
-        "dte": min(put_leg.dte, call_leg.dte),
+        "dte": put_leg.dte,
+        "expiration_scope": "funding_put" if is_staggered else "shared",
+        "dte_scope": "funding_put" if is_staggered else "shared",
+        "put_expiration": put_leg.expiration,
+        "put_dte": put_leg.dte,
+        "call_expiration": call_leg.expiration,
+        "call_dte": call_leg.dte,
+        "expiry_gap_days": call_leg.dte - put_leg.dte,
+        "put_contracts": 1,
+        "call_contracts": 1,
+        "put_leg_role": "funding_put",
+        "call_leg_role": "participation_call",
+        "candidate_pair_id": (
+            f"combo_yield:{put_leg.symbol}:{put_leg.contract_symbol}:{call_leg.contract_symbol}"
+        ),
         "spot": put_leg.spot,
         "currency": put_leg.currency,
         "option_ccy": put_leg.currency,
@@ -282,7 +302,7 @@ def _build_pair_row(
         "net_debit": metrics.net_debit,
         "put_only_net_credit": metrics.put_only_net_credit,
         "net_credit_yield": metrics.net_credit_yield,
-        "annualized_net_credit_yield": metrics.annualized_net_credit_yield,
+        "annualized_net_credit_yield": None if is_staggered else metrics.annualized_net_credit_yield,
         "funding_ratio": metrics.funding_ratio,
         "net_income": metrics.net_credit,
         "cash_required": metrics.cash_required,
@@ -294,19 +314,23 @@ def _build_pair_row(
         "downside_breakeven": metrics.downside_breakeven,
         "upside_breakeven": metrics.upside_breakeven,
         "max_loss_if_zero": metrics.max_loss_if_zero,
-        "annualized_return": metrics.annualized_net_credit_yield,
-        "expected_move_iv": metrics.expected_move_iv,
-        "expected_move": metrics.expected_move,
-        "call_payoff_multiple_at_1_5_sigma": metrics.call_payoff_multiple_at_1_5_sigma,
-        "call_payoff_multiple_at_2_0_sigma": metrics.call_payoff_multiple_at_2_0_sigma,
-        "scenario_score": metrics.scenario_score,
-        "annualized_scenario_score": metrics.annualized_scenario_score,
+        "annualized_return": None if is_staggered else metrics.annualized_net_credit_yield,
+        "expected_move_iv": None if is_staggered else metrics.expected_move_iv,
+        "expected_move": None if is_staggered else metrics.expected_move,
+        "call_payoff_multiple_at_1_5_sigma": None if is_staggered else metrics.call_payoff_multiple_at_1_5_sigma,
+        "call_payoff_multiple_at_2_0_sigma": None if is_staggered else metrics.call_payoff_multiple_at_2_0_sigma,
+        "scenario_score": None if is_staggered else metrics.scenario_score,
+        "annualized_scenario_score": None if is_staggered else metrics.annualized_scenario_score,
         "put_otm_pct": metrics.put_otm_pct,
         "call_otm_pct": metrics.call_otm_pct,
         "put_assignment_margin_pct": round(float(put_assignment_margin_pct), 6) if put_assignment_margin_pct is not None else None,
         "gap_width_pct": metrics.gap_width_pct,
         "upside_breakeven_pct_above_spot": metrics.upside_breakeven_pct_above_spot,
         "combo_spread_ratio": metrics.combo_spread_ratio,
+        "max_leg_spread_ratio": max(
+            value for value in (put_leg.spread_ratio, call_leg.spread_ratio) if value is not None
+        ),
+        "fee_basis": "estimated",
         "strike": put_leg.strike,
         "mid": metrics.net_credit / put_leg.multiplier,
         "bid": put_leg.bid,
@@ -329,11 +353,19 @@ def _build_pair_row(
         call_buy_fee=call_buy_fee,
         combo_metrics=metrics,
         min_combo_net_credit=min_combo_net_credit,
-        min_net_credit_annualized=_safe_float(enhancement_cfg.get("min_net_credit_annualized")),
+        min_net_credit_annualized=(
+            None if is_staggered else _safe_float(enhancement_cfg.get("min_net_credit_annualized"))
+        ),
         max_call_cost_to_put_credit=max_call_cost_to_put_credit,
-        max_combo_spread_ratio=_safe_float(enhancement_cfg.get("max_combo_spread_ratio")),
+        max_combo_spread_ratio=(
+            None if is_staggered else _safe_float(enhancement_cfg.get("max_combo_spread_ratio"))
+        ),
+        structure_mode=structure_mode,
     )
     row.update(_funding_decision_row_fields(decision))
+    if is_staggered:
+        row["annualized_net_credit_yield"] = None
+        row["annualized_return"] = None
     return row
 
 
@@ -343,6 +375,12 @@ def _empty_pairs_df() -> pd.DataFrame:
             "symbol",
             "expiration",
             "dte",
+            "structure_mode",
+            "put_expiration",
+            "put_dte",
+            "call_expiration",
+            "call_dte",
+            "expiry_gap_days",
             "put_contract_symbol",
             "call_contract_symbol",
             "call_strike",
@@ -429,6 +467,24 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
         "put_stress_down_loss_nav_pct",
         "put_gap_down_loss_nav_pct",
         "data_quality_flags",
+        "strike_safety_margin_pct",
+        "premium_edge_score",
+        "spread_ratio",
+        "open_interest",
+        "net_income",
+        "cash_required_usd",
+        "cash_required_cny",
+        "cash_available_usd",
+        "cash_free_usd",
+        "cash_available_cny",
+        "cash_free_cny",
+        "cash_available_total_cny",
+        "cash_free_total_cny",
+        "cash_requirement_unavailable_reason",
+        "cash_secured_unavailable_reason",
+        "single_trade_concentration",
+        "symbol_concentration_after",
+        "total_short_put_concentration_after",
     )
     return {key: row.get(key) for key in fields if key in row}
 
@@ -574,8 +630,9 @@ def _load_yield_enhancement_call_legs_by_expiration(
     input_root: Path,
     symbol: str,
     call_cfg: dict[str, Any],
-    window: Any,
+    call_window: Any,
     liquidity: Any,
+    structure_mode: str,
     diagnostics: list[dict[str, Any]],
 ) -> tuple[dict[str, list[YieldEnhancementLeg]], Counter[str]]:
     raw_calls = _load_required_data_calls(input_root=input_root, symbol=symbol)
@@ -622,19 +679,22 @@ def _load_yield_enhancement_call_legs_by_expiration(
             )
             continue
         reject_reason: str | None = None
-        if not _passes_range(leg.dte, int(window.min_dte), int(window.max_dte)):
+        if not _passes_range(leg.dte, int(call_window.min_dte), int(call_window.max_dte)):
             reject_reason = "call_dte_out_of_range"
-        effective_min_strike = max(value for value in (configured_min_strike, leg.spot) if value is not None)
-        if reject_reason is None and leg.strike < effective_min_strike:
+        effective_min_strike = configured_min_strike
+        if structure_mode != "staggered_expiry_pair":
+            effective_min_strike = max(value for value in (configured_min_strike, leg.spot) if value is not None)
+        if reject_reason is None and effective_min_strike is not None and leg.strike < effective_min_strike:
             reject_reason = "call_strike_below_min"
         if reject_reason is None and configured_max_strike is not None and leg.strike > configured_max_strike:
             reject_reason = "call_strike_above_max"
         call_delta = _safe_float(leg.delta)
         if reject_reason is None and call_delta is None and (min_call_delta is not None or max_call_delta is not None):
             reject_reason = "call_delta_missing"
-        if reject_reason is None and min_call_delta is not None and call_delta < float(min_call_delta):
+        absolute_call_delta = abs(call_delta) if call_delta is not None else None
+        if reject_reason is None and min_call_delta is not None and absolute_call_delta < float(min_call_delta):
             reject_reason = "call_delta_below_min"
-        if reject_reason is None and max_call_delta is not None and call_delta > float(max_call_delta):
+        if reject_reason is None and max_call_delta is not None and absolute_call_delta > float(max_call_delta):
             reject_reason = "call_delta_above_max"
         if reject_reason is None:
             reject_reason = _liquidity_reject_reason(
@@ -687,6 +747,13 @@ def _candidate_pair_reject_reasons(
             reasons.append("funding_rejected")
     if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
         reasons.append("funding_mode_credit_or_even")
+    if str(candidate.get("structure_mode") or "").strip().lower() == "staggered_expiry_pair":
+        funding_ratio = _safe_float(candidate.get("funding_ratio"))
+        call_cost_ratio = _safe_float(candidate.get("call_cost_to_put_credit"))
+        if funding_ratio is None or funding_ratio < 1.0:
+            reasons.append("funding_ratio")
+        if call_cost_ratio is None or call_cost_ratio > 1.0:
+            reasons.append("call_cost_to_put_credit")
     if funding_mode == "max_debit" and max_debit_native is not None and float(candidate["net_debit"]) > float(max_debit_native):
         reasons.append("max_debit_native")
     net_credit_retention = _safe_float(candidate.get("net_credit_retention"))
@@ -701,7 +768,7 @@ def _build_yield_enhancement_pair_rows(
     *,
     df: pd.DataFrame,
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]],
-    window: Any,
+    put_window: Any,
     sell_put_cfg: dict[str, Any] | None,
     min_combo_notional_floor: float,
     cfg: dict[str, Any],
@@ -712,6 +779,7 @@ def _build_yield_enhancement_pair_rows(
     min_net_credit_retention: float | None,
     reject_counts: Counter[str],
     diagnostics: list[dict[str, Any]],
+    structure_mode: str,
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
     diagnostic_policy = {
@@ -741,7 +809,7 @@ def _build_yield_enhancement_pair_rows(
                 )
             )
             continue
-        if not _passes_range(put_leg.dte, int(window.min_dte), int(window.max_dte)):
+        if not _passes_range(put_leg.dte, int(put_window.min_dte), int(put_window.max_dte)):
             reject_counts["put_dte_out_of_range"] += 1
             diagnostics.append(
                 _diagnostic_row(
@@ -766,7 +834,15 @@ def _build_yield_enhancement_pair_rows(
             )
             continue
 
-        call_legs = call_legs_by_expiration.get(put_leg.expiration, [])
+        if structure_mode == "staggered_expiry_pair":
+            call_legs = [
+                call_leg
+                for expiration, expiration_legs in call_legs_by_expiration.items()
+                if expiration > put_leg.expiration
+                for call_leg in expiration_legs
+            ]
+        else:
+            call_legs = call_legs_by_expiration.get(put_leg.expiration, [])
         if not call_legs:
             reject_counts["call_expiration_unavailable"] += 1
             diagnostics.append(
@@ -780,7 +856,11 @@ def _build_yield_enhancement_pair_rows(
             )
             continue
         for call_leg in call_legs:
-            pair_rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+            pair_rejects = validate_yield_enhancement_pair(
+                put_leg,
+                call_leg,
+                structure_mode=structure_mode,
+            )
             if pair_rejects:
                 reject_counts.update(pair_rejects)
                 diagnostics.append(
@@ -795,7 +875,11 @@ def _build_yield_enhancement_pair_rows(
                     )
                 )
                 continue
-            expected_iv = _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
+            expected_iv = (
+                None
+                if structure_mode == "staggered_expiry_pair"
+                else _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
+            )
             try:
                 candidate = _build_pair_row(
                     put_leg=put_leg,
@@ -885,9 +969,15 @@ def find_sell_put_yield_enhancement_pairs(
     liquidity_cfg = _merged_dict(global_yield_enhancement_liquidity, cfg)
     liquidity = resolve_candidate_liquidity(liquidity_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY)
     put_strategy_fields = _sell_put_strategy_fields(sell_put_cfg)
-    window = resolve_candidate_window(
+    put_window = resolve_candidate_window(
         sell_put_cfg if sell_put_cfg is not None else cfg,
         defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+    )
+    structure_mode = str(cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
+    call_window = (
+        resolve_candidate_window(call_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
+        if structure_mode == "staggered_expiry_pair"
+        else put_window
     )
 
     funding_mode = str(cfg.get("funding_mode") or "credit_or_even").strip().lower()
@@ -903,15 +993,16 @@ def find_sell_put_yield_enhancement_pairs(
         input_root=Path(input_root),
         symbol=symbol,
         call_cfg=call_cfg,
-        window=window,
+        call_window=call_window,
         liquidity=liquidity,
+        structure_mode=structure_mode,
         diagnostics=diagnostics,
     )
 
     pair_rows = _build_yield_enhancement_pair_rows(
         df=df,
         call_legs_by_expiration=call_legs_by_expiration,
-        window=window,
+        put_window=put_window,
         sell_put_cfg=sell_put_cfg,
         min_combo_notional_floor=min_combo_notional_floor,
         cfg=cfg,
@@ -922,6 +1013,7 @@ def find_sell_put_yield_enhancement_pairs(
         min_net_credit_retention=min_net_credit_retention,
         reject_counts=reject_counts,
         diagnostics=diagnostics,
+        structure_mode=structure_mode,
     )
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)
@@ -940,7 +1032,7 @@ def select_best_yield_enhancement_pairs(
 
     selected_rows: list[dict[str, Any]] = []
     for _put_contract_symbol, group in pairs_df.groupby("put_contract_symbol", sort=False):
-        top = rank_yield_enhancement_rows(group.to_dict("records"))[0]
+        top = rank_yield_enhancement_calls_for_put(group.to_dict("records"))[0]
         selected = dict(top)
         selected["call_candidate_count"] = int(len(group))
         selected_rows.append(selected)
