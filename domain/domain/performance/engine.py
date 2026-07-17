@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -11,11 +11,16 @@ from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, validate_
 from domain.domain.option_position_identity import normalize_account, normalize_broker
 from domain.domain.performance.models import (
     DecimalAmountEnvelope,
+    FXRateFact,
     FeeBasis,
     MetricQuality,
     MetricStatus,
+    OptionValuationPosition,
+    ValuationMarkFact,
     normalize_currency,
     quantize_money,
+    select_fx_rate,
+    select_valuation_mark,
     to_decimal,
 )
 from domain.domain.performance.period import PeriodWindow, REPORTING_TIMEZONE
@@ -31,6 +36,10 @@ _MONETARY_KINDS = frozenset(
         "stock_settlement_fee_cash",
         "realized_gross",
         "realized_net",
+        "opening_unrealized_gross",
+        "opening_unrealized_net",
+        "ending_unrealized_gross",
+        "ending_unrealized_net",
     }
 )
 _CASH_NET_KINDS = frozenset(
@@ -56,6 +65,7 @@ class PerformanceFact:
     source_event_id: str = ""
     allocation_id: str | None = None
     missing_reason: str | None = None
+    evidence_fact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         kind = str(self.fact_kind or "").strip()
@@ -90,6 +100,11 @@ class PerformanceFact:
         object.__setattr__(self, "source_event_id", str(self.source_event_id or "").strip())
         object.__setattr__(self, "allocation_id", str(self.allocation_id).strip() if self.allocation_id else None)
         object.__setattr__(self, "missing_reason", str(self.missing_reason).strip() if self.missing_reason else None)
+        object.__setattr__(
+            self,
+            "evidence_fact_ids",
+            tuple(dict.fromkeys(str(item) for item in self.evidence_fact_ids if str(item))),
+        )
 
     @property
     def fact_id(self) -> str:
@@ -110,6 +125,7 @@ class PerformanceFact:
             "source_event_id": self.source_event_id or None,
             "allocation_id": self.allocation_id,
             "missing_reason": self.missing_reason,
+            "evidence_fact_ids": list(self.evidence_fact_ids),
         }
 
 
@@ -148,6 +164,10 @@ def build_period_performance(
     account: str | None = None,
     broker: str | None = None,
     diagnostics: Sequence[Mapping[str, Any] | str] = (),
+    opening_positions: Sequence[OptionValuationPosition] = (),
+    ending_positions: Sequence[OptionValuationPosition] = (),
+    valuation_marks: Sequence[ValuationMarkFact] = (),
+    fx_rates: Sequence[FXRateFact] = (),
 ) -> PeriodPerformance:
     account_filter = normalize_account(account) if account else ""
     broker_filter = normalize_broker(broker) if broker else ""
@@ -169,6 +189,16 @@ def build_period_performance(
             broker_filter,
         )
     ]
+    scoped_opening_positions = [
+        position
+        for position in opening_positions
+        if _matches_scope(position.account, position.broker, account_filter, broker_filter)
+    ]
+    scoped_ending_positions = [
+        position
+        for position in ending_positions
+        if _matches_scope(position.account, position.broker, account_filter, broker_filter)
+    ]
 
     facts: list[PerformanceFact] = []
     for event in period_events:
@@ -185,6 +215,23 @@ def build_period_performance(
         if event.event_type in CLOSE_EVENT_TYPES and event.event_id not in allocations_by_close:
             facts.extend(_missing_realized_facts(event))
 
+    facts.extend(
+        _option_valuation_facts(
+            scoped_opening_positions,
+            valuation_marks=valuation_marks,
+            at_ms=period.valuation_open_at_ms,
+            prefix="opening",
+        )
+    )
+    facts.extend(
+        _option_valuation_facts(
+            scoped_ending_positions,
+            valuation_marks=valuation_marks,
+            at_ms=period.valuation_end_at_ms,
+            prefix="ending",
+        )
+    )
+
     ordered_facts = tuple(
         sorted(
             facts,
@@ -196,28 +243,39 @@ def build_period_performance(
             ),
         )
     )
-    summary = _summarize(ordered_facts)
+    summary = _summarize(ordered_facts, fx_rates=fx_rates)
     breakdowns = {
-        "monthly": _breakdown(ordered_facts, key_name="month", key_fn=_month_for_fact),
-        "accounts": _breakdown(ordered_facts, key_name="account", key_fn=lambda fact: fact.account),
-        "symbols": _breakdown(ordered_facts, key_name="symbol", key_fn=lambda fact: fact.symbol),
+        "monthly": _breakdown(
+            ordered_facts,
+            key_name="month",
+            key_fn=lambda fact: _month_for_fact(fact, period=period),
+            fx_rates=fx_rates,
+        ),
+        "accounts": _breakdown(ordered_facts, key_name="account", key_fn=lambda fact: fact.account, fx_rates=fx_rates),
+        "symbols": _breakdown(ordered_facts, key_name="symbol", key_fn=lambda fact: fact.symbol, fx_rates=fx_rates),
     }
     accounts = sorted(
         {
             *[event.contract_key.account for event in period_events],
             *[allocation.contract_key.account for allocation in scoped_allocations],
+            *[position.account for position in scoped_opening_positions],
+            *[position.account for position in scoped_ending_positions],
         }
     )
     brokers = sorted(
         {
             *[event.contract_key.broker for event in period_events],
             *[allocation.contract_key.broker for allocation in scoped_allocations],
+            *[position.broker for position in scoped_opening_positions],
+            *[position.broker for position in scoped_ending_positions],
         }
     )
     symbols = sorted(
         {
             *[event.contract_key.underlying_symbol for event in period_events],
             *[allocation.contract_key.underlying_symbol for allocation in scoped_allocations],
+            *[position.symbol for position in scoped_opening_positions],
+            *[position.symbol for position in scoped_ending_positions],
         }
     )
     relevant_event_ids = {
@@ -237,14 +295,26 @@ def build_period_performance(
         )
     ]
     warnings = tuple(dict.fromkeys(_diagnostic_text(item) for item in relevant_diagnostics if _diagnostic_text(item)))
-    missing = tuple(sorted({fact.fact_id for fact in ordered_facts if fact.amount is None and fact.missing_reason}))
+    fact_missing = {fact.fact_id for fact in ordered_facts if fact.amount is None and fact.missing_reason}
+    fx_missing, selected_fx_fact_ids = _fx_quality_for_facts(ordered_facts, fx_rates=fx_rates)
+    missing = tuple(sorted({*fact_missing, *fx_missing}))
     if missing or warnings:
         quality_status = MetricStatus.PARTIAL
     elif ordered_facts:
         quality_status = MetricStatus.OBSERVED
     else:
         quality_status = MetricStatus.NOT_OBSERVED
-    quality = MetricQuality(status=quality_status, missing=missing, warnings=warnings)
+    evidence_fact_ids = tuple(
+        dict.fromkeys(
+            [fact_id for fact in ordered_facts for fact_id in fact.evidence_fact_ids] + list(selected_fx_fact_ids)
+        )
+    )
+    quality = MetricQuality(
+        status=quality_status,
+        missing=missing,
+        warnings=warnings,
+        evidence_fact_ids=evidence_fact_ids,
+    )
     return PeriodPerformance(
         period=period,
         scope={
@@ -528,6 +598,81 @@ def _stock_settlement_facts(event: TradeEvent) -> list[PerformanceFact]:
     ]
 
 
+def _option_valuation_facts(
+    positions: Sequence[OptionValuationPosition],
+    *,
+    valuation_marks: Sequence[ValuationMarkFact],
+    at_ms: int,
+    prefix: str,
+) -> list[PerformanceFact]:
+    facts: list[PerformanceFact] = []
+    for position in positions:
+        selection = select_valuation_mark(
+            list(valuation_marks),
+            instrument_key=position.instrument.instrument_key,
+            at_ms=at_ms,
+        )
+        common = {
+            "effective_at_ms": int(at_ms),
+            "account": position.account,
+            "broker": position.broker,
+            "symbol": position.symbol,
+            "currency": position.currency,
+            "source_event_id": position.lot_id,
+        }
+        if selection.fact is None:
+            reason = f"{prefix} option mark unavailable: {selection.reason or selection.status}"
+            facts.extend(
+                [
+                    PerformanceFact(
+                        fact_kind=f"{prefix}_unrealized_gross",
+                        amount=None,
+                        missing_reason=reason,
+                        **common,
+                    ),
+                    PerformanceFact(
+                        fact_kind=f"{prefix}_unrealized_net",
+                        amount=None,
+                        missing_reason=reason,
+                        **common,
+                    ),
+                ]
+            )
+            continue
+        mark = selection.fact
+        assert isinstance(mark, ValuationMarkFact)
+        quantity = Decimal(position.contracts_open) * position.instrument.multiplier
+        if position.position_side == "short":
+            gross = quantize_money((position.open_price - mark.price) * quantity)
+        else:
+            gross = quantize_money((mark.price - position.open_price) * quantity)
+        evidence_ids = (str(mark.fact_id),)
+        facts.append(
+            PerformanceFact(
+                fact_kind=f"{prefix}_unrealized_gross",
+                amount=gross,
+                evidence_fact_ids=evidence_ids,
+                **common,
+            )
+        )
+        if position.open_fee_quality == FeeBasis.ACTUAL.value and position.open_fee_remaining is not None:
+            net = quantize_money(gross - position.open_fee_remaining)
+            net_reason = None
+        else:
+            net = None
+            net_reason = f"opening fee quality is {position.open_fee_quality}"
+        facts.append(
+            PerformanceFact(
+                fact_kind=f"{prefix}_unrealized_net",
+                amount=net,
+                missing_reason=net_reason,
+                evidence_fact_ids=evidence_ids,
+                **common,
+            )
+        )
+    return facts
+
+
 def _fact_currency(value: Any, *, context: str) -> tuple[str | None, str | None]:
     try:
         return normalize_currency(value), None
@@ -545,48 +690,105 @@ def _event_fact_kwargs(event: TradeEvent, *, currency: str | None) -> dict[str, 
     }
 
 
-def _summarize(facts: Sequence[PerformanceFact]) -> dict[str, Any]:
+def _summarize(
+    facts: Sequence[PerformanceFact],
+    *,
+    fx_rates: Sequence[FXRateFact] = (),
+) -> dict[str, Any]:
     return {
         "activity": {
-            "premium_collected_gross": _metric(facts, {"premium_collected_gross"}).to_dict(),
-            "premium_paid_gross": _metric(facts, {"premium_paid_gross"}).to_dict(),
+            "premium_collected_gross": _metric(facts, {"premium_collected_gross"}, fx_rates=fx_rates).to_dict(),
+            "premium_paid_gross": _metric(facts, {"premium_paid_gross"}, fx_rates=fx_rates).to_dict(),
             "contracts_opened": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_opened"),
             "contracts_closed": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_closed"),
         },
         "cash": {
-            "option_trade_cash_gross": _metric(facts, {"option_trade_cash_gross"}).to_dict(),
-            "option_fee_cash": _metric(facts, {"option_fee_cash"}).to_dict(),
-            "stock_settlement_cash_gross": _metric(facts, {"stock_settlement_cash_gross"}).to_dict(),
-            "total_cash_change_net": _metric(facts, _CASH_NET_KINDS).to_dict(),
+            "option_trade_cash_gross": _metric(facts, {"option_trade_cash_gross"}, fx_rates=fx_rates).to_dict(),
+            "option_fee_cash": _metric(facts, {"option_fee_cash"}, fx_rates=fx_rates).to_dict(),
+            "stock_settlement_cash_gross": _metric(facts, {"stock_settlement_cash_gross"}, fx_rates=fx_rates).to_dict(),
+            "total_cash_change_net": _metric(facts, _CASH_NET_KINDS, fx_rates=fx_rates).to_dict(),
         },
         "pnl": {
-            "realized_gross": _metric(facts, {"realized_gross"}).to_dict(),
-            "realized_net": _metric(facts, {"realized_net"}).to_dict(),
+            "realized_gross": _metric(facts, {"realized_gross"}, fx_rates=fx_rates).to_dict(),
+            "realized_net": _metric(facts, {"realized_net"}, fx_rates=fx_rates).to_dict(),
+            "opening_unrealized_gross": _metric(facts, {"opening_unrealized_gross"}, fx_rates=fx_rates).to_dict(),
+            "opening_unrealized_net": _metric(facts, {"opening_unrealized_net"}, fx_rates=fx_rates).to_dict(),
+            "ending_unrealized_gross": _metric(facts, {"ending_unrealized_gross"}, fx_rates=fx_rates).to_dict(),
+            "ending_unrealized_net": _metric(facts, {"ending_unrealized_net"}, fx_rates=fx_rates).to_dict(),
+            "period_total_gross": _period_total_metric(facts, net=False, fx_rates=fx_rates).to_dict(),
+            "period_total_net": _period_total_metric(facts, net=True, fx_rates=fx_rates).to_dict(),
         },
     }
 
 
-def _metric(facts: Sequence[PerformanceFact], kinds: set[str] | frozenset[str]) -> DecimalAmountEnvelope:
+def _metric(
+    facts: Sequence[PerformanceFact],
+    kinds: set[str] | frozenset[str],
+    *,
+    fx_rates: Sequence[FXRateFact] = (),
+) -> DecimalAmountEnvelope:
     selected = [fact for fact in facts if fact.fact_kind in kinds]
     if not selected:
         return DecimalAmountEnvelope(quality=MetricQuality(MetricStatus.NOT_OBSERVED))
     sums: dict[str, Decimal] = {}
     incomplete_currencies: set[str] = set()
     missing: list[str] = []
+    evidence_fact_ids: list[str] = []
+    fx_fact_ids: list[str] = []
+    cny_sum = Decimal(0)
+    cny_complete = True
     for fact in selected:
         currency = str(fact.currency or "")
+        evidence_fact_ids.extend(fact.evidence_fact_ids)
         if fact.amount is None:
             incomplete_currencies.add(currency)
             missing.append(fact.fact_id)
+            cny_complete = False
             continue
         sums[currency] = quantize_money(sums.get(currency, Decimal(0)) + fact.amount)
+        if currency == "CNY":
+            cny_sum = quantize_money(cny_sum + fact.amount)
+            continue
+        selection = select_fx_rate(list(fx_rates), base_currency=currency, at_ms=fact.effective_at_ms)
+        if selection.fact is None:
+            cny_complete = False
+            missing.append(f"fx:{currency}:{fact.fact_id}")
+            continue
+        rate = selection.fact
+        assert isinstance(rate, FXRateFact)
+        cny_sum = quantize_money(cny_sum + fact.amount * rate.rate)
+        fx_fact_ids.append(str(rate.fact_id))
     for currency in incomplete_currencies:
         sums.pop(currency, None)
     status = MetricStatus.PARTIAL if missing else MetricStatus.OBSERVED
     return DecimalAmountEnvelope(
         by_currency=sums,
-        quality=MetricQuality(status=status, missing=tuple(sorted(set(missing)))),
+        cny=cny_sum if cny_complete else None,
+        quality=MetricQuality(
+            status=status,
+            missing=tuple(sorted(set(missing))),
+            evidence_fact_ids=tuple(dict.fromkeys(evidence_fact_ids)),
+        ),
+        fx_fact_ids=tuple(dict.fromkeys(fx_fact_ids)),
     )
+
+
+def _period_total_metric(
+    facts: Sequence[PerformanceFact],
+    *,
+    net: bool,
+    fx_rates: Sequence[FXRateFact],
+) -> DecimalAmountEnvelope:
+    realized = "realized_net" if net else "realized_gross"
+    opening = "opening_unrealized_net" if net else "opening_unrealized_gross"
+    ending = "ending_unrealized_net" if net else "ending_unrealized_gross"
+    components: list[PerformanceFact] = []
+    for fact in facts:
+        if fact.fact_kind == realized or fact.fact_kind == ending:
+            components.append(fact)
+        elif fact.fact_kind == opening:
+            components.append(replace(fact, amount=None if fact.amount is None else -fact.amount))
+    return _metric(components, {realized, opening, ending}, fx_rates=fx_rates)
 
 
 def _breakdown(
@@ -594,6 +796,7 @@ def _breakdown(
     *,
     key_name: str,
     key_fn: Any,
+    fx_rates: Sequence[FXRateFact] = (),
 ) -> list[dict[str, Any]]:
     groups: dict[str, list[PerformanceFact]] = {}
     for fact in facts:
@@ -603,14 +806,40 @@ def _breakdown(
     out: list[dict[str, Any]] = []
     for key in sorted(groups):
         item = {key_name: key}
-        item.update(_summarize(groups[key]))
+        item.update(_summarize(groups[key], fx_rates=fx_rates))
         out.append(item)
     return out
 
 
-def _month_for_fact(fact: PerformanceFact) -> str:
+def _month_for_fact(fact: PerformanceFact, *, period: PeriodWindow | None = None) -> str:
     tz = ZoneInfo(REPORTING_TIMEZONE)
-    return datetime.fromtimestamp(fact.effective_at_ms / 1000, tz=tz).strftime("%Y-%m")
+    timestamp_ms = fact.effective_at_ms
+    if period is not None:
+        timestamp_ms = min(
+            max(timestamp_ms, period.effective_start_at_ms),
+            period.effective_end_exclusive_at_ms - 1,
+        )
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=tz).strftime("%Y-%m")
+
+
+def _fx_quality_for_facts(
+    facts: Sequence[PerformanceFact],
+    *,
+    fx_rates: Sequence[FXRateFact],
+) -> tuple[set[str], tuple[str, ...]]:
+    missing: set[str] = set()
+    selected_ids: list[str] = []
+    for fact in facts:
+        if fact.fact_kind not in _MONETARY_KINDS or fact.amount is None or not fact.currency:
+            continue
+        if fact.currency == "CNY":
+            continue
+        selection = select_fx_rate(list(fx_rates), base_currency=fact.currency, at_ms=fact.effective_at_ms)
+        if selection.fact is None:
+            missing.add(f"fx:{fact.currency}:{fact.fact_id}")
+            continue
+        selected_ids.append(str(selection.fact.fact_id))
+    return missing, tuple(dict.fromkeys(selected_ids))
 
 
 def _diagnostic_text(item: Mapping[str, Any] | str) -> str:
@@ -633,6 +862,12 @@ def _diagnostic_is_relevant(
 ) -> bool:
     if isinstance(item, str):
         return True
+    if str(item.get("context") or "").strip() == "valuation":
+        diagnostic_account = normalize_account(item.get("account"))
+        diagnostic_broker = normalize_broker(str(item.get("broker") or ""))
+        return (not account_filter or diagnostic_account == account_filter) and (
+            not broker_filter or diagnostic_broker == broker_filter
+        )
     event_id = str(item.get("event_id") or "").strip()
     if event_id and event_id in event_ids:
         return True
