@@ -245,6 +245,20 @@ def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once(
     assert row["covered_call_allocation_status"] == "explicit"
     assert row["covered_call_allocation_quality"] == "exact"
     assert row["covered_call_evidence_fact_ids"] == ["call-mark"]
+    assert report["covered_call_allocations"] == [
+        {
+            "open_event_id": "open-call",
+            "stock_lot_id": "assigned-stock-assign-put",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "shares": 100,
+            "start_at_ms": opened_at,
+            "end_at_ms": _ms("2026-06-30T16:00:00"),
+            "allocation_status": "explicit",
+        }
+    ]
 
 
 def test_covered_call_fifo_downgrades_quality_and_mixed_inventory_fails_closed() -> None:
@@ -290,6 +304,7 @@ def test_covered_call_fifo_downgrades_quality_and_mixed_inventory_fails_closed()
     assert fifo_row["covered_call_allocation_quality"] == "heuristic"
     assert fifo_row["lifecycle_quality"] == "open_marked_heuristic"
     assert mixed["assigned_stock_lots"][0]["covered_call_pnl"] == 0
+    assert mixed["covered_call_allocations"] == []
     assert any(row["status"] == "covered_call_unallocated" for row in mixed["assigned_stock_review_rows"])
 
 

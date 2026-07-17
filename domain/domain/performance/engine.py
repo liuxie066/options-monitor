@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
 from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
-from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, validate_trade_event
+from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, lot_id_for_open_event, validate_trade_event
 from domain.domain.option_position_identity import normalize_account, normalize_broker
 from domain.domain.performance.models import (
+    CAPITAL_DAYS_QUANTUM,
+    CapitalExposureSegment,
     DecimalAmountEnvelope,
     FXRateFact,
     FeeBasis,
@@ -140,6 +142,7 @@ class PeriodPerformance:
     activity: Mapping[str, Any]
     cash: Mapping[str, Any]
     pnl: Mapping[str, Any]
+    capital: Mapping[str, Any]
     assigned_stock: Mapping[str, Any]
     breakdowns: Mapping[str, Any]
     quality: MetricQuality
@@ -153,6 +156,7 @@ class PeriodPerformance:
             "activity": dict(self.activity),
             "cash": dict(self.cash),
             "pnl": dict(self.pnl),
+            "capital": dict(self.capital),
             "assigned_stock": dict(self.assigned_stock),
             "breakdowns": dict(self.breakdowns),
             "quality": self.quality.to_dict(),
@@ -186,16 +190,18 @@ def build_period_performance(
         if _matches_scope(event.contract_key.account, event.contract_key.broker, account_filter, broker_filter)
     ]
     period_events = [event for event in scoped_events if period.contains(event.event_time_ms)]
-    scoped_allocations = [
+    scoped_all_allocations = [
         allocation
         for allocation in allocations
-        if period.contains(allocation.closed_at_ms)
-        and _matches_scope(
+        if _matches_scope(
             allocation.contract_key.account,
             allocation.contract_key.broker,
             account_filter,
             broker_filter,
         )
+    ]
+    scoped_allocations = [
+        allocation for allocation in scoped_all_allocations if period.contains(allocation.closed_at_ms)
     ]
     scoped_opening_positions = [
         position
@@ -259,6 +265,13 @@ def build_period_performance(
         )
     )
     summary = _summarize(ordered_facts, fx_rates=fx_rates)
+    capital = _capital_report(
+        events=scoped_events,
+        allocations=scoped_all_allocations,
+        period=period,
+        ending_assigned_stock=ending_assigned_stock or {},
+        pnl=summary["pnl"],
+    )
     breakdowns = {
         "monthly": _breakdown(
             ordered_facts,
@@ -321,10 +334,26 @@ def build_period_performance(
             broker_filter=broker_filter,
         )
     ]
-    warnings = tuple(dict.fromkeys(_diagnostic_text(item) for item in relevant_diagnostics if _diagnostic_text(item)))
+    warnings = tuple(
+        dict.fromkeys(
+            [
+                _diagnostic_text(item)
+                for item in relevant_diagnostics
+                if _diagnostic_text(item)
+            ]
+            + [
+                f"capital:{item}"
+                for item in capital.get("coverage", {}).get("warnings", [])
+                if str(item)
+            ]
+        )
+    )
     fact_missing = {fact.fact_id for fact in ordered_facts if fact.amount is None and fact.missing_reason}
     fx_missing, selected_fx_fact_ids = _fx_quality_for_facts(ordered_facts, fx_rates=fx_rates)
-    missing = tuple(sorted({*fact_missing, *fx_missing}))
+    capital_missing = {
+        f"capital:{item}" for item in capital.get("coverage", {}).get("missing", []) if str(item)
+    }
+    missing = tuple(sorted({*fact_missing, *fx_missing, *capital_missing}))
     if missing or warnings:
         quality_status = MetricStatus.PARTIAL
     elif ordered_facts:
@@ -354,6 +383,7 @@ def build_period_performance(
         activity=summary["activity"],
         cash=summary["cash"],
         pnl=summary["pnl"],
+        capital=capital,
         assigned_stock=_assigned_stock_report_summary(
             opening_assigned_stock or {},
             ending_assigned_stock or {},
@@ -364,6 +394,354 @@ def build_period_performance(
         quality=quality,
         facts=ordered_facts,
     )
+
+
+def _capital_report(
+    *,
+    events: Sequence[TradeEvent],
+    allocations: Sequence[OptionEconomicAllocation],
+    period: PeriodWindow,
+    ending_assigned_stock: Mapping[str, Any],
+    pnl: Mapping[str, Any],
+) -> dict[str, Any]:
+    segments: list[CapitalExposureSegment] = []
+    missing: set[str] = set()
+    warnings: set[str] = set()
+    covered_call_rows = _assigned_stock_rows(ending_assigned_stock, "covered_call_allocations")
+    covered_call_ids = {
+        str(row.get("open_event_id") or "").strip()
+        for row in covered_call_rows
+        if str(row.get("open_event_id") or "").strip()
+    }
+    for row in covered_call_rows:
+        open_event_id = str(row.get("open_event_id") or "").strip()
+        allocation_status = str(row.get("allocation_status") or "unknown").strip().lower()
+        if open_event_id and allocation_status != "explicit":
+            warnings.add(f"covered_call_allocation_{allocation_status}:{open_event_id}")
+    allocations_by_open: dict[str, list[OptionEconomicAllocation]] = {}
+    for allocation in allocations:
+        allocations_by_open.setdefault(allocation.open_event_id, []).append(allocation)
+
+    for event in events:
+        if event.event_type != "open":
+            continue
+        remaining = int(event.contracts)
+        if remaining <= 0:
+            continue
+        cursor = int(event.event_time_ms)
+        transitions = sorted(
+            allocations_by_open.get(event.event_id, ()),
+            key=lambda item: (int(item.closed_at_ms), item.allocation_id),
+        )
+        for allocation in transitions:
+            close_at_ms = int(allocation.closed_at_ms)
+            if close_at_ms < cursor or int(allocation.contracts) > remaining:
+                missing.add(f"invalid_option_quantity_timeline:{event.event_id}")
+                continue
+            _append_option_capital_segment(
+                segments,
+                missing,
+                event=event,
+                remaining_contracts=remaining,
+                start_at_ms=cursor,
+                end_at_ms=close_at_ms,
+                period=period,
+                covered_call_ids=covered_call_ids,
+            )
+            remaining -= int(allocation.contracts)
+            cursor = close_at_ms
+        if remaining > 0:
+            _append_option_capital_segment(
+                segments,
+                missing,
+                event=event,
+                remaining_contracts=remaining,
+                start_at_ms=cursor,
+                end_at_ms=period.effective_end_exclusive_at_ms,
+                period=period,
+                covered_call_ids=covered_call_ids,
+            )
+
+    _append_assigned_stock_capital_segments(
+        segments,
+        missing,
+        projection=ending_assigned_stock,
+        period=period,
+    )
+    for row in _assigned_stock_rows(ending_assigned_stock, "unsupported_inventory_rows"):
+        event_id = str(row.get("event_id") or row.get("stock_event_id") or "unknown")
+        missing.add(f"incomplete_inventory_basis:{event_id}")
+
+    sums: dict[str, Decimal] = {}
+    relevant_segments: list[CapitalExposureSegment] = []
+    for segment in segments:
+        overlap_ms = segment.overlap_ms(
+            period_start_at_ms=period.effective_start_at_ms,
+            period_end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+        )
+        if overlap_ms <= 0:
+            continue
+        relevant_segments.append(segment)
+        capital_days = segment.capital_days(
+            period_start_at_ms=period.effective_start_at_ms,
+            period_end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+        )
+        if capital_days > 0:
+            sums[segment.currency] = sums.get(segment.currency, Decimal(0)) + capital_days
+    rounded_sums = {
+        currency: value.quantize(CAPITAL_DAYS_QUANTUM, rounding=ROUND_HALF_UP)
+        for currency, value in sorted(sums.items())
+    }
+    coverage_status = (
+        MetricStatus.PARTIAL
+        if missing or warnings
+        else MetricStatus.OBSERVED
+        if relevant_segments
+        else MetricStatus.NOT_OBSERVED
+    )
+    return {
+        "capital_basis": "notional_days_v1",
+        "capital_days_by_currency": {currency: float(value) for currency, value in rounded_sums.items()},
+        "period_total_net_annualized_efficiency": _annualized_efficiency(
+            pnl.get("period_total_net", {}), sums
+        ),
+        "period_realized_net_annualized_efficiency": _annualized_efficiency(
+            pnl.get("realized_net", {}), sums
+        ),
+        "coverage": {
+            "status": coverage_status.value,
+            "missing": sorted(missing),
+            "warnings": sorted(warnings),
+            "segment_count": len(relevant_segments),
+            "incremental_segment_count": sum(1 for item in relevant_segments if item.incremental),
+            "zero_incremental_segment_count": sum(1 for item in relevant_segments if not item.incremental),
+            "covered_call_open_event_ids": sorted(covered_call_ids),
+        },
+        "segments": [
+            item.to_dict(
+                period_start_at_ms=period.effective_start_at_ms,
+                period_end_exclusive_at_ms=period.effective_end_exclusive_at_ms,
+            )
+            for item in relevant_segments
+        ],
+    }
+
+
+def _append_option_capital_segment(
+    segments: list[CapitalExposureSegment],
+    missing: set[str],
+    *,
+    event: TradeEvent,
+    remaining_contracts: int,
+    start_at_ms: int,
+    end_at_ms: int,
+    period: PeriodWindow,
+    covered_call_ids: set[str],
+) -> None:
+    if remaining_contracts <= 0 or end_at_ms <= start_at_ms:
+        return
+    if min(end_at_ms, period.effective_end_exclusive_at_ms) <= max(
+        start_at_ms, period.effective_start_at_ms
+    ):
+        return
+    key = event.contract_key
+    side = str(key.position_side or "").strip().lower()
+    option_type = str(key.option_type or "").strip().lower()
+    try:
+        multiplier = to_decimal(event.multiplier, field_name="multiplier")
+        currency = normalize_currency(event.currency)
+    except ValueError:
+        missing.add(f"capital_basis_unavailable:{event.event_id}")
+        return
+    quantity = Decimal(remaining_contracts)
+    incremental = True
+    if side == "short" and option_type == "put":
+        try:
+            notional = to_decimal(key.strike, field_name="strike") * multiplier * quantity
+        except ValueError:
+            missing.add(f"capital_basis_unavailable:{event.event_id}")
+            return
+        exposure_kind = "short_put_strike_notional"
+    elif side == "long":
+        try:
+            notional = to_decimal(event.price, field_name="open_price") * multiplier * quantity
+        except ValueError:
+            missing.add(f"capital_basis_unavailable:{event.event_id}")
+            return
+        exposure_kind = "long_option_premium_debit"
+    elif side == "short" and option_type == "call" and event.event_id in covered_call_ids:
+        notional = Decimal(0)
+        incremental = False
+        exposure_kind = "covered_call_zero_incremental"
+    else:
+        missing.add(f"capital_basis_unavailable:{event.event_id}")
+        return
+    if incremental and notional < 0:
+        missing.add(f"capital_basis_unavailable:{event.event_id}")
+        return
+    segments.append(
+        CapitalExposureSegment(
+            account=key.account,
+            broker=key.broker,
+            symbol=key.underlying_symbol,
+            currency=currency,
+            exposure_kind=exposure_kind,
+            source_id=lot_id_for_open_event(event),
+            start_at_ms=start_at_ms,
+            end_at_ms=end_at_ms,
+            notional=notional,
+            quantity=quantity,
+            incremental=incremental,
+        )
+    )
+
+
+def _append_assigned_stock_capital_segments(
+    segments: list[CapitalExposureSegment],
+    missing: set[str],
+    *,
+    projection: Mapping[str, Any],
+    period: PeriodWindow,
+) -> None:
+    sales_by_lot: dict[str, list[dict[str, Any]]] = {}
+    for sale in _assigned_stock_rows(projection, "assigned_stock_sale_rows"):
+        sales_by_lot.setdefault(str(sale.get("stock_lot_id") or ""), []).append(sale)
+    for lot in _assigned_stock_rows(projection, "assigned_stock_lots"):
+        lot_id = str(lot.get("stock_lot_id") or "").strip()
+        if not lot_id:
+            continue
+        try:
+            cursor = int(lot.get("assigned_at_ms") or lot.get("opened_at_ms") or 0)
+            shares_remaining = Decimal(int(lot.get("shares_opened") or 0))
+            basis_remaining = to_decimal(lot.get("stock_cost_basis_total"), field_name="stock_cost_basis_total")
+        except (TypeError, ValueError):
+            missing.add(f"assigned_stock_basis_unavailable:{lot_id}")
+            continue
+        if cursor <= 0 or shares_remaining <= 0 or basis_remaining < 0:
+            missing.add(f"assigned_stock_basis_unavailable:{lot_id}")
+            continue
+        sales = sorted(
+            sales_by_lot.get(lot_id, ()),
+            key=lambda row: (int(row.get("event_at") or 0), str(row.get("stock_event_id") or "")),
+        )
+        for sale in sales:
+            sale_at_ms = int(sale.get("event_at") or 0)
+            sold_shares = Decimal(int(sale.get("shares") or 0))
+            try:
+                sold_basis = to_decimal(sale.get("stock_cost_basis_sold"), field_name="stock_cost_basis_sold")
+            except ValueError:
+                missing.add(f"assigned_stock_sale_basis_unavailable:{sale.get('stock_event_id') or lot_id}")
+                continue
+            if sale_at_ms < cursor or sold_shares <= 0 or sold_shares > shares_remaining:
+                missing.add(f"invalid_assigned_stock_quantity_timeline:{lot_id}")
+                continue
+            _append_stock_capital_segment(
+                segments,
+                missing,
+                lot=lot,
+                lot_id=lot_id,
+                start_at_ms=cursor,
+                end_at_ms=sale_at_ms,
+                notional=basis_remaining,
+                shares=shares_remaining,
+                period=period,
+            )
+            cursor = sale_at_ms
+            shares_remaining -= sold_shares
+            basis_remaining -= sold_basis
+            if basis_remaining < 0:
+                missing.add(f"invalid_assigned_stock_basis_timeline:{lot_id}")
+                basis_remaining = Decimal(0)
+        if shares_remaining > 0 and basis_remaining >= 0:
+            _append_stock_capital_segment(
+                segments,
+                missing,
+                lot=lot,
+                lot_id=lot_id,
+                start_at_ms=cursor,
+                end_at_ms=period.effective_end_exclusive_at_ms,
+                notional=basis_remaining,
+                shares=shares_remaining,
+                period=period,
+            )
+
+
+def _append_stock_capital_segment(
+    segments: list[CapitalExposureSegment],
+    missing: set[str],
+    *,
+    lot: Mapping[str, Any],
+    lot_id: str,
+    start_at_ms: int,
+    end_at_ms: int,
+    notional: Decimal,
+    shares: Decimal,
+    period: PeriodWindow,
+) -> None:
+    if end_at_ms <= start_at_ms or min(end_at_ms, period.effective_end_exclusive_at_ms) <= max(
+        start_at_ms, period.effective_start_at_ms
+    ):
+        return
+    try:
+        segment = CapitalExposureSegment(
+            account=str(lot.get("account") or ""),
+            broker=str(lot.get("broker") or ""),
+            symbol=str(lot.get("symbol") or ""),
+            currency=str(lot.get("currency") or ""),
+            exposure_kind="assigned_stock_cost_basis",
+            source_id=lot_id,
+            start_at_ms=start_at_ms,
+            end_at_ms=end_at_ms,
+            notional=notional,
+            quantity=shares,
+        )
+    except ValueError:
+        missing.add(f"assigned_stock_basis_unavailable:{lot_id}")
+        return
+    segments.append(segment)
+
+
+def _annualized_efficiency(
+    pnl_metric: Mapping[str, Any],
+    capital_days_by_currency: Mapping[str, Decimal],
+) -> dict[str, Any]:
+    raw_pnl = pnl_metric.get("by_currency") if isinstance(pnl_metric, Mapping) else {}
+    pnl_by_currency = raw_pnl if isinstance(raw_pnl, Mapping) else {}
+    currencies = sorted({*capital_days_by_currency, *(str(key) for key in pnl_by_currency)})
+    values: dict[str, float] = {}
+    missing: list[str] = []
+    zero_denominator = False
+    for currency in currencies:
+        denominator = capital_days_by_currency.get(currency, Decimal(0))
+        if denominator <= 0:
+            if currency in pnl_by_currency:
+                missing.append(f"zero_capital_days:{currency}")
+                zero_denominator = True
+            continue
+        if currency not in pnl_by_currency:
+            missing.append(f"pnl_unavailable:{currency}")
+            continue
+        pnl_amount = to_decimal(pnl_by_currency[currency], field_name=f"pnl[{currency}]")
+        value = (pnl_amount / denominator * Decimal(365)).quantize(
+            Decimal("0.000000000001"),
+            rounding=ROUND_HALF_UP,
+        )
+        values[currency] = float(value)
+    if values and missing:
+        status = MetricStatus.PARTIAL
+    elif values:
+        status = MetricStatus.OBSERVED
+    elif zero_denominator:
+        status = MetricStatus.NOT_APPLICABLE
+    elif missing:
+        status = MetricStatus.PARTIAL
+    else:
+        status = MetricStatus.NOT_OBSERVED
+    return {
+        "by_currency": values,
+        "status": status.value,
+        "missing": missing,
+    }
 
 
 def _matches_scope(account: str, broker: str, account_filter: str, broker_filter: str) -> bool:
