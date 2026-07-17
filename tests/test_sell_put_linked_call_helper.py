@@ -929,3 +929,137 @@ def test_yield_enhancement_shadow_rank_orders_selected_pairs_by_put_quality() ->
     assert baseline_order["put_contract_symbol"].tolist() == ["NVDA_P95", "NVDA_P90"]
     assert shadow_order["put_contract_symbol"].tolist() == ["NVDA_P90", "NVDA_P95"]
     assert shadow["rank_changed"].all()
+
+
+def test_staggered_expiry_policy_uses_full_put_premium_funding_defaults() -> None:
+    from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+
+    policy = derive_yield_enhancement_policy(
+        {"enabled": True, "structure_mode": "staggered_expiry_pair"},
+        {"strategy": "insurance_underwriting"},
+    )
+
+    assert policy.config["structure_mode"] == "staggered_expiry_pair"
+    assert policy.config["min_combo_net_credit"] == 0.0
+    assert policy.config["max_call_cost_to_put_credit"] == 1.0
+    assert policy.config["min_net_credit_retention"] is None
+    assert policy.config["min_net_credit_annualized"] is None
+
+
+def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import (
+        find_sell_put_yield_enhancement_pairs,
+        select_best_yield_enhancement_pairs,
+    )
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-10-16",
+                "dte": 91,
+                "contract_symbol": "NVDA261016C00110000",
+                "strike": 110.0,
+                "spot": 110.0,
+                "bid": 2.60,
+                "ask": 2.70,
+                "mid": 2.65,
+                "volume": 50,
+                "open_interest": 800,
+                "implied_volatility": 0.40,
+                "currency": "USD",
+                "delta": 0.31,
+                "multiplier": 100,
+            },
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-11-20",
+                "dte": 126,
+                "contract_symbol": "NVDA261120C00115000",
+                "strike": 115.0,
+                "spot": 110.0,
+                "bid": 2.35,
+                "ask": 2.45,
+                "mid": 2.40,
+                "volume": 45,
+                "open_interest": 700,
+                "implied_volatility": 0.39,
+                "currency": "USD",
+                "delta": 0.27,
+                "multiplier": 100,
+            },
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    puts = pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "expiration": "2026-08-21",
+                "dte": 35,
+                "contract_symbol": "NVDA260821P00100000",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 100.0,
+                "spot": 110.0,
+                "bid": 3.0,
+                "ask": 3.1,
+                "mid": 3.05,
+                "open_interest": 1200,
+                "volume": 80,
+                "implied_volatility": 0.42,
+                "delta": -0.20,
+                "funding_put_eligible": True,
+                "strike_safety_margin_pct": 0.10,
+                "premium_edge_score": 0.18,
+                "annualized_net_return_on_cash_basis": 0.20,
+                "cash_required_usd": 10000.0,
+            }
+        ]
+    )
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=puts,
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "structure_mode": "staggered_expiry_pair",
+            "call": {"min_dte": 60, "max_dte": 150, "min_delta": 0.10, "max_delta": 0.45},
+        },
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "insurance_underwriting",
+            "min_dte": 20,
+            "max_dte": 60,
+            "max_strike": 100.0,
+        },
+    )
+
+    assert len(pairs) == 2
+    selected = select_best_yield_enhancement_pairs(pairs)
+    assert len(selected) == 1
+    row = selected.iloc[0]
+    assert row["structure_mode"] == "staggered_expiry_pair"
+    assert row["put_expiration"] == "2026-08-21"
+    assert int(row["put_dte"]) == 35
+    assert row["call_expiration"] == "2026-10-16"
+    assert int(row["call_dte"]) == 91
+    assert int(row["expiry_gap_days"]) == 56
+    assert row["expiration_scope"] == "funding_put"
+    assert row["dte_scope"] == "funding_put"
+    assert int(row["put_contracts"]) == int(row["call_contracts"]) == 1
+    assert row["put_leg_role"] == "funding_put"
+    assert row["call_leg_role"] == "participation_call"
+    assert row["annualized_net_credit_yield"] is None
+    assert float(row["funding_ratio"]) >= 1.0
+    assert float(row["call_cost_to_put_credit"]) <= 1.0
+    assert row["candidate_pair_id"].endswith(
+        "NVDA260821P00100000:NVDA261016C00110000"
+    )
+    assert float(row["strike_safety_margin_pct"]) == 0.10
+    assert float(row["premium_edge_score"]) == 0.18
+    assert float(row["cash_required_usd"]) == 10000.0

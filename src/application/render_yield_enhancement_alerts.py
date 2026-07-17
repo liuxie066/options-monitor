@@ -46,6 +46,7 @@ def _default_report_file(report_dir_path: Path, basename: str, *, symbol: str | 
 
 def render_one(row: pd.Series) -> str:
     symbol = str(row.get("symbol") or "-")
+    structure_mode = str(row.get("structure_mode") or "").strip().lower()
     expiration = str(row.get("expiration") or "-")
     put_strike = _strike_token(row.get("put_strike"))
     call_strike = _strike_token(row.get("call_strike"))
@@ -76,6 +77,46 @@ def render_one(row: pd.Series) -> str:
     candidate_line = None
     if call_candidate_count is not None and call_candidate_count > 1:
         candidate_line = f"Call候选: {int(call_candidate_count)}个"
+    if structure_mode == "staggered_expiry_pair":
+        put_expiration = str(row.get("put_expiration") or row.get("expiration") or "-")
+        call_expiration = str(row.get("call_expiration") or "-")
+        put_dte = _safe_float(row.get("put_dte") if row.get("put_dte") is not None else row.get("dte"))
+        call_dte = _safe_float(row.get("call_dte"))
+        expiry_gap_days = _safe_float(row.get("expiry_gap_days"))
+        put_net_credit = _safe_float(row.get("put_net_credit"))
+        call_total_cost = _safe_float(row.get("call_total_cost"))
+        combo_net_credit = _safe_float(row.get("combo_net_credit"))
+        funding_ratio = _safe_float(row.get("funding_ratio"))
+        safety_margin = _safe_float(row.get("strike_safety_margin_pct"))
+        cash_required_usd = _safe_float(row.get("cash_required_usd"))
+        cash_required_cny = _safe_float(row.get("cash_required_cny"))
+        cash_text = "-"
+        if cash_required_usd is not None:
+            cash_text = f"${cash_required_usd:,.0f}"
+        elif cash_required_cny is not None:
+            cash_text = f"¥{cash_required_cny:,.0f}"
+        combo_cashflow = "-" if combo_net_credit is None else f"{combo_net_credit:+,.0f} {option_ccy}"
+        return "\n".join(
+            [
+                f"🧩 Combo Yield · 错期全额融资 {symbol}",
+                "",
+                (
+                    f"- Put: 卖 {put_strike}P @ {put_expiration}"
+                    f"（{int(put_dte)}天）" if put_dte is not None else f"- Put: 卖 {put_strike}P @ {put_expiration}"
+                )
+                + f" | bid={('-' if put_bid is None else num(put_bid))} | 按费用模型估算净收入={('-' if put_net_credit is None else num(put_net_credit))} {option_ccy}",
+                (
+                    f"- Call: 买 {call_strike}C @ {call_expiration}"
+                    f"（{int(call_dte)}天）" if call_dte is not None else f"- Call: 买 {call_strike}C @ {call_expiration}"
+                )
+                + f" | ask={('-' if call_ask is None else num(call_ask))} | delta={('-' if call_delta is None else f'{call_delta:.2f}')} | 按费用模型估算总成本={('-' if call_total_cost is None else num(call_total_cost))} {option_ccy}",
+                f"- 融资: 资金利用率={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))} | 覆盖率={('-' if funding_ratio is None else pct(funding_ratio))} | 开仓净现金流={combo_cashflow}",
+                f"- 风控: Put接货安全边界={('-' if safety_margin is None else pct(safety_margin))} | Put现金要求={cash_text}",
+                f"- 期限: Call比Put晚{('-' if expiry_gap_days is None else int(expiry_gap_days))}天 | 两腿各1张",
+                *( [f"- 备选: 同一Funding Put下共{int(call_candidate_count)}个Call候选"] if call_candidate_count is not None and call_candidate_count > 1 else [] ),
+                "- 备注: Put已独立通过接货、现金、事件、收益和流动性门槛；费用为模型估算。",
+            ]
+        )
     return "\n".join(
         [
             f"[组合收益推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",

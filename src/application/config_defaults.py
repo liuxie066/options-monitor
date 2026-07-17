@@ -232,6 +232,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 60},
                 "combo_yield": {
                     "enabled": False,
+                    "structure_mode": "same_expiry_pair",
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",
                     "funding_mode": "credit_or_even",
@@ -282,6 +283,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 90},
                 "combo_yield": {
                     "enabled": False,
+                    "structure_mode": "same_expiry_pair",
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",
                     "funding_mode": "credit_or_even",

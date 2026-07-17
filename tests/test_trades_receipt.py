@@ -301,3 +301,39 @@ def test_build_trade_intake_receipt_message_marks_projection_verification_failur
     assert "[已记录]" not in msg
     assert "状态：写入异常" in msg
     assert "projection_verification_failed" in msg
+
+
+def test_build_trade_intake_receipt_message_marks_staggered_combo_relation_pending() -> None:
+    msg = build_trade_intake_receipt_message(
+        deal=None,
+        result={
+            "status": "applied",
+            "reason": "applied_open",
+            "deal_id": "deal-staggered-call-1",
+            "account": "lx",
+            "action": "open",
+            "diagnostics": {
+                "combo_yield_enrichment": {
+                    "structure_mode": "staggered_expiry_pair",
+                    "pair_intent_id": None,
+                    "combination_relation_pending": True,
+                }
+            },
+        },
+        payload={
+            "symbol": "PDD",
+            "option_type": "call",
+            "side": "buy",
+            "expiration_ymd": "2026-10-16",
+            "strike": 100,
+            "qty": 1,
+            "price": 0.73,
+            "multiplier": 100,
+            "currency": "USD",
+        },
+    )
+
+    assert "[已记录]" in msg
+    assert "资金：权利金毛流出 USD 73.00" in msg
+    assert "组合关系待确认" in msg
+    assert "未自动归入 Combo Yield 组" in msg

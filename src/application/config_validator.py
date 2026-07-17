@@ -29,6 +29,7 @@ from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
     YIELD_ENHANCEMENT_OBJECTIVES,
     YIELD_ENHANCEMENT_OUTPUT_MODES,
+    YIELD_ENHANCEMENT_STRUCTURE_MODES,
 )
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
@@ -554,6 +555,10 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         output_mode = str(cfg.get('output_mode') or '').strip().lower()
         if output_mode not in YIELD_ENHANCEMENT_OUTPUT_MODES:
             die(f"{path}.output_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OUTPUT_MODES))}")
+    if 'structure_mode' in cfg and cfg.get('structure_mode') is not None:
+        structure_mode = str(cfg.get('structure_mode') or '').strip().lower()
+        if structure_mode not in YIELD_ENHANCEMENT_STRUCTURE_MODES:
+            die(f"{path}.structure_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_STRUCTURE_MODES))}")
     for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (

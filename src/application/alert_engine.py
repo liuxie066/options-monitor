@@ -21,6 +21,7 @@ from domain.domain.alert_rules import (
     SELL_PUT_NOTIFICATION_LOW,
 )
 from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
+from domain.domain.engine import yield_enhancement_rank_key
 from domain.domain.strategy_vocab import (
     STRATEGY_COVERED_CALL,
     STRATEGY_SELL_PUT,
@@ -495,6 +496,31 @@ def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
             parts.append(f"call_candidate_count {int(value)}")
     except Exception:
         pass
+    for key in (
+        'structure_mode',
+        'put_expiration',
+        'put_dte',
+        'call_expiration',
+        'call_dte',
+        'expiry_gap_days',
+        'put_net_credit',
+        'call_total_cost',
+        'combo_net_credit',
+        'funding_ratio',
+        'strike_safety_margin_pct',
+        'premium_edge_score',
+        'cash_required_usd',
+        'cash_required_cny',
+        'max_leg_spread_ratio',
+        'fee_basis',
+        'funding_accepted',
+    ):
+        try:
+            value = row.get(key)
+            if value is not None and not pd.isna(value):
+                parts.append(f"{key} {value}")
+        except Exception:
+            pass
     return parts
 
 
@@ -605,6 +631,10 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         return 'low', SELL_CALL_NOTIFICATION_LOW
 
     if strategy == STRATEGY_YIELD_ENHANCEMENT:
+        structure_mode = str(row.get('structure_mode') or '').strip().lower()
+        funding_accepted = str(row.get('funding_accepted') or '').strip().lower() in {'1', 'true', 'yes'}
+        if structure_mode == 'staggered_expiry_pair' and funding_accepted:
+            return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
         if annual > 0:
             return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
         return 'low', '当前组合收益推荐未通过优先级阈值，仅供观察。'
@@ -626,6 +656,11 @@ def _alert_row_sort_key(row: pd.Series) -> tuple[object, ...]:
     strategy = canonical_strategy_id(str(row.get('strategy') or ''))
     symbol = str(row.get('symbol') or '').strip().upper()
     contract = str(row.get('top_contract') or '').strip()
+    if strategy == STRATEGY_YIELD_ENHANCEMENT:
+        return (
+            _ALERT_STRATEGY_ORDER.get(strategy, 99),
+            *yield_enhancement_rank_key(row.to_dict()),
+        )
     return (
         _ALERT_STRATEGY_ORDER.get(strategy, 99),
         _numeric_sort_desc(row.get('annualized_return')),

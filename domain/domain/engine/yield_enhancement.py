@@ -117,7 +117,12 @@ def _normalize_weights(weights: tuple[float, ...], count: int) -> tuple[float, .
     return tuple(value / total for value in cleaned)
 
 
-def validate_yield_enhancement_pair(put_leg: YieldEnhancementLeg, call_leg: YieldEnhancementLeg) -> list[str]:
+def validate_yield_enhancement_pair(
+    put_leg: YieldEnhancementLeg,
+    call_leg: YieldEnhancementLeg,
+    *,
+    structure_mode: str = "same_expiry_pair",
+) -> list[str]:
     rejects: list[str] = []
     if str(put_leg.option_type).lower() != "put":
         rejects.append("put_leg_option_type")
@@ -125,7 +130,11 @@ def validate_yield_enhancement_pair(put_leg: YieldEnhancementLeg, call_leg: Yiel
         rejects.append("call_leg_option_type")
     if put_leg.symbol.upper() != call_leg.symbol.upper():
         rejects.append("symbol_mismatch")
-    if put_leg.expiration != call_leg.expiration:
+    normalized_structure_mode = str(structure_mode or "same_expiry_pair").strip().lower()
+    if normalized_structure_mode == "staggered_expiry_pair":
+        if call_leg.expiration <= put_leg.expiration or call_leg.dte <= put_leg.dte:
+            rejects.append("expiration_order")
+    elif put_leg.expiration != call_leg.expiration:
         rejects.append("expiration_mismatch")
     if put_leg.currency.upper() != call_leg.currency.upper():
         rejects.append("currency_mismatch")
@@ -152,8 +161,9 @@ def compute_yield_enhancement_metrics(
     scenario_move_factors: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5),
     scenario_weights: tuple[float, ...] = (0.2, 0.3, 0.4, 0.1),
     min_combo_notional_floor: float = 1.0,
+    structure_mode: str = "same_expiry_pair",
 ) -> YieldEnhancementMetrics:
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+    rejects = validate_yield_enhancement_pair(put_leg, call_leg, structure_mode=structure_mode)
     if rejects:
         raise ValueError(f"invalid yield enhancement pair: {', '.join(rejects)}")
 
@@ -268,9 +278,10 @@ def compute_yield_enhancement_funding_decision(
     max_call_cost_to_put_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
+    structure_mode: str = "same_expiry_pair",
 ) -> YieldEnhancementFundingDecision:
     """Decide whether the put premium can sensibly fund a speculative long call."""
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+    rejects = validate_yield_enhancement_pair(put_leg, call_leg, structure_mode=structure_mode)
     reject_reasons: list[str] = list(rejects)
 
     multiplier = float(put_leg.multiplier)
@@ -354,7 +365,76 @@ def compute_yield_enhancement_funding_decision(
     )
 
 
-def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
+def _is_staggered_expiry_pair(row: dict[str, Any]) -> bool:
+    return str(row.get("structure_mode") or "").strip().lower() == "staggered_expiry_pair"
+
+
+def _funding_accepted(row: dict[str, Any]) -> bool:
+    return str(row.get("funding_accepted") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def yield_enhancement_staggered_call_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    def f(key: str, default: float = 0.0) -> float:
+        value = _safe_float(row.get(key))
+        return float(default if value is None else value)
+
+    raw_call_delta = _safe_float(row.get("call_delta"))
+    call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
+    max_leg_spread_ratio = max(
+        f("put_spread_ratio", default=999.0),
+        f("call_spread_ratio", default=999.0),
+    )
+    return (
+        -1.0 if _funding_accepted(row) else 0.0,
+        -call_delta,
+        -f("call_cost_to_put_credit", default=-1.0),
+        -f("call_dte", default=-1.0),
+        max_leg_spread_ratio,
+        -f("call_open_interest"),
+        str(row.get("call_contract_symbol") or ""),
+    )
+
+
+def yield_enhancement_staggered_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    def f(key: str, default: float = 0.0) -> float:
+        value = _safe_float(row.get(key))
+        return float(default if value is None else value)
+
+    assignment_margin = _safe_float(row.get("strike_safety_margin_pct"))
+    if assignment_margin is None:
+        assignment_margin = _safe_float(row.get("put_assignment_margin_pct"))
+    if assignment_margin is None:
+        assignment_margin = f("put_otm_pct")
+    premium_edge = _safe_float(row.get("premium_edge_score"))
+    if premium_edge is None:
+        premium_edge = _safe_float(row.get("put_only_annualized_net_return"))
+    if premium_edge is None:
+        premium_edge = f("annualized_net_return_on_cash_basis", default=-1.0)
+    raw_call_delta = _safe_float(row.get("call_delta"))
+    call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
+    max_leg_spread_ratio = max(
+        f("put_spread_ratio", default=999.0),
+        f("call_spread_ratio", default=999.0),
+    )
+    return (
+        -1.0 if _funding_accepted(row) else 0.0,
+        -float(assignment_margin),
+        -float(premium_edge),
+        -call_delta,
+        -f("call_cost_to_put_credit", default=-1.0),
+        -f("call_dte", default=-1.0),
+        max_leg_spread_ratio,
+        -min(f("put_open_interest"), f("call_open_interest")),
+        str(row.get("symbol") or ""),
+        str(row.get("put_contract_symbol") or ""),
+        str(row.get("call_contract_symbol") or ""),
+    )
+
+
+def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    if _is_staggered_expiry_pair(row):
+        return yield_enhancement_staggered_rank_key(row)
+
     def f(key: str, default: float = 0.0) -> float:
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
@@ -384,6 +464,13 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
 
 def rank_yield_enhancement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted([dict(row) for row in rows], key=yield_enhancement_rank_key)
+
+
+def rank_yield_enhancement_calls_for_put(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    copied = [dict(row) for row in rows]
+    if copied and _is_staggered_expiry_pair(copied[0]):
+        return sorted(copied, key=yield_enhancement_staggered_call_rank_key)
+    return rank_yield_enhancement_rows(copied)
 
 
 def yield_enhancement_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:

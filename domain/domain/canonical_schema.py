@@ -43,6 +43,16 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         raise ValueError("processor output requires strategy")
 
     combo_fields = (
+        "structure_mode",
+        "put_expiration",
+        "put_dte",
+        "call_expiration",
+        "call_dte",
+        "expiry_gap_days",
+        "expiration_scope",
+        "dte_scope",
+        "put_contracts",
+        "call_contracts",
         "put_strike",
         "call_strike",
         "put_bid",
@@ -80,6 +90,11 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "upside_lift_to_put_credit",
         "premium_funding_score",
         "funding_score_components",
+        "net_credit_retention",
+        "strike_safety_margin_pct",
+        "premium_edge_score",
+        "max_leg_spread_ratio",
+        "fee_basis",
     )
 
     out = {

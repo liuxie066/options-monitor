@@ -1604,3 +1604,100 @@ def test_cli_strategy_lab_experiment_run_window(capsys, monkeypatch, tmp_path: P
     assert payload["data"]["dataset_dir"] is None
     assert payload["data"]["input_scope"]["readiness_scope"]["coverage"]["selected_scanned_runs"] == 1
     assert payload["data"]["evaluation"]["candidate_impact"]["allowed"] is True
+
+
+def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(tmp_path: Path) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset
+    from src.application.strategy_lab import run_combo_yield_group_experiment
+
+    run_dir = tmp_path / "output_runs" / "20260717T010000Z-run" / "accounts" / "lx"
+    run_dir.mkdir(parents=True)
+    (run_dir / "combo_yield_candidates.csv").write_text(
+        (
+            "symbol,account,structure_mode,candidate_pair_id,put_expiration,put_dte,call_expiration,call_dte,"
+            "spot,multiplier,put_contracts,call_contracts,put_contract_symbol,put_strike,put_bid,"
+            "call_contract_symbol,call_strike,call_ask,put_net_credit,call_total_cost,combo_net_credit\n"
+            "TSLA,lx,staggered_expiry_pair,pair-tsla-1,2026-08-21,35,2026-10-16,91,180,100,1,1,"
+            "TSLA260821P00150000,150,6.0,TSLA261016C00220000,220,4.0,600,400,200\n"
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_shadow_replay_dataset(
+        repo_root=tmp_path,
+        run_dir=tmp_path / "output_runs" / "20260717T010000Z-run",
+        dataset_id="staggered-case",
+    )
+    rows = [
+        json.loads(line)
+        for line in (Path(manifest["dataset_dir"]) / "candidate_snapshots.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    by_role = {row["leg_role"]: row for row in rows}
+
+    assert {row["structure_mode"] for row in rows} == {"staggered_expiry_pair"}
+    assert {row["candidate_pair_id"] for row in rows} == {"pair-tsla-1"}
+    assert by_role["funding_put"]["expiration"] == "2026-08-21"
+    assert by_role["funding_put"]["dte"] == 35
+    assert by_role["participation_call"]["expiration"] == "2026-10-16"
+    assert by_role["participation_call"]["dte"] == 91
+
+    result = run_combo_yield_group_experiment(candidate_snapshots=rows, min_sample=1)
+    group = result["group_universe"]["groups"][0]
+
+    assert group["structure_mode"] == "staggered_expiry_pair"
+    assert group["ready_for_group_experiment"] is True
+    assert "combo_yield_expiration_mismatch" not in group["blockers"]
+    assert "combo_yield_expiration_order_invalid" not in group["blockers"]
+    assert group["outcome_evaluation"]["status"] == "not_evaluable"
+    assert (
+        "combo_yield_multi_horizon_outcome_evidence_insufficient"
+        in group["outcome_evaluation"]["blockers"]
+    )
+
+
+def test_combo_yield_group_evaluator_rejects_reversed_staggered_expirations() -> None:
+    from src.application.strategy_lab import run_combo_yield_group_experiment
+
+    common = {
+        "symbol": "TSLA",
+        "account": "lx",
+        "status": "accepted",
+        "strategy_family": "combo_yield",
+        "strategy_group_id": "staggered-reversed",
+        "structure_mode": "staggered_expiry_pair",
+        "contracts": 1,
+        "multiplier": 100,
+        "spot": 180,
+        "combo_net_credit": 200,
+    }
+    rows = [
+        {
+            **common,
+            "contract_symbol": "TSLA261016P00150000",
+            "option_type": "put",
+            "leg_role": "funding_put",
+            "side": "short",
+            "strike": 150,
+            "expiration": "2026-10-16",
+            "net_income": 600,
+        },
+        {
+            **common,
+            "contract_symbol": "TSLA260821C00220000",
+            "option_type": "call",
+            "leg_role": "participation_call",
+            "side": "long",
+            "strike": 220,
+            "expiration": "2026-08-21",
+            "net_income": -400,
+        },
+    ]
+
+    result = run_combo_yield_group_experiment(candidate_snapshots=rows, min_sample=1)
+    group = result["group_universe"]["groups"][0]
+
+    assert group["ready_for_group_experiment"] is False
+    assert "combo_yield_expiration_order_invalid" in group["blockers"]
+    assert "combo_yield_expiration_mismatch" not in group["blockers"]

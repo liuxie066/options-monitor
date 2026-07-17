@@ -66,6 +66,7 @@ from src.application.ledger.repository import (
 from src.application.ledger.manual_trades import (
     existing_manual_close_event_result,
     persist_manual_adjust_event,
+    persist_manual_adjust_events,
     persist_manual_close_event,
     persist_manual_open_event,
 )
@@ -288,6 +289,56 @@ def persist_manual_adjust_event_with_ledger(
         patch=patch,
         ledger_preflight=ledger_preflight,
     )
+
+
+def record_manual_position_adjustments(
+    repo: Any,
+    adjustments: list[dict[str, Any]],
+) -> list[ManualAdjustLedgerResult]:
+    """Preflight and persist multiple lot adjustments atomically."""
+
+    prepared: list[dict[str, Any]] = []
+    preflight_results: list[Any] = []
+    for raw in adjustments:
+        item = dict(raw or {})
+        record_id = str(item.pop("record_id", "") or "").strip()
+        if not record_id:
+            raise ValueError("manual adjustment batch requires record_id")
+        item.setdefault("fields", None)
+        item.setdefault("contracts", None)
+        item.setdefault("strike", None)
+        item.setdefault("expiration_ymd", None)
+        item.setdefault("premium_per_share", None)
+        item.setdefault("multiplier", None)
+        item.setdefault("opened_at_ms", None)
+        item.setdefault("as_of_ms", None)
+        preflight_result = _preflight_lot_adjust(
+            repo,
+            record_id=record_id,
+            source="manual_adjust_batch_preflight",
+            operation_label="manual adjustment batch",
+            **item,
+        )
+        preflight_results.append(preflight_result)
+        prepared.append(
+            {
+                "record_id": record_id,
+                **item,
+                "fields": preflight_result.fields,
+                "as_of_ms": int(preflight_result.ledger_preflight.event_time_ms),
+            }
+        )
+
+    ledger_results = persist_manual_adjust_events(repo, prepared)
+    return [
+        ManualAdjustLedgerResult(
+            result=LedgerWriteResult.from_payload(ledger_result),
+            fields=preflight_result.fields,
+            patch=preflight_result.patch_contract,
+            ledger_preflight=preflight_result.ledger_preflight,
+        )
+        for preflight_result, ledger_result in zip(preflight_results, ledger_results, strict=True)
+    ]
 
 
 def persist_trade_close_events_with_ledger(

@@ -148,70 +148,119 @@ Covered Call 的 `premium_edge_score` 使用与 Sell Put 相同的去重补偿�
 
 ## Combo Yield
 
-Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。
+Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。当前 runtime key 是 `combo_yield`；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。
 
-当前 runtime key 是 `combo_yield`，历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义已经按 Combo Yield 独立处理，技术上不继承 Sell Put / Covered Call 的完整 `insurance_underwriting` IV/RV gate；Combo 自己应用事件 fail-closed、现金和流动性约束。
+当前结构由 `structure_mode` 决定：
 
-核心目标：用一张可接受接货义务的 short put，融资同 symbol、同到期的 long call，形成“保留净权利金，同时获得有限成本上行参与”的组合。
+| 结构 | 期限关系 | 当前定位 |
+|---|---|---|
+| `same_expiry_pair` | Put 与 Call 同到期 | 默认值；保留既有组合指标、硬筛和排序 |
+| `staggered_expiry_pair` | Put 早到期，Call 晚到期 | 新增错期全额融资结构 |
 
-### 召回
+### `same_expiry_pair`
 
-- put leg: option type 为 put，DTE 使用 Sell Put 窗口。
-- put strike 使用 Sell Put 接货边界：`min_strike` 可空；上界是 `min(spot, max_strike)`，如果 `max_strike` 为空则上界是 spot。
-- Funding Put 必须先独立通过 Sell Put 的 `min_annualized_net_return`；搭配 long call 不会把该门槛重置为 0。
-- call leg: option type 为 call，同 symbol、同到期、同 multiplier。
-- call strike 使用结构边界：`strike >= max(spot, call.min_strike)`，`call.max_strike` 可空。
-- call delta 可用作上行参与区间，默认保留低 delta 参与，不再用 OTM 百分比做召回控制。
+该模式继续配对同 symbol、同到期、同 currency、同 multiplier、`put strike < call strike` 的 Short Put + Long Call。现有 `min_net_credit_annualized`、`min_net_credit_retention`、`max_combo_spread_ratio`、scenario/breakeven 输出和原排序保持兼容；本轮不改变其产品定义。
 
-### 硬筛
+### `staggered_expiry_pair` 的核心关系
 
-- put strike < call strike。
-- `funding_mode` 通过：默认要求扣除 long call 成本和手续费后 `combo_net_credit >= 0`。
-- `min_net_credit_annualized` 通过。
-- `min_net_credit_retention` 通过；默认至少保留 80% short put 净权利金。
-- 显式配置时，兼容门槛 `min_combo_net_credit` / `max_call_cost_to_put_credit` 通过。
-- `max_combo_spread_ratio` 通过。
-- put / call 基础流动性通过。
+V1 使用严格的一对一关系：
 
-不再作为 Combo Yield 开仓硬筛：
+```text
+1 Short Put : 1 Long Call
+put.expiration < call.expiration
+put.strike < call.strike
+put.multiplier == call.multiplier
+put.currency == call.currency
+```
 
-- IV / RV
-- expected move / scenario score
-- put OTM 百分比
-- call OTM 百分比
-- upside lift to call cost / put credit
-- Sell Put / Covered Call 的完整 IV/RV underwriting gate
+Funding Put 是资金腿，Long Call 是参与腿。不是“多张 Put 共同融资一张 Call”，也不在候选或成交阶段做启发式拆分。这样可以让资金覆盖、风险归因、通知和持仓生命周期都保持可解释。
 
-Combo Yield 仍复用事件注释，并默认按 `reject_event_risk=true`、`event_source_fail_closed=true` fail closed；事件数据源不可用或到期前有事件时，不进入资金与配对筛选。
+### 召回与硬筛
 
-原因是 Combo Yield 的第一性目标不是“交易 IV 溢价”，而是判断一组结构是否值得开：接货义务是否在愿意范围内，short put 是否足够融资 long call，组合是否仍保留净权利金，以及 call 是否提供足够上行参与。
+Funding Put：
 
-### 排序
+- 依赖 `sell_put.enabled=true`。
+- 使用 Sell Put 自己的 DTE 窗口和接货 strike 边界。
+- 在组合构造前先复用完整 Sell Put underwriting 候选；现金、事件、收益、IV/RV、流动性及愿意接货边界均不得因 Long Call 而放宽。
 
-排序目标是推荐最优组合，不是解释所有可能性。
+Participation Call：
 
-排序顺序：
+- 从 required-data Call universe 独立召回，不要求启用 Covered Call 扫描。
+- 使用 `combo_yield.call.min_dte/max_dte`；Call 到期日必须晚于 Put。
+- 可配置 `call.min_strike/max_strike` 与 `call.min_delta/max_delta`。
+- 错期模式不强制 `call strike >= spot`，但最终结构仍必须满足 `put strike < call strike`。
+- Call bid/ask、delta、OI、volume、spread 和 multiplier 缺失或不合格时 fail closed。
+
+配对硬约束：
+
+- 同 symbol、currency、multiplier。
+- Put 到期早于 Call；Put strike 低于 Call strike。
+- `put_net_credit > 0`，`call_total_cost > 0`。
+- 默认 `funding_mode=credit_or_even`：`combo_net_credit >= 0`。
+- 默认 `max_call_cost_to_put_credit=1`：Call 总成本不超过 Put 净收入；对应 `funding_ratio >= 1`。
+- 两腿基础流动性通过，费用按当前费用模型估算。
+
+费用与资金定义：
+
+```text
+put_net_credit = Put bid * multiplier - estimated_sell_fees
+call_total_cost = Call ask * multiplier + estimated_buy_fees
+combo_net_credit = put_net_credit - call_total_cost
+call_cost_to_put_credit = call_total_cost / put_net_credit
+funding_ratio = put_net_credit / call_total_cost
+```
+
+错期组合不计算或硬筛组合年化、同到期 breakeven、expected-move scenario、1.5σ/2.0σ payoff multiple。Put 与 Call 的风险期限不同，把它们压成单一到期日指标会制造错误精度。
+
+### 排序与通知入选
+
+同一 Funding Put 下先选一个 Participation Call：
 
 1. `funding_accepted` 优先
-2. `premium_funding_score` 降序
-3. `net_credit_retention` 降序
-4. `call_cost_to_put_credit` 升序
-5. `call_participation` 降序
-6. `put_assignment_margin_pct` 降序
-7. `annualized_net_credit_yield` 降序
-8. `combo_spread_ratio` 升序
-9. `combo_net_credit` 降序
-10. `upside_breakeven_pct_above_spot` 升序
-11. `net_credit` 降序
-12. min(`put_open_interest`, `call_open_interest`) 降序
+2. `call_delta` 降序
+3. `call_cost_to_put_credit` 降序，即在仍满足全额覆盖前提下优先使用更多可用 Put 权利金
+4. `call_dte` 降序
+5. max(`put_spread_ratio`, `call_spread_ratio`) 升序
+6. `call_open_interest` 降序
+7. Call 合约标识稳定排序
 
-这里的排序刻意不把 IV/RV 放在核心位置。Combo Yield 的关键不是哪张保单 IV 最贵，而是哪组组合最像“用可接受接货价格，低成本买到上行参与，同时不牺牲太多权利金和执行质量”。
+不同组合进入通知前按以下顺序排列：
 
-当前生产排序保持上述顺序不变。研究侧另生成 `<symbol>_combo_yield_rank_shadow.csv`：同一 Funding Put 下按 Call Delta、1.5σ / 2.0σ 尾部回报倍数、spread、OI 选择彩票；不同已选组合再按接货安全垫、Put-only 年化、Call 参与度、执行质量和剩余净权利金排序。artifact 使用 `baseline_rank`、`shadow_rank`、`baseline_selected`、`shadow_selected`、`rank_changed` 对比两套结果，不影响生产推荐和通知。
+1. `funding_accepted` 优先
+2. Put `strike_safety_margin_pct` 降序
+3. Funding Put `premium_edge_score` 降序
+4. `call_delta` 降序
+5. `call_cost_to_put_credit` 降序
+6. `call_dte` 降序
+7. 两腿最大 spread 升序
+8. min(`put_open_interest`, `call_open_interest`) 降序
+9. symbol、Put 合约、Call 合约稳定排序
 
-`<symbol>_combo_yield_pair_diagnostics.csv` 记录 Call 预筛、Put 匹配和 Put+Call 配对阶段的逐行通过/拒绝结果，包括 `diagnostic_scope`、`diagnostic_stage`、`reject_reasons` 以及可计算的 Delta、流动性、融资和组合经济性字段。它只补充研究可观测性，不改变硬筛、生产排序、通知或配置。
+因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足资金覆盖硬门槛的组合。每个 Funding Put 只保留排序最优的一张 Call；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
 
-组合候选同时输出 `put_only_net_credit`、`put_only_breakeven`、`combo_breakeven`、`downside_breakeven_penalty`、`lottery_budget_ratio`、`residual_premium_ratio`、`call_payoff_multiple_at_1_5_sigma` 和 `call_payoff_multiple_at_2_0_sigma`，用于明确比较 Sell Put Only 与 Sell Put + Long Call。缺少 expected move 时尾部赔率为 null，不作为硬拒绝原因。
+### 候选身份、成交意图与回执
+
+- `candidate_pair_id`：扫描推荐身份，用于候选、artifact 和通知追踪，不等于真实成交关系。
+- `pair_intent_id`：操作员或成交入口显式提供的真实组合意图。
+- `strategy_group_id = combo_yield:<account>:<pair_intent_id>`。
+- 有 `pair_intent_id` 的错期成交按 `funding_put` / `participation_call` 自动归组。
+- 没有 `pair_intent_id` 时照常记录单腿，但不猜测组合关系；回执提示“组合关系待确认”。
+
+已分别入账的两腿可通过精确 lot id 确认：
+
+```bash
+./om option-positions pair-combo-yield \
+  --put-record-id <put_lot_id> \
+  --call-record-id <call_lot_id> \
+  --pair-intent-id <intent_id> \
+  --dry-run
+```
+
+该入口校验同账户、同 canonical symbol、Short Put/Long Call 方向、开放合约数、1:1、multiplier、到期顺序和 strike 顺序。确认写入时，两条 immutable adjustment event 在同一 SQLite 事务中提交；不按合约条件搜索或猜测 lot。
+
+### 配置示例边界
+
+`combo_yield.call.min_dte=60`、`max_dte=120` 仅是展示独立 Call horizon 的示例，不是生产推荐值。生产参数必须通过 Shadow Replay、pair diagnostics 和 outcome 证据校准。默认仍是 `same_expiry_pair`，本轮没有自动修改生产配置。
 
 ## 当前实现边界
 
