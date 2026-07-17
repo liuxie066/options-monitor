@@ -61,15 +61,54 @@ The pure period engine consumes effective canonical trade events plus canonical 
 - Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
 - An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
 
-All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal. No CNY conversion occurs before the valuation/FX slice.
+All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal. S4 adds evidence-backed CNY derivation without replacing those native amounts.
 
 Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
 
 The application service reads immutable events only through `src.application.ledger.api`, rebuilds canonical projection without writes, and passes domain facts to the pure engine. Its S3 output is the internal `option_period_performance.core.v1` contract; the public Agent/CLI v1 envelope is added in S7.
+
+## Valuation and FX Evidence
+
+Historical valuation is replayed from append-only `option_performance_evidence.v1` facts. Repository construction and report reads never run DDL. A missing schema returns `not_initialized`; only explicit evidence import/capture apply performs the idempotent v1 migration. Migration and the full evidence batch share one transaction, so any identity, correction, duplicate, or storage conflict rolls back both schema and data changes. Dry-run parses and validates the same envelope without creating or mutating the database.
+
+Valuation facts use `OptionInstrumentKey` or `StockInstrumentKey`; FX facts use an exact base/quote pair. Structured SQLite identity columns must decode to the same canonical key as the stored `instrument_key`. Corrections are append-only and must reference an existing or earlier fact of the same identity. Self-reference, missing targets, cross-identity corrections, source-identity conflicts, and correction cycles fail closed.
+
+Selection is deterministic at the requested valuation or event instant:
+
+1. consider facts whose `effective_at_ms` is not after the instant;
+2. remove facts superseded by an eligible correction;
+3. choose the latest effective time;
+4. at equal time use `manual_correction > official_close > broker_snapshot > realtime_snapshot > cache_snapshot`;
+5. then choose the highest revision and stable fact ID;
+6. reject evidence older than seven days.
+
+The selected mark and FX fact IDs are returned in metric/report quality. Native-currency amounts remain available when FX is missing, while the CNY amount and affected quality become partial.
+
+Opening and ending option inventory are projected only through the ledger application API. Boundary projection is restated using all valid canonical voids, including a later void of an earlier event, then applies economic state only through the requested boundary. This keeps historical realized activity and opening/ending inventory on the same canonical replay semantics. Remaining actual opening fee is derived from canonical close allocations rather than rematching lots.
+
+For an open short option:
+
+```text
+unrealized_gross = (open_price - mark_price) * contracts_open * multiplier
+unrealized_net   = unrealized_gross - remaining_actual_open_fee
+```
+
+The long-option price direction is reversed. Missing or non-actual opening fee leaves gross available and net partial. Period option PnL is:
+
+```text
+period_total = realized + ending_unrealized - opening_unrealized
+```
+
+Period, month, account, and symbol views reduce the same valuation facts. Valuation-only positions are included in scope, and opening/ending facts are assigned to the first/last report month respectively so monthly conservation remains explicit.
+
+Current collection runs only for `partial_current` reports with `refresh_quotes=true`. It deduplicates account-independent option identities, rejects conflicting stored market codes, resolves missing exact codes from only the required expiration chains, and fetches the resulting exact codes in one batched snapshot path. Positive bid/ask midpoint is preferred; positive last price is the explicit fallback. Crossed, zero, ambiguous, or unavailable markets fail closed with diagnostics. Broker timestamps are accepted only when timezone-aware and not in the future; otherwise the injected `now_ms` is used with `timestamp_fallback=true`.
+
+Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for later dry-run/apply wiring in S7.
 
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.
 - S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
 - S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
-- S4-S10: pending their Gateflow implementation/review gates.
+- S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
+- S5-S10: pending their Gateflow implementation/review gates.
