@@ -779,6 +779,60 @@ def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -
     assert report["warnings"] == []
 
 
+def test_monthly_income_report_applies_historical_cutoff_before_void_resolution(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    open_result = ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    ledger_interventions.persist_manual_void_event(
+        repo,
+        target_event_id=str(open_result.event_id),
+        void_reason="opened_by_mistake",
+        as_of_ms=_ms("2026-04-04"),
+    )
+    events = repo.list_trade_events()
+
+    before_void = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-04",
+        rates={"rates": {"USDCNY": 7.2}},
+        trade_events=events,
+        as_of_ms=_ms("2026-04-03"),
+    )
+    at_void = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-04",
+        trade_events=events,
+        as_of_ms=_ms("2026-04-04"),
+    )
+
+    assert [row["event_id"] for row in before_void["premium_rows"]] == [str(open_result.event_id)]
+    assert before_void["diagnostics"][0]["matched_trade_events_count"] == 1
+    assert at_void["premium_rows"] == []
+    assert at_void["summary"] == []
+    assert at_void["diagnostics"][0]["matched_trade_events_count"] == 0
+
+
 def test_monthly_income_report_ignores_invalid_void_when_filtering_active_events() -> None:
     report = build_monthly_income_report(
         [],
@@ -1320,6 +1374,61 @@ def test_monthly_income_report_assignment_lifecycle_marks_sold_assigned_stock() 
     assignment_fee = next(item for item in row["fee_evidence"] if item["component"] == "assignment_stock_fee")
     assert assignment_fee["basis"] == "missing"
     assert assignment_fee["reason"] == "us_assignment_fee_rule_not_explicit"
+
+
+def test_monthly_income_report_historical_cutoff_excludes_future_assigned_stock_sale() -> None:
+    events = [
+        _trade_event("open-short-cutoff", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put-cutoff",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=events,
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "future-sale",
+                "target_stock_lot_id": "assigned-stock-assign-short-put-cutoff",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "side": "sell",
+                "shares": 100,
+                "price": 105.0,
+                "currency": "USD",
+                "fees": 0.0,
+                "trade_time_ms": _ms("2026-06-01"),
+            }
+        ],
+        quote_snapshots=[
+            {
+                "symbol": "NVDA",
+                "spot": 102.0,
+                "quote_time_ms": _ms("2026-05-31"),
+                "quote_source": "manual_snapshot",
+                "quote_status": "fresh",
+            }
+        ],
+        as_of_ms=_ms("2026-05-31"),
+    )
+
+    assert report["assigned_stock_sale_rows"] == []
+    assert report["assignment_lifecycle_rows"][0]["status"] == "open"
+    assert report["assignment_lifecycle_rows"][0]["shares_remaining"] == 100
 
 
 def test_assignment_lifecycle_reports_dates_complete_fees_and_capital_days() -> None:
