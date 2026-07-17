@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.405 - 2026-07-17
+
+### Changed
+- Increased the per-account monitoring notification candidate limit from five to six while preserving cross-strategy coverage and priority ordering.
+- Simplified the production compact monitoring notification layout and candidate wording, including concise `Put`, `Call`, and `组合` sections plus `组合·同期` / `组合·跨期` labels.
+
+### Fixed
+- Counted compact notification candidates within their strategy sections so cross-expiry Combo Yield leg details no longer inflate the Put or Call totals.
+
 ## 1.2.404 - 2026-07-17
 
 ### Added

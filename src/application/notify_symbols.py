@@ -355,6 +355,13 @@ def _fmt_dte_compact(dte_token: str) -> str:
         return str(dte_token) if dte_token else '-'
 
 
+def _trim_decimal_tokens(text: str) -> str:
+    def trim(match: re.Match[str]) -> str:
+        return f"{float(match.group(0)):.4f}".rstrip('0').rstrip('.')
+
+    return re.sub(r"\d+(?:\.\d+)?", trim, str(text or ""))
+
+
 def _build_notification_block_compact(
     *,
     symbol_name: str,
@@ -373,21 +380,26 @@ def _build_notification_block_compact(
     strike = _normalize_contract_strike(strike_raw)
     emoji = _action_emoji(action_label, risk_line)
     is_enhancement = _is_combo_yield_action(action_label)
+    is_call = 'Call' in action_label
+    action_display = '组合·同期' if is_enhancement else ('Call' if is_call else 'Put')
+    expiry_display = exp_part.replace('@ ', '· ', 1)
 
     if not is_enhancement:
-        option_type = 'P' if 'Put' in action_label else 'C'
-        l1 = f"{emoji} {action_label} {symbol_name} {strike}{option_type} {exp_part}"
+        option_type = 'C' if is_call else 'P'
+        l1 = f"{emoji} {action_display} {symbol_name} {strike}{option_type} {expiry_display}"
     else:
         put_match = re.search(r'Put=([\d.]+)', contract_line)
         call_match = re.search(r'Call=([\d.]+)', contract_line)
         put_s = put_match.group(1) if put_match else ''
         call_s = call_match.group(1) if call_match else ''
         if put_s and call_s:
-            l1 = f"{emoji} {action_label} {symbol_name} {put_s}P+{call_s}C {exp_part}"
+            l1 = f"{emoji} {action_display} {symbol_name} {put_s}P+{call_s}C {expiry_display}"
         else:
-            l1 = f"{emoji} {action_label} {symbol_name} {exp_part}"
+            l1 = f"{emoji} {action_display} {symbol_name} {expiry_display}"
     if suggestion:
-        l1 += f" | 🎯{suggestion}"
+        suggestion_text = _trim_decimal_tokens(suggestion)
+        suggestion_label = suggestion_text if is_enhancement else f"挂单 {suggestion_text}"
+        l1 += f" · {suggestion_label}"
 
     l2_parts = []
     if '权利金' in income_line:
@@ -397,33 +409,21 @@ def _build_notification_block_compact(
             premium_raw = premium_match.group(1).strip()
             ccy_match = re.search(r'\((\w+)\)', premium_raw)
             ccy = ccy_match.group(1) if ccy_match else ''
-            num_match = re.search(r'([\d.]+)', premium_raw)
+            num_match = re.search(r'([-+]?\d+(?:\.\d+)?)', premium_raw)
             premium_num = num_match.group(1) if num_match else premium_raw
             try:
                 premium_num_fmt = f"{float(premium_num):.2f}".rstrip('0').rstrip('.')
             except Exception:
                 premium_num_fmt = premium_num
             label = "净权利金" if is_enhancement else "权利金"
-            l2_parts.append(f"{label} {premium_num_fmt}{ccy}")
+            ccy_tail = f" {ccy}" if ccy else ''
+            l2_parts.append(f"{label} {premium_num_fmt}{ccy_tail}")
         if annual_match:
             l2_parts.append(f"年化 {_fmt_pct_compact(annual_match.group(1) + '%')}")
-        if is_enhancement:
-            score_match = re.search(r'场景评分[=:](\d+\.?\d*)', income_line)
-            if score_match:
-                try:
-                    score_val = float(score_match.group(1))
-                    l2_parts.append(f"评分 {score_val:.3f}")
-                except Exception:
-                    pass
 
     dte_match = re.search(r'DTE[=:](\d+)', contract_line)
     if dte_match:
         l2_parts.append(_fmt_dte_compact(dte_match.group(1)))
-
-    if is_enhancement:
-        candidate_match = re.search(r'备选Call=(\d+)', contract_line)
-        if candidate_match:
-            l2_parts.append(f"备选 {candidate_match.group(1)}个")
 
     l2 = f"- {' · '.join(l2_parts)}" if l2_parts else ''
 
@@ -432,7 +432,7 @@ def _build_notification_block_compact(
     if risk_match:
         risk_val = risk_match.group(1).strip()
         if risk_val and risk_val != '-':
-            l3_parts.append(f"风险 {risk_val}")
+            l3_parts.append(risk_val)
 
     delta_match = re.search(r'(?:Call\s+)?delta[=:]([^|]+)', risk_line)
     if delta_match:
@@ -445,15 +445,10 @@ def _build_notification_block_compact(
             except Exception:
                 l3_parts.append(f"Δ {delta_val}")
 
-    if 'Call' in action_label:
+    if is_call:
         qty_match = re.search(r'数量=(\d+)张', contract_line)
         if qty_match:
             l3_parts.append(f"可卖{qty_match.group(1)}张")
-
-    if is_enhancement:
-        ask_match = re.search(r'Call\s+ask[=:](\d+\.?\d*)', risk_line)
-        if ask_match:
-            l3_parts.append(f"ask {ask_match.group(1)}")
 
     if not is_enhancement and ('保证金' in detail_line or '担保' in detail_line):
         margin_match = re.search(r'保证金占用[=:]([^|]+)', detail_line)
@@ -472,27 +467,13 @@ def _build_notification_block_compact(
     l3 = f"- {' · '.join(l3_parts)}" if l3_parts else ''
 
     l4 = ''
-    if is_enhancement:
-        em_match = re.search(r'expected_move[=:]([\d.]+)', detail_line)
-        iv_match = re.search(r'IV[=:]([\d.]+)', detail_line)
-        if em_match or iv_match:
-            l4_parts = []
-            if em_match:
-                l4_parts.append(f"预期波动 {em_match.group(1)}")
-            if iv_match:
-                l4_parts.append(f"IV {iv_match.group(1)}")
-            l4 = f"- {' · '.join(l4_parts)}"
-    elif extra_detail_line:
+    if not is_enhancement and extra_detail_line:
         l4_parts = []
         event_match = re.search(r'事件[:=]\s*([^\n]+)', extra_detail_line)
         if event_match:
             event_text = event_match.group(1).strip()
             if event_text:
                 l4_parts.append(f"事件 {event_text}")
-        if '收益增强' in extra_detail_line or '组合收益' in extra_detail_line:
-            call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
-            if call_match:
-                l4_parts.append(f"💡 推荐Call={call_match.group(1).strip()}")
         if l4_parts:
             l4 = f"- {' · '.join(l4_parts)}"
 
@@ -527,17 +508,41 @@ def _format_staggered_combo_alert(
     put_net_credit = extras.get('put_net_credit', '')
     call_total_cost = extras.get('call_total_cost', '')
     combo_net_credit = extras.get('combo_net_credit', '') or extras.get('net_credit', '')
-    utilization = extras.get('call_cost_to_put_credit', '')
     funding_ratio = extras.get('funding_ratio', '')
     safety_margin = extras.get('strike_safety_margin_pct', '')
     cash_required_usd = extras.get('cash_required_usd', '')
     cash_required_cny = extras.get('cash_required_cny', '')
     ccy = extras.get('ccy', '') or extras.get('option_ccy', '')
+    def number_text(token: str) -> str:
+        if _is_missing_value(token):
+            return '-'
+        try:
+            return f"{float(str(token).strip()):.4f}".rstrip('0').rstrip('.')
+        except Exception:
+            return str(token).strip()
+
+    def day_text(token: str) -> str:
+        if _is_missing_value(token):
+            return '-'
+        try:
+            return str(int(float(str(token).strip())))
+        except Exception:
+            return str(token).strip()
+
+    def money_text(token: str, prefix: str) -> str:
+        if _is_missing_value(token):
+            return '-'
+        raw = str(token).strip()
+        try:
+            return f"{prefix}{float(raw):,.0f}"
+        except Exception:
+            return f"{prefix}{raw}"
+
     cash_required = '-'
     if not _is_missing_value(cash_required_usd):
-        cash_required = f"${cash_required_usd}"
+        cash_required = money_text(cash_required_usd, '$')
     elif not _is_missing_value(cash_required_cny):
-        cash_required = f"¥{cash_required_cny}"
+        cash_required = money_text(cash_required_cny, '¥')
 
     def ratio_pct(token: str) -> str:
         if _is_missing_value(token):
@@ -553,42 +558,40 @@ def _format_staggered_combo_alert(
         except Exception:
             return raw
 
-    utilization_text = ratio_pct(utilization)
     coverage_text = ratio_pct(funding_ratio)
     safety_text = ratio_pct(safety_margin)
     ccy_tail = f" {ccy}" if ccy else ''
-    note = 'Put已独立通过接货、现金、事件、收益和流动性门槛；费用为模型估算，组合关系需以明确交易意图登记为准。'
-
+    put_bid_text = number_text(put_bid)
+    call_ask_text = number_text(call_ask)
+    call_delta_text = number_text(call_delta)
+    put_net_credit_text = number_text(put_net_credit)
+    call_total_cost_text = number_text(call_total_cost)
+    combo_net_credit_text = number_text(combo_net_credit)
+    put_dte_text = day_text(put_dte)
+    call_dte_text = day_text(call_dte)
+    expiry_gap_text = day_text(expiry_gap_days)
+    put_expiration_text = _fmt_date_compact(f"{put_expiration} 0").removeprefix('@ ')
+    call_expiration_text = _fmt_date_compact(f"{call_expiration} 0").removeprefix('@ ')
     if compact:
         return "\n".join(
             [
-                f"🧩 组合收益 · 错期全额融资 {parsed.symbol_name}",
-                f"- Put 卖 {put_strike}P @ {put_expiration} · {put_dte}天 · bid {put_bid} · 估算净收入 {put_net_credit}{ccy_tail}",
-                f"- Call 买 {call_strike}C @ {call_expiration} · {call_dte}天 · ask {call_ask} · Δ {call_delta} · 估算总成本 {call_total_cost}{ccy_tail}",
-                f"- 资金利用率 {utilization_text} · 覆盖率 {coverage_text} · 开仓净现金流 {combo_net_credit}{ccy_tail}",
-                f"- Put安全边界 {safety_text} · 现金要求 {cash_required} · Call晚{expiry_gap_days}天 · 两腿各1张",
-                f"- 备注: {note}",
+                f"🧩 组合·跨期 {parsed.symbol_name} {put_strike}P+{call_strike}C",
+                f"- Put 卖 {put_strike}P · {put_expiration_text}/{put_dte_text}天 · bid {put_bid_text} · 估算净收 {put_net_credit_text}{ccy_tail}",
+                f"- Call 买 {call_strike}C · {call_expiration_text}/{call_dte_text}天 · ask {call_ask_text} · Δ {call_delta_text} · 估算成本 {call_total_cost_text}{ccy_tail}",
+                f"- 组合 覆盖 {coverage_text} · 净现金流 {combo_net_credit_text}{ccy_tail}",
+                f"- 安全边界 {safety_text} · 现金 {cash_required} · Call晚{expiry_gap_text}天",
             ]
         )
 
-    return _build_notification_block(
-        account_label=account_label,
-        symbol_name=parsed.symbol_name,
-        action_label='组合收益 · 错期全额融资',
-        contract=parsed.contract,
-        income_line=(
-            f"- 融资: Put按费用模型估算净收入={put_net_credit}{ccy_tail} | "
-            f"Call按费用模型估算总成本={call_total_cost}{ccy_tail} | "
-            f"开仓净现金流={combo_net_credit}{ccy_tail}"
-        ),
-        contract_line=f"- Put: 卖 {put_strike}P @ {put_expiration} | DTE={put_dte} | bid={put_bid}",
-        risk_line=f"- Call: 买 {call_strike}C @ {call_expiration} | DTE={call_dte} | ask={call_ask} | delta={call_delta}",
-        detail_line=(
-            f"- 风控: 资金利用率={utilization_text} | 覆盖率={coverage_text} | "
-            f"Put接货安全边界={safety_text} | Put现金要求={cash_required} | "
-            f"Call比Put晚{expiry_gap_days}天 | 两腿各1张"
-        ),
-        note=note,
+    return "\n".join(
+        [
+            f"### [{account_label}] {parsed.symbol_name} · 组合收益",
+            f"- Put: 卖 {put_strike}P | {put_expiration}/{put_dte_text}天 | bid={put_bid_text} | 估算净收={put_net_credit_text}{ccy_tail}",
+            f"- Call: 买 {call_strike}C | {call_expiration}/{call_dte_text}天 | ask={call_ask_text} | delta={call_delta_text} | 估算成本={call_total_cost_text}{ccy_tail}",
+            f"- 组合: 覆盖率={coverage_text} | 净现金流={combo_net_credit_text}{ccy_tail}",
+            f"- 风控: Put安全边界={safety_text} | 现金={cash_required} | Call晚{expiry_gap_text}天",
+            "---",
+        ]
     )
 
 
@@ -937,7 +940,7 @@ def _select_notification_groups(
     medium_lines: list[str],
     low_lines: list[str],
     *,
-    total_limit: int = 5,
+    total_limit: int = 6,
 ) -> dict[str, list[str]]:
     limit = max(1, int(total_limit or 1))
     strategy_order = (STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL, STRATEGY_YIELD_ENHANCEMENT, STRATEGY_OTHER)
@@ -1047,11 +1050,11 @@ def build_notification(
             emit_fn(f'### {put_label}' if use_compact else put_label, groups[STRATEGY_SELL_PUT])
         if groups[STRATEGY_COVERED_CALL]:
             call_label = strategy_section_label(STRATEGY_COVERED_CALL)
-            emit_fn(f'### {call_label}' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
+            emit_fn('### Call' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
         if groups[STRATEGY_YIELD_ENHANCEMENT]:
             enhancement_label = strategy_section_label(STRATEGY_YIELD_ENHANCEMENT)
             emit_fn(
-                f'### {enhancement_label}' if use_compact else enhancement_label,
+                '### 组合' if use_compact else enhancement_label,
                 groups[STRATEGY_YIELD_ENHANCEMENT],
             )
         if groups[STRATEGY_OTHER]:

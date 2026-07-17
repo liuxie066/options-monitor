@@ -4225,4 +4225,4 @@ def test_preview_notification_is_read_only() -> None:
 
     assert out["ok"] is True
     assert "### Put" in out["data"]["notification_text"]
-    assert "🟢 卖Put NVDA 156P @ 06-18" in out["data"]["notification_text"]
+    assert "🟢 Put NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]

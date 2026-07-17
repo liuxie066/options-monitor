@@ -16,8 +16,9 @@ def test_build_notification_block_compact_sell_put() -> None:
         suggestion="2.3",
     )
 
-    assert "🟢 卖Put 腾讯 460P @ 04-29" in out
-    assert "权利金 2.3" in out or "年化 12%" in out
+    assert "🟢 Put 腾讯 460P · 04-29 · 挂单 2.3" in out
+    assert "- 权利金 2.3 · 年化 12% · 29天" in out
+    assert "- 保守 · Δ 0.25 · 担保 ¥46000" in out
     assert "---" not in out
 
 
@@ -35,13 +36,11 @@ def test_build_notification_block_compact_yield_enhancement() -> None:
         note="组合收益推荐",
     )
 
-    assert "💎 组合收益 英伟达 95P+110C @ 06-19" in out
-    assert "净权利金 95" in out
-    assert "评分 0.820" in out
-    assert "Call Δ 0.15" in out
-    assert "ask 1.2" in out
-    assert "预期波动 5.2" in out
-    assert "IV 0.35" in out
+    assert "💎 组合·同期 英伟达 95P+110C · 06-19" in out
+    assert "- 净权利金 95 · 年化 8.0% · 45天" in out
+    assert "- 中性 · Call Δ 0.15" in out
+    assert "评分" not in out
+    assert "预期波动" not in out
     assert "---" not in out
 
 
@@ -51,7 +50,7 @@ def test_format_alert_line_compact_sell_put() -> None:
     line = "腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | cash_req_cny ¥46000 | delta 0.25 | 风险 保守 | 通过准入"
     out = _format_alert_line_compact(line, account_label="lx")
 
-    assert "🟢 卖Put 腾讯" in out
+    assert "🟢 Put 腾讯" in out
     assert "年化 12%" in out
     assert "---" not in out
     assert "###" not in out
@@ -63,7 +62,7 @@ def test_format_alert_line_compact_sell_put_shows_event_risk() -> None:
     line = "腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | cash_req_cny ¥46000 | delta 0.25 | event earnings@2026-04-20 | 风险 保守 | 通过准入"
     out = _format_alert_line_compact(line, account_label="lx")
 
-    assert "🟢 卖Put 腾讯" in out
+    assert "🟢 Put 腾讯" in out
     assert "事件 earnings@2026-04-20" in out
     assert "---" not in out
 
@@ -90,7 +89,7 @@ def test_build_notification_compact_style() -> None:
     out = build_notification("", alerts_text, render_style="compact")
 
     assert "### Put" in out
-    assert "🟢 卖Put 腾讯" in out
+    assert "🟢 Put 腾讯" in out
     assert "---" not in out
 
 
@@ -104,8 +103,8 @@ def test_build_notification_compact_style_uses_markdown_enhancement_heading() ->
     )
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert "### Combo Yield" in out
-    assert "🎯卖2.150/买1.2" in out
+    assert "### 组合" in out
+    assert "· 卖2.15/买1.2" in out
     assert "卖0.950/买1.2" not in out
 
 
@@ -144,12 +143,12 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
 
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert out.count("卖Put") == 4
-    assert "PUT5" not in out
+    assert out.count("🟢 Put") == 5
+    assert "PUT5" in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert out.count("Covered Call") >= 1
-    assert out.index("### Put") < out.index("### Covered Call")
+    assert "🟢 Call CALL1" in out
+    assert out.index("### Put") < out.index("### Call")
 
 
 def test_render_markdown_compact_long_call_metrics() -> None:
@@ -218,12 +217,11 @@ def test_build_account_message_compact() -> None:
         cash_footer_lines=["LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
     )
 
-    assert "# OM · lx" in message
-    assert "2026-05-12 22:31:00 BJ" in message
-    assert "状态：Put 1 · Covered Call 0 · 平仓 1" in message
-    assert "候选\nPut\n- 腾讯 卖Put 2026-04-29 460P" in message
-    assert "持仓\n- NVDA Put 2026-06-19 150P · 强烈建议平仓" in message
-    assert "资金\n- LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
+    assert "# OM · lx · 2026-05-12 22:31:00 BJ" in message
+    assert "Put 1 · Call 0 · 平仓 1" in message
+    assert "## 候选\nPut\n- 腾讯 卖Put 2026-04-29 460P" in message
+    assert "## 持仓\n- NVDA Put 2026-06-19 150P · 强烈建议平仓" in message
+    assert "## 资金\n- LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
     assert "──────────────" not in message
 
 
@@ -248,6 +246,7 @@ def test_build_account_message_compact_without_close_advice() -> None:
         cash_footer_lines=None,
     )
 
-    assert "# OM · sy" in message
-    assert "状态：Put 1 · Covered Call 0 · 平仓 0" in message
-    assert "\n资金\n" not in message
+    assert "# OM · sy · 2026-05-12 22:31:00 BJ" in message
+    assert "Put 1 · Call 0 · 平仓 0" in message
+    assert "## 持仓\n- 无平仓建议" in message
+    assert "\n## 资金\n" not in message
