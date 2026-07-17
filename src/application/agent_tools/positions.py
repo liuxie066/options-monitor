@@ -3,13 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tools.operations_impl import option_positions_read_tool
-from src.application.agent_tools.materialization_impl import monthly_income_report_tool
+from src.application.agent_tools.materialization_impl import (
+    monthly_income_report_tool,
+    option_performance_report_tool,
+)
 from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.positions.inspection import build_lot_event_history
 from src.application.positions.reporting import build_monthly_income_report
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as get_exchange_rates
 from src.application.positions.inspection import inspect_projection_state
 from src.application.ledger.api import list_position_rows
+from src.application.ledger.api import open_performance_evidence_repository
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import mask_path
 from domain.domain.option_position_identity import normalize_account
@@ -18,6 +22,7 @@ from src.application.positions.assigned_stock_quotes import refresh_assigned_sto
 from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from src.application.performance.service import build_option_period_performance
 
 
 _MONTHLY_INCOME_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -104,6 +109,52 @@ _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
         "realized_rows[].realized_gross",
         "premium_rows[].contracts",
         "premium_rows[].premium_received_gross",
+    ],
+}
+
+_OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "option_performance_report.output.v1",
+    "source_label": "OM 本地账本 + 显式估值/汇率证据",
+    "primary_rows": "rows",
+    "fact_fields": [
+        "period.kind",
+        "period.requested_start_date",
+        "period.requested_end_date",
+        "scope.accounts",
+        "scope.brokers",
+        "activity.premium_collected_gross",
+        "activity.premium_paid_gross",
+        "cash.total_cash_change_net",
+        "pnl.realized_gross",
+        "pnl.realized_net",
+        "pnl.period_total_gross",
+        "pnl.period_total_net",
+        "capital.period_realized_net_annualized_efficiency",
+        "capital.period_total_net_annualized_efficiency",
+        "assignment_lifecycle.period",
+        "breakdowns.monthly",
+        "breakdowns.accounts",
+        "breakdowns.symbols",
+    ],
+    "missing_data_fields": [
+        "quality.missing",
+        "quality.warnings",
+        "capital.coverage.missing",
+        "assignment_lifecycle.review",
+    ],
+    "freshness_fields": [
+        "period.status",
+        "evidence.schema_state",
+        "evidence.collection.status",
+    ],
+    "model_preview_fields": [
+        "period",
+        "scope",
+        "activity",
+        "cash",
+        "pnl",
+        "capital",
+        "quality",
     ],
 }
 
@@ -213,6 +264,24 @@ def _monthly_income_report_tool(
         get_exchange_rates=get_exchange_rates,
         repo_base=repo_base,
         mask_path=mask_path,
+        open_performance_evidence_repository=open_performance_evidence_repository,
+        build_option_period_performance=build_option_period_performance,
+    )
+
+
+def _option_performance_report_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return option_performance_report_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=resolve_public_data_config_path,
+        normalize_broker=normalize_broker,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        open_performance_evidence_repository=open_performance_evidence_repository,
+        build_option_period_performance=build_option_period_performance,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
@@ -311,6 +380,88 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     output_contract={"schema_version": "monthly_income_report.output", "payload_dependent": True},
     output_contract_resolver=_monthly_income_output_contract,
     copilot_input_fields=("config_key", "account", "broker", "month", "include_rows"),
+)
+
+OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
+    name="option_performance_report",
+    description=(
+        "Primary read-only option performance report. Separates premium activity, cash movement, realized PnL, "
+        "period total PnL, assigned-stock lifecycle, and capital efficiency. Supports MTD, YTD, natural month, "
+        "natural year, and explicit date ranges. Omit account or broker to aggregate all matching ledger facts; "
+        "native-currency amounts remain authoritative and CNY is null when FX evidence is incomplete."
+    ),
+    requires=("runtime_config", "sqlite_data_config"),
+    capabilities=("option_performance", "income_report", "option_positions", "read_only"),
+    input_schema={
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
+        "config_path": "optional explicit config path",
+        "data_config": "optional explicit data config path",
+        "account": "optional account label; omitted aggregates all accounts",
+        "broker": "optional broker filter; omitted aggregates all brokers",
+        "period": {
+            "type": "string",
+            "enum": ["mtd", "ytd", "month", "year", "range"],
+        },
+        "as_of_date": {"type": ["string", "null"], "format": "date"},
+        "month": {"type": ["string", "null"], "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+        "year": {"type": ["integer", "string", "null"]},
+        "start_date": {"type": ["string", "null"], "format": "date"},
+        "end_date": {"type": ["string", "null"], "format": "date"},
+        "include_rows": {"type": "boolean"},
+        "refresh_quotes": {"type": "boolean"},
+    },
+    handler=_option_performance_report_tool,
+    pure_read=True,
+    safe_default_input={
+        "config_key": "us",
+        "config_path": None,
+        "data_config": None,
+        "account": None,
+        "broker": None,
+        "period": "mtd",
+        "as_of_date": None,
+        "month": None,
+        "year": None,
+        "start_date": None,
+        "end_date": None,
+        "include_rows": False,
+        "refresh_quotes": True,
+    },
+    examples=(
+        {"input": {"period": "ytd", "as_of_date": "2026-07-17"}},
+        {"input": {"period": "month", "month": "2026-06", "include_rows": True}},
+    ),
+    output_contract=_OPTION_PERFORMANCE_OUTPUT_CONTRACT,
+    copilot_input_fields=(
+        "config_key",
+        "account",
+        "broker",
+        "period",
+        "as_of_date",
+        "month",
+        "year",
+        "start_date",
+        "end_date",
+        "include_rows",
+        "refresh_quotes",
+    ),
+    copilot_input_schema={
+        "type": "object",
+        "properties": {
+            "config_key": {"type": "string", "enum": ["us", "hk"]},
+            "account": {"type": "string"},
+            "broker": {"type": "string"},
+            "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year", "range"]},
+            "as_of_date": {"type": "string", "format": "date"},
+            "month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
+            "year": {"type": ["integer", "string"]},
+            "start_date": {"type": "string", "format": "date"},
+            "end_date": {"type": "string", "format": "date"},
+            "include_rows": {"type": "boolean"},
+            "refresh_quotes": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
@@ -414,9 +565,15 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
 )
 
 TOOLS: tuple[AgentTool, ...] = (
+    OPTION_PERFORMANCE_REPORT_TOOL,
     MONTHLY_INCOME_REPORT_TOOL,
     OPTION_POSITIONS_READ_TOOL,
 )
 
 
-__all__ = ["MONTHLY_INCOME_REPORT_TOOL", "OPTION_POSITIONS_READ_TOOL", "TOOLS"]
+__all__ = [
+    "MONTHLY_INCOME_REPORT_TOOL",
+    "OPTION_PERFORMANCE_REPORT_TOOL",
+    "OPTION_POSITIONS_READ_TOOL",
+    "TOOLS",
+]
