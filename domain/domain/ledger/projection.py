@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from domain.domain.ledger.events import (
@@ -9,6 +10,11 @@ from domain.domain.ledger.events import (
     TradeEvent,
     lot_id_for_open_event,
     validate_trade_event,
+)
+from domain.domain.ledger.economics import (
+    OptionEconomicAllocation,
+    allocate_open_fee_for_close,
+    build_option_economic_allocation,
 )
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.invariants import check_position_lot_invariants
@@ -43,6 +49,7 @@ class RiskPositionView:
 class ProjectionResult:
     lots: list[PositionLot]
     views: list[RiskPositionView]
+    allocations: list[OptionEconomicAllocation] = field(default_factory=list)
     diagnostics: list[LedgerDiagnostic] = field(default_factory=list)
 
     @property
@@ -53,6 +60,7 @@ class ProjectionResult:
         return {
             "lots": [item.to_dict() for item in self.lots],
             "views": [item.to_dict() for item in self.views],
+            "allocations": [item.to_dict() for item in self.allocations],
             "diagnostics": [item.to_dict() for item in self.diagnostics],
             "has_errors": self.has_errors,
         }
@@ -84,6 +92,10 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
         and not any(item.severity == "error" for item in event_diagnostics)
     }
     lots_by_id: dict[str, PositionLot] = {}
+    open_events_by_lot_id: dict[str, TradeEvent] = {}
+    allocated_open_fee_by_lot_id: dict[str, Decimal] = {}
+    allocation_sequence_by_close_event: dict[str, int] = {}
+    allocations: list[OptionEconomicAllocation] = []
     lot_order: list[str] = []
     diagnostics: list[LedgerDiagnostic] = []
 
@@ -99,10 +111,21 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
         diagnostics.extend(event_diagnostics)
 
         if event.event_type == "open":
-            _apply_open_event(event, lots_by_id=lots_by_id, lot_order=lot_order, diagnostics=diagnostics)
+            lot_id = _apply_open_event(event, lots_by_id=lots_by_id, lot_order=lot_order, diagnostics=diagnostics)
+            if lot_id is not None:
+                open_events_by_lot_id[lot_id] = event
             continue
         if event.event_type in CLOSE_EVENT_TYPES:
-            _apply_close_event(event, lots_by_id=lots_by_id, diagnostics=diagnostics)
+            allocation = _apply_close_event(
+                event,
+                lots_by_id=lots_by_id,
+                open_events_by_lot_id=open_events_by_lot_id,
+                allocated_open_fee_by_lot_id=allocated_open_fee_by_lot_id,
+                allocation_sequence_by_close_event=allocation_sequence_by_close_event,
+                diagnostics=diagnostics,
+            )
+            if allocation is not None:
+                allocations.append(allocation)
             continue
         if event.event_type == "adjust":
             _apply_adjust_event(event, lots_by_id=lots_by_id, diagnostics=diagnostics)
@@ -113,6 +136,7 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
     return ProjectionResult(
         lots=lots,
         views=build_risk_position_views(lots),
+        allocations=allocations,
         diagnostics=diagnostics,
     )
 
@@ -156,7 +180,7 @@ def _apply_open_event(
     lots_by_id: dict[str, PositionLot],
     lot_order: list[str],
     diagnostics: list[LedgerDiagnostic],
-) -> None:
+) -> str | None:
     lot_id = lot_id_for_open_event(event)
     if lot_id in lots_by_id:
         diagnostics.append(
@@ -168,17 +192,21 @@ def _apply_open_event(
                 details={"lot_id": lot_id},
             )
         )
-        return
+        return None
     lots_by_id[lot_id] = PositionLot.from_open_event(event, lot_id=lot_id)
     lot_order.append(lot_id)
+    return lot_id
 
 
 def _apply_close_event(
     event: TradeEvent,
     *,
     lots_by_id: dict[str, PositionLot],
+    open_events_by_lot_id: dict[str, TradeEvent],
+    allocated_open_fee_by_lot_id: dict[str, Decimal],
+    allocation_sequence_by_close_event: dict[str, int],
     diagnostics: list[LedgerDiagnostic],
-) -> None:
+) -> OptionEconomicAllocation | None:
     target_lot_id = event.target_lot_id or ""
     lot = lots_by_id.get(target_lot_id)
     if lot is None:
@@ -191,7 +219,7 @@ def _apply_close_event(
                 details={"target_lot_id": target_lot_id},
             )
         )
-        return
+        return None
     if lot.contract_key != event.contract_key:
         diagnostics.append(
             LedgerDiagnostic(
@@ -206,7 +234,7 @@ def _apply_close_event(
                 },
             )
         )
-        return
+        return None
     if lot.contracts_open <= 0:
         diagnostics.append(
             LedgerDiagnostic(
@@ -217,7 +245,7 @@ def _apply_close_event(
                 details={"target_lot_id": target_lot_id},
             )
         )
-        return
+        return None
     if event.contracts > lot.contracts_open:
         diagnostics.append(
             LedgerDiagnostic(
@@ -232,8 +260,118 @@ def _apply_close_event(
                 },
             )
         )
-        return
+        return None
+    open_event = open_events_by_lot_id.get(target_lot_id)
+    if open_event is None:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="open_event_not_found_for_lot",
+                message="close allocation could not resolve the lot open event",
+                details={"target_lot_id": target_lot_id, "open_event_id": lot.open_event_id},
+            )
+        )
+        return None
+    allocation: OptionEconomicAllocation | None = None
+    allocated_before = allocated_open_fee_by_lot_id.get(target_lot_id, Decimal(0))
+    allocated_after = allocated_before
+    unit_mismatch = _economic_unit_mismatch(lot, event)
+    if unit_mismatch:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="target_economic_units_mismatch",
+                message="close event currency or multiplier does not match target lot",
+                details={"target_lot_id": target_lot_id, **unit_mismatch},
+            )
+        )
+        allocated_after = _advance_open_fee_state_without_allocation(
+            lot=lot,
+            open_event=open_event,
+            close_event=event,
+            allocated_before=allocated_before,
+            diagnostics=diagnostics,
+        )
+    else:
+        sequence = int(allocation_sequence_by_close_event.get(event.event_id, 0))
+        try:
+            allocation, allocated_after = build_option_economic_allocation(
+                lot=lot,
+                open_event=open_event,
+                close_event=event,
+                sequence=sequence,
+                open_fee_allocated_before=allocated_before,
+            )
+        except (TypeError, ValueError) as exc:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="economic_allocation_failed",
+                    message="close event economic allocation failed",
+                    details={"target_lot_id": target_lot_id, "error": str(exc)},
+                )
+            )
+            allocated_after = _advance_open_fee_state_without_allocation(
+                lot=lot,
+                open_event=open_event,
+                close_event=event,
+                allocated_before=allocated_before,
+                diagnostics=diagnostics,
+            )
     lots_by_id[target_lot_id] = lot.apply_close(event)
+    allocated_open_fee_by_lot_id[target_lot_id] = allocated_after
+    if allocation is not None:
+        allocation_sequence_by_close_event[event.event_id] = sequence + 1
+    return allocation
+
+
+def _economic_unit_mismatch(lot: PositionLot, event: TradeEvent) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    lot_currency = str(lot.currency or "").strip().upper()
+    event_currency = str(event.currency or "").strip().upper()
+    if lot_currency != event_currency:
+        details.update(lot_currency=lot_currency, event_currency=event_currency)
+    try:
+        lot_multiplier = Decimal(str(lot.multiplier))
+        event_multiplier = Decimal(str(event.multiplier))
+    except Exception as exc:
+        details["multiplier_error"] = str(exc)
+    else:
+        if lot_multiplier != event_multiplier:
+            details.update(lot_multiplier=str(lot_multiplier), event_multiplier=str(event_multiplier))
+    return details
+
+
+def _advance_open_fee_state_without_allocation(
+    *,
+    lot: PositionLot,
+    open_event: TradeEvent,
+    close_event: TradeEvent,
+    allocated_before: Decimal,
+    diagnostics: list[LedgerDiagnostic],
+) -> Decimal:
+    try:
+        _fee, allocated_after = allocate_open_fee_for_close(
+            lot=lot,
+            open_event=open_event,
+            close_contracts=int(close_event.contracts),
+            open_fee_allocated_before=allocated_before,
+        )
+        return allocated_after
+    except (TypeError, ValueError) as exc:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=close_event.event_id,
+                severity="error",
+                code="open_fee_allocation_state_failed",
+                message="open fee allocation state could not advance for an unallocated close",
+                details={"target_lot_id": lot.lot_id, "error": str(exc)},
+            )
+        )
+        return allocated_before
 
 
 def _apply_adjust_event(

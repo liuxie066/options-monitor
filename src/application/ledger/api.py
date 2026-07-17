@@ -74,6 +74,7 @@ from src.application.ledger.queries import (
     resolve_position_data_config_path,
     resolve_position_lot_snapshots,
     summarize_position_lot_shadow_status,
+    trade_event_economic_allocations,
     trade_event_log,
     trade_event_projection_preview,
 )
@@ -160,6 +161,7 @@ __all__ = [
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
     "summarize_broker_trade_close_candidates",
+    "trade_event_economic_allocations",
     "trade_event_log",
     "trade_event_projection_preview",
     "valid_void_target_event_id",
