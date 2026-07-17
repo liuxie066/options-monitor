@@ -51,18 +51,18 @@ def _looks_like_option_candidate_line(text: str) -> bool:
 
 def _is_covered_call_line(text: str) -> bool:
     return (
-        (f" {COVERED_CALL_ACTION_LABEL} " in text or " 卖Call " in text)
+        (f" {COVERED_CALL_ACTION_LABEL} " in text or " 卖Call " in text or " Call " in text)
         and _looks_like_option_candidate_line(text)
     )
 
 
 def _is_sell_put_line(text: str) -> bool:
-    return f" {SELL_PUT_ACTION_LABEL} " in text and _looks_like_option_candidate_line(text)
+    return (f" {SELL_PUT_ACTION_LABEL} " in text or " Put " in text) and _looks_like_option_candidate_line(text)
 
 
 def _is_yield_enhancement_line(text: str) -> bool:
     return (
-        (" 收益增强 " in text or " 组合收益 " in text)
+        (" 收益增强 " in text or " 组合收益 " in text or " 组合 " in text or " 组合·" in text)
         and _looks_like_option_candidate_line(text)
     )
 
@@ -173,9 +173,8 @@ def build_account_message(
         return ''
 
     kept = result.notification_text.strip().splitlines()
-    put_n = sum(1 for ln in kept if _is_sell_put_line(ln))
-    call_n = sum(1 for ln in kept if _is_covered_call_line(ln))
-    enhancement_n = sum(1 for ln in kept if _is_yield_enhancement_line(ln))
+    candidate_lines, _reject_lines, _close_lines = _split_monitor_sections("\n".join(kept))
+    put_n, call_n, enhancement_n = _compact_candidate_counts(candidate_lines)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
@@ -211,8 +210,24 @@ def _strip_markdown_heading(line: str) -> str:
         s = s[4:].strip()
     if s.startswith("## "):
         s = s[3:].strip()
-    if s in {"Put:", f"{SELL_PUT_SECTION_LABEL}:", f"{COVERED_CALL_SECTION_LABEL}:", "Enhancement:", "Combo Yield:"}:
-        return s[:-1]
+    section_labels = {
+        "Put": "Put",
+        "Put:": "Put",
+        SELL_PUT_SECTION_LABEL: "Put",
+        f"{SELL_PUT_SECTION_LABEL}:": "Put",
+        "Call": "Call",
+        "Call:": "Call",
+        COVERED_CALL_SECTION_LABEL: "Call",
+        f"{COVERED_CALL_SECTION_LABEL}:": "Call",
+        "Enhancement": "组合",
+        "Enhancement:": "组合",
+        "Combo Yield": "组合",
+        "Combo Yield:": "组合",
+        "组合": "组合",
+        "组合:": "组合",
+    }
+    if s in section_labels:
+        return section_labels[s]
     return s
 
 
@@ -249,8 +264,6 @@ def _compact_candidate_lines(lines: list[str]) -> list[str]:
     for raw in lines:
         s = str(raw or "").strip()
         if not s:
-            if out and out[-1] != "":
-                out.append("")
             continue
         if "暂无符合条件的候选" in s:
             saw_no_candidate = True
@@ -263,6 +276,30 @@ def _compact_candidate_lines(lines: list[str]) -> list[str]:
     if not out and saw_no_candidate:
         return ["- 无符合承保条件候选"]
     return out
+
+
+def _compact_candidate_counts(lines: list[str]) -> tuple[int, int, int]:
+    section = ""
+    counts = {"put": 0, "call": 0, "combo": 0}
+    for raw in lines:
+        s = str(raw or "").strip()
+        heading = _strip_markdown_heading(s)
+        if heading == "Put":
+            section = "put"
+            continue
+        if heading == "Call":
+            section = "call"
+            continue
+        if heading == "组合":
+            section = "combo"
+            continue
+        if section == "put" and _is_sell_put_line(s):
+            counts["put"] += 1
+        elif section == "call" and _is_covered_call_line(s):
+            counts["call"] += 1
+        elif section == "combo" and _is_yield_enhancement_line(s):
+            counts["combo"] += 1
+    return counts["put"], counts["call"], counts["combo"]
 
 
 def _compact_reject_lines(lines: list[str]) -> list[str]:
@@ -325,7 +362,7 @@ def _compact_close_gap_line(line: str) -> str:
 
 def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[list[str], int, int]:
     if not lines:
-        return ["- 无高/中优先级平仓建议"], 0, 0
+        return ["- 无平仓建议"], 0, 0
     action_count = sum(1 for line in lines if _is_close_action_line(line))
     gap_lines = [str(line).strip() for line in lines if _is_displayable_close_gap_line(str(line))]
     gap_count = len(gap_lines)
@@ -342,7 +379,7 @@ def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[l
             continue
         if "本次无 strong/medium 平仓建议" in s or "本次未生成 strong/medium 提醒" in s:
             if not action_count:
-                out.append("- 无高/中优先级平仓建议")
+                out.append("- 无平仓建议")
             continue
         if s == "- 待补数据:" or s == "待补数据:":
             in_gap = True
@@ -360,7 +397,7 @@ def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[l
     if gap_count > max_gap_items:
         out.append(f"- 另有 {gap_count - max_gap_items} 条待补数据")
     if not out:
-        out.append("- 无高/中优先级平仓建议")
+        out.append("- 无平仓建议")
     return out, action_count, gap_count
 
 
@@ -395,38 +432,35 @@ def build_account_message_compact(
     candidate_raw, _reject_raw, close_raw = _split_monitor_sections(body)
     candidate_lines = _compact_candidate_lines(candidate_raw)
     close_lines, close_action_n, close_gap_n = _compact_close_lines(close_raw)
-    put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
-    call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
-    enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
+    put_n, call_n, enhancement_n = _compact_candidate_counts(candidate_raw)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
-    lines.append(f"# OM · {acct}")
-    lines.append(f"{now_bj} BJ")
+    lines.append(f"# OM · {acct} · {now_bj} BJ")
     lines.append('')
-    overview_parts = [f"{SELL_PUT_SECTION_LABEL} {put_n}", f"{COVERED_CALL_SECTION_LABEL} {call_n}"]
+    overview_parts = [f"Put {put_n}", f"Call {call_n}"]
     if enhancement_n > 0:
-        overview_parts.append(f"组合收益 {enhancement_n}")
+        overview_parts.append(f"组合 {enhancement_n}")
     overview_parts.append(f"平仓 {close_action_n}")
     if close_gap_n > 0:
         overview_parts.append(f"待补 {close_gap_n}")
-    lines.append(f"状态：{' · '.join(overview_parts)}")
+    lines.append(' · '.join(overview_parts))
     lines.append('')
 
-    lines.append("候选")
+    lines.append("## 候选")
     if candidate_lines:
         lines.extend(candidate_lines)
     else:
         lines.append("- 无符合承保条件候选")
     lines.append('')
 
-    lines.append("持仓")
+    lines.append("## 持仓")
     lines.extend(close_lines)
     lines.append('')
 
     cash_lines = _compact_cash_footer_lines(cash_footer_lines or [])
     if cash_lines:
-        lines.append("资金")
+        lines.append("## 资金")
         lines.extend(cash_lines)
         lines.append('')
 
