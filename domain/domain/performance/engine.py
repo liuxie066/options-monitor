@@ -1,0 +1,654 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
+from datetime import datetime
+
+from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
+from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, validate_trade_event
+from domain.domain.option_position_identity import normalize_account, normalize_broker
+from domain.domain.performance.models import (
+    DecimalAmountEnvelope,
+    FeeBasis,
+    MetricQuality,
+    MetricStatus,
+    normalize_currency,
+    quantize_money,
+    to_decimal,
+)
+from domain.domain.performance.period import PeriodWindow, REPORTING_TIMEZONE
+
+
+_MONETARY_KINDS = frozenset(
+    {
+        "premium_collected_gross",
+        "premium_paid_gross",
+        "option_trade_cash_gross",
+        "option_fee_cash",
+        "stock_settlement_cash_gross",
+        "stock_settlement_fee_cash",
+        "realized_gross",
+        "realized_net",
+    }
+)
+_CASH_NET_KINDS = frozenset(
+    {
+        "option_trade_cash_gross",
+        "option_fee_cash",
+        "stock_settlement_cash_gross",
+        "stock_settlement_fee_cash",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PerformanceFact:
+    fact_kind: str
+    effective_at_ms: int
+    account: str
+    broker: str
+    symbol: str
+    currency: str | None
+    amount: Decimal | None = None
+    quantity: int | None = None
+    source_event_id: str = ""
+    allocation_id: str | None = None
+    missing_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        kind = str(self.fact_kind or "").strip()
+        if not kind:
+            raise ValueError("fact_kind is required")
+        account = normalize_account(self.account)
+        broker = normalize_broker(self.broker)
+        symbol = str(self.symbol or "").strip().upper()
+        if not account or not broker or not symbol:
+            raise ValueError("performance fact requires account, broker, and symbol")
+        try:
+            currency = normalize_currency(self.currency) if self.currency else None
+        except ValueError:
+            if self.amount is not None:
+                raise
+            currency = None
+        amount = None if self.amount is None else quantize_money(self.amount)
+        quantity = None if self.quantity is None else int(self.quantity)
+        if kind in _MONETARY_KINDS and amount is not None and not currency:
+            raise ValueError(f"{kind} requires currency")
+        if kind in _MONETARY_KINDS and amount is None and not self.missing_reason:
+            raise ValueError(f"{kind} missing amount requires missing_reason")
+        if quantity is not None and quantity < 0:
+            raise ValueError("quantity cannot be negative")
+        object.__setattr__(self, "fact_kind", kind)
+        object.__setattr__(self, "account", account)
+        object.__setattr__(self, "broker", broker)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "currency", currency)
+        object.__setattr__(self, "amount", amount)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "source_event_id", str(self.source_event_id or "").strip())
+        object.__setattr__(self, "allocation_id", str(self.allocation_id).strip() if self.allocation_id else None)
+        object.__setattr__(self, "missing_reason", str(self.missing_reason).strip() if self.missing_reason else None)
+
+    @property
+    def fact_id(self) -> str:
+        suffix = self.allocation_id or self.source_event_id or str(self.effective_at_ms)
+        return f"{self.fact_kind}:{suffix}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fact_id": self.fact_id,
+            "fact_kind": self.fact_kind,
+            "effective_at_ms": self.effective_at_ms,
+            "account": self.account,
+            "broker": self.broker,
+            "symbol": self.symbol,
+            "currency": self.currency,
+            "amount": None if self.amount is None else float(self.amount),
+            "quantity": self.quantity,
+            "source_event_id": self.source_event_id or None,
+            "allocation_id": self.allocation_id,
+            "missing_reason": self.missing_reason,
+        }
+
+
+@dataclass(frozen=True)
+class PeriodPerformance:
+    period: PeriodWindow
+    scope: Mapping[str, Any]
+    activity: Mapping[str, Any]
+    cash: Mapping[str, Any]
+    pnl: Mapping[str, Any]
+    breakdowns: Mapping[str, Any]
+    quality: MetricQuality
+    facts: tuple[PerformanceFact, ...]
+
+    def to_dict(self, *, include_rows: bool = True) -> dict[str, Any]:
+        payload = {
+            "schema_version": "option_period_performance.core.v1",
+            "period": self.period.to_dict(),
+            "scope": dict(self.scope),
+            "activity": dict(self.activity),
+            "cash": dict(self.cash),
+            "pnl": dict(self.pnl),
+            "breakdowns": dict(self.breakdowns),
+            "quality": self.quality.to_dict(),
+        }
+        if include_rows:
+            payload["rows"] = [fact.to_dict() for fact in self.facts]
+        return payload
+
+
+def build_period_performance(
+    *,
+    events: Sequence[TradeEvent],
+    allocations: Sequence[OptionEconomicAllocation],
+    period: PeriodWindow,
+    account: str | None = None,
+    broker: str | None = None,
+    diagnostics: Sequence[Mapping[str, Any] | str] = (),
+) -> PeriodPerformance:
+    account_filter = normalize_account(account) if account else ""
+    broker_filter = normalize_broker(broker) if broker else ""
+    effective_events = _effective_events(events)
+    scoped_events = [
+        event
+        for event in effective_events
+        if _matches_scope(event.contract_key.account, event.contract_key.broker, account_filter, broker_filter)
+    ]
+    period_events = [event for event in scoped_events if period.contains(event.event_time_ms)]
+    scoped_allocations = [
+        allocation
+        for allocation in allocations
+        if period.contains(allocation.closed_at_ms)
+        and _matches_scope(
+            allocation.contract_key.account,
+            allocation.contract_key.broker,
+            account_filter,
+            broker_filter,
+        )
+    ]
+
+    facts: list[PerformanceFact] = []
+    for event in period_events:
+        if event.event_type == "open":
+            facts.extend(_open_event_facts(event))
+        elif event.event_type in CLOSE_EVENT_TYPES:
+            facts.extend(_close_event_cash_facts(event))
+            facts.extend(_stock_settlement_facts(event))
+
+    allocations_by_close = {allocation.close_event_id: allocation for allocation in scoped_allocations}
+    for allocation in scoped_allocations:
+        facts.extend(_allocation_realized_facts(allocation))
+    for event in period_events:
+        if event.event_type in CLOSE_EVENT_TYPES and event.event_id not in allocations_by_close:
+            facts.extend(_missing_realized_facts(event))
+
+    ordered_facts = tuple(
+        sorted(
+            facts,
+            key=lambda item: (
+                item.effective_at_ms,
+                item.fact_kind,
+                item.source_event_id,
+                item.allocation_id or "",
+            ),
+        )
+    )
+    summary = _summarize(ordered_facts)
+    breakdowns = {
+        "monthly": _breakdown(ordered_facts, key_name="month", key_fn=_month_for_fact),
+        "accounts": _breakdown(ordered_facts, key_name="account", key_fn=lambda fact: fact.account),
+        "symbols": _breakdown(ordered_facts, key_name="symbol", key_fn=lambda fact: fact.symbol),
+    }
+    accounts = sorted(
+        {
+            *[event.contract_key.account for event in period_events],
+            *[allocation.contract_key.account for allocation in scoped_allocations],
+        }
+    )
+    brokers = sorted(
+        {
+            *[event.contract_key.broker for event in period_events],
+            *[allocation.contract_key.broker for allocation in scoped_allocations],
+        }
+    )
+    symbols = sorted(
+        {
+            *[event.contract_key.underlying_symbol for event in period_events],
+            *[allocation.contract_key.underlying_symbol for allocation in scoped_allocations],
+        }
+    )
+    relevant_event_ids = {
+        *[event.event_id for event in period_events],
+        *[allocation.open_event_id for allocation in scoped_allocations],
+        *[allocation.close_event_id for allocation in scoped_allocations],
+    }
+    relevant_diagnostics = [
+        item
+        for item in diagnostics
+        if _diagnostic_is_relevant(
+            item,
+            event_ids=relevant_event_ids,
+            period=period,
+            account_filter=account_filter,
+            broker_filter=broker_filter,
+        )
+    ]
+    warnings = tuple(dict.fromkeys(_diagnostic_text(item) for item in relevant_diagnostics if _diagnostic_text(item)))
+    missing = tuple(sorted({fact.fact_id for fact in ordered_facts if fact.amount is None and fact.missing_reason}))
+    if missing or warnings:
+        quality_status = MetricStatus.PARTIAL
+    elif ordered_facts:
+        quality_status = MetricStatus.OBSERVED
+    else:
+        quality_status = MetricStatus.NOT_OBSERVED
+    quality = MetricQuality(status=quality_status, missing=missing, warnings=warnings)
+    return PeriodPerformance(
+        period=period,
+        scope={
+            "account": account_filter or None,
+            "broker": broker_filter or None,
+            "accounts": accounts,
+            "brokers": brokers,
+            "symbols": symbols,
+        },
+        activity=summary["activity"],
+        cash=summary["cash"],
+        pnl=summary["pnl"],
+        breakdowns=breakdowns,
+        quality=quality,
+        facts=ordered_facts,
+    )
+
+
+def _matches_scope(account: str, broker: str, account_filter: str, broker_filter: str) -> bool:
+    return (not account_filter or normalize_account(account) == account_filter) and (
+        not broker_filter or normalize_broker(broker) == broker_filter
+    )
+
+
+def _effective_events(events: Sequence[TradeEvent]) -> list[TradeEvent]:
+    ordered = sorted(events, key=lambda item: (int(item.event_time_ms or 0), item.event_id))
+    validated: list[tuple[TradeEvent, bool]] = []
+    seen: set[str] = set()
+    for event in ordered:
+        has_error = any(item.severity == "error" for item in validate_trade_event(event))
+        if event.event_id in seen:
+            has_error = True
+        seen.add(event.event_id)
+        validated.append((event, has_error))
+    voided = {
+        event.target_event_id
+        for event, has_error in validated
+        if event.event_type == "void" and event.target_event_id and not has_error
+    }
+    return [
+        event
+        for event, has_error in validated
+        if not has_error and event.event_type != "void" and event.event_id not in voided
+    ]
+
+
+def _open_event_facts(event: TradeEvent) -> list[PerformanceFact]:
+    currency, currency_reason = _fact_currency(event.currency, context="option event currency")
+    amount, reason = _event_option_amount(event)
+    if currency_reason:
+        amount = None
+        reason = currency_reason
+    common = _event_fact_kwargs(event, currency=currency)
+    facts = [
+        PerformanceFact(
+            fact_kind="contracts_opened",
+            effective_at_ms=event.event_time_ms,
+            quantity=event.contracts,
+            **common,
+        ),
+        PerformanceFact(
+            fact_kind="option_trade_cash_gross",
+            effective_at_ms=event.event_time_ms,
+            amount=amount,
+            missing_reason=reason,
+            **common,
+        ),
+    ]
+    premium_kind = "premium_collected_gross" if event.contract_key.position_side == "short" else "premium_paid_gross"
+    premium_amount = None if amount is None else abs(amount)
+    facts.append(
+        PerformanceFact(
+            fact_kind=premium_kind,
+            effective_at_ms=event.event_time_ms,
+            amount=premium_amount,
+            missing_reason=reason,
+            **common,
+        )
+    )
+    facts.append(_option_fee_cash_fact(event, currency=currency, currency_reason=currency_reason))
+    return facts
+
+
+def _close_event_cash_facts(event: TradeEvent) -> list[PerformanceFact]:
+    currency, currency_reason = _fact_currency(event.currency, context="option event currency")
+    amount, reason = _event_option_amount(event)
+    if currency_reason:
+        amount = None
+        reason = currency_reason
+    common = _event_fact_kwargs(event, currency=currency)
+    return [
+        PerformanceFact(
+            fact_kind="contracts_closed",
+            effective_at_ms=event.event_time_ms,
+            quantity=event.contracts,
+            **common,
+        ),
+        PerformanceFact(
+            fact_kind="option_trade_cash_gross",
+            effective_at_ms=event.event_time_ms,
+            amount=amount,
+            missing_reason=reason,
+            **common,
+        ),
+        _option_fee_cash_fact(event, currency=currency, currency_reason=currency_reason),
+    ]
+
+
+def _event_option_amount(event: TradeEvent) -> tuple[Decimal | None, str | None]:
+    try:
+        price = to_decimal(event.price, field_name="price")
+        multiplier = to_decimal(event.multiplier, field_name="multiplier")
+        if price < 0:
+            raise ValueError("price cannot be negative")
+        if multiplier <= 0:
+            raise ValueError("multiplier must be positive")
+        gross = quantize_money(price * multiplier * Decimal(int(event.contracts)))
+    except (TypeError, ValueError) as exc:
+        return None, f"option cash unavailable: {exc}"
+    is_open = event.event_type == "open"
+    positive = (event.contract_key.position_side == "short" and is_open) or (
+        event.contract_key.position_side == "long" and not is_open
+    )
+    return (gross if positive else -gross), None
+
+
+def _option_fee_cash_fact(
+    event: TradeEvent,
+    *,
+    currency: str | None,
+    currency_reason: str | None,
+) -> PerformanceFact:
+    fee = fee_fact_for_event(event)
+    amount = -fee.amount if fee.basis == FeeBasis.ACTUAL and fee.amount is not None else None
+    reason = (
+        None if amount is not None else fee.reason or f"{fee.basis.value} option fee is not production cash evidence"
+    )
+    if currency_reason:
+        amount = None
+        reason = currency_reason
+    return PerformanceFact(
+        fact_kind="option_fee_cash",
+        effective_at_ms=event.event_time_ms,
+        amount=amount,
+        missing_reason=reason,
+        **_event_fact_kwargs(event, currency=currency),
+    )
+
+
+def _allocation_realized_facts(allocation: OptionEconomicAllocation) -> list[PerformanceFact]:
+    currency, currency_reason = _fact_currency(allocation.currency, context="allocation currency")
+    common = {
+        "effective_at_ms": allocation.closed_at_ms,
+        "account": allocation.contract_key.account,
+        "broker": allocation.contract_key.broker,
+        "symbol": allocation.contract_key.underlying_symbol,
+        "currency": currency,
+        "source_event_id": allocation.close_event_id,
+        "allocation_id": allocation.allocation_id,
+    }
+    gross_amount = None if currency_reason else allocation.realized_pnl_gross
+    net_amount = None if currency_reason else allocation.realized_pnl_net
+    net_reason = currency_reason
+    if net_reason is None and allocation.realized_pnl_net is None:
+        net_reason = f"fee quality is {allocation.fee_quality}"
+    return [
+        PerformanceFact(
+            fact_kind="realized_gross",
+            amount=gross_amount,
+            missing_reason=currency_reason,
+            **common,
+        ),
+        PerformanceFact(
+            fact_kind="realized_net",
+            amount=net_amount,
+            missing_reason=net_reason,
+            **common,
+        ),
+    ]
+
+
+def _missing_realized_facts(event: TradeEvent) -> list[PerformanceFact]:
+    currency, _ = _fact_currency(event.currency, context="option event currency")
+    common = _event_fact_kwargs(event, currency=currency)
+    return [
+        PerformanceFact(
+            fact_kind="realized_gross",
+            effective_at_ms=event.event_time_ms,
+            amount=None,
+            missing_reason="effective close has no canonical economic allocation",
+            **common,
+        ),
+        PerformanceFact(
+            fact_kind="realized_net",
+            effective_at_ms=event.event_time_ms,
+            amount=None,
+            missing_reason="effective close has no canonical economic allocation",
+            **common,
+        ),
+    ]
+
+
+def _stock_settlement_facts(event: TradeEvent) -> list[PerformanceFact]:
+    if event.event_type not in {"assignment", "exercise"}:
+        return []
+    raw = event.raw_payload.get("stock_settlement") if isinstance(event.raw_payload, dict) else None
+    event_currency, _ = _fact_currency(event.currency, context="option event currency")
+    common = _event_fact_kwargs(event, currency=event_currency)
+    if not isinstance(raw, dict):
+        return [
+            PerformanceFact(
+                fact_kind="stock_settlement_cash_gross",
+                effective_at_ms=event.event_time_ms,
+                amount=None,
+                missing_reason="assignment/exercise stock_settlement is missing",
+                **common,
+            ),
+            PerformanceFact(
+                fact_kind="stock_settlement_fee_cash",
+                effective_at_ms=event.event_time_ms,
+                amount=None,
+                missing_reason="assignment/exercise stock settlement fee is missing",
+                **common,
+            ),
+        ]
+    settlement_currency, currency_reason = _fact_currency(
+        raw.get("currency") or event.currency,
+        context="stock settlement currency",
+    )
+    stock_common = {**common, "currency": settlement_currency}
+    side = str(raw.get("side") or raw.get("stock_side") or "").strip().lower()
+    shares_raw = raw.get("shares") if raw.get("shares") not in (None, "") else raw.get("stock_qty")
+    price_raw = raw.get("price") if raw.get("price") not in (None, "") else raw.get("stock_price")
+    try:
+        shares_decimal = to_decimal(shares_raw, field_name="stock settlement shares")
+        if shares_decimal != shares_decimal.to_integral_value():
+            raise ValueError("stock settlement shares must be an integer")
+        shares = int(shares_decimal)
+        price = to_decimal(price_raw, field_name="stock settlement price")
+        if shares <= 0 or price < 0 or side not in {"buy", "sell"}:
+            raise ValueError("stock settlement requires buy/sell, positive shares, and non-negative price")
+        principal = quantize_money(price * Decimal(shares))
+        cash_amount = principal if side == "sell" else -principal
+        cash_reason = currency_reason
+        if currency_reason:
+            cash_amount = None
+    except (TypeError, ValueError) as exc:
+        cash_amount = None
+        cash_reason = f"stock settlement cash unavailable: {exc}"
+    fee_raw = raw.get("fees") if raw.get("fees") not in (None, "") else raw.get("fee")
+    if fee_raw in (None, ""):
+        fee_amount = None
+        fee_reason = "stock settlement fee is missing"
+    else:
+        try:
+            fee = to_decimal(fee_raw, field_name="stock settlement fee")
+            if fee < 0:
+                raise ValueError("stock settlement fee cannot be negative")
+            fee_amount = -quantize_money(fee)
+            fee_reason = currency_reason
+            if currency_reason:
+                fee_amount = None
+        except (TypeError, ValueError) as exc:
+            fee_amount = None
+            fee_reason = f"stock settlement fee unavailable: {exc}"
+    return [
+        PerformanceFact(
+            fact_kind="stock_settlement_cash_gross",
+            effective_at_ms=event.event_time_ms,
+            amount=cash_amount,
+            missing_reason=cash_reason,
+            **stock_common,
+        ),
+        PerformanceFact(
+            fact_kind="stock_settlement_fee_cash",
+            effective_at_ms=event.event_time_ms,
+            amount=fee_amount,
+            missing_reason=fee_reason,
+            **stock_common,
+        ),
+    ]
+
+
+def _fact_currency(value: Any, *, context: str) -> tuple[str | None, str | None]:
+    try:
+        return normalize_currency(value), None
+    except ValueError as exc:
+        return None, f"{context} unavailable: {exc}"
+
+
+def _event_fact_kwargs(event: TradeEvent, *, currency: str | None) -> dict[str, Any]:
+    return {
+        "account": event.contract_key.account,
+        "broker": event.contract_key.broker,
+        "symbol": event.contract_key.underlying_symbol,
+        "currency": currency,
+        "source_event_id": event.event_id,
+    }
+
+
+def _summarize(facts: Sequence[PerformanceFact]) -> dict[str, Any]:
+    return {
+        "activity": {
+            "premium_collected_gross": _metric(facts, {"premium_collected_gross"}).to_dict(),
+            "premium_paid_gross": _metric(facts, {"premium_paid_gross"}).to_dict(),
+            "contracts_opened": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_opened"),
+            "contracts_closed": sum(fact.quantity or 0 for fact in facts if fact.fact_kind == "contracts_closed"),
+        },
+        "cash": {
+            "option_trade_cash_gross": _metric(facts, {"option_trade_cash_gross"}).to_dict(),
+            "option_fee_cash": _metric(facts, {"option_fee_cash"}).to_dict(),
+            "stock_settlement_cash_gross": _metric(facts, {"stock_settlement_cash_gross"}).to_dict(),
+            "total_cash_change_net": _metric(facts, _CASH_NET_KINDS).to_dict(),
+        },
+        "pnl": {
+            "realized_gross": _metric(facts, {"realized_gross"}).to_dict(),
+            "realized_net": _metric(facts, {"realized_net"}).to_dict(),
+        },
+    }
+
+
+def _metric(facts: Sequence[PerformanceFact], kinds: set[str] | frozenset[str]) -> DecimalAmountEnvelope:
+    selected = [fact for fact in facts if fact.fact_kind in kinds]
+    if not selected:
+        return DecimalAmountEnvelope(quality=MetricQuality(MetricStatus.NOT_OBSERVED))
+    sums: dict[str, Decimal] = {}
+    incomplete_currencies: set[str] = set()
+    missing: list[str] = []
+    for fact in selected:
+        currency = str(fact.currency or "")
+        if fact.amount is None:
+            incomplete_currencies.add(currency)
+            missing.append(fact.fact_id)
+            continue
+        sums[currency] = quantize_money(sums.get(currency, Decimal(0)) + fact.amount)
+    for currency in incomplete_currencies:
+        sums.pop(currency, None)
+    status = MetricStatus.PARTIAL if missing else MetricStatus.OBSERVED
+    return DecimalAmountEnvelope(
+        by_currency=sums,
+        quality=MetricQuality(status=status, missing=tuple(sorted(set(missing)))),
+    )
+
+
+def _breakdown(
+    facts: Sequence[PerformanceFact],
+    *,
+    key_name: str,
+    key_fn: Any,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[PerformanceFact]] = {}
+    for fact in facts:
+        key = str(key_fn(fact) or "").strip()
+        if key:
+            groups.setdefault(key, []).append(fact)
+    out: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        item = {key_name: key}
+        item.update(_summarize(groups[key]))
+        out.append(item)
+    return out
+
+
+def _month_for_fact(fact: PerformanceFact) -> str:
+    tz = ZoneInfo(REPORTING_TIMEZONE)
+    return datetime.fromtimestamp(fact.effective_at_ms / 1000, tz=tz).strftime("%Y-%m")
+
+
+def _diagnostic_text(item: Mapping[str, Any] | str) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    code = str(item.get("code") or "").strip()
+    event_id = str(item.get("event_id") or "").strip()
+    if code and event_id:
+        return f"{code}:{event_id}"
+    return code or str(item.get("message") or "").strip()
+
+
+def _diagnostic_is_relevant(
+    item: Mapping[str, Any] | str,
+    *,
+    event_ids: set[str],
+    period: PeriodWindow,
+    account_filter: str,
+    broker_filter: str,
+) -> bool:
+    if isinstance(item, str):
+        return True
+    event_id = str(item.get("event_id") or "").strip()
+    if event_id and event_id in event_ids:
+        return True
+    try:
+        event_time_ms = int(item.get("event_time_ms") or 0)
+    except (TypeError, ValueError):
+        event_time_ms = 0
+    if event_time_ms <= 0:
+        return not event_id
+    if not period.contains(event_time_ms):
+        return False
+    diagnostic_account = normalize_account(item.get("account"))
+    diagnostic_broker = normalize_broker(str(item.get("broker") or ""))
+    return (not account_filter or diagnostic_account == account_filter) and (
+        not broker_filter or diagnostic_broker == broker_filter
+    )
+
+
+__all__ = ["PerformanceFact", "PeriodPerformance", "build_period_performance"]
