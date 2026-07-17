@@ -228,8 +228,11 @@ def _combo_pair_rows(
         call_contract=call_contract,
     )
     contracts = first_float(row, "contracts", "contract_count", "quantity", "qty") or 1.0
+    put_contracts = first_float(row, "put_contracts") or contracts
+    call_contracts = first_float(row, "call_contracts") or contracts
     put_credit = first_float(row, "put_net_credit")
     call_cost = first_float(row, "call_total_cost")
+    structure_mode = text(row.get("structure_mode")).lower() or "same_expiry_pair"
     common = {
         **row,
         "net_credit": None,
@@ -238,7 +241,12 @@ def _combo_pair_rows(
         "strategy_family": "combo_yield",
         "strategy_profile": text(row.get("strategy_profile") or row.get("yield_enhancement_mode")) or "combo_yield",
         "strategy_group_id": group_id,
-        "contracts": contracts,
+        "candidate_pair_id": text(row.get("candidate_pair_id")) or None,
+        "structure_mode": structure_mode,
+        "put_expiration": text(row.get("put_expiration") or row.get("expiration") or row.get("exp")) or None,
+        "put_dte": first_float(row, "put_dte", "dte"),
+        "call_expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
+        "call_dte": first_float(row, "call_dte", "dte"),
     }
     return [
         {
@@ -248,6 +256,9 @@ def _combo_pair_rows(
             "mode": "put",
             "side": "short",
             "leg_role": "funding_put",
+            "expiration": text(row.get("put_expiration") or row.get("expiration") or row.get("exp")) or None,
+            "dte": first_float(row, "put_dte", "dte"),
+            "contracts": put_contracts,
             "strike": first_float(row, "put_strike"),
             "bid": first_float(row, "put_bid"),
             "ask": first_float(row, "put_ask"),
@@ -266,6 +277,9 @@ def _combo_pair_rows(
             "mode": "call",
             "side": "long",
             "leg_role": "participation_call",
+            "expiration": text(row.get("call_expiration") or row.get("expiration") or row.get("exp")) or None,
+            "dte": first_float(row, "call_dte", "dte"),
+            "contracts": call_contracts,
             "strike": first_float(row, "call_strike"),
             "bid": first_float(row, "call_bid"),
             "ask": first_float(row, "call_ask"),
@@ -289,14 +303,27 @@ def _combo_pair_group_id(
     put_contract: str,
     call_contract: str,
 ) -> str:
-    parts = (
+    common_parts = (
         text(row.get("run_id") or run_id or source_path),
         text(row.get("account") or account).lower(),
         text(row.get("symbol") or row.get("underlying_symbol")).upper(),
-        text(row.get("expiration") or row.get("exp")),
-        put_contract.upper(),
-        call_contract.upper(),
     )
+    if text(row.get("structure_mode")).lower() == "staggered_expiry_pair":
+        parts = (
+            *common_parts,
+            text(row.get("candidate_pair_id")),
+            text(row.get("put_expiration") or row.get("expiration") or row.get("exp")),
+            text(row.get("call_expiration") or row.get("expiration") or row.get("exp")),
+            put_contract.upper(),
+            call_contract.upper(),
+        )
+    else:
+        parts = (
+            *common_parts,
+            text(row.get("expiration") or row.get("exp")),
+            put_contract.upper(),
+            call_contract.upper(),
+        )
     return "combo_yield|" + "|".join(parts)
 
 
@@ -445,6 +472,8 @@ def snapshot_from_row(
         "strategy_family": family,
         "strategy_profile": profile,
         "strategy_group_id": text(row.get("strategy_group_id") or row.get("group_id")) or None,
+        "candidate_pair_id": text(row.get("candidate_pair_id")) or None,
+        "structure_mode": text(row.get("structure_mode")).lower() or None,
         "leg_role": text(row.get("leg_role") or row.get("strategy_leg_role")) or None,
         "mode": mode_norm,
         "run_id": text(row.get("run_id")) or None,
@@ -453,6 +482,10 @@ def snapshot_from_row(
         "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
         "option_type": text(row.get("option_type")).lower() or mode_norm,
         "expiration": text(row.get("expiration") or row.get("exp")) or None,
+        "put_expiration": text(row.get("put_expiration")) or None,
+        "put_dte": first_float(row, "put_dte"),
+        "call_expiration": text(row.get("call_expiration")) or None,
+        "call_dte": first_float(row, "call_dte"),
         "strike": first_float(row, "strike"),
         "side": text(row.get("side") or row.get("position_side")).lower() or None,
         "contracts": first_float(row, "contracts", "contract_count", "quantity", "qty"),

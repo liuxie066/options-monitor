@@ -240,6 +240,8 @@ def build_trade_intake_receipt_message(
         )
     if ledger_store:
         lines.append(f"账本：{ledger_store.get('sqlite_path') or '-'}")
+    if _combo_yield_relation_pending(diagnostics):
+        lines.append("组合关系待确认：未提供 pair_intent_id，已按单腿正常记录，未自动归入 Combo Yield 组。")
     lines.append(f"原因：{reason}")
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)
@@ -251,6 +253,14 @@ def build_trade_intake_receipt_message(
             lines.append("请确认要匹配的选项，例如：选择 A。")
     lines.append(f"deal_id：{deal_id}")
     return "\n".join(lines)
+
+
+def _combo_yield_relation_pending(diagnostics: dict[str, Any]) -> bool:
+    for key in ("combo_yield_enrichment", "position_effect_inference"):
+        item = diagnostics.get(key)
+        if isinstance(item, dict) and bool(item.get("combination_relation_pending")):
+            return True
+    return False
 
 
 def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> bool:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Sequence
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
@@ -30,6 +30,7 @@ from src.application.ledger.writer import (
     persist_trade_event_object,
     projection_diagnostics_summary,
 )
+from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.infrastructure.feishu_bitable import safe_float
 
 
@@ -361,7 +362,7 @@ def persist_manual_close_event(
     return persist_trade_event_object(repo, event)
 
 
-def persist_manual_adjust_event(
+def _build_manual_adjust_event(
     repo: Any,
     *,
     record_id: str,
@@ -378,7 +379,7 @@ def persist_manual_adjust_event(
     yield_enhancement_mode: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
-) -> LedgerWriteResult:
+) -> tuple[TradeEvent, PositionLotPatch]:
     fields = assert_position_lot_target_matches_current_state(
         repo,
         record_id=record_id,
@@ -418,9 +419,6 @@ def persist_manual_adjust_event(
         target_source_event_id=target_source_event_id,
         patch=patch_contract,
     )
-    existing_result = _existing_trade_event_result(repo, event_id=event_id, record_id=str(record_id))
-    if existing_result is not None:
-        return existing_result.with_details(patch=patch)
     event = TradeEvent(
         event_id=event_id,
         event_type="adjust",
@@ -451,4 +449,111 @@ def persist_manual_adjust_event(
             "patch": patch,
         },
     )
-    return persist_trade_event_object(repo, event).with_record_id(str(record_id)).with_details(patch=patch)
+    return event, patch_contract
+
+
+def persist_manual_adjust_event(
+    repo: Any,
+    *,
+    record_id: str,
+    fields: dict[str, Any],
+    contracts: int | None = None,
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    multiplier: float | None = None,
+    opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+    as_of_ms: int | None = None,
+) -> LedgerWriteResult:
+    event, patch_contract = _build_manual_adjust_event(
+        repo,
+        record_id=record_id,
+        fields=fields,
+        contracts=contracts,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        multiplier=multiplier,
+        opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
+        as_of_ms=as_of_ms,
+    )
+    existing_result = _existing_trade_event_result(repo, event_id=event.event_id, record_id=str(record_id))
+    if existing_result is not None:
+        return existing_result.with_details(patch=patch_contract.to_dict())
+    return (
+        persist_trade_event_object(repo, event)
+        .with_record_id(str(record_id))
+        .with_details(patch=patch_contract.to_dict())
+    )
+
+
+def persist_manual_adjust_events(
+    repo: Any,
+    adjustments: Sequence[dict[str, Any]],
+) -> list[LedgerWriteResult]:
+    """Persist multiple lot adjustments and refresh projection in one transaction."""
+
+    prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
+    seen_record_ids: set[str] = set()
+    for raw in adjustments:
+        item = dict(raw or {})
+        record_id = str(item.pop("record_id", "") or "").strip()
+        fields = item.pop("fields", None)
+        if not record_id:
+            raise ValueError("manual adjustment batch requires record_id")
+        if record_id in seen_record_ids:
+            raise ValueError(f"manual adjustment batch contains duplicate record_id: {record_id}")
+        if not isinstance(fields, dict):
+            raise ValueError(f"manual adjustment batch requires fields for record_id={record_id}")
+        event, patch_contract = _build_manual_adjust_event(
+            repo,
+            record_id=record_id,
+            fields=dict(fields),
+            **item,
+        )
+        prepared.append((record_id, event, patch_contract))
+        seen_record_ids.add(record_id)
+
+    if not prepared:
+        raise ValueError("manual adjustment batch requires at least one adjustment")
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
+        created_flags: list[bool] = []
+        for _record_id, event, _patch_contract in prepared:
+            created_flags.append(
+                bool(sqlite_repo.upsert_trade_event(event, conn=conn))
+                if conn is not None
+                else bool(sqlite_repo.upsert_trade_event(event))
+            )
+        events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
+        projection = project_stored_trade_events_to_position_lots(events)
+        lot_count = (
+            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+            if conn is not None
+            else sqlite_repo.replace_position_lots(projection.lots)
+        )
+        diagnostics = projection_diagnostics_summary(projection.diagnostics)
+        out: list[LedgerWriteResult] = []
+        for (record_id, event, patch_contract), created in zip(prepared, created_flags, strict=True):
+            payload = {
+                "event_id": event.event_id,
+                "record_id": record_id,
+                "created": created,
+                "position_lot_count": int(lot_count),
+                **diagnostics,
+                "patch": patch_contract.to_dict(),
+            }
+            out.append(LedgerWriteResult.from_payload(payload))
+        return out
+
+    return with_sqlite_repo_transaction(repo, _run)

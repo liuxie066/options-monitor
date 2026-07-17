@@ -30,6 +30,9 @@ from src.application.trades.workflows import (
 )
 
 
+STAGGERED_EXPIRY_PAIR = "staggered_expiry_pair"
+
+
 class OptionPositionsRepoLike(Protocol):
     def list_position_lots(self) -> list[dict[str, Any]]: ...
     def get_record_fields(self, record_id: str) -> dict[str, Any]: ...
@@ -532,6 +535,31 @@ def _infer_missing_position_effect(
         )
 
     if deal.side == "buy" and deal.option_type == "call":
+        if _combo_yield_structure_mode(deal) == STAGGERED_EXPIRY_PAIR:
+            pair_intent_id = _combo_yield_pair_intent_id(deal)
+            inferred = replace(
+                deal,
+                position_effect="open",
+                raw_payload=_with_position_effect_inference_payload(
+                    deal.raw_payload,
+                    inferred_effect="open",
+                    reason="buy_call_without_close_target",
+                ),
+            )
+            return _PositionEffectInference(
+                deal=inferred,
+                reason="inferred_long_call_open",
+                diagnostics={
+                    **base_diagnostics,
+                    "decision": "open",
+                    "open_reason": "buy_call_without_close_target",
+                    "close_candidate_summary": close_candidate_summary,
+                    "structure_mode": STAGGERED_EXPIRY_PAIR,
+                    "pair_intent_id": pair_intent_id or None,
+                    "combination_relation_pending": not bool(pair_intent_id),
+                },
+            )
+
         companion = _combo_yield_companion_short_put(repo, deal)
         inferred = replace(
             deal,
@@ -593,6 +621,9 @@ def _enrich_combo_yield_open(
     *,
     repo: OptionPositionsRepoLike,
 ) -> _PositionEffectInference:
+    if _combo_yield_structure_mode(deal) == STAGGERED_EXPIRY_PAIR:
+        return _enrich_staggered_combo_yield_open(deal)
+
     if deal.side == "buy" and deal.option_type == "call":
         companion = _combo_yield_companion_short_put(repo, deal)
         return _PositionEffectInference(
@@ -629,6 +660,109 @@ def _enrich_combo_yield_open(
             },
         )
     return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
+
+
+def _enrich_staggered_combo_yield_open(deal: NormalizedTradeDeal) -> _PositionEffectInference:
+    leg_role = _staggered_combo_yield_leg_role(deal)
+    if leg_role is None:
+        return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
+
+    pair_intent_id = _combo_yield_pair_intent_id(deal)
+    if not pair_intent_id:
+        return _PositionEffectInference(
+            deal=deal,
+            reason="staggered_combo_yield_pair_intent_missing",
+            diagnostics={
+                "decision": "record_unpaired",
+                "structure_mode": STAGGERED_EXPIRY_PAIR,
+                "pair_intent_id": None,
+                "combination_relation_pending": True,
+            },
+        )
+
+    group_id = _explicit_combo_yield_group_id(deal, pair_intent_id=pair_intent_id)
+    return _PositionEffectInference(
+        deal=replace(
+            deal,
+            raw_payload=_with_staggered_combo_yield_payload(
+                deal.raw_payload,
+                leg_role=leg_role,
+                pair_intent_id=pair_intent_id,
+                strategy_group_id=group_id,
+            ),
+        ),
+        reason="staggered_combo_yield_open",
+        diagnostics={
+            "decision": "tag_explicit_pair_intent",
+            "structure_mode": STAGGERED_EXPIRY_PAIR,
+            "pair_intent_id": pair_intent_id,
+            "strategy_group_id": group_id,
+            "leg_role": leg_role,
+            "combination_relation_pending": False,
+        },
+    )
+
+
+def _staggered_combo_yield_leg_role(deal: NormalizedTradeDeal) -> str | None:
+    if deal.side == "sell" and deal.option_type == "put":
+        return "funding_put"
+    if deal.side == "buy" and deal.option_type == "call":
+        return "participation_call"
+    return None
+
+
+def _with_staggered_combo_yield_payload(
+    raw_payload: dict[str, Any],
+    *,
+    leg_role: str,
+    pair_intent_id: str,
+    strategy_group_id: str,
+) -> dict[str, Any]:
+    payload = dict(raw_payload or {})
+    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    payload.setdefault("leg_role", leg_role)
+    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    payload.setdefault("structure_mode", STAGGERED_EXPIRY_PAIR)
+    payload.setdefault("pair_intent_id", pair_intent_id)
+    payload.setdefault("strategy_group_id", strategy_group_id)
+
+    raw_snapshot = payload.get("strategy_snapshot")
+    snapshot = dict(raw_snapshot) if isinstance(raw_snapshot, dict) else {}
+    snapshot.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    snapshot.setdefault("strategy_family", STRATEGY_COMBO_YIELD)
+    snapshot.setdefault("strategy_source", "explicit_trade_intent")
+    snapshot.setdefault("leg_role", leg_role)
+    snapshot.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    snapshot.setdefault("structure_mode", STAGGERED_EXPIRY_PAIR)
+    snapshot.setdefault("pair_intent_id", pair_intent_id)
+    snapshot.setdefault("strategy_group_id", strategy_group_id)
+    payload["strategy_snapshot"] = snapshot
+    return payload
+
+
+def _combo_yield_structure_mode(deal: NormalizedTradeDeal) -> str:
+    return _combo_yield_payload_value(deal.raw_payload, "structure_mode").lower()
+
+
+def _combo_yield_pair_intent_id(deal: NormalizedTradeDeal) -> str:
+    return _combo_yield_payload_value(deal.raw_payload, "pair_intent_id")
+
+
+def _combo_yield_payload_value(raw_payload: Any, key: str) -> str:
+    if not isinstance(raw_payload, dict):
+        return ""
+    value = str(raw_payload.get(key) or "").strip()
+    if value:
+        return value
+    snapshot = raw_payload.get("strategy_snapshot")
+    if isinstance(snapshot, dict):
+        return str(snapshot.get(key) or "").strip()
+    return ""
+
+
+def _explicit_combo_yield_group_id(deal: NormalizedTradeDeal, *, pair_intent_id: str) -> str:
+    account = str(deal.internal_account or "").strip().lower()
+    return f"combo_yield:{account}:{pair_intent_id}"
 
 
 def _with_combo_yield_long_call_payload(

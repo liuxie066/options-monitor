@@ -253,6 +253,7 @@
         },
         "combo_yield": {
           "enabled": false,
+          "structure_mode": "same_expiry_pair",
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
           "funding_mode": "credit_or_even",
@@ -329,6 +330,7 @@
         },
         "combo_yield": {
           "enabled": false,
+          "structure_mode": "same_expiry_pair",
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
           "funding_mode": "credit_or_even",

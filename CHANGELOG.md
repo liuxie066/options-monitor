@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.404 - 2026-07-17
+
+### Added
+- Added `staggered_expiry_pair` Combo Yield candidates that pair one underwriting-approved short Put with one later-expiring long Call, using independent leg horizons, fee-aware full-funding checks, structure-specific ranking, notifications, diagnostics, and replay support.
+- Added explicit `pair_intent_id` trade grouping and `option-positions pair-combo-yield`, which validates exact open lot IDs and atomically records the `funding_put` / `participation_call` relationship without heuristic matching.
+
+### Changed
+- Kept `same_expiry_pair` as the default while documenting the staggered filtering, notification ordering, candidate-versus-trade identity boundary, receipt wording, and illustrative non-production Call horizon configuration.
+
 ## 1.2.403 - 2026-07-16
 
 ### Fixed
