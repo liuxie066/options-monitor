@@ -35,7 +35,22 @@ Symbols are canonical, currency is uppercase, dates are `YYYY-MM-DD`, and Decima
 - `actual` amount zero is a real zero; a legacy zero without provenance becomes `missing`.
 - Gross metrics ignore fees. Net metrics require all incurred fee components needed by that metric.
 
+## Canonical Option Economic Allocations
+
+The canonical ledger projection is the sole owner of option close matching and lifecycle PnL allocation. Every valid close-like event (`close`, `expire_close`, `assignment`, or `exercise`) targeting an open lot produces one stable `OptionEconomicAllocation`; downstream performance code consumes these allocations and must not independently rematch option lots.
+
+Allocation identity is derived from the open event, close event, and deterministic projection sequence. Projection sorts immutable events by `(event_time_ms, event_id)`, excludes validly voided events before applying state transitions, and therefore produces stable allocation ordering and IDs across replay. A voided close contributes neither lot mutation nor economics; a replacement close is projected as a new allocation.
+
+For short options, opening premium is positive cash and closing premium is negative cash. Long-option signs are the inverse. Gross realized PnL is the sum of those signed premium amounts. Assignment/exercise remains an option close allocation here; stock settlement principal and assigned-stock economics belong to later lifecycle facts and must not be treated as option loss.
+
+Open fees are allocated proportionally by closed contracts. The final close absorbs the six-decimal rounding remainder, preserving fee conservation. When one broker close is split across multiple target lots, its close fee is also allocated proportionally and the final segment absorbs the remainder; the split fees must conserve the original event total. A legacy non-zero canonical fee is treated as actual with explicit legacy provenance; zero without provenance is missing; explicit actual zero remains complete; malformed explicit provenance fails closed as missing. Gross PnL remains available when a fee is missing or estimated, while production realized net PnL is null unless every incurred fee is actual. Estimated fees remain visible only as quality/evidence and must not enter production realized PnL.
+
+Currency and multiplier are economic units even though they are not both part of legacy `ContractKey`. A close whose units differ from its target lot produces an error diagnostic and no economic allocation. Likewise, an otherwise valid close whose economics cannot be represented produces a diagnostic and no allocation. In both cases the pre-existing lot/risk close state transition still occurs, so reporting metadata cannot reopen production risk state. Downstream performance treats these effective closes as explicitly incomplete.
+
+`PositionLot.realized_pnl` is retained for risk/read compatibility and is not the canonical gross or net performance amount: legacy lot behavior subtracts close-event fees but does not allocate opening fees. New reporting must use `ProjectionResult.allocations`, exposed through the application ledger API.
+
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.
-- S2-S10: pending their Gateflow implementation/review gates.
+- S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
+- S3-S10: pending their Gateflow implementation/review gates.

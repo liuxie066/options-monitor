@@ -238,6 +238,11 @@ def project_trade_event_log(events: list[dict[str, Any]]) -> Any:
     return project_stored_trade_events_to_position_lots(events)
 
 
+
+def trade_event_economic_allocations(repo: Any) -> list[Any]:
+    projection = project_trade_event_log(trade_event_log(repo))
+    return list(projection.ledger_projection.allocations)
+
 def trade_event_projection_preview(events: list[dict[str, Any]]) -> dict[str, Any]:
     projection = project_trade_event_log(events)
     return {
@@ -278,6 +283,7 @@ __all__ = [
     "resolve_position_data_config_path",
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
+    "trade_event_economic_allocations",
     "trade_event_log",
     "trade_event_projection_preview",
 ]
