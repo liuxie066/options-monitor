@@ -22,7 +22,7 @@ from domain.domain.trade_contract_identity import (
 )
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
-from src.application.ledger.api import list_canonical_position_lot_snapshots, trade_event_log
+from src.application.ledger.api import assigned_stock_event_log, list_canonical_position_lot_snapshots, trade_event_log
 from src.application.symbol_mutations import normalize_symbol_read
 
 
@@ -346,8 +346,12 @@ def load_monthly_income_inputs(
     if rates is None:
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
 
-    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
-    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
+    assigned_stock_log = assigned_stock_event_log(repo)
+    raw_assigned_stock_events = [dict(item) for item in assigned_stock_log.events]
+    warnings.extend(
+        str(item.get("message") or item.get("code") or "assigned-stock event read warning")
+        for item in assigned_stock_log.diagnostics
+    )
     inputs = {
         "config_path": config_path,
         "config": cfg,

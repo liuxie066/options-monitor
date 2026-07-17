@@ -374,9 +374,9 @@ def build_position_monthly_income_report(
     list_trade_events = getattr(primary_repo, "list_trade_events", None)
     raw_trade_events = list_trade_events() if callable(list_trade_events) else None
     trade_events = raw_trade_events if isinstance(raw_trade_events, list) else None
-    list_assigned_stock_events = getattr(primary_repo, "list_assigned_stock_events", None)
-    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
-    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None
+    from src.application.ledger.queries import assigned_stock_event_log
+
+    assigned_stock_events = [dict(item) for item in assigned_stock_event_log(repo).events]
     return build_monthly_income_report(
         load_canonical_position_lot_records(repo, base=base),
         account=account,

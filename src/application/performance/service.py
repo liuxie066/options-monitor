@@ -7,6 +7,8 @@ from domain.domain.performance.engine import build_period_performance
 from domain.domain.performance.models import validate_evidence_facts
 from domain.domain.performance.period import PeriodRequest, PeriodWindow, normalize_period
 from src.application.performance.adapters import (
+    assigned_stock_instruments,
+    load_assigned_stock_projection,
     load_ledger_performance_inputs,
     load_option_valuation_inputs,
 )
@@ -71,6 +73,15 @@ def build_option_period_performance(
             }
         )
 
+    preliminary_ending_assigned_stock = load_assigned_stock_projection(
+        inputs,
+        as_of_ms=window.valuation_end_at_ms,
+        valuation_marks=persisted_marks,
+        account=account_filter,
+        broker=broker_filter,
+    )
+    stock_instruments = assigned_stock_instruments(preliminary_ending_assigned_stock)
+
     collector = evidence_collector or collect_current_performance_evidence
     if window.status != "partial_current":
         collection = CurrentEvidenceCollection(status="skipped_historical")
@@ -81,6 +92,7 @@ def build_option_period_performance(
             period_status=window.status,
             refresh_quotes=True,
             option_positions=ending.positions,
+            stock_instruments=stock_instruments,
             now_ms=int(now_ms if now_ms is not None else window.valuation_end_at_ms),
             cfg=collection_cfg or {},
             base_dir=collection_base_dir,
@@ -123,6 +135,21 @@ def build_option_period_performance(
             for item in collection.diagnostics
         ),
     ]
+    combined_marks = (*persisted_marks, *live_marks)
+    opening_assigned_stock = load_assigned_stock_projection(
+        inputs,
+        as_of_ms=window.valuation_open_at_ms,
+        valuation_marks=combined_marks,
+        account=account_filter,
+        broker=broker_filter,
+    )
+    ending_assigned_stock = load_assigned_stock_projection(
+        inputs,
+        as_of_ms=window.valuation_end_at_ms,
+        valuation_marks=combined_marks,
+        account=account_filter,
+        broker=broker_filter,
+    )
     result = build_period_performance(
         events=inputs.events,
         allocations=inputs.allocations,
@@ -132,8 +159,10 @@ def build_option_period_performance(
         diagnostics=diagnostics,
         opening_positions=opening.positions,
         ending_positions=ending.positions,
-        valuation_marks=(*persisted_marks, *live_marks),
+        valuation_marks=combined_marks,
         fx_rates=(*persisted_rates, *live_rates),
+        opening_assigned_stock=opening_assigned_stock,
+        ending_assigned_stock=ending_assigned_stock,
     )
     payload = result.to_dict(include_rows=include_rows)
     payload["evidence"] = {

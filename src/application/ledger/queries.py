@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,18 @@ from src.application.ledger.repository import (
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
+
+
+@dataclass(frozen=True)
+class AssignedStockEventLog:
+    events: tuple[dict[str, Any], ...]
+    diagnostics: tuple[dict[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "events": [dict(item) for item in self.events],
+            "diagnostics": [dict(item) for item in self.diagnostics],
+        }
 
 
 def open_position_ledger(data_config: Any) -> Any:
@@ -187,6 +200,61 @@ def apply_position_ledger_runtime_config(repo: Any, cfg: dict[str, Any] | None) 
     return repo
 
 
+def assigned_stock_event_log(repo: Any) -> AssignedStockEventLog:
+    candidate = getattr(repo, "primary_repo", repo)
+    list_events = getattr(candidate, "list_assigned_stock_events", None)
+    if not callable(list_events):
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_unavailable",
+                    "message": "ledger repository does not expose assigned-stock events",
+                },
+            ),
+        )
+    try:
+        raw_events = list_events()
+    except Exception as exc:
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_read_failed",
+                    "message": str(exc),
+                },
+            ),
+        )
+    if not isinstance(raw_events, list):
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_invalid_payload",
+                    "message": "assigned-stock repository returned a non-list payload",
+                },
+            ),
+        )
+    events: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_events):
+        if isinstance(item, dict):
+            events.append(dict(item))
+            continue
+        diagnostics.append(
+            {
+                "context": "assigned_stock",
+                "code": "assigned_stock_event_invalid_row",
+                "message": "assigned-stock event row is not an object",
+                "row_index": index,
+            }
+        )
+    return AssignedStockEventLog(events=tuple(events), diagnostics=tuple(diagnostics))
+
+
 def trade_event_log(repo: Any) -> list[dict[str, Any]]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     events = sqlite_repo.list_trade_events()
@@ -258,6 +326,8 @@ def position_projection_verify_state(base: Path) -> dict[str, Any]:
 
 
 __all__ = [
+    "AssignedStockEventLog",
+    "assigned_stock_event_log",
     "PositionLotSnapshot",
     "RiskPositionView",
     "apply_position_ledger_runtime_config",

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.ledger.api import ledger_store_payload
+from src.application.ledger.api import assigned_stock_event_log, ledger_store_payload
 from src.application.positions.reporting import build_monthly_income_report
 from src.application.trade_time_format import add_trade_time_beijing
 
@@ -374,9 +374,7 @@ def _assigned_stock_action(
     list_trade_events = getattr(repo, "list_trade_events", None)
     raw_trade_events = list_trade_events() if callable(list_trade_events) else []
     trade_events = raw_trade_events if isinstance(raw_trade_events, list) else []
-    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
-    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else []
-    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else []
+    assigned_stock_events = [dict(item) for item in assigned_stock_event_log(repo).events]
 
     broker = _optional_text(payload.get("broker"))
     broker = normalize_broker(broker) if broker else None

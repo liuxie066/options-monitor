@@ -104,7 +104,15 @@ def test_assignment_stock_principal_is_cash_movement_not_option_loss() -> None:
             "2026-05-01T10:00:00",
             price=0,
             target_lot_id="lot-open",
-            raw={"stock_settlement": {"side": "buy", "shares": 100, "price": 100, "fees": 0}},
+            raw={
+                "stock_settlement": {
+                    "side": "buy",
+                    "shares": 100,
+                    "price": 100,
+                    "fees": 0,
+                    "fee_provenance": {"basis": "actual", "source": "test"},
+                }
+            },
         ),
     ]
 

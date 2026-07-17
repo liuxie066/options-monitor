@@ -105,10 +105,40 @@ Current collection runs only for `partial_current` reports with `refresh_quotes=
 
 Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for later dry-run/apply wiring in S7.
 
+## Sell Put Assigned-Stock Lifecycle
+
+Supported assigned-stock inventory is projected once by `domain.domain.assigned_stock.project_assigned_stock_lifecycle`. Both the legacy monthly report and option-performance service delegate to that projector. Application code reads assigned-stock sale events only through `src.application.ledger.api.assigned_stock_event_log`; repository capability probing and read failures are contained at that boundary and become explicit diagnostics.
+
+The supported inventory transition is deliberately narrow:
+
+```text
+short put assignment
+  -> buy-side stock settlement
+  -> assigned-stock lot
+  -> zero or more partial/full assigned-stock sales
+```
+
+Assignment/exercise inventory outside that Sell Put buy-side transition is returned as `incomplete_inventory_basis`; the system does not invent a stock basis. External holdings are reconciliation evidence only. They never create, close, or resize a canonical assigned-stock lot.
+
+Option premium remains owned by the canonical option allocation. Stock gross PnL uses settlement principal only:
+
+```text
+sale_realized_gross = gross_sale_proceeds - sold_settlement_principal
+stock_unrealized_gross = market_value - remaining_settlement_principal
+period_stock_total = sale_realized + ending_unrealized - opening_unrealized
+```
+
+Settlement and sale fees are separate facts. Production net metrics use only `actual` fee evidence, including explicit actual zero. Estimated or missing fees preserve gross and make the affected net metric partial. The settlement fee is recognized once at assignment; it is not embedded again in stock gross basis. This keeps option premium, settlement fee, sale fee, and stock price movement from being double counted.
+
+Opening and ending assigned-stock projections use the same restated boundary semantics as option inventory: valid later voids are included when rebuilding an earlier boundary. Historical reports select persisted stock marks only and never fetch current stock prices. Current reports may collect deduplicated `StockInstrumentKey` marks through the S4 read-through collector.
+
+Covered-call lifecycle attribution prefers an explicit `stock_lot_id` link. If no explicit link exists, FIFO attribution is allowed only when the available inventory is entirely attributable to assigned-stock lots; it is labelled `heuristic` and downgrades lifecycle quality. Mixed ordinary/assigned inventory fails closed. Reservations prevent one stock share from backing two overlapping calls. Closed-call realized PnL and open-call marked unrealized PnL are both visible in the lifecycle projection, but they are not added again to top-level performance because canonical option facts already own those economics.
+
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.
 - S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
 - S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
 - S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
-- S5-S10: pending their Gateflow implementation/review gates.
+- S5: shared Sell Put assigned-stock projection, legal ledger API boundary, partial/full sales, stock marks, actual-fee net semantics, covered-call attribution quality, unsupported inventory diagnostics, and legacy delegation implemented.
+- S6-S10: pending their Gateflow implementation/review gates.
