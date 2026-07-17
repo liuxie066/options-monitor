@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.407 - 2026-07-17
+
+### Added
+- Added the read-only `portfolio_capital_bridge` Copilot tool for selectable MTD/YTD total-asset bridge analysis across portfolio change, external cash flow, and option cash evidence.
+- Added structured bridge `steps[]` and Markdown-friendly `fallback_text` output without image or chart generation.
+
+### Changed
+- Required an explicit data month for MTD analysis and preserved partial, unavailable, observed, not-observed, and not-applicable evidence instead of treating missing inputs as zero.
+- Reused one shared option-ledger load per request and consumed the portfolio-management capital facts API through the existing loopback-only boundary.
+
+### Fixed
+- Enforced historical cutoffs in option income reporting so period analysis never uses transactions after the requested end date.
+
 ## 1.2.406 - 2026-07-17
 
 ### Fixed
