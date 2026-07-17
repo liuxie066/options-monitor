@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.409 - 2026-07-17
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values such as `Typing`, so inbound ACKs can use the keyboard-typing reaction without being rewritten to an invalid all-uppercase value.
+
 ## 1.2.408 - 2026-07-17
 
 ### Fixed
