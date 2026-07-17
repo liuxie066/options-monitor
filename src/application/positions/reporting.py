@@ -216,6 +216,17 @@ def _valid_void_target_event_id(event: dict[str, Any]) -> str | None:
     return target
 
 
+def _trade_events_as_of(events: list[dict[str, Any]], as_of_ms: int | None) -> list[dict[str, Any]]:
+    if as_of_ms is None:
+        return [dict(event) for event in events]
+    cutoff = int(as_of_ms)
+    return [
+        dict(event)
+        for event in events
+        if (event_time := _event_ts(event)) is not None and event_time <= cutoff
+    ]
+
+
 def _active_trade_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     voided = _voided_event_ids(events)
     out: list[dict[str, Any]] = []
@@ -1210,6 +1221,18 @@ def _normalize_assigned_stock_events(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _assigned_stock_events_as_of(value: Any, as_of_ms: int | None) -> list[dict[str, Any]]:
+    events = _normalize_assigned_stock_events(value)
+    if as_of_ms is None:
+        return events
+    cutoff = int(as_of_ms)
+    return [
+        event
+        for event in events
+        if (event_time := _stock_event_time_ms(event)) is not None and event_time <= cutoff
+    ]
 
 
 _DAY_MS = 86_400_000
@@ -2799,14 +2822,19 @@ def build_monthly_income_report(
     account_norm = normalize_account(account) if account else None
     broker_norm = normalize_broker(broker) if broker else None
     converter = _build_exchange_rate_converter(rates)
-    report = _build_monthly_income_report_from_events(
+    cutoff_trade_events = _trade_events_as_of(
         trade_events if isinstance(trade_events, list) else [],
+        as_of_ms,
+    )
+    cutoff_assigned_stock_events = _assigned_stock_events_as_of(assigned_stock_events, as_of_ms)
+    report = _build_monthly_income_report_from_events(
+        cutoff_trade_events,
         records=records,
         account_norm=account_norm,
         broker_norm=broker_norm,
         month=month,
         converter=converter,
-        assigned_stock_events=assigned_stock_events,
+        assigned_stock_events=cutoff_assigned_stock_events,
         quote_snapshots=quote_snapshots,
         assigned_stock_holdings=assigned_stock_holdings,
         as_of_ms=as_of_ms,
