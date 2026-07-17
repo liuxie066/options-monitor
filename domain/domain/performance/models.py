@@ -14,6 +14,8 @@ from domain.domain.option_position_identity import normalize_option_type
 from domain.domain.trade_contract_identity import canonical_contract_symbol, normalize_contract_expiration
 
 MONEY_QUANTUM = Decimal("0.000001")
+CAPITAL_DAYS_QUANTUM = Decimal("0.000000000001")
+MILLISECONDS_PER_DAY = Decimal("86400000")
 _CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9]{2,9}$")
 
 
@@ -304,7 +306,96 @@ class FeeFact:
         }
 
 
+@dataclass(frozen=True)
+class CapitalExposureSegment:
+    account: str
+    broker: str
+    symbol: str
+    currency: str
+    exposure_kind: str
+    source_id: str
+    start_at_ms: int
+    end_at_ms: int
+    notional: Decimal
+    quantity: Decimal
+    incremental: bool = True
+
+    def __post_init__(self) -> None:
+        account = str(self.account or "").strip().lower()
+        broker = str(self.broker or "").strip().lower()
+        symbol = str(self.symbol or "").strip().upper()
+        exposure_kind = str(self.exposure_kind or "").strip()
+        source_id = str(self.source_id or "").strip()
+        start_at_ms = int(self.start_at_ms)
+        end_at_ms = int(self.end_at_ms)
+        notional = to_decimal(self.notional, field_name="notional")
+        quantity = to_decimal(self.quantity, field_name="quantity")
+        if not account or not broker or not symbol or not exposure_kind or not source_id:
+            raise ValueError("capital exposure requires account, broker, symbol, kind, and source_id")
+        if start_at_ms <= 0 or end_at_ms < start_at_ms:
+            raise ValueError("capital exposure interval is invalid")
+        if notional < 0 or quantity < 0:
+            raise ValueError("capital exposure notional and quantity cannot be negative")
+        if not self.incremental and notional != 0:
+            raise ValueError("zero-incremental capital exposure must have zero notional")
+        object.__setattr__(self, "account", account)
+        object.__setattr__(self, "broker", broker)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "currency", normalize_currency(self.currency))
+        object.__setattr__(self, "exposure_kind", exposure_kind)
+        object.__setattr__(self, "source_id", source_id)
+        object.__setattr__(self, "start_at_ms", start_at_ms)
+        object.__setattr__(self, "end_at_ms", end_at_ms)
+        object.__setattr__(self, "notional", notional)
+        object.__setattr__(self, "quantity", quantity)
+
+    def overlap_ms(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> int:
+        return max(
+            0,
+            min(self.end_at_ms, int(period_end_exclusive_at_ms))
+            - max(self.start_at_ms, int(period_start_at_ms)),
+        )
+
+    def capital_days(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> Decimal:
+        overlap_ms = self.overlap_ms(
+            period_start_at_ms=period_start_at_ms,
+            period_end_exclusive_at_ms=period_end_exclusive_at_ms,
+        )
+        if overlap_ms <= 0 or not self.incremental:
+            return Decimal(0)
+        return self.notional * Decimal(overlap_ms) / MILLISECONDS_PER_DAY
+
+    def to_dict(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> dict[str, Any]:
+        overlap_ms = self.overlap_ms(
+            period_start_at_ms=period_start_at_ms,
+            period_end_exclusive_at_ms=period_end_exclusive_at_ms,
+        )
+        return {
+            "account": self.account,
+            "broker": self.broker,
+            "symbol": self.symbol,
+            "currency": self.currency,
+            "exposure_kind": self.exposure_kind,
+            "source_id": self.source_id,
+            "start_at_ms": self.start_at_ms,
+            "end_at_ms": self.end_at_ms,
+            "notional": float(self.notional),
+            "quantity": float(self.quantity),
+            "incremental": self.incremental,
+            "overlap_ms": overlap_ms,
+            "capital_days": float(
+                self.capital_days(
+                    period_start_at_ms=period_start_at_ms,
+                    period_end_exclusive_at_ms=period_end_exclusive_at_ms,
+                )
+            ),
+        }
+
+
 __all__ = [
+    "CAPITAL_DAYS_QUANTUM",
+    "MILLISECONDS_PER_DAY",
+    "CapitalExposureSegment",
     "DecimalAmountEnvelope",
     "FeeBasis",
     "FeeComponent",
