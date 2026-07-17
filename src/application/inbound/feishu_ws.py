@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import queue
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +28,7 @@ from src.application.channels.reply_decision import (
     permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
 )
 from src.application.copilot.host_store import CopilotHostStore
+from src.application.inbound.feishu import prepare_feishu_ack_target
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
@@ -202,12 +205,21 @@ def handle_feishu_ws_event(
     reaction_fn: ReactionFn = add_message_reaction,
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
+    react_in_handler: bool = True,
 ) -> dict[str, Any]:
+    event_ref = _event_ref(payload)
+    handler_started = time.monotonic()
+
+    stage_started = time.monotonic()
     outbox_retry = _retry_pending_feishu_reply(settings=settings, reply_fn=reply_fn)
+    outbox_retry_ms = _duration_ms(stage_started, time.monotonic())
+
     inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
     service = channel_service or build_feishu_inbound_channel_service()
+
+    stage_started = time.monotonic()
     inbound = service.handle_inbound(
         FEISHU_APP_NOTIFICATION_PROVIDER,
         payload,
@@ -217,9 +229,33 @@ def handle_feishu_ws_event(
         assistant_config_path=settings.assistant_config_path,
         **inbound_kwargs,
     )
-    reaction_status = _maybe_react(inbound=inbound, settings=settings, reaction_fn=reaction_fn)
+    inbound_ms = _duration_ms(stage_started, time.monotonic())
+
+    reaction_started = time.monotonic()
+    reaction_status = _maybe_react(
+        inbound=inbound,
+        settings=settings,
+        reaction_fn=reaction_fn,
+        send_reaction=react_in_handler,
+    )
+    reaction_ms = _duration_ms(reaction_started, time.monotonic())
+
+    stage_started = time.monotonic()
     reply_status = _maybe_reply(inbound=inbound, settings=settings, reply_fn=reply_fn)
     _record_reply_receipt(inbound=inbound, settings=settings, reply_status=reply_status)
+    reply_ms = _duration_ms(stage_started, time.monotonic())
+    total_ms = _duration_ms(handler_started, time.monotonic())
+
+    LOG.info(
+        "feishu_ws_handler event_ref=%s outbox_retry_ms=%d inbound_ms=%d "
+        "reaction_ms=%d reply_ms=%d total_ms=%d",
+        event_ref,
+        outbox_retry_ms,
+        inbound_ms,
+        reaction_ms,
+        reply_ms,
+        total_ms,
+    )
     return build_response(
         tool_name="inbound.feishu_ws",
         ok=bool(inbound.get("ok", False)) and bool(reply_status.get("ok", True)),
@@ -234,6 +270,21 @@ def handle_feishu_ws_event(
     )
 
 
+@dataclass(frozen=True)
+class _FeishuBusinessJob:
+    payload: dict[str, Any]
+    received_monotonic: float
+    event_ref: str
+
+
+@dataclass(frozen=True)
+class _FeishuAckJob:
+    message_id: str
+    emoji_type: str
+    received_monotonic: float
+    event_ref: str
+
+
 def serve_feishu_ws(
     settings: FeishuWsSettings,
     *,
@@ -245,21 +296,105 @@ def serve_feishu_ws(
 ) -> None:
     settings.validate_for_serve()
     with _single_instance_lock(lock_path):
-        worker = _FeishuWsWorker(
+        business_worker = _FeishuWsWorker(
             settings=settings,
             reply_fn=reply_fn,
             reaction_fn=reaction_fn,
             execute_tool_fn=execute_tool_fn,
         )
-        worker.start()
+        emoji_type = str(settings.ack_reaction or "").strip().upper()
+        ack_worker = (
+            _FeishuAckWorker(settings=settings, reaction_fn=reaction_fn)
+            if emoji_type
+            else None
+        )
+        coordinator_lock = threading.Lock()
+        coordinator_accepting = True
+
+        business_worker.start()
+        if ack_worker is not None:
+            ack_worker.start()
+
+        def _on_event(payload: dict[str, Any]) -> None:
+            nonlocal coordinator_accepting
+            received_monotonic = time.monotonic()
+            with coordinator_lock:
+                if not coordinator_accepting:
+                    return
+                event_ref = _event_ref(payload)
+                preflight_started = time.monotonic()
+                ack_target: dict[str, Any] | None = None
+                ack_reason = "disabled"
+                if ack_worker is not None:
+                    try:
+                        ack_target = prepare_feishu_ack_target(
+                            payload,
+                            allowed_senders=settings.allowed_senders,
+                        )
+                        ack_reason = (
+                            "ready"
+                            if bool(ack_target.get("ready"))
+                            else str(ack_target.get("reason") or "not_ready")
+                        )
+                    except Exception as exc:
+                        ack_reason = "preflight_failed"
+                        LOG.warning(
+                            "failed to prepare Feishu ACK target event_ref=%s error_type=%s",
+                            event_ref,
+                            type(exc).__name__,
+                        )
+                preflight_ms = _duration_ms(preflight_started, time.monotonic())
+
+                business_status = business_worker.submit(
+                    payload,
+                    received_monotonic=received_monotonic,
+                )
+                ack_status = "disabled" if ack_worker is None else "not_ready"
+                if (
+                    business_status == "accepted"
+                    and ack_worker is not None
+                    and ack_target is not None
+                    and bool(ack_target.get("ready"))
+                ):
+                    ack_status = ack_worker.submit(
+                        message_id=str(ack_target.get("message_id") or ""),
+                        emoji_type=emoji_type,
+                        received_monotonic=received_monotonic,
+                        event_ref=event_ref,
+                    )
+                elif business_status != "accepted" and ack_worker is not None:
+                    ack_status = "not_submitted"
+
+                dispatch_log_fn = (
+                    LOG.warning
+                    if business_status == "queue_full"
+                    or ack_status == "queue_full"
+                    or ack_reason == "preflight_failed"
+                    else LOG.info
+                )
+                dispatch_log_fn(
+                    "feishu_ws_dispatch event_ref=%s business=%s ack=%s ack_reason=%s "
+                    "preflight_ms=%d callback_ms=%d",
+                    event_ref,
+                    business_status,
+                    ack_status,
+                    ack_reason,
+                    preflight_ms,
+                    _duration_ms(received_monotonic, time.monotonic()),
+                )
+
         try:
             start_client_fn(
                 app_id=settings.app_id,
                 app_secret=settings.app_secret,
-                on_event=worker.submit,
+                on_event=_on_event,
             )
         finally:
-            worker.stop()
+            with coordinator_lock:
+                coordinator_accepting = False
+            if ack_worker is not None:
+                ack_worker.stop()
+            business_worker.stop()
 
 
 class _FeishuWsWorker:
@@ -275,37 +410,212 @@ class _FeishuWsWorker:
         self._reply_fn = reply_fn
         self._reaction_fn = reaction_fn
         self._execute_tool_fn = execute_tool_fn
-        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=max(1, int(settings.queue_size)))
+        self._queue: queue.Queue[_FeishuBusinessJob | None] = queue.Queue(
+            maxsize=max(1, int(settings.queue_size))
+        )
+        self._lifecycle_lock = threading.Lock()
+        self._accepting = True
+        self._stop_requested = threading.Event()
         self._thread = threading.Thread(target=self._run, name="om-feishu-ws-worker", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
     def stop(self) -> None:
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            pass
+        with self._lifecycle_lock:
+            if not self._accepting:
+                return
+            self._accepting = False
+            self._stop_requested.set()
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
         self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            LOG.warning("Feishu business worker did not stop within 5 seconds")
 
-    def submit(self, payload: dict[str, Any]) -> None:
-        self._queue.put_nowait(dict(payload))
+    def submit(
+        self,
+        payload: dict[str, Any],
+        *,
+        received_monotonic: float | None = None,
+    ) -> str:
+        received = time.monotonic() if received_monotonic is None else float(received_monotonic)
+        job = _FeishuBusinessJob(
+            payload=dict(payload),
+            received_monotonic=received,
+            event_ref=_event_ref(payload),
+        )
+        with self._lifecycle_lock:
+            if not self._accepting:
+                return "stopped"
+            try:
+                self._queue.put_nowait(job)
+            except queue.Full:
+                return "queue_full"
+        return "accepted"
 
     def _run(self) -> None:
         while True:
-            payload = self._queue.get()
-            if payload is None:
-                return
             try:
-                handle_feishu_ws_event(
-                    payload,
+                job = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._stop_requested.is_set():
+                    return
+                continue
+            if job is None:
+                return
+            process_started = time.monotonic()
+            status = "ok"
+            try:
+                result = handle_feishu_ws_event(
+                    job.payload,
                     settings=self._settings,
                     reply_fn=self._reply_fn,
                     reaction_fn=self._reaction_fn,
                     execute_tool_fn=self._execute_tool_fn,
+                    react_in_handler=False,
                 )
-            except Exception:
-                LOG.exception("failed to process Feishu WebSocket event")
+                if not bool(result.get("ok", False)):
+                    status = "failed"
+            except Exception as exc:
+                status = "failed"
+                LOG.warning(
+                    "failed to process Feishu WebSocket event event_ref=%s error_type=%s",
+                    job.event_ref,
+                    type(exc).__name__,
+                )
+            finished = time.monotonic()
+            LOG.info(
+                "feishu_ws_event event_ref=%s status=%s queue_wait_ms=%d process_ms=%d total_ms=%d",
+                job.event_ref,
+                status,
+                _duration_ms(job.received_monotonic, process_started),
+                _duration_ms(process_started, finished),
+                _duration_ms(job.received_monotonic, finished),
+            )
+
+
+class _FeishuAckWorker:
+    def __init__(
+        self,
+        *,
+        settings: FeishuWsSettings,
+        reaction_fn: ReactionFn,
+    ) -> None:
+        self._settings = settings
+        self._reaction_fn = reaction_fn
+        self._queue: queue.Queue[_FeishuAckJob | None] = queue.Queue(
+            maxsize=min(4, max(1, int(settings.queue_size)))
+        )
+        self._lifecycle_lock = threading.Lock()
+        self._accepting = True
+        self._stop_requested = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="om-feishu-ack-worker", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(
+        self,
+        *,
+        message_id: str,
+        emoji_type: str,
+        received_monotonic: float,
+        event_ref: str,
+    ) -> str:
+        job = _FeishuAckJob(
+            message_id=str(message_id),
+            emoji_type=str(emoji_type),
+            received_monotonic=float(received_monotonic),
+            event_ref=str(event_ref),
+        )
+        with self._lifecycle_lock:
+            if not self._accepting:
+                return "stopped"
+            try:
+                self._queue.put_nowait(job)
+            except queue.Full:
+                return "queue_full"
+        return "accepted"
+
+    def stop(self) -> None:
+        dropped: list[_FeishuAckJob] = []
+        with self._lifecycle_lock:
+            if not self._accepting:
+                return
+            self._accepting = False
+            self._stop_requested.set()
+            while True:
+                try:
+                    queued = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if queued is not None:
+                    dropped.append(queued)
+            self._queue.put_nowait(None)
+
+        stopped_at = time.monotonic()
+        for job in dropped:
+            LOG.warning(
+                "feishu_ws_ack event_ref=%s status=shutdown_dropped queue_wait_ms=%d "
+                "reaction_ms=0 total_ms=%d",
+                job.event_ref,
+                _duration_ms(job.received_monotonic, stopped_at),
+                _duration_ms(job.received_monotonic, stopped_at),
+            )
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            LOG.warning("Feishu ACK worker did not stop within 5 seconds status=inflight_unfinished")
+
+    def _run(self) -> None:
+        while True:
+            try:
+                job = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._stop_requested.is_set():
+                    return
+                continue
+            if job is None:
+                return
+
+            reaction_started = time.monotonic()
+            queue_wait_ms = _duration_ms(job.received_monotonic, reaction_started)
+            if reaction_started - job.received_monotonic > 3.0:
+                LOG.warning(
+                    "feishu_ws_ack event_ref=%s status=stale_dropped queue_wait_ms=%d "
+                    "reaction_ms=0 total_ms=%d",
+                    job.event_ref,
+                    queue_wait_ms,
+                    queue_wait_ms,
+                )
+                continue
+
+            status = "sent"
+            error_type = ""
+            try:
+                self._reaction_fn(
+                    app_id=self._settings.app_id,
+                    app_secret=self._settings.app_secret,
+                    message_id=job.message_id,
+                    emoji_type=job.emoji_type,
+                )
+            except Exception as exc:
+                status = "failed"
+                error_type = type(exc).__name__
+            finished = time.monotonic()
+            log_fn = LOG.info if status == "sent" else LOG.warning
+            log_fn(
+                "feishu_ws_ack event_ref=%s status=%s queue_wait_ms=%d reaction_ms=%d "
+                "total_ms=%d error_type=%s",
+                job.event_ref,
+                status,
+                queue_wait_ms,
+                _duration_ms(reaction_started, finished),
+                _duration_ms(job.received_monotonic, finished),
+                error_type or "none",
+            )
 
 
 def _maybe_react(
@@ -313,6 +623,7 @@ def _maybe_react(
     inbound: dict[str, Any],
     settings: FeishuWsSettings,
     reaction_fn: ReactionFn,
+    send_reaction: bool = True,
 ) -> dict[str, Any]:
     data = _inbound_message_data(inbound)
     if data is None:
@@ -332,6 +643,8 @@ def _maybe_react(
     message_id = _message_id_from_inbound_data(data)
     if not message_id:
         return {"attempted": True, "ok": False, "reason": "missing_message_id"}
+    if not send_reaction:
+        return {"attempted": False, "ok": True, "reason": "transport_managed"}
 
     try:
         api_response = reaction_fn(
@@ -571,6 +884,18 @@ def _reply_api_success(api_response: Any) -> bool:
     response = _dict(api_response)
     code = response.get("code")
     return not isinstance(code, int) or code == 0
+
+
+def _duration_ms(started: float, finished: float) -> int:
+    return max(0, int(round((float(finished) - float(started)) * 1000)))
+
+
+def _event_ref(payload: dict[str, Any]) -> str:
+    event = _dict(payload.get("event"))
+    message = _dict(event.get("message"))
+    header = _dict(payload.get("header"))
+    raw = _first_text(message.get("message_id"), header.get("event_id"), payload.get("uuid"), "missing")
+    return hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:12]
 
 
 def _message_id_from_inbound_data(data: dict[str, Any]) -> str | None:

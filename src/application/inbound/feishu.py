@@ -6,8 +6,48 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.policy import check_sender_allowed
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+
+def prepare_feishu_ack_target(
+    payload: dict[str, Any],
+    *,
+    allowed_senders: str | None,
+) -> dict[str, Any]:
+    """Return a side-effect-free target for a best-effort Feishu ACK."""
+
+    event_type = _extract_event_type(payload)
+    if event_type != "im.message.receive_v1":
+        return {"ready": False, "reason": "unsupported_event"}
+
+    try:
+        request = feishu_payload_to_inbound_request(payload)
+    except AgentToolError:
+        return {"ready": False, "reason": "invalid_message"}
+
+    message_id = str(request.message_id or "").strip()
+    if not message_id:
+        return {"ready": False, "reason": "invalid_message"}
+
+    decision = check_sender_allowed(
+        channel="feishu",
+        sender_id=request.sender_id,
+        allowed_senders=allowed_senders,
+    )
+    if not decision.allowed:
+        return {
+            "ready": False,
+            "reason": "permission_denied",
+            "sender_decision": decision.public_payload(),
+        }
+    return {
+        "ready": True,
+        "reason": "accepted_sender",
+        "message_id": message_id,
+        "sender_decision": decision.public_payload(),
+    }
 
 
 def handle_feishu_payload(
