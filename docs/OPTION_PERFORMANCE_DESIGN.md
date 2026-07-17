@@ -49,8 +49,27 @@ Currency and multiplier are economic units even though they are not both part of
 
 `PositionLot.realized_pnl` is retained for risk/read compatibility and is not the canonical gross or net performance amount: legacy lot behavior subtracts close-event fees but does not allocate opening fees. New reporting must use `ProjectionResult.allocations`, exposed through the application ledger API.
 
+## Core Period Activity, Cash, and Realized PnL
+
+The pure period engine consumes effective canonical trade events plus canonical option economic allocations. It never matches option lots. Events own direct activity and cash facts; allocations exclusively own realized option PnL.
+
+- Short option opens create positive `premium_collected_gross` and positive option trade cash; short closes create negative option trade cash.
+- Long option opens create positive `premium_paid_gross` and negative option trade cash; long closes create positive option trade cash.
+- Premium activity is not PnL. Realized option PnL is recognized only at the allocation close timestamp.
+- Assignment/exercise option close price zero is valid. Recorded stock settlement principal is a separate signed cash fact and never an option loss.
+- Option fee cash is production-observed only from actual fee facts. Estimated or missing fees make affected net metrics partial/null while gross metrics remain available.
+- Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
+- An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
+
+All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal. No CNY conversion occurs before the valuation/FX slice.
+
+Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
+
+The application service reads immutable events only through `src.application.ledger.api`, rebuilds canonical projection without writes, and passes domain facts to the pure engine. Its S3 output is the internal `option_period_performance.core.v1` contract; the public Agent/CLI v1 envelope is added in S7.
+
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.
 - S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
-- S3-S10: pending their Gateflow implementation/review gates.
+- S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
+- S4-S10: pending their Gateflow implementation/review gates.
