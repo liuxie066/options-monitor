@@ -9,6 +9,10 @@ from datetime import datetime
 from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
 from domain.domain.ledger.events import CLOSE_EVENT_TYPES, TradeEvent, lot_id_for_open_event, validate_trade_event
 from domain.domain.option_position_identity import normalize_account, normalize_broker
+from domain.domain.performance.attribution import (
+    resolve_allocation_attribution,
+    resolve_event_attribution,
+)
 from domain.domain.performance.models import (
     CAPITAL_DAYS_QUANTUM,
     CapitalExposureSegment,
@@ -18,6 +22,7 @@ from domain.domain.performance.models import (
     MetricQuality,
     MetricStatus,
     OptionValuationPosition,
+    StrategyAttribution,
     ValuationMarkFact,
     normalize_currency,
     quantize_money,
@@ -72,6 +77,8 @@ class PerformanceFact:
     allocation_id: str | None = None
     missing_reason: str | None = None
     evidence_fact_ids: tuple[str, ...] = ()
+    attribution: StrategyAttribution | None = None
+    attribution_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         kind = str(self.fact_kind or "").strip()
@@ -111,6 +118,11 @@ class PerformanceFact:
             "evidence_fact_ids",
             tuple(dict.fromkeys(str(item) for item in self.evidence_fact_ids if str(item))),
         )
+        object.__setattr__(
+            self,
+            "attribution_issues",
+            tuple(sorted({str(item) for item in self.attribution_issues if str(item)})),
+        )
 
     @property
     def fact_id(self) -> str:
@@ -132,6 +144,8 @@ class PerformanceFact:
             "allocation_id": self.allocation_id,
             "missing_reason": self.missing_reason,
             "evidence_fact_ids": list(self.evidence_fact_ids),
+            "attribution": None if self.attribution is None else self.attribution.to_dict(),
+            "attribution_issues": list(self.attribution_issues),
         }
 
 
@@ -579,6 +593,10 @@ def _append_option_capital_segment(
     if incremental and notional < 0:
         missing.add(f"capital_basis_unavailable:{event.event_id}")
         return
+    attribution_resolution = resolve_event_attribution(
+        event,
+        lifecycle_source_id=lot_id_for_open_event(event),
+    )
     segments.append(
         CapitalExposureSegment(
             account=key.account,
@@ -592,6 +610,8 @@ def _append_option_capital_segment(
             notional=notional,
             quantity=quantity,
             incremental=incremental,
+            attribution=attribution_resolution.attribution,
+            attribution_issues=attribution_resolution.issues,
         )
     )
 
@@ -885,6 +905,12 @@ def _allocation_realized_facts(allocation: OptionEconomicAllocation) -> list[Per
         "currency": currency,
         "source_event_id": allocation.close_event_id,
         "allocation_id": allocation.allocation_id,
+        "attribution": resolve_allocation_attribution(
+            strategy=allocation.strategy,
+            leg_role=allocation.leg_role,
+            strategy_group_id=allocation.strategy_group_id,
+            target_lot_id=allocation.target_lot_id,
+        ),
     }
     gross_amount = None if currency_reason else allocation.realized_pnl_gross
     net_amount = None if currency_reason else allocation.realized_pnl_net
@@ -1300,6 +1326,8 @@ def _option_valuation_facts(
             "symbol": position.symbol,
             "currency": position.currency,
             "source_event_id": position.lot_id,
+            "attribution": position.attribution,
+            "attribution_issues": position.attribution_issues,
         }
         if selection.fact is None:
             reason = f"{prefix} option mark unavailable: {selection.reason or selection.status}"
@@ -1362,12 +1390,18 @@ def _fact_currency(value: Any, *, context: str) -> tuple[str | None, str | None]
 
 
 def _event_fact_kwargs(event: TradeEvent, *, currency: str | None) -> dict[str, Any]:
+    resolution = resolve_event_attribution(
+        event,
+        lifecycle_source_id=lot_id_for_open_event(event) if event.event_type == "open" else None,
+    )
     return {
         "account": event.contract_key.account,
         "broker": event.contract_key.broker,
         "symbol": event.contract_key.underlying_symbol,
         "currency": currency,
         "source_event_id": event.event_id,
+        "attribution": resolution.attribution,
+        "attribution_issues": resolution.issues,
     }
 
 
