@@ -556,3 +556,49 @@ def test_list_position_rows_requires_broker_on_persisted_rows() -> None:
 
     assert [row["record_id"] for row in rows] == ["lot_1"]
     assert rows[0]["broker"] == "富途"
+
+
+def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
+    group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
+    records = []
+    for record_id, option_type, side, contracts, expiration, leg_role in (
+        ("put-1", "put", "short", 2, "2026-08-21", "sell_put"),
+        ("call-1", "call", "long", 1, "2026-09-18", "enhancement_call"),
+        ("call-2", "call", "long", 1, "2026-09-18", "enhancement_call"),
+    ):
+        expiration_ms = int(datetime.fromisoformat(expiration).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        records.append(
+            {
+                "record_id": record_id,
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "PDD",
+                    "status": "open",
+                    "side": side,
+                    "option_type": option_type,
+                    "contracts": contracts,
+                    "contracts_open": contracts,
+                    "contracts_closed": 0,
+                    "currency": "USD",
+                    "strike": 80.0 if option_type == "put" else 100.0,
+                    "multiplier": 100,
+                    "expiration": expiration_ms,
+                    "expiration_ymd": expiration,
+                    "strategy": "combo_yield",
+                    "leg_role": leg_role,
+                    "strategy_group_id": group_id,
+                    "strategy_snapshot": {"expiry_structure": "diagonal", "strategy_group_id": group_id},
+                },
+            }
+        )
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+
+    assert len(ctx["combo_yield_groups"]) == 1
+    group = ctx["combo_yield_groups"][0]
+    assert group["strategy_group_id"] == group_id
+    assert group["put_contracts_open"] == 2
+    assert group["call_contracts_open"] == 2
+    assert group["summary_classification"] == "active_combo"
+    assert group["evidence_scope"] == "option_lots"
