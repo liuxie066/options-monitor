@@ -6,9 +6,12 @@
 
 ### Added
 - Added true diagonal Combo Yield lifecycle support with independent funding-Put and participation-Call expiries, required composition dependencies, pair diagnostics, and lifecycle reporting.
+- Added additive cross-expiry Combo Yield strategy attribution for Funding Put, Participation Call, assigned-stock, residual-tail PnL, and risk-capital-days while preserving canonical report totals.
+- Added additive cross-expiry performance attribution for Funding Put, Participation Call, assigned stock, and residual Call tail lifecycles, including native-currency PnL conservation and risk-capital-days efficiency.
 
 ### Changed
 - Made Combo Yield an explicit per-symbol runtime strategy step controlled solely by `combo_yield.enabled`, independent of Sell Put enablement, prefiltering, candidate availability, or scan failure.
+- Kept Call premium as the Participation Call lifecycle cost basis, reported Put-to-Call funding separately, and failed closed instead of mismatching residual-tail PnL when an exact Put-close transition mark is unavailable.
 - Planned Combo Yield Put and Call required-data prefetch independently and preserved market funding configuration when Sell Put is disabled for an account.
 
 ### Fixed
