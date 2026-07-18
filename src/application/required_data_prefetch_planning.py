@@ -238,7 +238,7 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
     want_put = bool(sp.get("enabled", False))
     want_direct_call = bool(cc.get("enabled", False))
     yield_policy = derive_yield_enhancement_policy(ye, sp)
-    want_yield_call = bool(want_put and yield_policy.enabled)
+    want_yield_call = bool(yield_policy.enabled)
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     include_realized_volatility = bool(
@@ -252,7 +252,7 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
     max_dtes: list[int] = []
     side_strike_windows: dict[str, dict[str, float | None]] = {}
 
-    if want_put:
+    if want_put or want_yield_call:
         min_dte, max_dte = _window_values(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
         min_dtes.append(min_dte)
         max_dtes.append(max_dte)

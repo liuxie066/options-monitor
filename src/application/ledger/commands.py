@@ -524,6 +524,15 @@ def persist_manual_close_event_with_ledger(
 def preview_manual_position_open(repo: Any | None, command: OpenPositionCommand) -> ManualOpenPreviewResult:
     fields_contract = build_position_lot_fields(command)
     fields = fields_contract.to_dict()
+    fields.update(
+        strategy_metadata_fields_from_payload(
+            {
+                "strategy_snapshot": (
+                    dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None
+                )
+            }
+        )
+    )
     resolved_command = command
     if resolved_command.opened_at_ms is None:
         resolved_command = replace(resolved_command, opened_at_ms=int(fields_contract.opened_at))
@@ -537,9 +546,19 @@ def record_manual_position_open(repo: Any, command: OpenPositionCommand) -> Open
     if supports_ledger_open_preflight(repo):
         return persist_manual_open_event_with_ledger(repo, command)
     result = persist_manual_open_event(repo, command)
+    fields = build_position_lot_fields(command).to_dict()
+    fields.update(
+        strategy_metadata_fields_from_payload(
+            {
+                "strategy_snapshot": (
+                    dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None
+                )
+            }
+        )
+    )
     return OpenLedgerResult(
         result=LedgerWriteResult.from_payload(result),
-        fields=build_position_lot_fields(command).to_dict(),
+        fields=fields,
         command=command,
         ledger_preflight=LedgerPreflightResult(
             status="skipped",

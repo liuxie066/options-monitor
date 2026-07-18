@@ -810,6 +810,7 @@ om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 - 只读已有 `close_advice.csv`，按 account/symbol/option type/side/strike/expiration 过滤平仓建议行
 - 给 Inbound 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
 - 返回已有报告中的 `close_calibration_status`、压力损失、显式替代收益和继续履约意愿，供人工解释和 replay 使用
+- 对新报告同时返回 additive `combo_group_*` 分类、动作、issues、两腿未平数量、行情状态和证据范围；逐腿 `close_action` / tier / reason 保持原样
 - 新报告返回 `position_lot_id=position_lots.record_id`，用于区分同合约的多个 lot；旧报告没有该字段时仍可读取
 - 不刷新行情、不连接 OpenD、不重新生成 close advice、不写报告
 

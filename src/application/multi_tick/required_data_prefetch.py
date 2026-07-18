@@ -173,7 +173,7 @@ def _build_single_prefetch_fetch_plan(
     yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, sell_put_cfg)
     want_put = bool(sell_put_cfg.get("enabled", False))
     want_call = bool(sell_call_cfg.get("enabled", False))
-    want_yield_enhancement = bool(want_put and yield_policy.enabled)
+    want_yield_enhancement = bool(yield_policy.enabled)
     snapshot_cfg = _as_dict(opend_fetch_cfg.get("market_snapshot"))
     expiration_cfg = _as_dict(opend_fetch_cfg.get("option_expiration"))
     return build_required_data_fetch_plan(
