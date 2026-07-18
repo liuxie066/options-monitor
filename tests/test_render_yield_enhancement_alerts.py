@@ -97,3 +97,35 @@ def test_render_yield_enhancement_alerts_preserves_explicit_paths(tmp_path: Path
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == text
     assert not (report_dir / "nvda_combo_yield_alerts.txt").exists()
+
+
+def test_render_yield_enhancement_alerts_shows_diagonal_horizons_without_terminal_prediction(tmp_path: Path) -> None:
+    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    row = _sample_candidate()
+    row.update(
+        {
+            "expiry_structure": "diagonal",
+            "put_expiration": "2026-06-19",
+            "call_expiration": "2026-07-17",
+            "put_dte": 44,
+            "call_dte": 72,
+            "terminal_metrics_status": "not_evaluable_diagonal",
+            "terminal_metrics_unsupported_reason": "future_call_residual_value_not_modeled",
+            "expected_move": None,
+            "scenario_score": None,
+            "annualized_scenario_score": None,
+        }
+    )
+    pd.DataFrame([row]).to_csv(report_dir / "nvda_combo_yield_candidates.csv", index=False)
+
+    text = render_yield_enhancement_alerts(report_dir=report_dir, symbol="NVDA", top=1)
+
+    assert "[组合收益推荐] NVDA Put 2026-06-19 95P + Call 2026-07-17 110C" in text
+    assert "DTE: Put=44 | Call=72" in text
+    assert "到期终值指标: 不可评估（不预测 Put 到期时 Call 剩余价值）" in text
+    assert "Expected Move:" not in text
+    assert "场景评分:" not in text
+    assert "上行弹性:" not in text

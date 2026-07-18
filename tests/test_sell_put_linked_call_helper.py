@@ -139,6 +139,7 @@ def _write_single_call(
     ask: float = 0.25,
     implied_volatility: float = 0.80,
     delta: float = 0.20,
+    expiration: str = "2026-06-19",
 ) -> None:
     parsed = input_root / "parsed"
     parsed.mkdir(parents=True, exist_ok=True)
@@ -147,7 +148,7 @@ def _write_single_call(
             {
                 "symbol": "NVDA",
                 "option_type": "call",
-                "expiration": "2026-06-19",
+                "expiration": expiration,
                 "dte": dte,
                 "contract_symbol": contract_symbol,
                 "strike": strike,
@@ -193,6 +194,109 @@ def _single_put_df(
     }
     row.update(overrides)
     return pd.DataFrame([row])
+
+
+def test_yield_enhancement_diagonal_uses_independent_expiries_and_null_terminal_metrics(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import (
+        attach_best_linked_calls,
+        find_sell_put_yield_enhancement_pairs,
+    )
+
+    _write_single_call(
+        tmp_path,
+        dte=72,
+        expiration="2026-07-17",
+        contract_symbol="NVDA_C110_JUL",
+    )
+    puts = _single_put_df(dte=44, account="LX")
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=puts,
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "expiry_structure": "diagonal",
+            "min_expiry_gap_days": 7,
+            "min_net_credit_annualized": 0.0,
+            "min_net_credit_retention": 0.0,
+            "call": {"min_dte": 61, "max_dte": 90},
+        },
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60},
+    )
+
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert row["expiry_structure"] == "diagonal"
+    assert row["put_expiration"] == "2026-06-19"
+    assert row["call_expiration"] == "2026-07-17"
+    assert int(row["put_dte"]) == 44
+    assert int(row["call_dte"]) == 72
+    assert int(row["expiry_gap_days"]) == 28
+    assert row["terminal_metrics_status"] == "not_evaluable_diagonal"
+    assert row["terminal_metrics_unsupported_reason"] == "future_call_residual_value_not_modeled"
+    for field in (
+        "expected_move",
+        "call_payoff_multiple_at_1_5_sigma",
+        "call_payoff_multiple_at_2_0_sigma",
+        "scenario_score",
+        "annualized_scenario_score",
+        "upside_scenario_price",
+        "upside_lift",
+        "upside_net_lift",
+        "upside_lift_to_call_cost",
+        "upside_lift_to_put_credit",
+        "upside_breakeven",
+        "upside_breakeven_pct_above_spot",
+    ):
+        assert pd.isna(row[field])
+    assert row["combo_pair_fingerprint"] == "combo_yield|NVDA|NVDA_P95|NVDA_C110_JUL"
+    assert row["strategy_group_id"] == "combo_yield:lx:combo_yield|NVDA|NVDA_P95|NVDA_C110_JUL"
+
+    attached = attach_best_linked_calls(df_candidates=puts, pairs_df=pairs)
+    assert attached.iloc[0]["linked_call_contract"] == "2026-07-17 110C"
+
+
+def test_yield_enhancement_diagonal_rejects_same_or_earlier_call_and_enforces_gap(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA", "option_type": "call", "expiration": expiration, "dte": dte,
+                "contract_symbol": contract, "strike": 110.0, "spot": 100.0, "bid": 0.24,
+                "ask": 0.25, "mid": 0.245, "volume": 65, "open_interest": 980,
+                "implied_volatility": 0.80, "currency": "USD", "delta": 0.20, "multiplier": 100,
+            }
+            for expiration, dte, contract in (
+                ("2026-06-12", 37, "NVDA_C110_EARLY"),
+                ("2026-06-19", 44, "NVDA_C110_SAME"),
+                ("2026-06-26", 51, "NVDA_C110_SHORT_GAP"),
+                ("2026-07-17", 72, "NVDA_C110_VALID"),
+            )
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(dte=44),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "expiry_structure": "diagonal",
+            "min_expiry_gap_days": 14,
+            "min_net_credit_annualized": 0.0,
+            "min_net_credit_retention": 0.0,
+            "call": {"min_dte": 30, "max_dte": 90},
+        },
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60},
+    )
+
+    assert pairs["call_contract_symbol"].tolist() == ["NVDA_C110_VALID"]
+    assert pairs.attrs["reject_counts"]["call_expiration_not_later"] == 2
+    assert pairs.attrs["reject_counts"]["expiry_gap_below_minimum"] == 1
 
 
 def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path: Path) -> None:
