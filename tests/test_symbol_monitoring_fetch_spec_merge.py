@@ -46,6 +46,10 @@ def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypat
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     out = mod.run_symbol_monitoring(
@@ -114,6 +118,10 @@ def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkey
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
         run_sell_call_scan_fn=_scan_should_not_run,
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     out = mod.run_symbol_monitoring(
@@ -181,6 +189,10 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     mod.run_symbol_monitoring(
@@ -270,6 +282,10 @@ def test_run_symbol_monitoring_lifts_sell_call_min_strike_to_avg_cost(monkeypatc
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     mod.run_symbol_monitoring(
@@ -354,6 +370,10 @@ def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkey
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     mod.run_symbol_monitoring(
@@ -419,6 +439,10 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     out = mod.run_symbol_monitoring(
@@ -505,6 +529,8 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
         run_combo_yield_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: None,
     )
 
     out = mod.run_symbol_monitoring(
