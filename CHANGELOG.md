@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.413 - 2026-07-18
+
 ### Changed
 - Set Python 3.12 as the repository-wide hard minimum across public launchers, installation, release preflight, service-upgrade runtime creation, generated release commands, Ruff, and CI.
 - Bound service-upgrade venv creation to the already-running supported interpreter while keeping shared dependency-cache identity stable at the Python major/minor contract.
