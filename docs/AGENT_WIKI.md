@@ -302,6 +302,29 @@ Rules:
 - Non-ledger runtime code must enter through `src/application/ledger/api.py`.
 - Do not patch projected state directly when the canonical event chain is wrong.
 
+#### Option Performance And Portfolio Bridges
+
+Primary read entry points:
+
+```bash
+./om option-performance report --config-key us --account lx --period mtd
+./om option-performance report --config-key us --account lx --period ytd --as-of-date 2026-07-17
+./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"month","month":"2026-06"}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+```
+
+Use the metric namespace that matches the question:
+
+- profit / earnings -> `pnl.period_total_net` or an explicit gross/realized variant;
+- cash movement -> `cash.total_cash_change_net` and its six components;
+- premium activity -> `activity.premium_collected_gross`;
+- capital efficiency -> the explicit `capital.*_annualized_efficiency` fields only.
+
+`premium_collected_gross` is not additional profit. Assignment stock principal is cash movement and an asset conversion, not option PnL. Missing fee, mark, or FX evidence stays partial/null and must never be replaced with zero. A configured account scope with no events is a proven observed zero; an arbitrary unconfigured scope remains `not_observed`.
+
+`monthly_income_report`, `./om option-positions report monthly-income`, and `portfolio_capital_bridge` are deprecated rollback boundaries. Do not create new consumers of their ambiguous `net_income_cny` or generic return fields. See `docs/migrations/OPTION_PERFORMANCE_V1_MIGRATION.md` for reconciliation, rollback, and removal gates.
+
 ### Close Advice
 
 - Domain policy: `domain/domain/close_advice.py`
