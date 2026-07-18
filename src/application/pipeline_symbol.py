@@ -9,13 +9,24 @@ from run_pipeline.py with minimal/no behavioral changes.
 from __future__ import annotations
 
 from pathlib import Path
+from functools import partial
 
 from src.application.exchange_rate_loader import build_converter
 from src.application.prefilters import apply_prefilters
 from src.application.multiplier_steps import apply_multiplier_cache_to_required_data_csv
 from src.application.required_data_steps import ensure_required_data
 from src.application.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
-from src.application.sell_put_steps import empty_sell_put_summary, run_sell_put_scan_and_summarize
+from src.application.sell_put_steps import (
+    _enrich_and_filter_sell_put_cash,
+    empty_sell_put_summary,
+    materialize_empty_sell_put_artifacts,
+    run_sell_put_scan_and_summarize,
+)
+from src.application.combo_yield_steps import (
+    empty_combo_yield_summary,
+    materialize_empty_combo_yield_artifacts,
+    run_combo_yield_for_symbol_and_summarize,
+)
 from src.application.symbol_monitoring import (
     SymbolMonitoringDependencies,
     SymbolMonitoringInputs,
@@ -71,5 +82,12 @@ def process_symbol(
             empty_sell_put_summary_fn=empty_sell_put_summary,
             run_sell_call_scan_fn=run_sell_call_scan_and_summarize,
             empty_sell_call_summary_fn=empty_sell_call_summary,
+            run_combo_yield_scan_fn=partial(
+                run_combo_yield_for_symbol_and_summarize,
+                cash_filter_put_candidates_fn=_enrich_and_filter_sell_put_cash,
+            ),
+            empty_combo_yield_summary_fn=empty_combo_yield_summary,
+            materialize_empty_sell_put_artifacts_fn=materialize_empty_sell_put_artifacts,
+            materialize_empty_combo_yield_artifacts_fn=materialize_empty_combo_yield_artifacts,
         ),
     )
