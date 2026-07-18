@@ -459,13 +459,20 @@ def _residual_tail(*, call: Mapping[str, Any], put: Mapping[str, Any], call_segm
     ]
     isolated = period.effective_start_at_ms >= tail_start
     tail_pnl = call_pnl if isolated else {"period_total_net": {"by_currency": {}, "status": "not_observed", "reason": "transition_mark_required"}}
+    quality_issues = ["transition_mark_required"]
+    if isolated:
+        quality_issues = []
+        for metric in ("period_total_gross", "period_total_net"):
+            status = str((tail_pnl.get(metric) or {}).get("status") or "not_observed")
+            if status != "observed":
+                quality_issues.append(f"residual_tail_{metric}_{status}")
     return {
         "residual_tail_id": f"residual_tail:{call['attribution'].strategy_group_id}:{put['allocations'][-1].close_event_id if put['allocations'] else tail_start}",
         "start_at_ms": tail_start,
         "end_at_ms": tail_end,
         "pnl": tail_pnl,
         "capital": _capital_report(tail_segments, period=period, pnl=tail_pnl),
-        "quality": {"status": "observed" if isolated else "partial", "issues": [] if isolated else ["transition_mark_required"]},
+        "quality": {"status": "partial" if quality_issues else "observed", "issues": quality_issues},
     }
 
 
