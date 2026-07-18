@@ -51,7 +51,7 @@ Full performance validation with dirty-worktree allowance during implementation:
 - Test result: `2682 passed, 10 skipped` on each run.
 - Median improvement: 106s → 38s, approximately 64%.
 
-A clean `--require-clean` run remains required after the accepted slice commit.
+Clean-worktree final validation after the accepted slice commit: 45s elapsed; `2682 passed, 10 skipped` in 41.38s pytest time.
 
 ## Docs decision
 
@@ -64,4 +64,4 @@ The durable plan, goal confirmation, plan review, implementation artifact, and c
 
 ## Completion status
 
-Implementation complete; pending code review gate and clean-worktree validation.
+Implementation complete; code review passed and clean-worktree validation passed.
