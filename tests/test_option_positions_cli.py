@@ -1903,3 +1903,82 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
     assert "# Position Lots Monthly Income" in out
     assert "filters: month=2026-04 | account=lx | broker=富途" in out
     assert "| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 | 0 |" in out
+
+
+def test_combo_yield_lifecycle_events_copy_group_metadata(tmp_path: Path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import record_lifecycle_expire_close, record_manual_assignment
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    def snapshot(group_id: str) -> dict:
+        return {
+            "strategy": "combo_yield",
+            "leg_role": "sell_put",
+            "strategy_group_id": group_id,
+            "expiry_structure": "diagonal",
+            "yield_enhancement_mode": "income_upside",
+        }
+
+    assignment_group = "combo_yield:lx:assignment-pair"
+    expiry_group = "combo_yield:lx:expiry-pair"
+    for symbol, group_id, opened_at_ms in (
+        ("PDD", assignment_group, 1000),
+        ("TSLA", expiry_group, 2000),
+    ):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol=symbol,
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=80.0,
+                multiplier=100,
+                expiration_ymd="2026-08-21",
+                premium_per_share=1.0,
+                opened_at_ms=opened_at_ms,
+                strategy_snapshot=snapshot(group_id),
+            ),
+        )
+
+    assignment_lot = next(lot for lot in repo.list_position_lots() if lot["fields"]["symbol"] == "PDD")
+    record_manual_assignment(
+        repo,
+        record_id=assignment_lot["record_id"],
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=80.0,
+        as_of_ms=3000,
+    )
+    record_lifecycle_expire_close(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="TSLA",
+        option_type="put",
+        position_side="short",
+        strike=80.0,
+        expiration_ymd="2026-08-21",
+        contracts_to_close=1,
+        event_time_ms=4000,
+        case_id="expiry-case",
+        evidence_ids=["evidence-1"],
+    )
+
+    lifecycle_events = {
+        event["event_type"]: event
+        for event in repo.list_trade_events()
+        if event.get("event_type") in {"assignment", "expire_close"}
+    }
+    assert set(lifecycle_events) == {"assignment", "expire_close"}
+    for event_type, expected_group in (("assignment", assignment_group), ("expire_close", expiry_group)):
+        payload = lifecycle_events[event_type]["raw_payload"]
+        assert payload["strategy"] == "combo_yield"
+        assert payload["leg_role"] == "sell_put"
+        assert payload["strategy_group_id"] == expected_group
+        assert payload["strategy_snapshot"]["expiry_structure"] == "diagonal"
