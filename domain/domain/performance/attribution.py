@@ -45,7 +45,9 @@ def resolve_event_attribution(
         return AttributionResolution(None)
     if strategy != _COMBO_YIELD or not group_id:
         return AttributionResolution(None, (f"strategy_attribution_incomplete:{event.event_id}",))
-    lifecycle_id = _lifecycle_id(leg_role=leg_role, source_id=lifecycle_source_id or event.event_id)
+    if not _text(lifecycle_source_id):
+        return AttributionResolution(None, (f"strategy_lifecycle_source_missing:{event.event_id}",))
+    lifecycle_id = _lifecycle_id(leg_role=leg_role, source_id=lifecycle_source_id)
     if lifecycle_id is None:
         return AttributionResolution(None, (f"strategy_leg_role_unsupported:{event.event_id}",))
     return AttributionResolution(
