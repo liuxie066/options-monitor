@@ -9,9 +9,17 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
+from domain.domain.candidate_defaults import (
+    DEFAULT_SELL_PUT_WINDOW,
+    CandidateLiquidityDefaults,
+    CandidateWindowDefaults,
+    resolve_candidate_liquidity,
+    resolve_candidate_window,
+    resolve_event_risk_config,
+)
 from domain.domain.insurance_underwriting import evaluate_event_risk_candidate
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
+from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -32,6 +40,8 @@ from src.application.sell_put_call_helper import (
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
 from src.application.yield_enhancement_config import (
     YieldEnhancementPolicy,
+    derive_yield_enhancement_policy,
+    resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,
     wants_yield_enhancement_separate,
 )
@@ -366,3 +376,88 @@ def run_combo_yield_scan_and_summarize(
     if final_result.separate_enabled:
         summary = summarize_yield_enhancement(final_result.recommended_pairs, symbol, symbol_cfg=symbol_cfg)
     return final_result, summary
+
+
+def materialize_empty_combo_yield_artifacts(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
+    """Replace current Combo Yield outputs with explicit empty artifacts."""
+
+    result = _empty_result(report_dir=report_dir, symbol_lower=symbol_lower)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame().to_csv(result.candidates_path, index=False)
+    result.alerts_path.write_text("", encoding="utf-8")
+    for suffix in (
+        "combo_yield_pair_diagnostics.csv",
+        "combo_yield_rank_shadow.csv",
+        "combo_yield_put_universe.csv",
+        "combo_yield_put_universe_labeled.csv",
+        "combo_yield_put_universe_cash_filtered.csv",
+        "combo_yield_put_universe_underwritten.csv",
+    ):
+        pd.DataFrame().to_csv((report_dir / f"{symbol_lower}_{suffix}").resolve(), index=False)
+    return result
+
+
+def empty_combo_yield_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:
+    return summarize_yield_enhancement(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+
+
+def run_combo_yield_for_symbol_and_summarize(
+    *,
+    base: Path,
+    sym: str,
+    symbol: str,
+    symbol_lower: str,
+    symbol_cfg: dict[str, Any],
+    sell_put_cfg: dict[str, Any],
+    top_n: int,
+    required_data_dir: Path,
+    report_dir: Path,
+    is_scheduled: bool,
+    exchange_rate_converter: CurrencyConverter,
+    portfolio_ctx: dict[str, Any] | None,
+    global_sell_put_liquidity: dict[str, Any] | None = None,
+    global_sell_put_event_risk: dict[str, Any] | None = None,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = None,
+) -> dict[str, Any] | None:
+    """Symbol-level Combo Yield facade with independent config and artifact ownership."""
+
+    yield_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    policy = derive_yield_enhancement_policy(yield_cfg, sell_put_cfg, market=symbol_market(symbol))
+    if not policy.enabled:
+        materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
+        return None
+
+    materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
+    liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
+    event_risk = resolve_event_risk_config(global_sell_put_event_risk)
+    yield_window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
+    sell_put_labeled_path = (report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve()
+    df_sell_put_labeled = (
+        safe_read_csv(sell_put_labeled_path)
+        if bool(sell_put_cfg.get("enabled", False))
+        else pd.DataFrame()
+    )
+
+    _result, summary = run_combo_yield_scan_and_summarize(
+        base=base,
+        sym=sym,
+        symbol=symbol,
+        symbol_lower=symbol_lower,
+        symbol_cfg=symbol_cfg,
+        yield_enhancement_cfg=yield_cfg,
+        yield_sp=dict(sell_put_cfg),
+        yield_enhancement_policy=policy,
+        df_sell_put_labeled=df_sell_put_labeled,
+        sell_put_labeled_path=sell_put_labeled_path,
+        required_data_dir=required_data_dir,
+        report_dir=report_dir,
+        yield_window=yield_window,
+        liquidity=liquidity,
+        event_risk=event_risk,
+        exchange_rate_converter=exchange_rate_converter,
+        portfolio_ctx=portfolio_ctx,
+        top_n=top_n,
+        is_scheduled=is_scheduled,
+        cash_filter_put_candidates_fn=cash_filter_put_candidates_fn,
+    )
+    return summary

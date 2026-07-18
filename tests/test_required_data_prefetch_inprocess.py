@@ -997,3 +997,31 @@ def test_inprocess_prefetch_summary_includes_symbol_duration(tmp_path: Path, mon
     assert result["symbols"][0]["duration_sec"] >= 0.0
     assert result["audit"][0]["duration_sec"] >= 0.0
     assert built and built[0].close_calls >= 1
+
+
+def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disabled() -> None:
+    out = strategy_prefetch_kwargs(
+        {
+            "symbol": "NVDA",
+            "sell_put": {
+                "enabled": False,
+                "min_dte": 20,
+                "max_dte": 60,
+                "min_strike": 90,
+                "max_strike": 96,
+            },
+            "sell_call": {"enabled": False},
+            "combo_yield": {
+                "enabled": True,
+                "structure_mode": "staggered_expiry_pair",
+                "call": {"min_dte": 61, "max_dte": 90},
+            },
+        },
+        enabled=True,
+    )
+
+    assert out["option_types"] == "put,call"
+    assert out["min_dte"] == 20
+    assert out["max_dte"] == 90
+    assert out["side_strike_windows"]["put"]["min_strike"] == 90.0
+    assert out["side_strike_windows"]["put"]["max_strike"] == 96.0
