@@ -896,6 +896,144 @@ def _resolve_exit_contract(
     return EXIT_STATE_HOLD, exit_reason_type or EXIT_REASON_TYPE_HOLD
 
 
+
+def synthesize_combo_yield_group_close_advice(
+    *,
+    inventory_classification: Any,
+    inventory_issues: list[str] | tuple[str, ...] | None,
+    put_actions: list[str] | tuple[str, ...] | None,
+    call_actions: list[str] | tuple[str, ...] | None,
+    evidence_issues: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Synthesize additive Combo Yield group advice after leg advice.
+
+    The leg evaluators remain authoritative.  This helper only classifies the
+    option inventory and translates already-evaluated leg actions into a
+    quantity/quote-gated group view.
+    """
+
+    classification = str(inventory_classification or "").strip().lower()
+    issues = sorted(
+        {
+            str(item or "").strip()
+            for item in [*(inventory_issues or []), *(evidence_issues or [])]
+            if str(item or "").strip()
+        }
+    )
+    normalized_put_actions = sorted(
+        {str(item or "").strip().lower() for item in (put_actions or []) if str(item or "").strip()}
+    )
+    normalized_call_actions = sorted(
+        {str(item or "").strip().lower() for item in (call_actions or []) if str(item or "").strip()}
+    )
+
+    def review(*extra: str) -> dict[str, Any]:
+        final_issues = sorted({*issues, *(item for item in extra if item)})
+        return {
+            "combo_group_classification": "review_required",
+            "combo_group_status": "review_required",
+            "combo_group_action": None,
+            "combo_group_reason": "组合证据不完整或互相冲突，保留逐腿建议并要求人工复核",
+            "combo_group_issues": final_issues,
+        }
+
+    if issues:
+        return review()
+
+    if classification == "active_combo":
+        if len(normalized_put_actions) != 1:
+            return review("mixed_put_leg_actions" if normalized_put_actions else "missing_put_leg_advice")
+        if len(normalized_call_actions) != 1:
+            return review("mixed_call_leg_actions" if normalized_call_actions else "missing_call_leg_advice")
+        put_action = normalized_put_actions[0]
+        call_action = normalized_call_actions[0]
+        call_sell_actions = {"sell_call_take_profit", "sell_call_salvage"}
+        call_hold_actions = {
+            "hold_call",
+            "hold_call_as_convexity",
+            "hold_to_expiry_or_expire",
+        }
+        if call_action not in call_sell_actions | call_hold_actions:
+            return review(
+                "call_leg_advice_not_evaluable"
+                if call_action == "not_evaluable"
+                else "unsupported_call_leg_action"
+            )
+        if put_action == "close_put_keep_call" and call_action in call_sell_actions:
+            action = "close_both"
+            reason = "Put 腿满足平仓条件，Call 腿也建议卖出；组合动作与两腿建议一致"
+        elif put_action == "close_put_keep_call":
+            action = "close_put_keep_call"
+            reason = "Put 腿满足平仓条件；Call 腿继续按其独立持有建议管理"
+        elif put_action == "hold_put_keep_call" and call_action in call_sell_actions:
+            action = "sell_call_keep_put"
+            reason = "Put 腿继续持有，Call 腿建议卖出；组合动作与两腿建议一致"
+        elif put_action == "hold_put_keep_call":
+            action = "hold_active_combo"
+            reason = "两腿当前均未给出卖出组合的建议"
+        else:
+            return review("put_leg_advice_not_evaluable" if put_action == "not_evaluable" else "unsupported_put_leg_action")
+        return {
+            "combo_group_classification": classification,
+            "combo_group_status": "evaluable",
+            "combo_group_action": action,
+            "combo_group_reason": reason,
+            "combo_group_issues": [],
+        }
+
+    if classification == "missing_call":
+        if len(normalized_put_actions) != 1:
+            return review("mixed_put_leg_actions" if normalized_put_actions else "missing_put_leg_advice")
+        put_action = normalized_put_actions[0]
+        if put_action == "close_put_keep_call":
+            action = "close_put_unpaired"
+            reason = "Call 腿缺失；仅执行 Put 腿平仓判断，不生成保留 Call 的组合建议"
+        elif put_action == "hold_put_keep_call":
+            action = "hold_put_unpaired"
+            reason = "Call 腿缺失；仅保留 Put 腿建议并标记组合不完整"
+        else:
+            return review("put_leg_advice_not_evaluable" if put_action == "not_evaluable" else "unsupported_put_leg_action")
+        return {
+            "combo_group_classification": classification,
+            "combo_group_status": "incomplete",
+            "combo_group_action": action,
+            "combo_group_reason": reason,
+            "combo_group_issues": ["missing_call_leg"],
+        }
+
+    if classification == "residual_call":
+        if len(normalized_call_actions) != 1:
+            return review("mixed_call_leg_actions" if normalized_call_actions else "missing_call_leg_advice")
+        call_action = normalized_call_actions[0]
+        action_map = {
+            "sell_call_take_profit": "sell_residual_call_take_profit",
+            "sell_call_salvage": "sell_residual_call_salvage",
+            "hold_to_expiry_or_expire": "hold_residual_call_to_expiry_or_expire",
+            "hold_call_as_convexity": "hold_residual_call_as_convexity",
+            "hold_call": "hold_residual_call",
+        }
+        action = action_map.get(call_action)
+        if action is None:
+            return review("call_leg_advice_not_evaluable" if call_action == "not_evaluable" else "unsupported_call_leg_action")
+        return {
+            "combo_group_classification": classification,
+            "combo_group_status": "evaluable",
+            "combo_group_action": action,
+            "combo_group_reason": "Put 腿已不再持仓；剩余 Call 仅按当前真实行情和长期 Call 逐腿建议管理",
+            "combo_group_issues": [],
+        }
+
+    if classification == "closed":
+        return {
+            "combo_group_classification": classification,
+            "combo_group_status": "closed",
+            "combo_group_action": None,
+            "combo_group_reason": "组合没有未平期权腿",
+            "combo_group_issues": [],
+        }
+
+    return review("unsupported_inventory_classification")
+
 def sort_advice_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """按平仓建议 tier、捕获比例和剩余权利金排序。"""
     return sorted(

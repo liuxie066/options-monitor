@@ -132,8 +132,26 @@ combo_net_if_close_both
 
 When a paired call or its cost basis cannot be resolved, the system exposes
 `combo_cost_basis_status` instead of assuming zero cost. The optional
-`close_both_optional` action is only emitted when the paired call exists and
+`close_both_optional` action is only emitted when the paired call exists, open
+Put/Call quantities match, current quotes are usable, and
 `combo_net_if_close_both` is computable.
+
+Group synthesis runs only after every option leg has its own advice. It adds
+`combo_group_classification`, `combo_group_status`, `combo_group_action`,
+`combo_group_reason`, `combo_group_issues`, open Put/Call quantities, quote
+status, and evidence scope without replacing the leg tier, reason,
+`close_action`, or `strategy_exit_mode`. The option-only truth table is:
+
+- equal open Put/Call quantities: `active_combo`;
+- open Put only: `missing_call`, with Put-only display wording;
+- open Call only: `residual_call`, evaluated from the current Call quote;
+- quantity mismatch, missing quote/group identity, or mixed facts:
+  `review_required`, with no group action or group economics;
+- no open option legs: `closed`.
+
+This synthesis never infers assignment from a close type and never invents an
+assigned-stock sale, Call exercise, or future Call terminal value. Assignment
+semantics remain in the separate full-lifecycle reporting path.
 
 ## Calibration Evidence
 
