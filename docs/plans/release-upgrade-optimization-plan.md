@@ -1,8 +1,8 @@
 # 升级与发布流程优化实施计划
 
-> 日期：2026-07-18  
-> 状态：Revised after `docs/reviews/plan-review-20260718-194351.md`  
-> 基线：`origin/main` `b5ba7693` / VERSION `1.2.413`  
+> 日期：2026-07-18
+> 状态：Revised after `docs/reviews/plan-review-20260718-194351.md`
+> 基线：`origin/main` `b5ba7693` / VERSION `1.2.413`
 > 目标：在不削弱质量门、最小权限、升级原子性和回滚能力的前提下，显著降低本地发布检查、GitHub Release 和生产依赖变更升级耗时。
 
 ## 1. 执行摘要
