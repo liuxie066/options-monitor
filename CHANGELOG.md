@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.414 - 2026-07-18
+
+### Changed
+- Reduced full release preflight time by avoiding a redundant focused agent/plugin pytest pass before the complete suite.
+- Replaced two real 30-second cooldown waits in tests with narrow injected seams while preserving the production cooldown-policy assertion.
+
+### Fixed
+- Made isolated residual-Call attribution quality follow the actual gross and net PnL evidence status instead of treating time isolation alone as complete evidence.
+- Made assigned-stock Combo attribution fail closed when strategy metadata conflicts or required group provenance is incomplete, while preserving observed-empty behavior for ordinary non-Combo stock.
+
 ## 1.2.413 - 2026-07-18
 
 ### Changed
