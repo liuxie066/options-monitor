@@ -55,6 +55,60 @@ The three top-level namespaces are parallel and must not be added or subtracted 
 | Candidate ranking / strategy filters | candidate quote economics named `net_income` / `net_income_cny` | Intentionally retained: candidate-domain naming, not historical performance reporting. |
 | Legacy position reporting/workflow | `build_monthly_income_report` | Retained only as adapter/rollback boundary until removal gate. |
 
+## Reconciliation Matrix
+
+Shadow reconciliation is a validation layer, not another reporting pipeline. `src/application/performance/reconciliation.py` compares current legacy monthly output with v1 and keeps three result classes separate.
+
+### Exact/native checks
+
+| Check | Legacy source | v1 source | Rule |
+|---|---|---|---|
+| Premium collected | `summary[].premium_received_gross` by currency | `activity.premium_collected_gross.by_currency` | Exact after period attribution is aligned. |
+| Option trade cash | `summary[].net_cashflow_gross - assignment_stock_net_cashflow_gross` by currency | `cash.option_trade_cash_gross.by_currency` | Exact; stock settlement/sale principal must not leak into option cash. |
+| Option realized gross | `rows[].realized_pnl_gross` keyed by close event and currency | `rows[fact_kind=realized_gross, allocation_id!=null]` keyed by source event and currency | Exact by canonical close allocation identity; assigned-stock sale PnL is excluded from this comparison. |
+| Contract quantities | legacy option cashflow rows | `activity.contracts_opened/contracts_closed` | Checked independently from money. |
+
+Exact mismatches fail the gate. Detail-row identity checks are `not_applicable`, not guessed, when either report omits rows.
+
+### Expected semantic deltas
+
+These differences are classified explicitly and never silently added to an equality tolerance:
+
+| Delta code | Meaning |
+|---|---|
+| `actual_fee_delta` / `fee_coverage_incomplete` | v1 net uses incurred actual fee evidence; legacy values are gross or lack fee provenance. |
+| `effective_time_fx_vs_legacy_static_fx` | v1 CNY selects FX at each fact's effective time; legacy CNY may use one static/latest rate. |
+| `opening_ending_valuation_and_assigned_stock_lifecycle` | v1 period total includes realized plus ending minus opening unrealized and supported assigned-stock economics; legacy realized is option-close oriented. |
+| `asia_shanghai_vs_legacy_month_attribution` | v1 assigns periods in `Asia/Shanghai`; the legacy builder attributes event months in UTC. Boundary samples require source-fact review rather than weakening exact checks. |
+| `intentional_removal_use_explicit_capital_efficiency` | generic legacy return rates are not reproduced; consumers must select an explicit notional-days efficiency field. |
+
+### Replay and coverage gates
+
+- `assess_replay_determinism` compares canonical JSON and SHA-256 hashes for two historical replays from identical facts.
+- `assess_report_coverage` rejects invalid envelopes, partial metrics without missing evidence, missing FX represented as a CNY number, and missing evidence represented as zero.
+- Missing fee preserves gross while net remains partial/null.
+- Missing FX preserves native currency while CNY remains partial/null.
+- Missing marks preserve realized metrics while unrealized/period-total remains partial/null.
+- No events in a configured/proven account scope becomes observed zero. An arbitrary unconfigured account is not proof of completeness and remains `not_observed`.
+
+## Legacy Reference Allowlist
+
+The S10 source scan covers `monthly_income_report`, `net_income_cny`, and `realized_return_rate`. Every matching Python path under `src/` must appear in the exact allowlist in `src/application/performance/reconciliation.py`; new or stale paths fail the gate. The allowed ownership classes are:
+
+1. `deprecated_adapter_rollback` — legacy report/workflow, ledger facade, old bridge, legacy CLI, and deprecated Agent surfaces;
+2. `deprecated_compatibility_projection` — analysis/Assistant projections that remain only for compatibility;
+3. `candidate_strategy_domain` — candidate quote and strategy-research fields whose `net_income_cny` name is not historical performance reporting.
+
+This is path ownership, not permission to add new legacy semantics inside an allowed file. Any new reference still requires explicit review and an allowlist update with a documented owner.
+
+Current exact path inventory:
+
+- deprecated adapter / rollback: `application/agent_tools/operations_impl.py`, `application/agent_tools/portfolio.py`, `application/agent_tools/positions.py`, `application/ledger/api.py`, `application/ledger/queries.py`, `application/ledger/read_model.py`, `application/portfolio_capital_bridge.py`, `application/positions/reporting.py`, `application/positions/workflows.py`, `interfaces/cli/option_positions_report.py`;
+- deprecated compatibility projection: `application/agent_tools/analysis.py`, `application/agent_tools/materialization_impl.py`, `application/assistant/inbound_control.py`, `application/assistant/renderer.py`, `application/assistant/tool_bindings.py`;
+- candidate / strategy domain: `application/agent_tools/candidate_rank_impl.py`, `application/covered_call_strategy_risk.py`, `application/sell_call_steps.py`, `application/sell_put_steps.py`, `application/sell_put_strategy_risk.py`, `application/shadow_replay/analysis.py`, `application/shadow_replay/candidate_impact.py`, `application/shadow_replay/capture.py`, `application/short_vol_risk_context.py`, `application/strategy_lab/experiment.py`.
+
+Paths are relative to `src/`.
+
 ## Compatibility and Deprecation
 
 - `monthly_income_report` remains callable but is not primary for tool selection.
@@ -65,7 +119,26 @@ The three top-level namespaces are parallel and must not be added or subtracted 
 
 ## Rollback Boundary
 
-Rollback does not mutate or downgrade trade events, assigned-stock events, evidence facts, or performance facts. To roll back a consumer, point it temporarily to the deprecated adapter and retain v1 data. Do not restore residual arithmetic or reinterpret option cash as profit. Evidence schema/data remains forward-compatible and append-only.
+Rollback is consumer routing only; it does not mutate or downgrade trade events, assigned-stock events, evidence facts, or performance facts.
+
+1. Keep the v1 ledger/evidence schema and all append-only facts in place. No data migration rollback is required.
+2. Temporarily route only the affected consumer to `monthly_income_report`, `./om option-positions report monthly-income`, or `portfolio_capital_bridge`.
+3. Preserve deprecation warnings and label legacy cash/gross semantics; do not restore residual arithmetic or reinterpret option cash as profit.
+4. Capture the failed v1 request, legacy output, v1 output, reconciliation artifact, and evidence IDs before changing routing.
+5. Fix the v1 owner, replay the same facts, pass exact/expected-delta/coverage gates, then route the consumer back to v1.
+
+The deprecated adapters are code rollback boundaries, not alternate sources of truth. Evidence schema/data remains forward-compatible and append-only.
+
+## Removal Gate
+
+Legacy adapters are not removed in this refactor. A later explicit work unit may remove them only when all of the following are true:
+
+- the exact legacy-reference allowlist contains no production consumer that still requires legacy output;
+- historical replay determinism and coverage/null gates pass for representative US/HK, assignment, partial-close, missing-evidence, MTD, YTD, natural-month, and natural-year samples;
+- exact native reconciliations pass and every remaining delta is one of the documented semantic classifications;
+- operational rollback evidence proves consumers can be restored without data rollback;
+- public docs, tool manifests, CLI help, Assistant bindings, analysis aliases, and portfolio integrations no longer advertise the removed surface;
+- removal receives its own review, release note, and version bump.
 
 ## Validation Checklist
 
@@ -74,4 +147,6 @@ Rollback does not mutate or downgrade trade events, assigned-stock events, evide
 3. No consumer adds premium activity to PnL or subtracts these namespaces to make “other income”.
 4. Missing fee/mark/FX facts remain explicit.
 5. Deprecated aliases have migration warnings and a documented replacement.
-6. Search results for `monthly_income_report`, `net_income_cny`, and `realized_return_rate` are classified as adapter/test/docs, candidate-domain naming, or a later approved bridge slice.
+6. The source scan exactly matches `LEGACY_REFERENCE_ALLOWLIST`; no unowned or stale path remains.
+7. Old/new exact checks, expected-delta classifications, replay hashes, and coverage/null gates pass.
+8. Rollback remains consumer routing only, and the removal gate is explicitly deferred to a versioned later work unit.

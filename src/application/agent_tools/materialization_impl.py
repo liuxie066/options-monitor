@@ -495,6 +495,9 @@ def option_performance_report_tool(
     data_config_path = resolve_public_data_config_path(request, portfolio_cfg)
     _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
     evidence_repo = open_performance_evidence_repository(repo)
+    configured_accounts = set(accounts_from_config(cfg, fallback=()))
+    requested_account = str(request.get("account") or "")
+    scope_proven = requested_account in configured_accounts if requested_account else bool(configured_accounts)
     report = build_option_period_performance(
         repo,
         period=window,
@@ -506,6 +509,7 @@ def option_performance_report_tool(
         refresh_quotes=request["refresh_quotes"],
         collection_cfg=cfg,
         collection_base_dir=config_path.parent,
+        scope_proven=scope_proven,
     )
     data = _public_option_performance_report(report, request=request, cfg=cfg)
     return data, [], {

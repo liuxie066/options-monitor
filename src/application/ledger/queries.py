@@ -182,7 +182,15 @@ def position_monthly_income_report(
 ) -> dict[str, Any]:
     from src.application.ledger.read_model import build_position_monthly_income_report as _impl
 
-    return _impl(repo, base=base, broker=broker, account=account, month=month)
+    assigned_events = [dict(item) for item in assigned_stock_event_log(repo).events]
+    return _impl(
+        repo,
+        base=base,
+        broker=broker,
+        account=account,
+        month=month,
+        assigned_stock_events=assigned_events,
+    )
 
 
 def format_position_money(value: float | int | None, currency: str) -> str:

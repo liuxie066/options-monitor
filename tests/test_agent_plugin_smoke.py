@@ -149,7 +149,7 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
         "run_futu_doctor": (diagnostics_tools,),
         "load_option_positions_repo": (diagnostics_tools,),
         "load_portfolio_context": (materialization_tools,),
-        "get_exchange_rates": (analysis_tools, positions_tools),
+        "get_exchange_rates": (positions_tools,),
         "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
         "repo_base": (runtime_tools,),
         "check_version_update": (runtime_tools,),

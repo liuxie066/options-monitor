@@ -167,4 +167,7 @@ or unqualified `return_rate` is introduced.
 - S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
 - S5: shared Sell Put assigned-stock projection, legal ledger API boundary, partial/full sales, stock marks, actual-fee net semantics, covered-call attribution quality, unsupported inventory diagnostics, and legacy delegation implemented.
 - S6: continuous-time option/assigned-stock notional-days, exact partial transitions, assignment handoff, covered-call zero-incremental treatment, and net annualized efficiency coverage implemented.
-- S7-S10: pending their Gateflow implementation/review gates.
+- S7: primary Agent/CLI contract, evidence lifecycle commands, and deprecated monthly adapter implemented.
+- S8: analysis, Assistant, Copilot, and legacy CLI consumers migrated to explicit activity/cash/PnL semantics.
+- S9: independent portfolio PnL and cash bridges implemented; the mixed capital bridge is deprecated.
+- S10: old/new reconciliation, replay and coverage gates, explicit legacy-reference allowlist, proven-scope zero semantics, and rollback/removal documentation implemented.
