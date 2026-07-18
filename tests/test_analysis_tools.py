@@ -78,6 +78,54 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + ("\n" if rows else ""), encoding="utf-8")
 
+def _performance_metric(cny: float | None = None, *, usd: float | None = None, status: str = "observed") -> dict[str, Any]:
+    return {
+        "cny": cny,
+        "by_currency": ({"USD": usd} if usd is not None else {}),
+        "quality": {"status": status},
+    }
+
+
+def _performance_report(
+    *,
+    month: str = "2026-05",
+    account: str = "lx",
+    option_trade_cash_cny: float | None = 1.0,
+    premium_cny: float | None = None,
+    realized_cny: float | None = None,
+    assignment_lifecycle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = {
+        "month": month,
+        "activity": {"premium_collected_gross": _performance_metric(premium_cny)},
+        "cash": {
+            "option_trade_cash_gross": _performance_metric(option_trade_cash_cny),
+            "total_cash_change_net": _performance_metric(option_trade_cash_cny),
+        },
+        "pnl": {
+            "realized_gross": _performance_metric(realized_cny),
+            "period_total_gross": _performance_metric(realized_cny),
+            "period_total_net": _performance_metric(realized_cny),
+        },
+    }
+    return {
+        "period": {
+            "kind": "month",
+            "requested_start_date": f"{month}-01",
+            "requested_end_date": f"{month}-28",
+            "status": "complete_past",
+        },
+        "scope": {"account": account, "accounts": [account], "broker": None, "brokers": []},
+        "activity": summary["activity"],
+        "cash": summary["cash"],
+        "pnl": summary["pnl"],
+        "capital": {},
+        "breakdowns": {"monthly": [summary]},
+        "quality": {"status": "observed"},
+        "rows": [],
+        "assignment_lifecycle": assignment_lifecycle or {"ending_lots": [], "sales": [], "review": []},
+    }
+
 
 def test_analysis_query_rejects_write_sql_before_context_access() -> None:
     with pytest.raises(AgentToolError) as exc:
@@ -102,7 +150,7 @@ def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() ->
 
     view = data["views"]["account_monthly_performance"]
     assert view["row_grain"] == "month + account"
-    assert view["alias_of"] == "monthly_income_return_summary"
+    assert view["alias_of"] == "option_monthly_performance"
     assert view["primary_metric"] == "realized_pnl_cny"
     assert view["safe_join_keys"] == ("month", "account")
     assert "net_income_cny" in view["fields"]
@@ -129,7 +177,7 @@ def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() ->
     assert net_return["metric_role"] == "legacy_cashflow_ratio"
     assert "avg" in net_return["do_not"]
 
-    assert data["metric_policy"]["primary_profit"].startswith("realized_pnl_*")
+    assert data["metric_policy"]["primary_profit"].startswith("pnl.period_total_net")
     assert all("net_income_cny" not in item["sql"] for item in data["query_patterns"])
     assert data["field_types"]["account_monthly_performance"]["net_return_rate"] == "rate"
     assert data["aggregation_policies"]["account_monthly_performance"]["net_return_rate"] == "weighted_recompute"
@@ -144,7 +192,7 @@ def test_analysis_catalog_exposes_p0_semantic_views() -> None:
 
     components = data["views"]["account_monthly_income_components"]
     assert components["row_grain"] == "month + account + component"
-    assert components["status"] == "legacy_compatibility"
+    assert components["status"] == "deprecated_alias"
     assert components["additivity"] == "non_additive"
     assert components["field_semantics"]["amount_cny"]["aggregation"] == "sum_within_same_component_only"
     assert data["views"]["assigned_stock_position_pnl"]["row_grain"] == "account + symbol + stock_lot_id"
@@ -254,13 +302,13 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
 
     def fake_monthly_tool(*_args, **_kwargs):
         calls.append("monthly")
-        return {"return_summary": [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]}, [], {}
+        return _performance_report(month="2026-05", option_trade_cash_cny=1.0), [], {}
 
     def fake_positions_tool(*_args, **_kwargs):
         calls.append("positions")
         return {"rows": []}, [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
@@ -268,16 +316,17 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
         {"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 10},
     )
 
-    assert len(warnings) == 1
-    assert "legacy option-cashflow metric" in warnings[0]
-    assert calls == ["monthly"]
+    assert len(warnings) == 2
+    assert any("migration-only" in warning for warning in warnings)
+    assert any("not profit or total cash change" in warning for warning in warnings)
+    assert calls == ["monthly", "monthly"]
     assert data["rows"] == [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]
     assert data["source"]["kind"] == "materialized_views"
     assert data["scope"] == {"views": ["account_monthly_performance"], "limit": 10}
     assert data["coverage"]["accounts"] == ["lx"]
     assert data["freshness"][0]["view"] == "account_monthly_performance"
     assert data["freshness"][0]["freshness"] == "snapshot"
-    assert data["freshness"][0]["source"] == "monthly_income_report.return_summary"
+    assert data["freshness"][0]["source"] == "option_performance_report.breakdowns.monthly"
     assert meta["requested_views"] == ["account_monthly_performance"]
     assert meta["materialized_views"] == ["account_monthly_performance"]
 
@@ -287,13 +336,13 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
 
     def fake_monthly_tool(*_args, **_kwargs):
         calls.append("monthly")
-        return {"return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 1.0}]}, [], {}
+        return _performance_report(month="2026-06", option_trade_cash_cny=1.0), [], {}
 
     def fake_positions_tool(*_args, **_kwargs):
         calls.append("positions")
         return {"rows": [{"account": "lx", "symbol": "NVDA", "contracts": 1}]}, [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
@@ -305,26 +354,140 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
         },
     )
 
-    assert len(warnings) == 1
-    assert "non-additive metric roles" in warnings[0]
-    assert calls == ["monthly", "positions"]
+    assert warnings == ["Deprecated monthly-income aliases are migration-only and project fields from option_performance_report."]
+    assert calls == ["monthly", "monthly", "positions"]
     assert data["query"]["mode"] == "views"
     assert data["preflight"]["warnings"] == warnings
     assert data["views_used"] == ["account_monthly_performance", "open_option_exposure"]
-    assert data["view_datasets"]["account_monthly_performance"]["rows"] == [
-        {"month": "2026-06", "account": "lx", "net_income_cny": 1.0}
-    ]
+    legacy_rows = data["view_datasets"]["account_monthly_performance"]["rows"]
+    assert len(legacy_rows) == 1
+    assert legacy_rows[0]["month"] == "2026-06"
+    assert legacy_rows[0]["account"] == "lx"
+    assert legacy_rows[0]["net_income_cny"] == 1.0
+    assert legacy_rows[0]["return_basis"] == "deprecated_alias_no_generic_return"
     assert data["evidence"]["coverage"]["views"] == ["account_monthly_performance", "open_option_exposure"]
     assert meta["requested_views"] == ["account_monthly_performance", "open_option_exposure"]
     assert meta["materialized_views"] == ["account_monthly_performance", "open_option_exposure"]
 
+
+def test_analysis_query_primary_option_performance_views_keep_namespaces_separate(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_performance_tool(*_args, **_kwargs):
+        return _performance_report(
+            month="2026-06",
+            option_trade_cash_cny=1200.0,
+            premium_cny=800.0,
+            realized_cny=400.0,
+        ), [], {}
+
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_performance_tool)
+
+    data, warnings, _meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {
+            "views": [
+                "option_monthly_performance",
+                "option_activity_components",
+                "option_cash_components",
+                "option_pnl_components",
+            ],
+            "period": "month",
+            "month": "2026-06",
+        },
+    )
+
+    assert any("parallel namespaces" in warning for warning in warnings)
+    monthly = data["view_datasets"]["option_monthly_performance"]["rows"][0]
+    assert monthly["premium_collected_cny"] == 800.0
+    assert monthly["option_trade_cash_cny"] == 1200.0
+    assert monthly["period_total_pnl_net_cny"] == 400.0
+    assert {row["component"] for row in data["view_datasets"]["option_activity_components"]["rows"]} >= {
+        "premium_collected"
+    }
+    assert {row["component"] for row in data["view_datasets"]["option_cash_components"]["rows"]} >= {
+        "option_trade_cash",
+        "total_cash_change",
+    }
+    assert {row["component"] for row in data["view_datasets"]["option_pnl_components"]["rows"]} >= {
+        "realized_gross",
+        "period_total_net",
+    }
+
+def test_analysis_query_forwards_account_and_broker_scope_to_performance_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def fake_performance_tool(payload, *_args, **_kwargs):
+        requests.append(dict(payload))
+        return _performance_report(account="lx"), [], {}
+
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_performance_tool)
+
+    _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {
+            "view": "option_period_performance",
+            "period": "mtd",
+            "account": "lx",
+            "broker": "FUTU",
+            "refresh_quotes": False,
+        },
+    )
+
+    assert requests == [
+        {
+            "config_key": "us",
+            "config_path": None,
+            "data_config": None,
+            "account": "lx",
+            "broker": "FUTU",
+            "include_rows": True,
+            "refresh_quotes": False,
+            "period": "mtd",
+        }
+    ]
+
+
+def test_performance_component_views_do_not_mix_period_and_month_grains(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = _performance_report(month="2026-06", option_trade_cash_cny=1200.0, premium_cny=800.0, realized_cny=400.0)
+    july = {
+        "month": "2026-07",
+        "activity": {"premium_collected_gross": _performance_metric(200.0)},
+        "cash": {
+            "option_trade_cash_gross": _performance_metric(300.0),
+            "total_cash_change_net": _performance_metric(300.0),
+        },
+        "pnl": {
+            "realized_gross": _performance_metric(100.0),
+            "period_total_gross": _performance_metric(100.0),
+            "period_total_net": _performance_metric(100.0),
+        },
+    }
+    report["breakdowns"]["monthly"].append(july)
+
+    monkeypatch.setattr(
+        analysis_module,
+        "option_performance_report_tool",
+        lambda *_args, **_kwargs: (report, [], {}),
+    )
+
+    data, _warnings, _meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {"view": "option_activity_components", "period": "ytd"},
+    )
+
+    rows = data["view_datasets"]["option_activity_components"]["rows"]
+    premium_rows = [row for row in rows if row["component"] == "premium_collected"]
+    assert [row["month"] for row in premium_rows] == ["2026-06", "2026-07"]
+    assert all(row["month"] is not None for row in rows)
 
 def test_analysis_query_materializes_only_referenced_position_views(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
     def fake_monthly_tool(*_args, **_kwargs):
         calls.append("monthly")
-        return {"return_summary": []}, [], {}
+        return _performance_report(option_trade_cash_cny=None), [], {}
 
     def fake_positions_tool(payload, *_args, **_kwargs):
         calls.append(str(payload.get("action")))
@@ -345,7 +508,7 @@ def test_analysis_query_materializes_only_referenced_position_views(monkeypatch:
             ]
         }, [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
@@ -365,13 +528,13 @@ def test_analysis_query_select_constant_materializes_no_views(monkeypatch: pytes
 
     def fake_monthly_tool(*_args, **_kwargs):
         calls.append("monthly")
-        return {}, [], {}
+        return _performance_report(option_trade_cash_cny=None), [], {}
 
     def fake_positions_tool(*_args, **_kwargs):
         calls.append("positions")
         return {}, [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
     monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL, _AnalysisQueryContext(), {"sql": "select 1 as ok"})
@@ -1145,8 +1308,7 @@ def test_analysis_query_upgrade_operation_status_reports_missing_command_log_art
 
 def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_monthly_tool(*_args, **_kwargs):
-        return {
-            "assignment_lifecycle_rows": [
+        return _performance_report(assignment_lifecycle={"ending_lots": [
                 {
                     "account": "sy",
                     "symbol": "0700.HK",
@@ -1155,10 +1317,9 @@ def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monke
                     "spot": 463.6,
                     "spot_time": "2026-06-14T10:00:00+08:00",
                 }
-            ]
-        }, [], {}
+            ], "sales": [], "review": []}), [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
@@ -1187,8 +1348,7 @@ def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monke
 
 def test_analysis_query_quote_freshness_gap_summary_includes_as_of(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_monthly_tool(*_args, **_kwargs):
-        return {
-            "assignment_lifecycle_rows": [
+        return _performance_report(assignment_lifecycle={"ending_lots": [
                 {
                     "account": "sy",
                     "symbol": "FUTU",
@@ -1197,10 +1357,9 @@ def test_analysis_query_quote_freshness_gap_summary_includes_as_of(monkeypatch: 
                     "spot": 97.54,
                     "spot_time": "2026-06-14T21:30:00+08:00",
                 }
-            ]
-        }, [], {}
+            ], "sales": [], "review": []}), [], {}
 
-    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_monthly_tool)
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
@@ -1256,10 +1415,10 @@ def test_account_monthly_income_components_split_included_and_excluded_amounts()
     )
 
     assert [(row["component"], row["amount_cny"], row["included_in_net_income"]) for row in rows] == [
-        ("premium_income", 1200.0, True),
-        ("realized_pnl", 250.0, True),
-        ("other_net_income", 50.0, True),
-        ("excluded_assignment_stock_principal", -72000.0, False),
+        ("premium_activity", 1200.0, False),
+        ("option_trade_cash", 1500.0, False),
+        ("realized_pnl_gross", 250.0, False),
+        ("stock_settlement_cash", -72000.0, False),
     ]
     assert rows[-1]["amount_by_ccy"] == {"USD": -10000.0}
 
@@ -1506,7 +1665,6 @@ def test_analysis_query_unknown_column_returns_structured_suggestions() -> None:
     assert exc.value.details["unknown_column"] == "net_cashflow"
     assert exc.value.details["referenced_views"] == ["account_monthly_performance"]
     assert "net_income_cny" in exc.value.details["suggestions"]
-    assert "realized_pnl_cny" in exc.value.details["suggestions"]
 
 
 def test_analysis_query_executes_read_only_aggregates() -> None:
@@ -1554,7 +1712,7 @@ def test_analysis_query_explain_warns_on_invalid_rate_aggregation() -> None:
     assert query_explain["aggregations"][0]["field"] == "net_return_rate"
     assert query_explain["aggregations"][0]["policy"] == "invalid_rate_aggregation"
     assert warnings[0] == query_explain["aggregations"][0]["warning"]
-    assert any("legacy cashflow ratios" in warning for warning in warnings)
+    assert any("Legacy generic return-rate aliases" in warning for warning in warnings)
     assert evidence["aggregation_policy"][0]["status"] == "warning"
 
 
@@ -1566,8 +1724,9 @@ def test_analysis_query_explain_marks_legacy_cashflow_sum_and_warns_not_pnl() ->
         views_used=["account_monthly_performance"],
     )
 
-    assert len(warnings) == 1
-    assert "not profit or PnL" in warnings[0]
+    assert len(warnings) == 2
+    assert any("migration-only" in warning for warning in warnings)
+    assert any("not profit or total cash change" in warning for warning in warnings)
     assert query_explain["aggregations"][0]["field"] == "net_income_cny"
     assert query_explain["aggregations"][0]["policy"] == "allowed"
     assert evidence["coverage"]["views"] == ["account_monthly_performance"]
@@ -1584,8 +1743,9 @@ def test_analysis_query_explain_warns_premium_and_realized_pnl_are_non_additive(
         views_used=["account_monthly_performance"],
     )
 
-    assert len(warnings) == 1
-    assert "must not be added" in warnings[0]
+    assert len(warnings) == 2
+    assert any("migration-only" in warning for warning in warnings)
+    assert any("must not be added" in warning for warning in warnings)
     assert query_explain["warnings"] == warnings
 
 
@@ -1597,7 +1757,7 @@ def test_analysis_query_explain_warns_legacy_component_view_is_non_additive() ->
         views_used=["account_monthly_income_components"],
     )
 
-    assert any("legacy non-additive compatibility view" in warning for warning in warnings)
+    assert any("deprecated non-additive compatibility view" in warning for warning in warnings)
 
 
 def _removed_legacy_answer_guard_tests() -> None:

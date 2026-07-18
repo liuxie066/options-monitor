@@ -12,6 +12,7 @@ from src.application.assistant.position_query import parse_position_query_text, 
 
 
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
+_YEAR_RE = re.compile(r"^(20\d{2})$")
 _YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
@@ -60,7 +61,7 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
         return _parse_positions(command, args, today=today)
     if command in _COMMANDS["assigned_stock_position_query"]:
         return _parse_assigned_stock(command, args)
-    if command in _COMMANDS["monthly_income_report"]:
+    if command in _COMMANDS["option_performance_report"]:
         return _parse_income(command, args, today=today)
     if command in _COMMANDS["runtime_runs"]:
         return _parse_runs(command, args)
@@ -346,7 +347,8 @@ def _parse_manual_trade_update_command(command: str, args: list[str]) -> Control
 
 def _parse_income(command: str, args: list[str], *, today: date) -> ControlCommand:
     account: str | None = None
-    month: str | None = None
+    period = "mtd"
+    period_value: object | None = None
     for arg in args:
         normalized = arg.lower()
         if normalized in _ACCOUNTS:
@@ -355,28 +357,45 @@ def _parse_income(command: str, args: list[str], *, today: date) -> ControlComma
             account = normalized
         elif normalized in {"all", "全部"}:
             continue
-        elif normalized in {"本月", "this-month"}:
-            month = today.strftime("%Y-%m")
+        elif normalized in {"mtd", "本月", "this-month"}:
+            period = "mtd"
+            period_value = None
+        elif normalized in {"ytd", "今年", "年初至今", "year-to-date"}:
+            period = "ytd"
+            period_value = None
         elif normalized in {"上月", "last-month"}:
-            month = _previous_month(today)
+            period = "month"
+            period_value = _previous_month(today)
         elif _MONTH_RE.match(normalized):
-            month = normalized.replace("/", "-").replace(".", "-")
+            period = "month"
+            period_value = normalized.replace("/", "-").replace(".", "-")
+        elif _YEAR_RE.match(normalized):
+            period = "year"
+            period_value = int(normalized)
         elif match := _YEAR_MONTH_CN_RE.match(normalized):
             month_number = _month_number(match.group(2))
             if month_number is not None:
-                month = f"{int(match.group(1)):04d}-{month_number:02d}"
+                period = "month"
+                period_value = f"{int(match.group(1)):04d}-{month_number:02d}"
         elif match := _MONTH_CN_RE.match(normalized):
             month_number = _month_number(match.group(1))
             if month_number is not None:
-                month = f"{today.year:04d}-{month_number:02d}"
+                period = "month"
+                period_value = f"{today.year:04d}-{month_number:02d}"
         else:
-            raise _bad_arg(command, arg, "支持：/income、/income sy、/income sy 2026-05、/income sy 6月、/income 上月。")
-    payload: dict[str, object] = {}
+            raise _bad_arg(
+                command,
+                arg,
+                "支持：/income、/income sy ytd、/income sy 2026、/income sy 2026-05、/income 上月。",
+            )
+    payload: dict[str, object] = {"period": period}
     if account:
         payload["account"] = account
-    if month:
-        payload["month"] = month
-    return _intent("monthly_income_report", payload)
+    if period == "month" and period_value is not None:
+        payload["month"] = period_value
+    elif period == "year" and period_value is not None:
+        payload["year"] = period_value
+    return _intent("option_performance_report", payload)
 
 
 def _parse_runs(command: str, args: list[str]) -> ControlCommand:

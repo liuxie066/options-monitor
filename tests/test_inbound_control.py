@@ -533,22 +533,28 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     }
 
     income = parse_assistant_command("/income sy 本月", now_fn=lambda: date(2026, 5, 19))
-    assert income.intent_name == "monthly_income_report"
-    assert income.arguments == {"account": "sy", "month": "2026-05"}
+    assert income.intent_name == "option_performance_report"
+    assert income.arguments == {"account": "sy", "period": "mtd"}
 
     all_income = parse_assistant_command("/income 本月", now_fn=lambda: date(2026, 5, 19))
-    assert all_income.intent_name == "monthly_income_report"
-    assert all_income.arguments == {"month": "2026-05"}
+    assert all_income.intent_name == "option_performance_report"
+    assert all_income.arguments == {"period": "mtd"}
 
     last_month = parse_assistant_command("/income lx 上月", now_fn=lambda: date(2026, 1, 3))
-    assert last_month.arguments == {"account": "lx", "month": "2025-12"}
+    assert last_month.arguments == {"account": "lx", "period": "month", "month": "2025-12"}
 
     june_income = parse_assistant_command("/income sy 6月", now_fn=lambda: date(2026, 6, 1))
-    assert june_income.intent_name == "monthly_income_report"
-    assert june_income.arguments == {"account": "sy", "month": "2026-06"}
+    assert june_income.intent_name == "option_performance_report"
+    assert june_income.arguments == {"account": "sy", "period": "month", "month": "2026-06"}
 
     june_income_year = parse_assistant_command("/income sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
-    assert june_income_year.arguments == {"account": "sy", "month": "2026-06"}
+    assert june_income_year.arguments == {"account": "sy", "period": "month", "month": "2026-06"}
+
+    ytd_income = parse_assistant_command("/income sy ytd", now_fn=lambda: date(2026, 7, 17))
+    assert ytd_income.arguments == {"account": "sy", "period": "ytd"}
+
+    year_income = parse_assistant_command("/income 2025", now_fn=lambda: date(2026, 7, 17))
+    assert year_income.arguments == {"period": "year", "year": 2025}
 
     logs = parse_assistant_command("/logs 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
@@ -3216,12 +3222,12 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
 
     assert first["ok"] is True
     assert first["data"]["tool_call"] == {
-        "tool_name": "monthly_income_report",
-        "payload": {"config_key": "us", "account": "sy", "month": "2026-05"},
+        "tool_name": "option_performance_report",
+        "payload": {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"},
     }
-    assert "基于 OM 本地账本" in first["data"]["response_text"]
+    assert first["data"]["response_text"].startswith("期权收益统计完成")
     assert second["meta"]["idempotent_replay"] is True
-    assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
+    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"})]
 
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
@@ -3232,15 +3238,15 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
             """
         ).fetchone()
 
-    assert row[:7] == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
+    assert row[:7] == ("option_performance_report", "option_performance_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
     control = json.loads(row[7])
     assert control["status"] == "supported"
-    assert control["intent_name"] == "monthly_income_report"
+    assert control["intent_name"] == "option_performance_report"
     assert control["safety_class"] == "read"
     assert control["action_kind"] == "tool"
     assert control["reason"] == "read_only_capability"
-    assert control["tool_name"] == "monthly_income_report"
-    assert control["payload"] == {"config_key": "us", "account": "sy", "month": "2026-05"}
+    assert control["tool_name"] == "option_performance_report"
+    assert control["payload"] == {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"}
     assert control["response_text"] == first["data"]["response_text"]
     assert control["executed"] is True
     assert control["ok"] is True
@@ -3283,7 +3289,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     assert income["ok"] is True
     assert positions["ok"] is True
     assert calls == [
-        ("monthly_income_report", {"config_key": "us", "month": "2026-05"}),
+        ("option_performance_report", {"config_key": "us", "period": "month", "month": "2026-05"}),
         ("option_positions_read", {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}),
     ]
     with sqlite3.connect(audit_db) as conn:
@@ -4092,7 +4098,7 @@ def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
         allowed_senders="feishu:ou_1",
     )
 
-    assert out["data"]["response_text"].startswith("sy 2026-05 暂无可计算收益")
+    assert out["data"]["response_text"].startswith("期权收益统计完成")
     with sqlite3.connect(audit_db) as conn:
         response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
 
@@ -4205,8 +4211,8 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
 
     assert out["ok"] is True
     assert out["tool_name"] == "inbound.feishu"
-    assert out["data"]["response_text"].startswith("收益统计完成")
-    assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
+    assert out["data"]["response_text"].startswith("期权收益统计完成")
+    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"})]
 
 
 def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

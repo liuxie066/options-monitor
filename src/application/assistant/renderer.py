@@ -45,6 +45,7 @@ def render_inbound_text(*, intent: ControlCommand | None, tool_result: dict[str,
     renderer_key = {
         "analysis_catalog": "analysis_catalog",
         "analysis_query": "analysis_result",
+        "option_performance_report": "option_performance",
         "monthly_income_report": "monthly_income",
         "position_query": "position_rows",
         "assigned_stock_position_query": "assigned_stock_lifecycle",
@@ -736,6 +737,60 @@ def _format_config_mapping(value: dict[str, Any]) -> str:
     if not parts:
         return "{...}"
     return ", ".join(parts)
+
+
+def _performance_metric_text(value: Any) -> str:
+    metric = _dict(value)
+    by_ccy = _dict(metric.get("by_currency"))
+    cny = _float_or_none(metric.get("cny"))
+    parts: list[str] = []
+    if by_ccy:
+        parts.append(_format_ccy_amounts(by_ccy))
+    if cny is not None:
+        parts.append(f"CNY {cny:,.2f}")
+    quality = _dict(metric.get("quality"))
+    status = str(quality.get("status") or "").strip()
+    text = " / ".join(parts) if parts else "-"
+    return f"{text}（{status}）" if status and status != "observed" else text
+
+
+def _render_option_performance(data: dict[str, Any]) -> str:
+    period = _dict(data.get("period"))
+    scope = _dict(data.get("scope"))
+    activity = _dict(data.get("activity"))
+    cash = _dict(data.get("cash"))
+    pnl = _dict(data.get("pnl"))
+    quality = _dict(data.get("quality"))
+    lifecycle = _dict(data.get("assignment_lifecycle"))
+    account = scope.get("account") or "全部账户"
+    period_label = f"{period.get('requested_start_date') or '-'} 至 {period.get('requested_end_date') or '-'}"
+    lines = [
+        f"期权收益统计完成（{account}，{period.get('kind') or '-'}，{period_label}）：",
+        "利润口径：",
+        f"- 期间总 PnL（净）：{_performance_metric_text(pnl.get('period_total_net'))}",
+        f"- 期间总 PnL（毛）：{_performance_metric_text(pnl.get('period_total_gross'))}",
+        f"- 已实现 PnL（净）：{_performance_metric_text(pnl.get('realized_net'))}",
+        f"- 已实现 PnL（毛）：{_performance_metric_text(pnl.get('realized_gross'))}",
+        "现金口径：",
+        f"- 总现金变动（净）：{_performance_metric_text(cash.get('total_cash_change_net'))}",
+        f"- 期权交易现金：{_performance_metric_text(cash.get('option_trade_cash_gross'))}",
+        f"- 指派/行权正股结算本金：{_performance_metric_text(cash.get('stock_settlement_cash_gross'))}",
+        "活动口径：",
+        f"- 收到权利金：{_performance_metric_text(activity.get('premium_collected_gross'))}",
+        f"- 支付权利金：{_performance_metric_text(activity.get('premium_paid_gross'))}",
+    ]
+    ending_lots = _list(lifecycle.get("ending_lots"))
+    review = _list(lifecycle.get("review"))
+    if ending_lots or review:
+        lines.append(f"指派正股：期末 lot {len(ending_lots)} 个，数据复核项 {len(review)} 条。")
+    missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
+    warnings = [str(item) for item in _list(quality.get("warnings")) if str(item)]
+    if missing:
+        lines.append("缺失证据：" + "；".join(missing[:6]))
+    if warnings:
+        lines.append("提示：" + "；".join(warnings[:6]))
+    lines.append("口径：利润、现金和权利金活动是平行命名空间，不能相加或相减制造残差；指派本金是资产转换，不是亏损。")
+    return "\n".join(lines)
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
@@ -2035,6 +2090,7 @@ _CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
 _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
     "analysis_catalog": _render_analysis_catalog,
     "analysis_result": _render_analysis_result,
+    "option_performance": lambda data, _tool_result: _render_option_performance(data),
     "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),
     "assigned_stock_lifecycle": lambda data, _tool_result: _render_assigned_stock_lifecycle(data),
