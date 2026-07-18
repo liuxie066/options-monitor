@@ -158,7 +158,7 @@ ssh prod 'cd /path/to/options-monitor && ./om research collect \
   --scope full \
   --output handoff \
   --no-write-outputs' \
-| python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["handoff_markdown"])'
+| ./.venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["data"]["handoff_markdown"])'
 ```
 
 Recommended Codex prompt:
@@ -451,12 +451,12 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 
 | Change area | Suggested checks |
 |---|---|
-| Tool Gateway manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
-| Research | `python3 -m pytest tests/test_research.py` |
+| Tool Gateway manifest/handler | `./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
+| Research | `./.venv/bin/python -m pytest tests/test_research.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
-| Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
-| Notifications | `python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
-| Config | `python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py`; YAML validate/build dry-runs; runtime validate for generated snapshots |
+| Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
+| Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
+| Config | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_layered_config.py`; YAML validate/build dry-runs; runtime validate for generated snapshots |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 

@@ -17,7 +17,7 @@
 先用只读 advisor 看本次变更建议跑哪些检查：
 
 ```bash
-python3 scripts/release_test_plan.py --mode standard --base origin/main
+./.venv/bin/python scripts/release_test_plan.py --mode standard --base origin/main
 ```
 
 它只读取 git diff 和 `VERSION`，输出 JSON 计划，不执行测试、不写文件。`--mode fast|standard|full` 用来选择预检强度；如果命中 ledger/position/trade 等高风险路径，计划会显式要求完整 pytest。
@@ -46,11 +46,11 @@ make release-preflight ARGS="--full --require-clean"
 
 ```bash
 VERSION="$(cat VERSION)"
-python3 scripts/release_check.py --tag "v${VERSION}"
-python3 scripts/generate_dependency_graph.py --check
-python3 tests/run_smoke.py
-python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
-python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
+./.venv/bin/python scripts/release_check.py --tag "v${VERSION}"
+./.venv/bin/python scripts/generate_dependency_graph.py --check
+./.venv/bin/python tests/run_smoke.py
+./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_layered_config.py
 ./om config init --dry-run --output /tmp/options-monitor-config.yaml --runtime-output-dir /tmp/options-monitor-runtime-config
 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
@@ -155,7 +155,7 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。代码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror`，后续 `git fetch --tags --prune`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
 
-Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时执行 `uv venv --python python3 .venv` 和 `uv pip install -p .venv/bin/python ...`，不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
 
 release 清理默认 dry-run，不删除文件：
 

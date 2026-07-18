@@ -35,8 +35,8 @@ Use the highest-level safe entry point available:
 
 1. `./om-agent` for structured JSON tools and read-first diagnostics. It is the local Tool Gateway, not OM's autonomous Agent.
 2. `./om` for human/operator CLI workflows.
-3. `python3 -m src.application.<module>` only when no public facade exists.
-4. `python3 scripts/...` only for compatibility or operational wrappers.
+3. `./.venv/bin/python -m src.application.<module>` only when no public facade exists.
+4. `./.venv/bin/python scripts/...` only for compatibility or operational wrappers.
 
 Unified tick chain:
 
@@ -142,19 +142,19 @@ Use focused checks for the area touched, then add broader checks when risk warra
 
 ```bash
 # Agent contract
-python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 
 # Research
-python3 -m pytest tests/test_research.py
+./.venv/bin/python -m pytest tests/test_research.py
 
 # Notification formatting
-python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py
+./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py
 
 # Tick behavior
-python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py
+./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py
 
 # Config validation
-python3 -m pytest tests/test_layered_config.py
+./.venv/bin/python -m pytest tests/test_layered_config.py
 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
 ./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
