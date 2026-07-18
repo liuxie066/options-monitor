@@ -199,6 +199,62 @@ def test_residual_tail_pnl_is_available_when_report_window_starts_after_put_clos
     assert tail["capital"]["capital_days_by_currency"] == {"USD": 12000.0}
 
 
+def test_residual_tail_quality_is_partial_when_isolated_call_marks_are_missing() -> None:
+    from decimal import Decimal
+
+    from domain.domain.performance.attribution import resolve_event_attribution
+    from domain.domain.performance.models import OptionInstrumentKey, OptionValuationPosition
+
+    put_open = _event("put-open", "open", "2026-04-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5)
+    call_open = _event("call-open", "open", "2026-04-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4)
+    put_close = _event("put-expire", "expire_close", "2026-05-20T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open")
+    events = [put_open, call_open, put_close]
+    projection = project_trade_events(events)
+    window = normalize_period({"period": "month", "month": "2026-06"}, now_ms=NOW_MS)
+    instrument = OptionInstrumentKey(
+        symbol="NVDA",
+        option_type="call",
+        strike=Decimal("120"),
+        expiration_ymd="2026-07-31",
+        currency="USD",
+        multiplier=Decimal("100"),
+    )
+    resolved = resolve_event_attribution(call_open, lifecycle_source_id="lot-call-open")
+    position = OptionValuationPosition(
+        lot_id="lot-call-open",
+        account="lx",
+        broker="futu",
+        instrument=instrument,
+        position_side="long",
+        contracts_open=1,
+        open_price=Decimal("4"),
+        open_fee_remaining=Decimal("0"),
+        open_fee_quality="actual",
+        opened_at_ms=call_open.event_time_ms,
+        attribution=resolved.attribution,
+    )
+
+    report = build_period_performance(
+        events=events,
+        allocations=projection.allocations,
+        period=window,
+        opening_positions=[position],
+        ending_positions=[position],
+        valuation_marks=[],
+    ).to_dict()
+    tail = report["attribution"]["groups"][0]["residual_tails"][0]
+
+    assert tail["pnl"]["period_total_gross"]["status"] == "partial"
+    assert tail["pnl"]["period_total_net"]["status"] == "partial"
+    assert tail["quality"] == {
+        "status": "partial",
+        "issues": [
+            "residual_tail_period_total_gross_partial",
+            "residual_tail_period_total_net_partial",
+        ],
+    }
+
+
 def test_non_combo_strategy_produces_observed_empty_attribution() -> None:
     event = _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5)
     event.raw_payload["strategy_snapshot"] = {"strategy": "sell_put", "leg_role": "funding_put"}
@@ -262,6 +318,82 @@ def test_assigned_stock_requires_explicit_group_provenance() -> None:
     assert attributed["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"
     assert attributed["attribution_issues"] == ()
     assert unproven["attribution"] is None
+
+
+@pytest.mark.parametrize("conflict_key", ["strategy", "leg_role", "expiry_structure"])
+def test_assigned_stock_metadata_conflicts_fail_closed(conflict_key: str) -> None:
+    from domain.domain.performance.engine import _assigned_stock_fact_kwargs
+
+    row = {
+        "account": "lx",
+        "broker": "futu",
+        "symbol": "NVDA",
+        "currency": "USD",
+        "stock_lot_id": "stock-lot-1",
+        "strategy": "combo_yield",
+        "leg_role": "assigned_stock",
+        "strategy_group_id": "combo_yield:lx:pair-1",
+        "expiry_structure": "diagonal",
+        "strategy_snapshot": {
+            "strategy": "combo_yield",
+            "leg_role": "assigned_stock",
+            "strategy_group_id": "combo_yield:lx:pair-1",
+            "expiry_structure": "diagonal",
+        },
+    }
+    row[conflict_key] = {
+        "strategy": "sell_put",
+        "leg_role": "funding_put",
+        "expiry_structure": "same_expiry",
+    }[conflict_key]
+
+    result = _assigned_stock_fact_kwargs(row, source_event_id="stock-lot-1")
+
+    assert result["attribution"] is None
+    assert result["attribution_issues"] == (
+        f"assigned_stock_strategy_metadata_conflict:stock-lot-1:{conflict_key}",
+    )
+
+
+def test_assigned_stock_combo_without_group_reports_unavailable_attribution() -> None:
+    from domain.domain.performance.engine import _assigned_stock_fact_kwargs
+
+    result = _assigned_stock_fact_kwargs(
+        {
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "stock_lot_id": "stock-lot-1",
+            "strategy": "combo_yield",
+            "leg_role": "assigned_stock",
+        },
+        source_event_id="stock-lot-1",
+    )
+
+    assert result["attribution"] is None
+    assert result["attribution_issues"] == ("assigned_stock_attribution_unavailable:stock-lot-1",)
+
+
+def test_assigned_stock_non_combo_metadata_remains_observed_empty() -> None:
+    from domain.domain.performance.engine import _assigned_stock_fact_kwargs
+
+    result = _assigned_stock_fact_kwargs(
+        {
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "stock_lot_id": "stock-lot-1",
+            "strategy": "sell_put",
+            "leg_role": "assigned_stock",
+            "strategy_group_id": "sell_put:lx:lot-1",
+        },
+        source_event_id="stock-lot-1",
+    )
+
+    assert result["attribution"] is None
+    assert result["attribution_issues"] == ()
 
 
 def test_assigned_stock_partial_sales_keep_stock_lot_lifecycle_identity() -> None:

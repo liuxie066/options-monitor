@@ -1223,18 +1223,36 @@ def _assigned_stock_attribution(
     source_id: str,
 ) -> tuple[StrategyAttribution | None, tuple[str, ...]]:
     snapshot = row.get("strategy_snapshot") if isinstance(row.get("strategy_snapshot"), Mapping) else {}
-    snapshot_group = str(snapshot.get("strategy_group_id") or "").strip()
-    row_group = str(row.get("strategy_group_id") or "").strip()
-    if snapshot_group and row_group and snapshot_group != row_group:
-        return None, (f"assigned_stock_strategy_group_conflict:{source_id}",)
-    group_id = snapshot_group or row_group
-    strategy = str(snapshot.get("strategy") or row.get("strategy") or "").strip()
+    values: dict[str, str] = {}
+    conflicts: list[str] = []
+    combo_indicated = False
+    for key in ("strategy", "leg_role", "strategy_group_id", "expiry_structure"):
+        snapshot_value = str(snapshot.get(key) or "").strip()
+        row_value = str(row.get(key) or "").strip()
+        if key == "strategy" and "combo_yield" in (snapshot_value, row_value):
+            combo_indicated = True
+        if key == "strategy_group_id" and any(
+            value.startswith("combo_yield:") for value in (snapshot_value, row_value)
+        ):
+            combo_indicated = True
+        if snapshot_value and row_value and snapshot_value != row_value:
+            conflicts.append(f"assigned_stock_strategy_metadata_conflict:{source_id or 'unknown'}:{key}")
+        values[key] = snapshot_value or row_value
+    if not combo_indicated:
+        return None, ()
+    if conflicts:
+        return None, tuple(conflicts)
+    group_id = values["strategy_group_id"]
+    strategy = values["strategy"]
     if not strategy and group_id.startswith("combo_yield:"):
         strategy = "combo_yield"
-    if not group_id:
-        return None, ()
     lifecycle_source_id = str(row.get("stock_lot_id") or source_id or "").strip()
-    if strategy != "combo_yield" or not lifecycle_source_id:
+    if (
+        strategy != "combo_yield"
+        or not group_id
+        or not lifecycle_source_id
+        or values["leg_role"] not in ("", "assigned_stock")
+    ):
         return None, (f"assigned_stock_attribution_unavailable:{source_id or 'unknown'}",)
     return (
         StrategyAttribution(
@@ -1242,7 +1260,7 @@ def _assigned_stock_attribution(
             leg_role="assigned_stock",
             strategy_group_id=group_id,
             lifecycle_id=f"assigned_stock:{lifecycle_source_id}",
-            expiry_structure=str(snapshot.get("expiry_structure") or row.get("expiry_structure") or "").strip() or None,
+            expiry_structure=values["expiry_structure"] or None,
         ),
         (),
     )
