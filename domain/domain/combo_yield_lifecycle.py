@@ -180,4 +180,146 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
     return inventory
 
 
-__all__ = ["build_option_group_inventory"]
+def build_full_group_lifecycle(
+    option_groups: list[dict[str, Any]],
+    *,
+    assigned_stock_lots: list[dict[str, Any]] | None = None,
+    assignment_events: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+
+    def bucket(group_id: str) -> dict[str, Any]:
+        return grouped.setdefault(
+            group_id,
+            {
+                "strategy_group_id": group_id,
+                "option_group": None,
+                "stock_lots": [],
+                "assignment_events": [],
+            },
+        )
+
+    for row in option_groups or []:
+        group_id = _text(row.get("strategy_group_id"))
+        if group_id:
+            bucket(group_id)["option_group"] = dict(row)
+    for row in assigned_stock_lots or []:
+        group_id = _text(row.get("strategy_group_id"))
+        if group_id:
+            bucket(group_id)["stock_lots"].append(dict(row))
+    for row in assignment_events or []:
+        group_id = _text(row.get("strategy_group_id"))
+        if group_id:
+            bucket(group_id)["assignment_events"].append(dict(row))
+
+    output: list[dict[str, Any]] = []
+    for group_id in sorted(grouped):
+        source = grouped[group_id]
+        option = dict(source.get("option_group") or {})
+        stock_lots = list(source.get("stock_lots") or [])
+        assignments = list(source.get("assignment_events") or [])
+        issues = [str(item) for item in option.get("inventory_issues") or [] if str(item)]
+
+        put_open = _quantity(option.get("put_contracts_open")) or 0
+        call_open = _quantity(option.get("call_contracts_open")) or 0
+        assignment_contracts = 0
+        assignment_event_ids: list[str] = []
+        for event in assignments:
+            quantity = _quantity(event.get("contracts"))
+            if quantity is None:
+                issues.append("invalid_assignment_contract_quantity")
+            else:
+                assignment_contracts += quantity
+            event_id = _text(event.get("event_id"))
+            if event_id:
+                assignment_event_ids.append(event_id)
+            if event.get("stock_settlement_valid") is False:
+                issues.append("missing_assignment_settlement")
+
+        shares_opened = shares_remaining = shares_sold = 0
+        stock_lot_ids: list[str] = []
+        stock_accounts: set[str] = set()
+        stock_symbols: set[str] = set()
+        for lot in stock_lots:
+            opened = _quantity(lot.get("shares_opened"))
+            remaining = _quantity(lot.get("shares_remaining"))
+            sold = _quantity(lot.get("shares_sold"))
+            if opened is None or remaining is None or sold is None:
+                issues.append("invalid_assigned_stock_quantity")
+                continue
+            shares_opened += opened
+            shares_remaining += remaining
+            shares_sold += sold
+            lot_id = _text(lot.get("stock_lot_id"))
+            if lot_id:
+                stock_lot_ids.append(lot_id)
+            account = _text(lot.get("account")).lower()
+            symbol = canonical_symbol(lot.get("symbol")) or _text(lot.get("symbol")).upper()
+            if account:
+                stock_accounts.add(account)
+            if symbol:
+                stock_symbols.add(symbol)
+
+        option_account = _text(option.get("account")).lower()
+        option_symbol = canonical_symbol(option.get("symbol")) or _text(option.get("symbol")).upper()
+        if len(stock_accounts) > 1:
+            issues.append("multiple_assigned_stock_accounts")
+        if len(stock_symbols) > 1:
+            issues.append("multiple_assigned_stock_symbols")
+        if option_account and stock_accounts and stock_accounts != {option_account}:
+            issues.append("assigned_stock_account_mismatch")
+        if option_symbol and stock_symbols and stock_symbols != {option_symbol}:
+            issues.append("assigned_stock_symbol_mismatch")
+        if assignments and not stock_lots and "missing_assignment_settlement" not in issues:
+            issues.append("missing_assigned_stock_lot")
+
+        residual_call_contracts = max(0, call_open - put_open)
+        if "open_quantity_mismatch" in issues and put_open + assignment_contracts == call_open:
+            issues = [item for item in issues if item != "open_quantity_mismatch"]
+        if shares_remaining > 0 and put_open > 0 and residual_call_contracts == 0:
+            issues.append("mixed_active_combo_and_assigned_stock")
+
+        unique_issues = sorted(set(issues))
+        if unique_issues:
+            classification = "review_required"
+        elif shares_remaining > 0 and residual_call_contracts > 0:
+            classification = "assigned_stock_with_residual_call"
+        elif shares_remaining > 0 and put_open == 0 and call_open == 0:
+            classification = "assigned_stock_only"
+        elif shares_remaining == 0 and put_open == 0 and call_open > 0:
+            classification = "residual_call"
+        elif shares_remaining == 0 and put_open == 0 and call_open == 0:
+            classification = "closed"
+        else:
+            unique_issues = sorted(set([*unique_issues, "full_lifecycle_not_terminal"]))
+            classification = "review_required"
+
+        output.append(
+            {
+                "strategy_group_id": group_id,
+                "strategy": STRATEGY_COMBO_YIELD,
+                "account": option.get("account") or next(iter(stock_accounts), None),
+                "symbol": option.get("symbol") or next(iter(stock_symbols), None),
+                "expiry_structure": option.get("expiry_structure"),
+                "put_expiration": option.get("put_expiration"),
+                "call_expiration": option.get("call_expiration"),
+                "put_contracts_open": put_open,
+                "call_contracts_open": call_open,
+                "residual_call_contracts": residual_call_contracts,
+                "assigned_contracts": assignment_contracts,
+                "assigned_shares_opened": shares_opened,
+                "assigned_shares_remaining": shares_remaining,
+                "assigned_shares_sold": shares_sold,
+                "option_inventory_classification": option.get("summary_classification"),
+                "summary_classification": classification,
+                "lifecycle_issues": unique_issues,
+                "evidence_scope": "trade_events_and_assigned_stock_lots",
+                "option_record_ids": list(option.get("record_ids") or []),
+                "assignment_event_ids": sorted(set(assignment_event_ids)),
+                "assigned_stock_lot_ids": sorted(set(stock_lot_ids)),
+            }
+        )
+    return output
+
+
+__all__ = ["build_full_group_lifecycle", "build_option_group_inventory"]

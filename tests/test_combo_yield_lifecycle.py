@@ -2,7 +2,7 @@ from pathlib import Path
 
 import src.application.ledger.repository as ledger_repository
 
-from domain.domain.combo_yield_lifecycle import build_option_group_inventory
+from domain.domain.combo_yield_lifecycle import build_full_group_lifecycle, build_option_group_inventory
 
 
 def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str = "diagonal") -> dict:
@@ -172,3 +172,174 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
     assert groups[0]["summary_classification"] == "active_combo"
     assert groups[0]["put_expiration"] == "2026-08-21"
     assert groups[0]["call_expiration"] == "2026-09-18"
+
+
+def test_full_group_lifecycle_classifies_residual_and_assignment_states() -> None:
+    group_id = "combo_yield:lx:pair-full"
+    residual_options = build_option_group_inventory(
+        [
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("call", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id),
+        ]
+    )
+    residual = build_full_group_lifecycle(residual_options)[0]
+    assigned = build_full_group_lifecycle(
+        residual_options,
+        assigned_stock_lots=[
+            {
+                "stock_lot_id": "stock-1",
+                "strategy_group_id": group_id,
+                "account": "lx",
+                "symbol": "PDD",
+                "shares_opened": 100,
+                "shares_remaining": 100,
+                "shares_sold": 0,
+            }
+        ],
+        assignment_events=[
+            {
+                "event_id": "assign-1",
+                "strategy_group_id": group_id,
+                "contracts": 1,
+                "stock_settlement_valid": True,
+            }
+        ],
+    )[0]
+
+    assert residual["summary_classification"] == "residual_call"
+    assert residual["residual_call_contracts"] == 1
+    assert assigned["summary_classification"] == "assigned_stock_with_residual_call"
+    assert assigned["assigned_contracts"] == 1
+    assert assigned["assigned_shares_remaining"] == 100
+
+
+def test_full_group_lifecycle_reconciles_partial_assignment_quantities() -> None:
+    group_id = "combo_yield:lx:pair-partial"
+    option_groups = build_option_group_inventory(
+        [
+            _lot("put", option_type="put", side="short", opened=2, open_count=1, expiration="2026-08-21", group_id=group_id),
+            _lot("call", option_type="call", side="long", opened=2, open_count=2, expiration="2026-09-18", group_id=group_id),
+        ]
+    )
+    lifecycle = build_full_group_lifecycle(
+        option_groups,
+        assigned_stock_lots=[
+            {
+                "stock_lot_id": "stock-partial",
+                "strategy_group_id": group_id,
+                "account": "lx",
+                "symbol": "PDD",
+                "shares_opened": 100,
+                "shares_remaining": 100,
+                "shares_sold": 0,
+            }
+        ],
+        assignment_events=[
+            {
+                "event_id": "assign-partial",
+                "strategy_group_id": group_id,
+                "contracts": 1,
+                "stock_settlement_valid": True,
+            }
+        ],
+    )[0]
+
+    assert lifecycle["summary_classification"] == "assigned_stock_with_residual_call"
+    assert lifecycle["put_contracts_open"] == 1
+    assert lifecycle["call_contracts_open"] == 2
+    assert lifecycle["residual_call_contracts"] == 1
+    assert lifecycle["lifecycle_issues"] == []
+
+
+def test_full_group_lifecycle_keeps_assignment_history_after_stock_sale() -> None:
+    group_id = "combo_yield:lx:pair-closed"
+    option_groups = build_option_group_inventory(
+        [
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("call", option_type="call", side="long", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
+        ]
+    )
+    lifecycle = build_full_group_lifecycle(
+        option_groups,
+        assigned_stock_lots=[
+            {
+                "stock_lot_id": "stock-sold",
+                "strategy_group_id": group_id,
+                "account": "lx",
+                "symbol": "PDD",
+                "shares_opened": 100,
+                "shares_remaining": 0,
+                "shares_sold": 100,
+            }
+        ],
+        assignment_events=[
+            {
+                "event_id": "assign-closed",
+                "strategy_group_id": group_id,
+                "contracts": 1,
+                "stock_settlement_valid": True,
+            }
+        ],
+    )[0]
+
+    assert lifecycle["summary_classification"] == "closed"
+    assert lifecycle["assigned_shares_opened"] == 100
+    assert lifecycle["assigned_shares_sold"] == 100
+    assert lifecycle["assignment_event_ids"] == ["assign-closed"]
+    assert lifecycle["assigned_stock_lot_ids"] == ["stock-sold"]
+
+
+def test_full_group_lifecycle_fails_closed_when_assignment_settlement_missing() -> None:
+    group_id = "combo_yield:lx:pair-missing-settlement"
+    option_groups = build_option_group_inventory(
+        [_lot("call", option_type="call", side="long", opened=1, open_count=1, expiration="2026-09-18", group_id=group_id)]
+    )
+    lifecycle = build_full_group_lifecycle(
+        option_groups,
+        assignment_events=[
+            {
+                "event_id": "assign-missing",
+                "strategy_group_id": group_id,
+                "contracts": 1,
+                "stock_settlement_valid": False,
+            }
+        ],
+    )[0]
+
+    assert lifecycle["summary_classification"] == "review_required"
+    assert "missing_assignment_settlement" in lifecycle["lifecycle_issues"]
+
+
+def test_full_group_lifecycle_classifies_assigned_stock_without_open_call() -> None:
+    group_id = "combo_yield:lx:assigned-stock-only"
+    option_groups = build_option_group_inventory(
+        [
+            _lot("put", option_type="put", side="short", opened=1, open_count=0, expiration="2026-08-21", group_id=group_id),
+            _lot("call", option_type="call", side="long", opened=1, open_count=0, expiration="2026-09-18", group_id=group_id),
+        ]
+    )
+    lifecycle = build_full_group_lifecycle(
+        option_groups,
+        assigned_stock_lots=[
+            {
+                "stock_lot_id": "assigned-only",
+                "strategy_group_id": group_id,
+                "account": "lx",
+                "symbol": "PDD",
+                "shares_opened": 100,
+                "shares_remaining": 100,
+                "shares_sold": 0,
+            }
+        ],
+        assignment_events=[
+            {
+                "event_id": "assign-only",
+                "strategy_group_id": group_id,
+                "contracts": 1,
+                "stock_settlement_valid": True,
+            }
+        ],
+    )[0]
+
+    assert lifecycle["summary_classification"] == "assigned_stock_only"
+    assert lifecycle["residual_call_contracts"] == 0
