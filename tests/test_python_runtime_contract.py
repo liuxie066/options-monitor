@@ -232,3 +232,22 @@ def test_src_and_domain_guards_are_python39_parseable_and_fail_fast() -> None:
         assert result.returncode != 0
         assert "options-monitor requires Python >= 3.12" in result.stderr
         assert "observed=3.9.18" in result.stderr
+
+
+def test_current_operational_docs_do_not_reintroduce_ambiguous_python_bootstrap() -> None:
+    current_docs = (
+        ROOT / "AGENTS.md",
+        ROOT / "docs" / "AGENT_GETTING_STARTED.md",
+        ROOT / "docs" / "DEPLOY_LINUX_MAC.md",
+        ROOT / "docs" / "RELEASE_PROCESS.md",
+        ROOT / "docs" / "TOOL_REFERENCE.md",
+    )
+
+    for path in current_docs:
+        text = path.read_text(encoding="utf-8")
+        assert "python3 -m venv .venv" not in text
+        assert "uv venv --python python3" not in text
+
+    assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in (
+        ROOT / "scripts" / "generate_dependency_graph.py"
+    ).read_text(encoding="utf-8")

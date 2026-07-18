@@ -436,8 +436,8 @@ Tool Gateway 只读列出：
 手工成交文本入账使用 runtime config 路径；确认写入前会打印目标 SQLite，发现 active/default store 已经漂移时会拒绝写入：
 
 ```bash
-python3 -m src.application.option_intake --config /var/lib/options-monitor/config.hk.json --text "/om -sy open ..." --dry-run
-python3 -m src.application.option_intake --config /var/lib/options-monitor/config.hk.json --text "/om -sy open ..." --confirm
+./.venv/bin/python -m src.application.option_intake --config /var/lib/options-monitor/config.hk.json --text "/om -sy open ..." --dry-run
+./.venv/bin/python -m src.application.option_intake --config /var/lib/options-monitor/config.hk.json --text "/om -sy open ..." --confirm
 ```
 
 过期自动平仓使用专用入口，不随 tick 扫描执行：
@@ -735,7 +735,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | 期权监控 / 扫描通知 | `./om run tick-cron --market hk --accounts lx sy --timeout 600` / `./om run tick-cron --market us --accounts lx sy --timeout 600` | cron 每 10 分钟唤醒，代码内判断业务窗口 | 写本地报告、portfolio capacity shadow 和运行状态；启用 Close Advice 时额外写 reallocation shadow；并按通知策略发送扫描/建议消息 |
 | Strategy Lab 证据记录 | `./om service render --include-strategy-lab-recorder ...` 生成的 `options-monitor-strategy-lab-*.timer` | 独立低频 timer | 写本地 Shadow Replay dataset、mark path、outcome facts、required-data cache 和 receipt；不发通知、不改生产配置 |
 | 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或人工检查 | 只读 |
-| 自动交易监听 / 入账 | `python3 -m src.application.trades.auto_intake --config config.us.json --mode apply --yes` | 长驻进程 | 写本地 `option_positions`、intake state/status，并按 receipt 配置发送回执 |
+| 自动交易监听 / 入账 | `./.venv/bin/python -m src.application.trades.auto_intake --config config.us.json --mode apply --yes` | 长驻进程 | 写本地 `option_positions`、intake state/status，并按 receipt 配置发送回执 |
 | 过期自动平仓 | `./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --confirm` | 低频定时或人工触发，按 runtime config market 只处理对应市场标的；短仓需有价外 spot 证据 | 写本地 `option_positions`、运行状态，并按 receipt 配置发送任务级回执 |
 | 版本检查 | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | 低频只读 | 只读 |
 | 版本更新预览 | `./om-agent run --tool version_update --input-json '{"bump":"patch"}'` | dry-run | 不写 `VERSION` |
@@ -762,8 +762,8 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | `./om run tick --config ...` | 是 | 可能 | 是 |
 | `./om run tick-cron --market ...` | 是 | 可能 | 是 |
 | `./om research strategy-lab update --write ...` | 是 | 否 | 否 |
-| `python3 -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是，默认发送入账回执 |
-| `python3 -m src.application.option_intake --config ... --confirm` | 是 | 否 | 否 |
+| `./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是，默认发送入账回执 |
+| `./.venv/bin/python -m src.application.option_intake --config ... --confirm` | 是 | 否 | 否 |
 | `./om option-positions auto-close-expired --confirm` | 是 | 否 | 是，默认发送过期自动平仓回执 |
 | `./om option-positions auto-close-expired --confirm --no-send` | 是 | 否 | 否 |
 
