@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.ledger.api import assigned_stock_event_log
 from src.application.trades.state import load_trade_intake_state, upsert_deal_state, write_trade_intake_state
 
 
@@ -288,15 +289,10 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
 
 
 def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
-    list_events = getattr(repo, "list_assigned_stock_events", None)
-    if not callable(list_events):
-        return {}
     out: dict[str, list[dict[str, Any]]] = {}
-    for event in list_events():
-        if not isinstance(event, dict):
-            continue
+    for event in assigned_stock_event_log(repo).events:
         for deal_id in _deal_ids_from_assigned_stock_event(event):
-            out.setdefault(deal_id, []).append(event)
+            out.setdefault(deal_id, []).append(dict(event))
     return out
 
 

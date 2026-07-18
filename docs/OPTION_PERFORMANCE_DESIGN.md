@@ -1,0 +1,183 @@
+# Option Performance v1 Design
+
+This document is the contract source for the option-performance refactor. Implementation lands in reviewed Gateflow slices; sections are expanded as each slice is accepted.
+
+## Period Contract
+
+Public period kinds are `mtd`, `ytd`, `month`, `year`, and `range`. Operator-facing dates use `Asia/Shanghai`. Domain computation uses UTC Unix millisecond intervals with half-open semantics:
+
+```text
+[effective_start_at_ms, effective_end_exclusive_at_ms)
+```
+
+Past date ranges end at the next local midnight. A range ending on local today ends at `now_ms + 1`, so `valuation_end_at_ms == now_ms`. Opening valuation is the instant immediately before activity begins: `valuation_open_at_ms = effective_start_at_ms - 1`.
+
+The public parser rejects future dates, inverted ranges, invalid calendar values, and period-specific fields that do not belong to the selected period. An internal `cutoff_ms_override` exists only for the deprecated adapter and must fall inside the normalized period.
+
+## Instrument Identity
+
+Valuation evidence uses account-independent market instrument identity. It never reuses `ContractKey.position_key`, which includes broker, account, and position side.
+
+```text
+option:v1|<pct(symbol)>|<option_type>|<strike>|<expiration_ymd>|<currency>|<multiplier>
+stock:v1|<pct(symbol)>|<currency>
+```
+
+Symbols are canonical, currency is uppercase, dates are `YYYY-MM-DD`, and Decimal values use fixed notation without insignificant trailing zeros or exponent notation. Unknown codec versions and invalid fields fail closed. Adjusted/non-standard contracts must later prove unique market identity; they must not be silently matched as standard contracts.
+
+## Money, Quality, and Fee Facts
+
+- Domain money is `Decimal` quantized to `0.000001`.
+- Native-currency maps are authoritative; CNY is derived only with evidence.
+- Metric status is one of `observed`, `partial`, `not_observed`, or `not_applicable`.
+- Missing inputs are explicit and are never coerced to zero.
+- Fee basis is `actual`, `estimated`, or `missing`.
+- `actual` amount zero is a real zero; a legacy zero without provenance becomes `missing`.
+- Gross metrics ignore fees. Net metrics require all incurred fee components needed by that metric.
+
+## Canonical Option Economic Allocations
+
+The canonical ledger projection is the sole owner of option close matching and lifecycle PnL allocation. Every valid close-like event (`close`, `expire_close`, `assignment`, or `exercise`) targeting an open lot produces one stable `OptionEconomicAllocation`; downstream performance code consumes these allocations and must not independently rematch option lots.
+
+Allocation identity is derived from the open event, close event, and deterministic projection sequence. Projection sorts immutable events by `(event_time_ms, event_id)`, excludes validly voided events before applying state transitions, and therefore produces stable allocation ordering and IDs across replay. A voided close contributes neither lot mutation nor economics; a replacement close is projected as a new allocation.
+
+For short options, opening premium is positive cash and closing premium is negative cash. Long-option signs are the inverse. Gross realized PnL is the sum of those signed premium amounts. Assignment/exercise remains an option close allocation here; stock settlement principal and assigned-stock economics belong to later lifecycle facts and must not be treated as option loss.
+
+Open fees are allocated proportionally by closed contracts. The final close absorbs the six-decimal rounding remainder, preserving fee conservation. When one broker close is split across multiple target lots, its close fee is also allocated proportionally and the final segment absorbs the remainder; the split fees must conserve the original event total. A legacy non-zero canonical fee is treated as actual with explicit legacy provenance; zero without provenance is missing; explicit actual zero remains complete; malformed explicit provenance fails closed as missing. Gross PnL remains available when a fee is missing or estimated, while production realized net PnL is null unless every incurred fee is actual. Estimated fees remain visible only as quality/evidence and must not enter production realized PnL.
+
+Currency and multiplier are economic units even though they are not both part of legacy `ContractKey`. A close whose units differ from its target lot produces an error diagnostic and no economic allocation. Likewise, an otherwise valid close whose economics cannot be represented produces a diagnostic and no allocation. In both cases the pre-existing lot/risk close state transition still occurs, so reporting metadata cannot reopen production risk state. Downstream performance treats these effective closes as explicitly incomplete.
+
+`PositionLot.realized_pnl` is retained for risk/read compatibility and is not the canonical gross or net performance amount: legacy lot behavior subtracts close-event fees but does not allocate opening fees. New reporting must use `ProjectionResult.allocations`, exposed through the application ledger API.
+
+## Core Period Activity, Cash, and Realized PnL
+
+The pure period engine consumes effective canonical trade events plus canonical option economic allocations. It never matches option lots. Events own direct activity and cash facts; allocations exclusively own realized option PnL.
+
+- Short option opens create positive `premium_collected_gross` and positive option trade cash; short closes create negative option trade cash.
+- Long option opens create positive `premium_paid_gross` and negative option trade cash; long closes create positive option trade cash.
+- Premium activity is not PnL. Realized option PnL is recognized only at the allocation close timestamp.
+- Assignment/exercise option close price zero is valid. Recorded stock settlement principal is a separate signed cash fact and never an option loss.
+- Option fee cash is production-observed only from actual fee facts. Estimated or missing fees make affected net metrics partial/null while gross metrics remain available.
+- Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
+- An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
+
+All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal. S4 adds evidence-backed CNY derivation without replacing those native amounts.
+
+Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
+
+The application service reads immutable events only through `src.application.ledger.api`, rebuilds canonical projection without writes, and passes domain facts to the pure engine. Its S3 output is the internal `option_period_performance.core.v1` contract; the public Agent/CLI v1 envelope is added in S7.
+
+## Valuation and FX Evidence
+
+Historical valuation is replayed from append-only `option_performance_evidence.v1` facts. Repository construction and report reads never run DDL. A missing schema returns `not_initialized`; only explicit evidence import/capture apply performs the idempotent v1 migration. Migration and the full evidence batch share one transaction, so any identity, correction, duplicate, or storage conflict rolls back both schema and data changes. Dry-run parses and validates the same envelope without creating or mutating the database.
+
+Valuation facts use `OptionInstrumentKey` or `StockInstrumentKey`; FX facts use an exact base/quote pair. Structured SQLite identity columns must decode to the same canonical key as the stored `instrument_key`. Corrections are append-only and must reference an existing or earlier fact of the same identity. Self-reference, missing targets, cross-identity corrections, source-identity conflicts, and correction cycles fail closed.
+
+Selection is deterministic at the requested valuation or event instant:
+
+1. consider facts whose `effective_at_ms` is not after the instant;
+2. remove facts superseded by an eligible correction;
+3. choose the latest effective time;
+4. at equal time use `manual_correction > official_close > broker_snapshot > realtime_snapshot > cache_snapshot`;
+5. then choose the highest revision and stable fact ID;
+6. reject evidence older than seven days.
+
+The selected mark and FX fact IDs are returned in metric/report quality. Native-currency amounts remain available when FX is missing, while the CNY amount and affected quality become partial.
+
+Opening and ending option inventory are projected only through the ledger application API. Boundary projection is restated using all valid canonical voids, including a later void of an earlier event, then applies economic state only through the requested boundary. This keeps historical realized activity and opening/ending inventory on the same canonical replay semantics. Remaining actual opening fee is derived from canonical close allocations rather than rematching lots.
+
+For an open short option:
+
+```text
+unrealized_gross = (open_price - mark_price) * contracts_open * multiplier
+unrealized_net   = unrealized_gross - remaining_actual_open_fee
+```
+
+The long-option price direction is reversed. Missing or non-actual opening fee leaves gross available and net partial. Period option PnL is:
+
+```text
+period_total = realized + ending_unrealized - opening_unrealized
+```
+
+Period, month, account, and symbol views reduce the same valuation facts. Valuation-only positions are included in scope, and opening/ending facts are assigned to the first/last report month respectively so monthly conservation remains explicit.
+
+Current collection runs only for `partial_current` reports with `refresh_quotes=true`. It deduplicates account-independent option identities, rejects conflicting stored market codes, resolves missing exact codes from only the required expiration chains, and fetches the resulting exact codes in one batched snapshot path. Positive bid/ask midpoint is preferred; positive last price is the explicit fallback. Crossed, zero, ambiguous, or unavailable markets fail closed with diagnostics. Broker timestamps are accepted only when timezone-aware and not in the future; otherwise the injected `now_ms` is used with `timestamp_fallback=true`.
+
+Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for later dry-run/apply wiring in S7.
+
+## Sell Put Assigned-Stock Lifecycle
+
+Supported assigned-stock inventory is projected once by `domain.domain.assigned_stock.project_assigned_stock_lifecycle`. Both the legacy monthly report and option-performance service delegate to that projector. Application code reads assigned-stock sale events only through `src.application.ledger.api.assigned_stock_event_log`; repository capability probing and read failures are contained at that boundary and become explicit diagnostics.
+
+The supported inventory transition is deliberately narrow:
+
+```text
+short put assignment
+  -> buy-side stock settlement
+  -> assigned-stock lot
+  -> zero or more partial/full assigned-stock sales
+```
+
+Assignment/exercise inventory outside that Sell Put buy-side transition is returned as `incomplete_inventory_basis`; the system does not invent a stock basis. External holdings are reconciliation evidence only. They never create, close, or resize a canonical assigned-stock lot.
+
+Option premium remains owned by the canonical option allocation. Stock gross PnL uses settlement principal only:
+
+```text
+sale_realized_gross = gross_sale_proceeds - sold_settlement_principal
+stock_unrealized_gross = market_value - remaining_settlement_principal
+period_stock_total = sale_realized + ending_unrealized - opening_unrealized
+```
+
+Settlement and sale fees are separate facts. Production net metrics use only `actual` fee evidence, including explicit actual zero. Estimated or missing fees preserve gross and make the affected net metric partial. The settlement fee is recognized once at assignment; it is not embedded again in stock gross basis. This keeps option premium, settlement fee, sale fee, and stock price movement from being double counted.
+
+Opening and ending assigned-stock projections use the same restated boundary semantics as option inventory: valid later voids are included when rebuilding an earlier boundary. Historical reports select persisted stock marks only and never fetch current stock prices. Current reports may collect deduplicated `StockInstrumentKey` marks through the S4 read-through collector.
+
+Covered-call lifecycle attribution prefers an explicit `stock_lot_id` link. If no explicit link exists, FIFO attribution is allowed only when the available inventory is entirely attributable to assigned-stock lots; it is labelled `heuristic` and downgrades lifecycle quality. Mixed ordinary/assigned inventory fails closed. Reservations prevent one stock share from backing two overlapping calls. Closed-call realized PnL and open-call marked unrealized PnL are both visible in the lifecycle projection, but they are not added again to top-level performance because canonical option facts already own those economics.
+
+## Capital Exposure and Efficiency
+
+The report exposes capital only as continuous-time notional-days under the explicit basis
+`notional_days_v1`. Each exposure is a half-open interval `[start_at_ms, end_at_ms)` and is
+intersected with the normalized report window using exact milliseconds:
+
+```text
+capital_days = notional * overlap_ms / 86_400_000
+```
+
+Short puts use strike * multiplier * remaining contracts. Long options use the remaining
+opening premium debit. Assigned stock uses remaining stock cost basis and reduces both shares
+and basis at the exact sale timestamp. A Sell Put assignment closes put exposure and opens
+assigned-stock exposure at the same timestamp. The shared assigned-stock projector publishes
+the covered-call allocation identities it already validated, allowing attributed covered calls
+to contribute an explicit zero-incremental segment without reimplementing attribution in the
+performance engine. Naked or otherwise unallocated short calls remain unavailable.
+
+`capital.period_total_net_annualized_efficiency` and
+`capital.period_realized_net_annualized_efficiency` are reported per native currency only when
+both the corresponding net PnL and a positive denominator are complete. Zero denominators,
+missing net PnL, unsupported inventory basis, and unknown short-call capital are explicit in
+`capital.coverage` or the efficiency envelope. No NAV, margin return, integer-day approximation,
+or unqualified `return_rate` is introduced.
+
+## Portfolio Bridge Boundary
+
+The primary PnL and cash bridges are per-account accounting boundaries. Each PM fact payload and
+each option performance report must prove the exact requested account, the same natural period end,
+and `Asia/Shanghai` reporting timezone. Aggregate or missing account scope is never accepted as
+single-account evidence. A nested metric is usable only when both that metric and the report-level
+quality are `observed`; partial report diagnostics remain binding downstream even when a known
+subtotal is still visible. Contract mismatches and partial evidence keep bridge amounts null rather
+than attributing them to the requested account or treating them as zero.
+
+## Slice Status
+
+- S1: period, instrument, money, quality, and fee contracts implemented.
+- S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
+- S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
+- S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
+- S5: shared Sell Put assigned-stock projection, legal ledger API boundary, partial/full sales, stock marks, actual-fee net semantics, covered-call attribution quality, unsupported inventory diagnostics, and legacy delegation implemented.
+- S6: continuous-time option/assigned-stock notional-days, exact partial transitions, assignment handoff, covered-call zero-incremental treatment, and net annualized efficiency coverage implemented.
+- S7: primary Agent/CLI contract, evidence lifecycle commands, and deprecated monthly adapter implemented.
+- S8: analysis, Assistant, Copilot, and legacy CLI consumers migrated to explicit activity/cash/PnL semantics.
+- S9: independent portfolio PnL and cash bridges implemented; the mixed capital bridge is deprecated.
+- S10: old/new reconciliation, replay and coverage gates, explicit legacy-reference allowlist, proven-scope zero semantics, and rollback/removal documentation implemented.

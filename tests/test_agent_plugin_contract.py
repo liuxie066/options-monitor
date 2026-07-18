@@ -27,6 +27,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
     assert "monthly_income_report" in tool_names
+    assert "option_performance_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
     assert "runtime_runs" in tool_names
@@ -100,6 +101,14 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
     assert "month" in income_report["input_schema"]
+    performance_report = next(item for item in spec["tools"] if item["name"] == "option_performance_report")
+    assert performance_report["risk_level"] == "read_only"
+    assert performance_report["requires_confirm"] is False
+    assert performance_report["safe_default_input"]["config_key"] == "us"
+    assert performance_report["safe_default_input"]["period"] == "mtd"
+    assert performance_report["safe_default_input"]["refresh_quotes"] is True
+    assert "capital.period_realized_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
+    assert "capital.period_total_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
     option_positions_read = next(item for item in spec["tools"] if item["name"] == "option_positions_read")
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"
@@ -448,8 +457,12 @@ def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
         safe_default = tool.get("safe_default_input") if isinstance(tool, dict) else {}
         if isinstance(schema, dict) and "config_key" in schema:
             assert isinstance(safe_default, dict)
-            assert "config_key" not in safe_default
-            assert "config_path" not in safe_default
+            if tool.get("name") == "option_performance_report":
+                assert safe_default.get("config_key") == "us"
+                assert safe_default.get("config_path") is None
+            else:
+                assert "config_key" not in safe_default
+                assert "config_path" not in safe_default
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:
