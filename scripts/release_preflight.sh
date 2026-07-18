@@ -18,18 +18,9 @@ EOF
 }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python_has_pytest() {
-  "$1" -c 'import pytest' >/dev/null 2>&1
-}
-
-PYTHON_BIN="${PYTHON:-}"
-if [[ -z "${PYTHON_BIN}" ]]; then
-  if [[ -x "${ROOT}/.venv/bin/python" ]] && python_has_pytest "${ROOT}/.venv/bin/python"; then
-    PYTHON_BIN="${ROOT}/.venv/bin/python"
-  else
-    PYTHON_BIN="python3"
-  fi
-fi
+# shellcheck source=python_runtime.sh
+source "${ROOT}/scripts/python_runtime.sh"
+PYTHON_BIN="$(om_select_repo_python "${ROOT}")"
 
 FULL=0
 REQUIRE_CLEAN=0
