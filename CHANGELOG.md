@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+- Set Python 3.12 as the repository-wide hard minimum across public launchers, installation, release preflight, service-upgrade runtime creation, generated release commands, Ruff, and CI.
+- Bound service-upgrade venv creation to the already-running supported interpreter while keeping shared dependency-cache identity stable at the Python major/minor contract.
+
+### Fixed
+- Prevented missing or incompatible repo virtualenvs from silently falling back to an older shell `python3`, including macOS Python 3.9; failures now report the selected executable, observed version, and remediation.
+
 ## 1.2.412 - 2026-07-18
 
 ### Added
