@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.410 - 2026-07-18
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values at the final HTTP request boundary, preventing `Typing` from being sent as invalid `TYPING`.
+
 ## 1.2.409 - 2026-07-17
 
 ### Fixed
