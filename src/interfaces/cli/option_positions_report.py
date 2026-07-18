@@ -5,10 +5,63 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.application.ledger.api import (
-    format_position_money,
-    position_monthly_income_report,
-)
+from src.application.ledger.api import format_position_money, open_performance_evidence_repository
+from src.application.performance.service import build_option_period_performance
+
+
+
+
+def _metric_text(value: Any) -> str:
+    metric = value if isinstance(value, dict) else {}
+    by_currency = metric.get("by_currency") if isinstance(metric.get("by_currency"), dict) else {}
+    parts = [format_position_money(amount, currency) for currency, amount in sorted(by_currency.items())]
+    if metric.get("cny") is not None:
+        parts.append(format_position_money(metric.get("cny"), "CNY"))
+    quality = metric.get("quality") if isinstance(metric.get("quality"), dict) else {}
+    status = str(quality.get("status") or "")
+    text = " / ".join(parts) if parts else "-"
+    return f"{text} ({status})" if status and status != "observed" else text
+
+
+def print_option_performance(report: dict[str, Any]) -> None:
+    period = report.get("period") if isinstance(report.get("period"), dict) else {}
+    activity = report.get("activity") if isinstance(report.get("activity"), dict) else {}
+    cash = report.get("cash") if isinstance(report.get("cash"), dict) else {}
+    pnl = report.get("pnl") if isinstance(report.get("pnl"), dict) else {}
+    quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
+    filters = report.get("filters") if isinstance(report.get("filters"), dict) else {}
+    print("# Option Performance (monthly-income deprecated alias)")
+    print("")
+    print(
+        f"period={period.get('kind') or '-'} "
+        f"{period.get('requested_start_date') or '-'}..{period.get('requested_end_date') or '-'} "
+        f"status={period.get('status') or '-'}"
+    )
+    print(
+        "filters: "
+        f"month={filters.get('month') or '-'} | account={filters.get('account') or '-'} | "
+        f"broker={filters.get('broker') or '-'}"
+    )
+    print("")
+    print("## PnL")
+    print(f"- period_total_net: {_metric_text(pnl.get('period_total_net'))}")
+    print(f"- period_total_gross: {_metric_text(pnl.get('period_total_gross'))}")
+    print(f"- realized_net: {_metric_text(pnl.get('realized_net'))}")
+    print(f"- realized_gross: {_metric_text(pnl.get('realized_gross'))}")
+    print("")
+    print("## Cash")
+    print(f"- total_cash_change_net: {_metric_text(cash.get('total_cash_change_net'))}")
+    print(f"- option_trade_cash_gross: {_metric_text(cash.get('option_trade_cash_gross'))}")
+    print(f"- stock_settlement_cash_gross: {_metric_text(cash.get('stock_settlement_cash_gross'))}")
+    print("")
+    print("## Activity")
+    print(f"- premium_collected_gross: {_metric_text(activity.get('premium_collected_gross'))}")
+    print(f"- premium_paid_gross: {_metric_text(activity.get('premium_paid_gross'))}")
+    print("")
+    print("PnL, cash, and premium activity are parallel namespaces; do not add or subtract them as residual components.")
+    missing = quality.get("missing") if isinstance(quality.get("missing"), list) else []
+    if missing:
+        print("missing: " + ", ".join(str(item) for item in missing[:10]))
 
 
 def _format_rate(value: Any) -> str:
@@ -258,16 +311,32 @@ def run_report(args, *, base, repo) -> int:
     """Dispatch `option-positions report <subcmd>` against an already-resolved repo."""
     sub = getattr(args, "report_cmd", None)
     if sub == "monthly-income":
-        report = position_monthly_income_report(
+        del base
+        period = (
+            {"period": "month", "month": args.month}
+            if str(args.month or "").strip()
+            else {"period": "mtd"}
+        )
+        report = build_option_period_performance(
             repo,
-            base=base,
+            period=period,
             account=args.account,
             broker=args.broker,
-            month=args.month,
+            include_rows=bool(args.include_rows),
+            evidence_repo=open_performance_evidence_repository(repo),
+            refresh_quotes=False,
         )
+        report = dict(report)
+        report["schema_version"] = "option_performance_report.output.v1"
+        report["assignment_lifecycle"] = report.pop("assigned_stock", {})
+        report["filters"] = {"month": args.month, "account": args.account, "broker": args.broker}
+        report["deprecation"] = {
+            "status": "deprecated_alias",
+            "replacement": "./om option-performance report",
+        }
         if args.format == "json":
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
-        print_monthly_income(report, include_rows=bool(args.include_rows))
+        print_option_performance(report)
         return 0
     raise SystemExit(f"unknown report subcommand: {sub}")
