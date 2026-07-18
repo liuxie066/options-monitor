@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VPY="${PYTHON:-python3}"
+# shellcheck source=python_runtime.sh
+source "$ROOT/scripts/python_runtime.sh"
+VPY="$(om_select_bootstrap_python "$ROOT/.venv")"
 
 cd "$ROOT"
 
