@@ -159,6 +159,16 @@ missing net PnL, unsupported inventory basis, and unknown short-call capital are
 `capital.coverage` or the efficiency envelope. No NAV, margin return, integer-day approximation,
 or unqualified `return_rate` is introduced.
 
+## Portfolio Bridge Boundary
+
+The primary PnL and cash bridges are per-account accounting boundaries. Each PM fact payload and
+each option performance report must prove the exact requested account, the same natural period end,
+and `Asia/Shanghai` reporting timezone. Aggregate or missing account scope is never accepted as
+single-account evidence. A nested metric is usable only when both that metric and the report-level
+quality are `observed`; partial report diagnostics remain binding downstream even when a known
+subtotal is still visible. Contract mismatches and partial evidence keep bridge amounts null rather
+than attributing them to the requested account or treating them as zero.
+
 ## Slice Status
 
 - S1: period, instrument, money, quality, and fee contracts implemented.

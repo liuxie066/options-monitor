@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.performance.models import OptionInstrumentKey, StockInstrumentKey, ValuationMarkFact
+from domain.domain.performance.models import FXRateFact, OptionInstrumentKey, StockInstrumentKey, ValuationMarkFact
 from domain.domain.performance.period import normalize_period
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.performance.adapters import load_assigned_stock_projection, load_ledger_performance_inputs
@@ -37,9 +37,19 @@ def _repo_with_assignment(
     *,
     assignment_stock_fee: float = 0,
     assignment_stock_fee_basis: str = "actual",
+    include_stock_settlement: bool = True,
 ) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(tmp_path / "assignment-performance.sqlite3")
     key = _key()
+    assignment_payload = {"fee_provenance": {"basis": "actual", "source": "test"}}
+    if include_stock_settlement:
+        assignment_payload["stock_settlement"] = {
+            "side": "buy",
+            "shares": 100,
+            "price": 100,
+            "fees": assignment_stock_fee,
+            "fee_provenance": {"basis": assignment_stock_fee_basis, "source": "test"},
+        }
     repo.upsert_trade_event(
         TradeEvent(
             event_id="open-put",
@@ -69,16 +79,7 @@ def _repo_with_assignment(
             multiplier=100,
             fees=0,
             target_lot_id="lot-put",
-            raw_payload={
-                "fee_provenance": {"basis": "actual", "source": "test"},
-                "stock_settlement": {
-                    "side": "buy",
-                    "shares": 100,
-                    "price": 100,
-                    "fees": assignment_stock_fee,
-                    "fee_provenance": {"basis": assignment_stock_fee_basis, "source": "test"},
-                },
-            },
+            raw_payload=assignment_payload,
         )
     )
     return repo
@@ -89,6 +90,7 @@ def _evidence(
     marks: list[tuple[str, int, float]],
     *,
     option_marks: list[tuple[str, int, float]] | None = None,
+    fx_at_ms: list[int] | None = None,
 ) -> PerformanceEvidenceSQLiteRepository:
     stock_instrument = StockInstrumentKey(symbol="NVDA", currency="USD")
     facts = [
@@ -118,12 +120,26 @@ def _evidence(
         )
         for fact_id, at_ms, price in (option_marks or [])
     )
+    fx_rates = [
+        FXRateFact(
+            fact_id=f"fx-{at_ms}",
+            base_currency="USD",
+            quote_currency="CNY",
+            rate="7",
+            rate_kind="official_close",
+            effective_at_ms=at_ms,
+            observed_at_ms=at_ms,
+            source="official_close",
+            source_id=f"fx-{at_ms}",
+        )
+        for at_ms in (fx_at_ms or [])
+    ]
     evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
     evidence.import_envelope(
         {
             "schema_version": "option_performance_evidence.v1",
             "valuation_marks": [fact.normalized_payload() for fact in facts],
-            "fx_rates": [],
+            "fx_rates": [fact.normalized_payload() for fact in fx_rates],
         },
         apply=True,
         migrated_at_ms=NOW_MS,
@@ -273,6 +289,68 @@ def test_estimated_sale_fee_keeps_gross_and_marks_net_partial(tmp_path) -> None:
     assert report["pnl"]["realized_net"]["by_currency"] == {}
     assert report["pnl"]["realized_net"]["status"] == "partial"
     assert report["cash"]["assigned_stock_sale_fee_cash"]["status"] == "partial"
+
+
+def test_historical_missing_stock_settlement_blocks_proven_zero(tmp_path) -> None:
+    repo = _repo_with_assignment(tmp_path, include_stock_settlement=False)
+
+    report = build_option_period_performance(
+        repo,
+        period={"period": "month", "month": "2026-06"},
+        account="lx",
+        now_ms=NOW_MS,
+        scope_proven=True,
+    )
+
+    assert report["quality"]["status"] == "partial"
+    assert report["quality"]["warnings"] == ["missing_stock_settlement:assign-put"]
+    assert report["pnl"]["period_total_net"]["status"] == "not_observed"
+    assert report["pnl"]["period_total_net"]["cny"] is None
+
+
+def test_invalid_assigned_stock_sale_degrades_observed_period_quality(tmp_path) -> None:
+    repo = _repo_with_assignment(tmp_path)
+    june = normalize_period({"period": "month", "month": "2026-06"}, now_ms=NOW_MS)
+    repo.upsert_assigned_stock_event(
+        {
+            "event_type": "sale",
+            "stock_event_id": "sale-too-many",
+            "target_stock_lot_id": "assigned-stock-assign-put",
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "side": "sell",
+            "shares": 200,
+            "price": 110,
+            "currency": "USD",
+            "fees": 0,
+            "fee_provenance": {"basis": "actual", "source": "test"},
+            "trade_time_ms": _ms("2026-06-15T10:00:00"),
+        }
+    )
+    evidence = _evidence(
+        repo,
+        [
+            ("june-open-stock", june.valuation_open_at_ms, 100),
+            ("june-end-stock", june.valuation_end_at_ms, 105),
+        ],
+        fx_at_ms=[june.valuation_open_at_ms, june.valuation_end_at_ms],
+    )
+
+    report = build_option_period_performance(
+        repo,
+        period=june,
+        account="lx",
+        now_ms=NOW_MS,
+        evidence_repo=evidence,
+        scope_proven=True,
+    )
+
+    assert report["pnl"]["period_total_net"]["by_currency"] == {"USD": 500.0}
+    assert report["pnl"]["period_total_net"]["status"] == "observed"
+    assert report["quality"]["status"] == "partial"
+    assert report["quality"]["warnings"] == ["source_conflict:sale-too-many"]
+    assert report["assigned_stock"]["sales"] == []
 
 
 def test_assigned_stock_boundary_projection_restates_later_valid_void(tmp_path) -> None:

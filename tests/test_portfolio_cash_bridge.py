@@ -57,7 +57,11 @@ def _report(
 ) -> dict:
     total = _metric(cash, status=status) if cash is not None else {"cny": None, "status": status}
     return {
-        "period": {"kind": period, "requested_end_date": end_date},
+        "period": {
+            "kind": period,
+            "requested_end_date": end_date,
+            "reporting_timezone": "Asia/Shanghai",
+        },
         "scope": {"account": account},
         "quality": {"status": "observed", "evidence_fact_ids": ["cash-event-1", "fee-1"]},
         "cash": {
@@ -184,6 +188,68 @@ def test_cash_bridge_requires_aligned_option_period_and_matching_account_end_dat
     assert misaligned["accounts"][0]["option_cash_evidence"]["reason"] == "option_performance_period_mismatch"
     assert _step(misaligned["accounts"][0], "option_total_cash_change")["amount"] is None
     assert combined["combined"]["reason"] == "account_end_date_mismatch"
+
+
+def test_cash_bridge_requires_exact_source_account_and_reporting_timezone() -> None:
+    wrong_facts = _facts("sy")
+    utc_facts = _facts("lx")
+    utc_facts["period"]["timezone"] = "UTC"
+    aggregate_report = _report("lx")
+    aggregate_report["scope"]["account"] = None
+    utc_report = _report("lx")
+    utc_report["period"]["reporting_timezone"] = "UTC"
+
+    wrong_facts_result = build_portfolio_cash_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        cash_facts_by_account={"lx": wrong_facts},
+        option_reports_by_account={"lx": _report("lx")},
+    )
+    facts_timezone_result = build_portfolio_cash_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        cash_facts_by_account={"lx": utc_facts},
+        option_reports_by_account={"lx": _report("lx")},
+    )
+    aggregate_result = build_portfolio_cash_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        cash_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": aggregate_report},
+    )
+    timezone_result = build_portfolio_cash_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        cash_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": utc_report},
+    )
+
+    assert wrong_facts_result["accounts"][0]["reason"] == "portfolio_cash_account_mismatch"
+    assert facts_timezone_result["accounts"][0]["reason"] == "portfolio_cash_timezone_mismatch"
+    assert aggregate_result["accounts"][0]["option_cash_evidence"]["reason"] == "option_performance_account_mismatch"
+    assert timezone_result["accounts"][0]["option_cash_evidence"]["reason"] == "option_performance_timezone_mismatch"
+
+
+def test_cash_bridge_does_not_use_observed_metric_from_partial_report() -> None:
+    report = _report("lx")
+    report["quality"] = {"status": "partial", "warnings": ["source_conflict:bad-sale"]}
+
+    result = build_portfolio_cash_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        cash_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": report},
+    )
+
+    account = result["accounts"][0]
+    assert account["option_cash_evidence"]["status"] == "observed"
+    assert account["option_cash_evidence"]["usable"] is False
+    assert _step(account, "option_total_cash_change")["amount"] is None
 
 
 def test_missing_cash_balance_or_non_cny_facts_are_unavailable() -> None:
