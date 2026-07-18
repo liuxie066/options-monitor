@@ -189,6 +189,35 @@ def test_bootstrap_selector_rejects_interpreter_through_symlinked_target_venv(tm
     assert f"target_venv={shared}" in result.stderr
 
 
+def test_bootstrap_selector_rejects_external_alias_to_target_interpreter(tmp_path: Path) -> None:
+    target = tmp_path / "repo" / ".venv"
+    target_python = _write_fake_python(target / "bin" / "python", version="3.12.3")
+    alias = tmp_path / "fake-bin" / "python3.12"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(target_python)
+    env = _runtime_env(tmp_path / "empty-bin")
+    env["PYTHON"] = str(alias)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && om_select_bootstrap_python "$2"',
+            "bootstrap-test",
+            str(ROOT / "scripts" / "python_runtime.sh"),
+            str(target),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "bootstrap interpreter must be outside" in result.stderr
+    assert f"executable={target_python}" in result.stderr
+
+
 def test_bootstrap_selector_ignores_existing_target_venv(tmp_path: Path) -> None:
     target = tmp_path / "repo" / ".venv"
     _write_fake_python(target / "bin" / "python", version="3.11.9")
@@ -237,6 +266,7 @@ def test_src_and_domain_guards_are_python39_parseable_and_fail_fast() -> None:
 def test_current_operational_docs_do_not_reintroduce_ambiguous_python_bootstrap() -> None:
     current_docs = (
         ROOT / "AGENTS.md",
+        ROOT / "RUNBOOK.md",
         ROOT / "docs" / "AGENT_GETTING_STARTED.md",
         ROOT / "docs" / "DEPLOY_LINUX_MAC.md",
         ROOT / "docs" / "RELEASE_PROCESS.md",
@@ -247,7 +277,11 @@ def test_current_operational_docs_do_not_reintroduce_ambiguous_python_bootstrap(
         text = path.read_text(encoding="utf-8")
         assert "python3 -m venv .venv" not in text
         assert "uv venv --python python3" not in text
+        assert "`python3 -m src.application" not in text
 
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in (
         ROOT / "scripts" / "generate_dependency_graph.py"
+    ).read_text(encoding="utf-8")
+    assert "./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes" in (
+        ROOT / "RUNBOOK.md"
     ).read_text(encoding="utf-8")

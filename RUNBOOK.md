@@ -57,7 +57,7 @@ cd /var/lib/options-monitor/current
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式扫描/通知入口 |
-| `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
+| `./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
 | `./om option-positions auto-close-expired --config ... --apply` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
 
 判断原则：
