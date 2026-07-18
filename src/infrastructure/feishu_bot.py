@@ -78,9 +78,18 @@ def add_message_reaction(
                 "Authorization": f"Bearer {tenant_token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
+            timeout=2,
+            retry_max_attempts=1,
         )
 
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return with_tenant_token_retry(
+        app_id,
+        app_secret,
+        _send,
+        token_timeout=2,
+        token_retry_max_attempts=1,
+        token_lock_timeout=0.0,
+    )
 
 
 def send_text_message(

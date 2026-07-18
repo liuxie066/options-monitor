@@ -220,7 +220,7 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, optionally adds the configured Inbound `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. When `inbound.feishu_ws.ack_reaction` is configured, an independent bounded ACK lane adds the Reaction after the allowlisted text event has entered the business queue; the Reaction is best-effort and does not mean that Control, Copilot, a tool, or the final reply has completed. Unauthorized senders remain silent, and ACK failures or drops do not block business processing. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 `openclaw_readiness` has been retired. Use `healthcheck` for environment readiness and
 `runtime_status` for existing runtime artifacts.

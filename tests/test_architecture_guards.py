@@ -344,3 +344,21 @@ def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
     )
 
     assert unknown == []
+
+
+def test_feishu_ws_transport_does_not_own_allowlist_policy() -> None:
+    ws_path = ROOT / "src" / "application" / "inbound" / "feishu_ws.py"
+    adapter_path = ROOT / "src" / "application" / "inbound" / "feishu.py"
+    ws_text = ws_path.read_text(encoding="utf-8")
+    adapter_text = adapter_path.read_text(encoding="utf-8")
+    ws_imports = set(_imported_modules_with_from_names(ws_path))
+    adapter_imports = set(_imported_modules_with_from_names(adapter_path))
+
+    assert "_parse_allowed_entries" not in ws_text
+    assert "_parse_allowed_entries" not in adapter_text
+    assert "OM_FEISHU_BOT_ALLOWED_OPEN_IDS" not in adapter_text
+    assert "OM_FEISHU_BOT_USER_OPEN_ID" not in adapter_text
+
+    assert "src.application.assistant.policy" not in ws_imports
+    assert "src.application.assistant.policy.check_sender_allowed" in adapter_imports
+    assert "check_sender_allowed(" in adapter_text

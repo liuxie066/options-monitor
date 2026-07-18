@@ -8,14 +8,16 @@ from src.infrastructure import feishu_bot
 def test_add_message_reaction_posts_feishu_reaction_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    token_calls: list[dict] = []
 
-    def _http_json(method: str, url: str, payload: dict, headers: dict) -> dict:
-        calls.append({"method": method, "url": url, "payload": payload, "headers": headers})
+    def _with_token(app_id, app_secret, fn, **kwargs):
+        token_calls.append({"app_id": app_id, "app_secret": app_secret, **kwargs})
+        return fn("tenant_token")
+
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", _with_token)
+
+    def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
+        calls.append({"method": method, "url": url, "payload": payload, "headers": headers, "kwargs": kwargs})
         return {"code": 0, "data": {"reaction_id": "r_1"}}
 
     out = feishu_bot.add_message_reaction(
@@ -36,6 +38,16 @@ def test_add_message_reaction_posts_feishu_reaction_payload(monkeypatch: pytest.
                 "Authorization": "Bearer tenant_token",
                 "Content-Type": "application/json; charset=utf-8",
             },
+            "kwargs": {"timeout": 2, "retry_max_attempts": 1},
+        }
+    ]
+    assert token_calls == [
+        {
+            "app_id": "app_1",
+            "app_secret": "secret_1",
+            "token_timeout": 2,
+            "token_retry_max_attempts": 1,
+            "token_lock_timeout": 0.0,
         }
     ]
 
