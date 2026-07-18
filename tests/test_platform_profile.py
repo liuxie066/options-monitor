@@ -16,6 +16,7 @@ def test_linux_platform_profile_defaults() -> None:
     assert profile.default_install_prefix == Path("/home/om/apps/options-monitor")
     assert profile.default_runtime_root == Path("/var/lib/options-monitor")
     assert profile.default_env_file == Path("/etc/options-monitor/options-monitor.env")
+    assert any("Python 3.12" in hint for hint in profile.prerequisite_hints)
 
 
 def test_macos_platform_profile_defaults() -> None:
@@ -26,6 +27,7 @@ def test_macos_platform_profile_defaults() -> None:
     assert profile.default_install_prefix == Path("/Users/liuxie/apps/options-monitor")
     assert profile.default_runtime_root == Path("/Users/liuxie/Library/Application Support/options-monitor")
     assert profile.default_env_file == Path("/Users/liuxie/Library/Application Support/options-monitor/options-monitor.env")
+    assert any("Python 3.12" in hint for hint in profile.prerequisite_hints)
 
 
 def test_service_target_runtime_root_defaults() -> None:

@@ -34,7 +34,7 @@
 最小运行依赖：
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
 ```
@@ -221,7 +221,7 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 `options-monitor-projection-verify.timer` 每天北京时间 09:30 运行一次 `./om option-positions verify-projection --mode auto`，用于校验 `trade_events -> position_lots` 并复用 checkpoint。
 `options-monitor-tick-us.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，按美东时间 10 分钟整数边界唤醒。
 `options-monitor-tick-hk.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`，按香港时间 10 分钟整数边界唤醒；是否真正扫描/通知仍由 `tick-cron` scheduler 的 run points 决定。
-`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会从本机 git cache materialize 目标 release、创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。默认 cache root 是 repo symlink 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖；`_cache/git/options-monitor.git` 首次 mirror clone，后续增量 fetch，依赖下载缓存复用 `_cache/uv` / `_cache/pip`。release 目录不保留 `.git`，所以升级检查和下一次升级会在需要时从 git cache 读取 remote 与 release tags。依赖安装默认 `OM_UPGRADE_INSTALLER=auto`，会优先使用宿主机已安装的 `uv`，执行 `uv venv --python python3 .venv`；uv 不可用或 auto 模式失败时回退 pip。升级流程不会自动安装 uv；可用 `OM_UPGRADE_INSTALLER=pip|uv` 强制选择。只配置 `PIP_INDEX_URL` 时会自动映射给 uv 的 `UV_INDEX_URL`。
+`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会从本机 git cache materialize 目标 release、创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。默认 cache root 是 repo symlink 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖；`_cache/git/options-monitor.git` 首次 mirror clone，后续增量 fetch，依赖下载缓存复用 `_cache/uv` / `_cache/pip`。release 目录不保留 `.git`，所以升级检查和下一次升级会在需要时从 git cache 读取 remote 与 release tags。依赖安装默认 `OM_UPGRADE_INSTALLER=auto`，会优先使用宿主机已安装的 `uv`，并把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`；uv 不可用或 auto 模式失败时回退 pip。升级流程不会自动安装 uv；可用 `OM_UPGRADE_INSTALLER=pip|uv` 强制选择。只配置 `PIP_INDEX_URL` 时会自动映射给 uv 的 `UV_INDEX_URL`。
 
 升级后的 release 清理默认 dry-run：
 
