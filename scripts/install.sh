@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_URL="https://github.com/liuxie066/options-monitor.git"
 PREFIX="${HOME}/apps/options-monitor"
 VERSION=""
-PYTHON_BIN="${PYTHON:-python3}"
+PYTHON_BIN="${PYTHON:-}"
 WITH_SERVER=0
 WITH_DEV=0
 FORCE=0
@@ -32,7 +32,7 @@ Options:
                         Default: latest published GitHub release, never main.
   --prefix PATH        Install root. Default: $HOME/apps/options-monitor.
   --repo-url URL       Git repository URL.
-  --python PATH        Python executable for venv creation. Default: python3.
+  --python PATH        Python executable for venv creation. Default: python3.12, then compatible python3.
   --install-cli        Create user-level om and om-agent wrappers. Default.
   --no-install-cli     Do not create user-level CLI wrappers.
   --bin-dir PATH       Wrapper directory. Default: $HOME/.local/bin.
@@ -66,10 +66,10 @@ missing_git_message() {
 missing_python_message() {
   case "$OS_NAME" in
     Darwin)
-      printf 'python executable not found: %s. On macOS install Python with: brew install python' "$PYTHON_BIN"
+      printf 'python executable not found: %s. On macOS install Python 3.12 with: brew install python@3.12' "$PYTHON_BIN"
       ;;
     Linux)
-      printf 'python executable not found: %s. Install python3 and venv support, for example: sudo apt-get install python3 python3-venv' "$PYTHON_BIN"
+      printf 'python executable not found: %s. Install Python 3.12 and venv support, for example: sudo apt-get install python3.12 python3.12-venv' "$PYTHON_BIN"
       ;;
     *)
       printf 'python executable not found: %s' "$PYTHON_BIN"
@@ -92,15 +92,19 @@ missing_curl_message() {
 }
 
 check_python_runtime() {
-  "$PYTHON_BIN" - <<'PY'
-import importlib.util
-import sys
+  runtime_version=""
+  if runtime_version="$("$PYTHON_BIN" -c 'import sys; print(".".join(str(part) for part in sys.version_info[:3])); raise SystemExit(0 if sys.version_info >= (3, 12) else 42)' 2>&1)"; then
+    :
+  else
+    status=$?
+    if [ "$status" -eq 42 ]; then
+      die "Python >= 3.12 is required; executable=$PYTHON_BIN; observed=${runtime_version:-unknown}. Install Python 3.12 or pass --python PATH."
+    fi
+    die "Python >= 3.12 runtime check failed; executable=$PYTHON_BIN; observed=${runtime_version:-unusable}. Install Python 3.12 or pass --python PATH."
+  fi
 
-if sys.version_info < (3, 10):
-    raise SystemExit("python >= 3.10 is required")
-if importlib.util.find_spec("venv") is None:
-    raise SystemExit("python venv module is required")
-PY
+  "$PYTHON_BIN" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("venv") is not None else 43)' \
+    || die "Python venv module is required; executable=$PYTHON_BIN; observed=$runtime_version. Install the Python 3.12 venv package."
 }
 
 quote() {
@@ -362,9 +366,17 @@ else
 fi
 validate_tag "$TAG"
 
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3.12 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.12"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
+
 command -v git >/dev/null 2>&1 || die "$(missing_git_message)"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$(missing_python_message)"
-check_python_runtime || die "python runtime check failed. Linux may need python3-venv; macOS may need a Homebrew Python."
+check_python_runtime
 
 PREFIX_PARENT="$(dirname "$PREFIX")"
 mkdir -p "$PREFIX_PARENT"

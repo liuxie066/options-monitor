@@ -4,6 +4,8 @@
 
 安装不会创建 runtime config，不会写 env secrets，不会启动 systemd/launchd，也不会连接 OpenD、Feishu 或修改 SQLite 状态。默认会创建用户级 `om` / `om-agent` wrapper，方便从任意目录启动。
 
+整个仓库要求 **Python 3.12 或更高版本**。`om`、`om-agent`、installer、release preflight 和 service upgrade 都会在执行前验证解释器，不再静默接受 macOS 自带的旧 `python3`。
+
 ## Quick Install
 
 普通安装默认解析并安装最新 GitHub release，不安装浮动 `main` 分支：
@@ -55,15 +57,15 @@ macOS 是一等支持平台，适合本地手动运行或轻量常驻运行。�
 
 ```bash
 xcode-select --install
-python3 --version
+python3.12 --version
 ```
 
-Python 需要 3.10 或更高版本。
+Python 需要 3.12 或更高版本。
 
 如果使用 Homebrew：
 
 ```bash
-brew install python git
+brew install python@3.12 git
 ```
 
 安装代码：
@@ -119,10 +121,10 @@ Linux 是推荐的生产长期运行平台。
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3 python3-venv
+sudo apt-get install -y git python3.12 python3.12-venv
 ```
 
-Python 需要 3.10 或更高版本；较旧发行版请安装更新的 Python 包。
+Python 需要 3.12 或更高版本；较旧发行版请先启用提供 Python 3.12 的受信软件源或升级发行版。
 
 安装代码：
 
@@ -181,9 +183,24 @@ om service render \
 git clone https://github.com/liuxie066/options-monitor.git options-monitor
 cd options-monitor
 git checkout <release-tag>
-python3 -m venv .venv
+python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+```
+
+如果已有 `.venv` 是 Python 3.10/3.11 或已损坏，launcher 会明确失败而不会绕到 shell 的其他 `python3`。确认该目录只包含可重建依赖后再重建：
+
+```bash
+rm -rf .venv
+python3.12 -m venv .venv
+./.venv/bin/pip install -U pip
+./.venv/bin/pip install -r requirements.txt -c constraints.txt
+```
+
+临时诊断或恢复时可以显式指定兼容解释器：
+
+```bash
+OM_PYTHON=/absolute/path/to/python3.12 ./om --help
 ```
 
 可选依赖：
