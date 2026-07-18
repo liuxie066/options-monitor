@@ -301,3 +301,28 @@ def test_attribution_summary_does_not_depend_on_rows_serialization() -> None:
     assert "rows" in with_rows
     assert "rows" not in without_rows
     assert without_rows["attribution"] == with_rows["attribution"]
+
+
+def test_mislabeled_leg_contract_fails_closed_for_attribution() -> None:
+    events = [
+        _event("bad-put", "open", "2026-05-01T00:00:00", role="funding_put", option_type="call", side="long", strike=100, price=5),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4),
+    ]
+
+    report = _report(events)
+
+    assert report["attribution"]["groups"] == []
+    assert any("funding_put_contract_invalid" in issue for issue in report["attribution"]["coverage"]["issues"])
+
+
+def test_group_quality_is_partial_when_period_pnl_is_unobserved() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4),
+    ]
+
+    group = _report(events)["attribution"]["groups"][0]
+
+    assert group["pnl"]["period_total_net"]["status"] == "not_observed"
+    assert group["quality"]["status"] == "partial"
+    assert "group_period_total_net_not_observed" in group["quality"]["issues"]

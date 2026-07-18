@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 714 (`src`: 400, `domain`: 59, `scripts`: 7, `tests`: 248)
-- Internal import edges: 3987 total, 1882 production/script edges excluding tests
+- Python files scanned: 718 (`src`: 400, `domain`: 61, `scripts`: 7, `tests`: 250)
+- Internal import edges: 4009 total, 1892 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|288| domain
+  application -->|289| domain
   application -->|2| domain_services
   application -->|104| infrastructure
   application -->|34| storage
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   storage -->|1| domain
   tests -->|1460| application
-  tests -->|315| domain
+  tests -->|327| domain
   tests -->|2| domain_services
   tests -->|110| infrastructure
   tests -->|174| interfaces
@@ -56,7 +56,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 288 |
+| application | domain | 289 |
 | interfaces | application | 121 |
 | application | infrastructure | 104 |
 | application | storage | 34 |
@@ -74,7 +74,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | tests | application | 1460 |
-| tests | domain | 315 |
+| tests | domain | 327 |
 | tests | interfaces | 174 |
 | tests | infrastructure | 110 |
 | tests | storage | 16 |
@@ -87,7 +87,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 154 |
+| src.application | domain.domain | 155 |
 | src.interfaces | src.application | 99 |
 | src.application | src.infrastructure | 73 |
 | src.application.ledger | domain.domain.ledger | 28 |
@@ -106,11 +106,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain | 13 |
 | src.application.trades | src.application | 12 |
 | src.application.positions | domain.domain.ledger | 11 |
+| domain.domain | domain.domain.ledger | 10 |
 | src.application.ledger | src.infrastructure | 8 |
 | src.application.multi_tick | src.infrastructure | 8 |
 | src.application.positions | src.infrastructure | 8 |
 | src.application.positions | domain.storage | 7 |
-| domain.domain | domain.domain.ledger | 7 |
 | src.application | domain.domain.ledger | 6 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.trades | src.application.ledger | 6 |

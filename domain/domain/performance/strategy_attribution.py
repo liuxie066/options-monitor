@@ -137,6 +137,15 @@ def _build_topology(
             bucket["issues"].append("currency_mismatch")
         if Decimal(str(put_event.multiplier)) != Decimal(str(call_event.multiplier)):
             bucket["issues"].append("multiplier_mismatch")
+        if put_event.contract_key.option_type != "put" or put_event.contract_key.position_side != "short":
+            bucket["issues"].append("funding_put_contract_invalid")
+        if call_event.contract_key.option_type != "call" or call_event.contract_key.position_side != "long":
+            bucket["issues"].append("participation_call_contract_invalid")
+        structure = str(bucket.get("expiry_structure") or "").strip().lower()
+        if structure in {"diagonal", "staggered_expiry_pair"} and (
+            call_event.contract_key.expiration_ymd <= put_event.contract_key.expiration_ymd
+        ):
+            bucket["issues"].append("invalid_diagonal_expiry_order")
         if bucket["issues"]:
             bucket["status"] = "partial"
             issues.update(f"strategy_group_invalid:{group_id}:{item}" for item in bucket["issues"])
@@ -194,6 +203,13 @@ def _group_report(
             *(item for segment in segments for item in segment.attribution_issues),
         }
     )
+    metric_issues = _group_metric_issues(
+        group_pnl=group_pnl,
+        put_pnl=put_pnl,
+        call_pnl=call_pnl,
+        group_capital=group_capital,
+    )
+    quality_issues = sorted({*issues, *metric_issues})
     return {
         "strategy_group_id": topology["strategy_group_id"],
         "strategy": topology["strategy"],
@@ -229,8 +245,30 @@ def _group_report(
         "funding": _funding_snapshot(put["event"], call["event"]),
         "pnl": group_pnl,
         "capital": group_capital,
-        "quality": {"status": "partial" if issues else "observed", "issues": issues},
+        "quality": {"status": "partial" if quality_issues else "observed", "issues": quality_issues},
     }
+
+
+def _group_metric_issues(
+    *,
+    group_pnl: Mapping[str, Any],
+    put_pnl: Mapping[str, Any],
+    call_pnl: Mapping[str, Any],
+    group_capital: Mapping[str, Any],
+) -> list[str]:
+    issues: list[str] = []
+    for label, report in (("group", group_pnl), ("funding_put", put_pnl), ("participation_call", call_pnl)):
+        for metric in ("period_total_gross", "period_total_net"):
+            status = str((report.get(metric) or {}).get("status") or "not_observed")
+            if status != "observed":
+                issues.append(f"{label}_{metric}_{status}")
+    efficiency_status = str(
+        (group_capital.get("period_total_net_annualized_efficiency") or {}).get("status")
+        or "not_observed"
+    )
+    if efficiency_status != "observed":
+        issues.append(f"group_efficiency_{efficiency_status}")
+    return issues
 
 
 def _assigned_stock_lifecycles(
