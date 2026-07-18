@@ -282,3 +282,22 @@ def test_assigned_stock_partial_sales_keep_stock_lot_lifecycle_identity() -> Non
 
     assert first["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"
     assert second["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"
+
+
+def test_attribution_summary_does_not_depend_on_rows_serialization() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+    projection = project_trade_events(events)
+    window = normalize_period({"period": "month", "month": "2026-05"}, now_ms=NOW_MS)
+    result = build_period_performance(events=events, allocations=projection.allocations, period=window)
+
+    with_rows = result.to_dict(include_rows=True)
+    without_rows = result.to_dict(include_rows=False)
+
+    assert "rows" in with_rows
+    assert "rows" not in without_rows
+    assert without_rows["attribution"] == with_rows["attribution"]
