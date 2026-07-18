@@ -7,6 +7,7 @@ from typing import Any
 SCHEMA_VERSION = "portfolio.cash_bridge.v1"
 _MONEY = Decimal("0.01")
 _TOLERANCE = Decimal("0.05")
+_REPORTING_TIMEZONE = "Asia/Shanghai"
 _STEP_KEYS = (
     "opening_cash",
     "external_cash_flow",
@@ -80,7 +81,12 @@ def build_portfolio_cash_bridge(
 
 
 def _account_bridge(*, account: str, period: str, as_of_month: str, facts: Any, report: Any) -> dict[str, Any]:
-    fact_error = _fact_contract_error(facts, period=period, as_of_month=as_of_month)
+    fact_error = _fact_contract_error(
+        facts,
+        account=account,
+        period=period,
+        as_of_month=as_of_month,
+    )
     if fact_error is not None:
         return _unavailable_account(
             account,
@@ -195,15 +201,25 @@ def _account_bridge(*, account: str, period: str, as_of_month: str, facts: Any, 
     }
 
 
-def _fact_contract_error(facts: Any, *, period: str, as_of_month: str) -> str | None:
+def _fact_contract_error(
+    facts: Any,
+    *,
+    account: str,
+    period: str,
+    as_of_month: str,
+) -> str | None:
     if not isinstance(facts, dict) or str(facts.get("status") or "") != "ok":
         return str((facts or {}).get("reason") or "portfolio_cash_facts_unavailable")
+    if str(facts.get("account") or "").strip() != account:
+        return "portfolio_cash_account_mismatch"
     fact_period = facts.get("period") if isinstance(facts.get("period"), dict) else {}
     if str(fact_period.get("kind") or "").strip().lower() != period:
         return "portfolio_cash_period_mismatch"
     requested_month = str(fact_period.get("requested_as_of_month") or "").strip()
     if requested_month and requested_month != as_of_month:
         return "portfolio_cash_as_of_month_mismatch"
+    if str(fact_period.get("timezone") or "").strip() != _REPORTING_TIMEZONE:
+        return "portfolio_cash_timezone_mismatch"
     if not str(fact_period.get("end_date") or "").strip():
         return "portfolio_cash_end_date_missing"
     return None
@@ -250,16 +266,23 @@ def _option_cash_evidence(
         return {**unavailable, "reason": "option_performance_period_mismatch", "period": dict(report_period)}
     scope = report.get("scope") if isinstance(report.get("scope"), dict) else {}
     scoped_account = str(scope.get("account") or "").strip()
-    if scoped_account and scoped_account != account:
+    if scoped_account != account:
         return {**unavailable, "reason": "option_performance_account_mismatch", "scope": dict(scope)}
+    if str(report_period.get("reporting_timezone") or "").strip() != _REPORTING_TIMEZONE:
+        return {
+            **unavailable,
+            "reason": "option_performance_timezone_mismatch",
+            "period": dict(report_period),
+        }
 
     cash = report.get("cash") if isinstance(report.get("cash"), dict) else {}
     metric = cash.get("total_cash_change_net") if isinstance(cash.get("total_cash_change_net"), dict) else {}
     quality = metric.get("quality") if isinstance(metric.get("quality"), dict) else {}
     report_quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
     status = str(metric.get("status") or quality.get("status") or "not_observed")
+    report_status = str(report_quality.get("status") or "not_observed")
     raw_amount = _money_or_none(metric.get("cny"))
-    usable = status == "observed" and raw_amount is not None
+    usable = status == "observed" and report_status == "observed" and raw_amount is not None
     evidence = {
         "status": status,
         "amount_cny": _float(raw_amount) if raw_amount is not None else None,

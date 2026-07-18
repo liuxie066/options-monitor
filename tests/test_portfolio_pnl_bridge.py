@@ -44,7 +44,11 @@ def _report(
     status: str = "observed",
 ) -> dict:
     return {
-        "period": {"kind": period, "requested_end_date": end_date},
+        "period": {
+            "kind": period,
+            "requested_end_date": end_date,
+            "reporting_timezone": "Asia/Shanghai",
+        },
         "scope": {"account": account},
         "cash": {
             "stock_settlement_cash_gross": {
@@ -133,6 +137,68 @@ def test_pnl_bridge_requires_aligned_option_period_and_account() -> None:
     assert account_result["accounts"][0]["option_pnl_evidence"]["reason"] == "option_performance_account_mismatch"
     assert _step(period_result["accounts"][0], "option_period_total_net_pnl")["amount"] is None
     assert _step(account_result["accounts"][0], "option_period_total_net_pnl")["amount"] is None
+
+
+def test_pnl_bridge_requires_exact_source_account_and_reporting_timezone() -> None:
+    wrong_facts = _facts("sy")
+    utc_facts = _facts("lx")
+    utc_facts["period"]["timezone"] = "UTC"
+    aggregate_report = _report("lx")
+    aggregate_report["scope"]["account"] = None
+    utc_report = _report("lx")
+    utc_report["period"]["reporting_timezone"] = "UTC"
+
+    wrong_facts_result = build_portfolio_pnl_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        capital_facts_by_account={"lx": wrong_facts},
+        option_reports_by_account={"lx": _report("lx")},
+    )
+    facts_timezone_result = build_portfolio_pnl_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        capital_facts_by_account={"lx": utc_facts},
+        option_reports_by_account={"lx": _report("lx")},
+    )
+    aggregate_result = build_portfolio_pnl_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        capital_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": aggregate_report},
+    )
+    timezone_result = build_portfolio_pnl_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        capital_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": utc_report},
+    )
+
+    assert wrong_facts_result["accounts"][0]["reason"] == "portfolio_capital_account_mismatch"
+    assert facts_timezone_result["accounts"][0]["reason"] == "portfolio_capital_timezone_mismatch"
+    assert aggregate_result["accounts"][0]["option_pnl_evidence"]["reason"] == "option_performance_account_mismatch"
+    assert timezone_result["accounts"][0]["option_pnl_evidence"]["reason"] == "option_performance_timezone_mismatch"
+
+
+def test_pnl_bridge_does_not_use_observed_metric_from_partial_report() -> None:
+    report = _report("lx")
+    report["quality"] = {"status": "partial", "warnings": ["source_conflict:bad-sale"]}
+
+    result = build_portfolio_pnl_bridge(
+        period="mtd",
+        as_of_month="2026-07",
+        accounts=["lx"],
+        capital_facts_by_account={"lx": _facts("lx")},
+        option_reports_by_account={"lx": report},
+    )
+
+    account = result["accounts"][0]
+    assert account["option_pnl_evidence"]["status"] == "observed"
+    assert account["option_pnl_evidence"]["usable"] is False
+    assert _step(account, "option_period_total_net_pnl")["amount"] is None
 
 
 def test_pnl_bridge_exposes_portfolio_reconciliation_residual() -> None:
