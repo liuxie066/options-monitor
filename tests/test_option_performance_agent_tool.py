@@ -100,6 +100,7 @@ def test_option_performance_report_normalizes_scope_and_caps_rows(monkeypatch: p
     assert calls["account"] == "lx"
     assert calls["broker"] == "FUTU"
     assert calls["refresh_quotes"] is True
+    assert calls["scope_proven"] is True
 
 
 def test_option_performance_report_omitted_account_is_aggregate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,6 +112,7 @@ def test_option_performance_report_omitted_account_is_aggregate(monkeypatch: pyt
 
     assert calls["account"] is None
     assert calls["broker"] is None
+    assert calls["scope_proven"] is True
     assert data["scope"]["accounts"] == ["lx", "sy"]
     assert "rows" not in data
 
@@ -173,3 +175,16 @@ def test_monthly_income_report_maps_legacy_as_of_to_historical_mtd(
     assert calls["period"].requested_end_date == "2026-04-30"
     assert calls["refresh_quotes"] is False
     assert any("mapped to an MTD as_of_date" in warning for warning in warnings)
+
+
+def test_option_performance_report_does_not_prove_unconfigured_account_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_dependencies(monkeypatch, report=_core_report())
+
+    positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
+        {"period": "month", "month": "2026-06", "account": "ghost"}
+    )
+
+    assert calls["account"] == "ghost"
+    assert calls["scope_proven"] is False

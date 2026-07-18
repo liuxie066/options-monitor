@@ -382,14 +382,12 @@ def build_position_monthly_income_report(
     broker: str,
     account: str | None = None,
     month: str | None = None,
+    assigned_stock_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     primary_repo = getattr(repo, "primary_repo", repo)
     list_trade_events = getattr(primary_repo, "list_trade_events", None)
     raw_trade_events = list_trade_events() if callable(list_trade_events) else None
     trade_events = raw_trade_events if isinstance(raw_trade_events, list) else None
-    from src.application.ledger.queries import assigned_stock_event_log
-
-    assigned_stock_events = [dict(item) for item in assigned_stock_event_log(repo).events]
     return build_monthly_income_report(
         load_canonical_position_lot_records(repo, base=base),
         account=account,
@@ -399,7 +397,7 @@ def build_position_monthly_income_report(
             cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
         ),
         trade_events=trade_events,
-        assigned_stock_events=assigned_stock_events,
+        assigned_stock_events=[dict(item) for item in assigned_stock_events or []],
     )
 
 

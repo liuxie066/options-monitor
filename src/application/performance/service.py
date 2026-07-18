@@ -32,6 +32,7 @@ def build_option_period_performance(
     collection_base_dir: Any | None = None,
     evidence_collector: Callable[..., CurrentEvidenceCollection] | None = None,
     evidence_collector_kwargs: Mapping[str, Any] | None = None,
+    scope_proven: bool = False,
 ) -> dict[str, Any]:
     window = period if isinstance(period, PeriodWindow) else normalize_period(period, now_ms=now_ms)
     account_filter = normalize_account(account) if account else None
@@ -165,6 +166,8 @@ def build_option_period_performance(
         ending_assigned_stock=ending_assigned_stock,
     )
     payload = result.to_dict(include_rows=include_rows)
+    if scope_proven and _can_apply_proven_zero_semantics(payload):
+        payload = _apply_proven_zero_semantics(payload)
     payload["evidence"] = {
         "schema_state": schema_state,
         "message": evidence_message,
@@ -175,6 +178,30 @@ def build_option_period_performance(
         "collection": collection.to_dict(),
     }
     return payload
+
+
+def _can_apply_proven_zero_semantics(payload: Mapping[str, Any]) -> bool:
+    quality = payload.get("quality")
+    if not isinstance(quality, Mapping):
+        return False
+    warnings = quality.get("warnings")
+    return isinstance(warnings, list) and not warnings
+
+
+def _apply_proven_zero_semantics(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_apply_proven_zero_semantics(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    out = {key: _apply_proven_zero_semantics(item) for key, item in value.items()}
+    if {"by_currency", "cny", "status", "missing"}.issubset(out) and out.get("status") == "not_observed":
+        out["by_currency"] = {}
+        out["cny"] = 0.0
+        out["status"] = "observed"
+        out["missing"] = []
+    if {"status", "missing", "warnings", "evidence_fact_ids"}.issubset(out) and out.get("status") == "not_observed":
+        out["status"] = "observed"
+    return out
 
 
 __all__ = ["build_option_period_performance"]
