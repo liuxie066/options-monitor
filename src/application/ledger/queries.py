@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,18 @@ from src.application.ledger.repository import (
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
+
+
+@dataclass(frozen=True)
+class AssignedStockEventLog:
+    events: tuple[dict[str, Any], ...]
+    diagnostics: tuple[dict[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "events": [dict(item) for item in self.events],
+            "diagnostics": [dict(item) for item in self.diagnostics],
+        }
 
 
 def open_position_ledger(data_config: Any) -> Any:
@@ -54,6 +67,12 @@ def open_position_ledger_from_runtime_config(
     )
     apply_position_ledger_runtime_config(repo, cfg)
     return resolved_data_config, repo
+
+
+def open_performance_evidence_repository(repo: Any) -> Any:
+    from src.application.ledger.read_model import open_performance_evidence_repository as _impl
+
+    return _impl(repo)
 
 
 def normalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
@@ -163,7 +182,15 @@ def position_monthly_income_report(
 ) -> dict[str, Any]:
     from src.application.ledger.read_model import build_position_monthly_income_report as _impl
 
-    return _impl(repo, base=base, broker=broker, account=account, month=month)
+    assigned_events = [dict(item) for item in assigned_stock_event_log(repo).events]
+    return _impl(
+        repo,
+        base=base,
+        broker=broker,
+        account=account,
+        month=month,
+        assigned_stock_events=assigned_events,
+    )
 
 
 def format_position_money(value: float | int | None, currency: str) -> str:
@@ -185,6 +212,61 @@ def summarize_position_lot_shadow_status(records: list[dict[str, Any]]) -> dict[
 def apply_position_ledger_runtime_config(repo: Any, cfg: dict[str, Any] | None) -> Any:
     _ = cfg
     return repo
+
+
+def assigned_stock_event_log(repo: Any) -> AssignedStockEventLog:
+    candidate = getattr(repo, "primary_repo", repo)
+    list_events = getattr(candidate, "list_assigned_stock_events", None)
+    if not callable(list_events):
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_unavailable",
+                    "message": "ledger repository does not expose assigned-stock events",
+                },
+            ),
+        )
+    try:
+        raw_events = list_events()
+    except Exception as exc:
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_read_failed",
+                    "message": str(exc),
+                },
+            ),
+        )
+    if not isinstance(raw_events, list):
+        return AssignedStockEventLog(
+            events=(),
+            diagnostics=(
+                {
+                    "context": "assigned_stock",
+                    "code": "assigned_stock_event_log_invalid_payload",
+                    "message": "assigned-stock repository returned a non-list payload",
+                },
+            ),
+        )
+    events: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_events):
+        if isinstance(item, dict):
+            events.append(dict(item))
+            continue
+        diagnostics.append(
+            {
+                "context": "assigned_stock",
+                "code": "assigned_stock_event_invalid_row",
+                "message": "assigned-stock event row is not an object",
+                "row_index": index,
+            }
+        )
+    return AssignedStockEventLog(events=tuple(events), diagnostics=tuple(diagnostics))
 
 
 def trade_event_log(repo: Any) -> list[dict[str, Any]]:
@@ -238,6 +320,11 @@ def project_trade_event_log(events: list[dict[str, Any]]) -> Any:
     return project_stored_trade_events_to_position_lots(events)
 
 
+
+def trade_event_economic_allocations(repo: Any) -> list[Any]:
+    projection = project_trade_event_log(trade_event_log(repo))
+    return list(projection.ledger_projection.allocations)
+
 def trade_event_projection_preview(events: list[dict[str, Any]]) -> dict[str, Any]:
     projection = project_trade_event_log(events)
     return {
@@ -253,6 +340,8 @@ def position_projection_verify_state(base: Path) -> dict[str, Any]:
 
 
 __all__ = [
+    "AssignedStockEventLog",
+    "assigned_stock_event_log",
     "PositionLotSnapshot",
     "RiskPositionView",
     "apply_position_ledger_runtime_config",
@@ -278,6 +367,7 @@ __all__ = [
     "resolve_position_data_config_path",
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
+    "trade_event_economic_allocations",
     "trade_event_log",
     "trade_event_projection_preview",
 ]

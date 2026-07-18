@@ -112,6 +112,19 @@ def resolve_position_data_config_path(
     )
 
 
+def open_performance_evidence_repository(repo: Any) -> Any:
+    """Open the performance-evidence repository that shares the ledger SQLite file."""
+    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+
+    db_path = getattr(repo, "db_path", None)
+    if db_path in (None, ""):
+        ledger_store = getattr(repo, "ledger_store", None)
+        db_path = getattr(ledger_store, "sqlite_path", None)
+    if db_path in (None, ""):
+        raise ValueError("position ledger does not expose its SQLite path")
+    return PerformanceEvidenceSQLiteRepository(Path(db_path))
+
+
 def canonicalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
     raw = dict(fields or {})
     note = str(raw.get("note") or "")
@@ -369,14 +382,12 @@ def build_position_monthly_income_report(
     broker: str,
     account: str | None = None,
     month: str | None = None,
+    assigned_stock_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     primary_repo = getattr(repo, "primary_repo", repo)
     list_trade_events = getattr(primary_repo, "list_trade_events", None)
     raw_trade_events = list_trade_events() if callable(list_trade_events) else None
     trade_events = raw_trade_events if isinstance(raw_trade_events, list) else None
-    list_assigned_stock_events = getattr(primary_repo, "list_assigned_stock_events", None)
-    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
-    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None
     return build_monthly_income_report(
         load_canonical_position_lot_records(repo, base=base),
         account=account,
@@ -386,7 +397,7 @@ def build_position_monthly_income_report(
             cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
         ),
         trade_events=trade_events,
-        assigned_stock_events=assigned_stock_events,
+        assigned_stock_events=[dict(item) for item in assigned_stock_events or []],
     )
 
 

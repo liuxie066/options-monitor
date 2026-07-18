@@ -147,11 +147,16 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert out["ok"] is True
     assert out["data"]["reaction"]["reason"] == "sent"
     assert out["data"]["reply"]["reason"] == "sent"
-    assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
+    assert calls == [
+        (
+            "option_performance_report",
+            {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"},
+        )
+    ]
     assert reactions[0]["message_id"] == "msg_1"
     assert reactions[0]["emoji_type"] == "Typing"
     assert replies[0]["message_id"] == "msg_1"
-    assert replies[0]["text"].startswith("收益统计完成")
+    assert replies[0]["text"].startswith("期权收益统计完成")
     assert out["data"]["reply"]["outbound_message_id"] == "reply_1"
 
     with sqlite3.connect(tmp_path / "audit.sqlite3") as conn:

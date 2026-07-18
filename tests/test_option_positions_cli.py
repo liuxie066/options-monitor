@@ -1640,40 +1640,15 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
     assert payload["filters"]["account"] == "lx"
     assert payload["filters"]["broker"] == "富途"
     assert payload["filters"]["month"] == "2026-04"
-    assert len(payload["summary"]) == 1
-    row = payload["summary"][0]
-    assert {key: row.get(key) for key in {
-        "month",
-        "account",
-        "currency",
-        "net_cashflow_gross",
-        "realized_pnl_gross",
-        "open_basis_lifecycle_pnl_gross",
-        "realized_gross",
-        "premium_received_gross",
-        "premium_received_gross_cny",
-        "closed_contracts",
-        "positions",
-        "premium_contracts",
-        "premium_positions",
-    }} == {
-        "month": "2026-04",
-        "account": "lx",
-        "currency": "USD",
-        "net_cashflow_gross": 250.0,
-        "realized_pnl_gross": 0.0,
-        "open_basis_lifecycle_pnl_gross": 250.0,
-        "realized_gross": 0.0,
-        "premium_received_gross": 250.0,
-        "premium_received_gross_cny": 1800.0,
-        "closed_contracts": 0,
-        "positions": 0,
-        "premium_contracts": 1,
-        "premium_positions": 1,
-    }
-    assert payload["return_summary"][0]["account"] == "lx"
-    assert payload["return_summary"][0]["cash_secured_by_ccy"] == {"USD": 10000.0}
-    assert payload["return_summary"][0]["premium_return_rate"] == round(1800.0 / 72000.0, 6)
+    assert payload["schema_version"] == "option_performance_report.output.v1"
+    assert payload["deprecation"]["status"] == "deprecated_alias"
+    assert payload["period"]["kind"] == "month"
+    assert payload["scope"]["account"] == "lx"
+    assert payload["activity"]["premium_collected_gross"]["by_currency"] == {"USD": 250.0}
+    assert payload["cash"]["option_trade_cash_gross"]["by_currency"] == {"USD": 250.0}
+    assert payload["pnl"]["realized_gross"]["by_currency"] == {}
+    assert "summary" not in payload
+    assert "return_summary" not in payload
 
 
 def test_option_positions_cli_assigned_stock_sale_records_independent_event(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1811,7 +1786,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     cli_mod.main()
 
     report = json.loads(capsys.readouterr().out)
-    lifecycle = [row for row in report["assignment_lifecycle_rows"] if row["stock_lot_id"] == stock_lot_id][0]
+    lifecycle = [row for row in report["assignment_lifecycle"]["ending_lots"] if row["stock_lot_id"] == stock_lot_id][0]
     assert lifecycle["status"] == "closed"
     assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
     assert lifecycle["option_premium_attribution"] == 250.0
@@ -1824,14 +1799,8 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
 
-    class _EmptyRepo:
-        def list_records(self, *, page_size: int = 500):
-            return []
-
-        def list_position_lots(self):
-            return []
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, _EmptyRepo()))
+    empty_repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, empty_repo))
     monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
     monkeypatch.setattr(
         sys,
@@ -1852,9 +1821,12 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
     cli_mod.main()
 
     out = capsys.readouterr().out
-    assert "# Position Lots Monthly Income" in out
+    assert "# Option Performance (monthly-income deprecated alias)" in out
     assert "filters: month=2026-04 | account=lx | broker=富途" in out
-    assert "| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 | 0 |" in out
+    assert "## PnL" in out
+    assert "## Cash" in out
+    assert "## Activity" in out
+    assert "parallel namespaces" in out
 
 
 def test_option_positions_cli_pair_combo_yield_dry_run_outputs_both_patches(

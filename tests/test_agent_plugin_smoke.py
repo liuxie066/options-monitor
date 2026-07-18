@@ -149,7 +149,7 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
         "run_futu_doctor": (diagnostics_tools,),
         "load_option_positions_repo": (diagnostics_tools,),
         "load_portfolio_context": (materialization_tools,),
-        "get_exchange_rates": (analysis_tools, positions_tools),
+        "get_exchange_rates": (positions_tools,),
         "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
         "repo_base": (runtime_tools,),
         "check_version_update": (runtime_tools,),
@@ -915,13 +915,13 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     )
 
     assert out["ok"] is True
-    assert Path(rate_calls[0]["cache_path"]) == tmp_path / "output_shared" / "state" / "rate_cache.json"
-    assert out["warnings"] == []
-    assert out["data"]["row_count"] == 1
+    assert rate_calls == []
+    assert refresh_calls == []
+    assert any("DEPRECATED" in warning for warning in out["warnings"])
     assert out["data"]["summary_count"] == 1
     assert out["data"]["scope"] == {
-        "config_key": None,
-        "broker": "富途",
+        "config_key": "us",
+        "broker": None,
         "account": "user1",
         "month": "2026-04",
     }
@@ -932,71 +932,23 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     }
     assert out["data"]["freshness"]["market_quotes_included"] is False
     assert out["data"]["premium_row_count"] == 1
-    assert out["data"]["calculation_method"] == "trade_events"
-    assert len(out["data"]["summary"]) == 1
-    assert out["data"]["quote_refresh"]["status"] == "skipped_no_open_assigned_stock"
-    assert len(refresh_calls) == 1
-
-    disabled = run_tool(
-        "monthly_income_report",
-        {"config_path": str(cfg_path), "account": "user1", "refresh_quotes": False},
-    )
-    assert disabled["data"]["quote_refresh"] == {"enabled": False}
-    assert len(refresh_calls) == 1
-
-    refreshed = run_tool(
-        "monthly_income_report",
-        {"config_path": str(cfg_path), "account": "user1", "refresh_quotes": True},
-    )
-    historical = run_tool(
-        "monthly_income_report",
-        {
-            "config_path": str(cfg_path),
-            "account": "user1",
-            "refresh_quotes": True,
-            "as_of_ms": _ms("2026-04-30"),
-        },
-    )
-    assert refreshed["data"]["quote_refresh"]["status"] == "skipped_no_open_assigned_stock"
-    assert len(refresh_calls) == 2
-    assert historical["data"]["quote_refresh"]["status"] == "skipped_historical_as_of"
-    assert len(refresh_calls) == 2
-    row = out["data"]["summary"][0]
-    assert {key: row.get(key) for key in {
-        "month",
-        "account",
-        "currency",
-        "net_cashflow_gross",
-        "realized_pnl_gross",
-        "open_basis_lifecycle_pnl_gross",
-        "realized_gross",
-        "realized_gross_cny",
-        "closed_contracts",
-        "positions",
-        "premium_received_gross",
-        "premium_received_gross_cny",
-        "premium_contracts",
-        "premium_positions",
-    }} == {
+    assert out["data"]["calculation_method"] == "deprecated_adapter_over_option_performance_report_v1"
+    assert out["data"]["deprecation"]["replacement"] == "option_performance_report"
+    assert out["data"]["quote_refresh"]["status"] == "skipped_historical"
+    summary = out["data"]["summary"][0]
+    assert summary == {
         "month": "2026-04",
         "account": "user1",
-        "currency": "USD",
-        "net_cashflow_gross": 150.0,
-        "realized_pnl_gross": 150.0,
-        "open_basis_lifecycle_pnl_gross": 150.0,
-        "realized_gross": 150.0,
-        "realized_gross_cny": 1080.0,
-        "closed_contracts": 1,
-        "positions": 1,
-        "premium_received_gross": 250.0,
-        "premium_received_gross_cny": 1800.0,
-        "premium_contracts": 1,
-        "premium_positions": 1,
+        "net_cashflow_gross": {"USD": 150.0},
+        "assignment_stock_net_cashflow_gross": {},
     }
-    assert out["data"]["rows"][0]["realized_gross"] == 150.0
-    assert out["data"]["premium_rows"][0]["premium_received_gross"] == 250.0
-    assert out["data"]["cashflow_rows"][0]["net_cashflow_gross"] == 250.0
-    assert out["data"]["cashflow_rows"][1]["net_cashflow_gross"] == -100.0
+    return_row = out["data"]["return_summary"][0]
+    assert return_row["realized_pnl_by_ccy"] == {"USD": 150.0}
+    assert return_row["premium_income_by_ccy"] == {"USD": 250.0}
+    assert return_row["net_income_by_ccy"] == {"USD": 150.0}
+    assert return_row["realized_return_rate"] is None
+    assert out["data"]["premium_rows"][0]["amount"] == 250.0
+    assert out["data"]["realized_rows"][0]["amount"] == 150.0
     assert out["meta"]["data_config"] == ".../portfolio.runtime.json"
 
 

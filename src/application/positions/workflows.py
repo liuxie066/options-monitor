@@ -21,6 +21,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.api import (
+    assigned_stock_event_log,
     LotCloseResolutionError,
     preview_manual_assignment,
     preview_manual_exercise,
@@ -77,9 +78,7 @@ def _list_repo_trade_events(repo: Any) -> list[dict[str, Any]]:
 
 
 def _list_repo_assigned_stock_events(repo: Any) -> list[dict[str, Any]]:
-    list_events = getattr(repo, "list_assigned_stock_events", None)
-    rows = list_events() if callable(list_events) else []
-    return rows if isinstance(rows, list) else []
+    return [dict(item) for item in assigned_stock_event_log(repo).events]
 
 
 def _assigned_stock_report(

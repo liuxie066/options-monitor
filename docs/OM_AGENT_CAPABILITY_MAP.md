@@ -16,15 +16,21 @@ and Copilot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 autonomous Agent. Internal Copilot projects a pure-read subset from the same
 canonical registry.
 
-The `portfolio` toolset contains two pure-read tools. `portfolio_query` lets the
+The `portfolio` toolset contains four pure-read tools. `portfolio_query` lets the
 same `om_chat` Copilot read portfolio-management `health`, `accounts`, `overview`,
 `holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
-loopback HTTP boundary. `portfolio_capital_bridge` combines the PM capital-facts
-endpoint with the shared OM option ledger to return MTD/YTD waterfall `steps[]`
-and Markdown `fallback_text`; it does not render an image. Neither tool exposes
-portfolio writes, accepts endpoint arguments, or adds a second Scene/Agent. The
-toolset is optional and defaults off for internal Copilot projection; `./om-agent`
-continues to expose both canonical tools independently of this Copilot setting.
+loopback HTTP boundary. The two primary bridge tools keep independent accounting
+equations: `portfolio_pnl_bridge` combines PM capital facts with
+`option_performance_report.pnl.period_total_net`, while `portfolio_cash_bridge`
+combines PM `/analysis/cash-facts` with
+`option_performance_report.cash.total_cash_change_net`. Both return MTD/YTD
+waterfall `steps[]` and Markdown `fallback_text`; missing or incomplete evidence
+remains unavailable instead of becoming zero. The old `portfolio_capital_bridge`
+is retained only as a deprecated compatibility surface because it mixes total
+assets with legacy option cash semantics. None of these tools exposes portfolio
+writes, accepts endpoint arguments, or adds a second Scene/Agent. The toolset is
+optional and defaults off for internal Copilot projection; `./om-agent` continues
+to expose all four canonical tools independently of this Copilot setting.
 
 ## Deterministic Control
 
@@ -78,7 +84,7 @@ assistant:
   active_model: deepseek-default
 ```
 
-Set `assistant.copilot.toolsets.portfolio: true` to expose both portfolio tools to
+Set `assistant.copilot.toolsets.portfolio: true` to expose the portfolio toolset to
 Copilot. Effective access requires the assistant, Copilot, and portfolio toolset
 flags to all be true. Missing toolset configuration is fail-closed.
 

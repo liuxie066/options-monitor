@@ -1357,8 +1357,9 @@ def test_monthly_income_report_assignment_lifecycle_marks_sold_assigned_stock() 
             "fee_reason": "standard_fixed_stock_fee_schedule_estimate",
             "cash_in_gross": 10500.0,
             "stock_sale_cash_in_net": 10497.4739,
-            "stock_cost_basis_sold": 10000.0,
-            "assigned_stock_realized_pnl": 497.4739,
+                "stock_cost_basis_sold": 10000.0,
+                "stock_principal_basis_sold": 10000.0,
+                "assigned_stock_realized_pnl": 497.4739,
             "source": "manual",
             "source_deal_id": None,
         }
@@ -1690,7 +1691,7 @@ def test_assignment_lifecycle_attributes_covered_call_fifo_and_rejects_mixed_inv
 
 
 def test_lifecycle_efficiency_summary_uses_weighted_capital_days() -> None:
-    from src.application.positions.reporting import _lifecycle_efficiency_summary
+    from domain.domain.assigned_stock import _lifecycle_efficiency_summary
 
     summary = _lifecycle_efficiency_summary(
         [
