@@ -18,6 +18,19 @@ COMBO_YIELD_STRATEGY = "combo_yield"
 LEGACY_YIELD_ENHANCEMENT_STRATEGY = "yield_enhancement"
 YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
 YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
+YIELD_ENHANCEMENT_PUT_LEG_ROLES = {
+    "funding_put",
+    "sell_put",
+    "enhancement_put",
+    "yield_enhancement_put",
+}
+YIELD_ENHANCEMENT_CALL_LEG_ROLES = {
+    "participation_call",
+    "enhancement_call",
+    "long_call",
+    "upside_call",
+    "convexity_call",
+}
 
 
 @dataclass(frozen=True)
@@ -232,8 +245,8 @@ def resolve_yield_enhancement_position_role(position: dict[str, Any]) -> YieldEn
         and side in {"", "short"}
         and (
             has_yield_marker
-            or leg_role in {"enhancement_put", "yield_enhancement_put"}
-            or (leg_role == "sell_put" and bool(group_id))
+            or leg_role == "funding_put"
+            or (leg_role in YIELD_ENHANCEMENT_PUT_LEG_ROLES and bool(group_id))
         )
     )
     is_long_call = (
@@ -241,7 +254,7 @@ def resolve_yield_enhancement_position_role(position: dict[str, Any]) -> YieldEn
         and side == "long"
         and (
             has_yield_marker
-            or leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}
+            or leg_role in YIELD_ENHANCEMENT_CALL_LEG_ROLES
         )
     )
     return YieldEnhancementPositionRole(

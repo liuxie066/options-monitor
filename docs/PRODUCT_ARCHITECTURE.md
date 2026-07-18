@@ -45,7 +45,7 @@
 当前状态：
 
 - Sell Put / Covered Call 已完成本轮 `insurance_underwriting` 语义重构。
-- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`，详细策略已按价格边界、融资经济性、call 参与质量和执行质量重构，不继承 Sell Put / Covered Call 的 underwriting RV、event 或 gate。
+- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`。默认 `same_expiry_pair` 保留既有逻辑；`staggered_expiry_pair` 的 Funding Put 复用完整 Sell Put underwriting 结果，再配对更晚到期、可由 Put 净收入覆盖成本的 Long Call。
 
 标准生命周期：
 
@@ -60,7 +60,8 @@
 
 - 开仓机会监控只推荐候选，不记录真实成交，不修改持仓账本。
 - 排序用于推荐最优候选，不能替代硬风险阈值。
-- Combo Yield 使用独立的组合腿结构、组合收益、组合风险和组合排序，不再作为 Sell Put overlay 扩展。
+- Combo Yield 使用独立的组合腿结构、组合资金关系和组合排序，不再作为 Sell Put overlay 扩展；错期模式不把不同期限的两腿压成单一组合年化或 scenario 指标。
+- 推荐身份 `candidate_pair_id` 与真实成交意图 `pair_intent_id` 分离；没有显式 intent 时只记录单腿，不猜测持仓关系。
 
 主要实现位置：
 
@@ -275,7 +276,8 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 
 - Sell Put / Covered Call 的开仓语义已经从 `short_vol` 转为 `insurance_underwriting`。
 - 开仓配置不再接受 `strategy=short_vol`。
-- Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策。
+- Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；错期 Funding Put 仍通过显式依赖复用 Sell Put underwriting。
+- 已有错期两腿可用精确 lot id 原子登记 `pair_intent_id` 和共享 `strategy_group_id`，不做启发式匹配。
 - Close Advice 和持仓侧保留 `short_vol` thesis 命名。
 - Research / Shadow Replay 与生产执行保持分离。
 

@@ -32,6 +32,7 @@ from src.application.ledger.commands import (
     record_manual_assignment,
     record_manual_exercise,
     record_manual_position_adjust,
+    record_manual_position_adjustments,
     record_manual_position_close,
     record_manual_position_open,
     record_normalized_trade_event,
@@ -48,6 +49,8 @@ from src.application.ledger.commands import (
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.queries import (
+    AssignedStockEventLog,
+    assigned_stock_event_log,
     PositionLotSnapshot,
     RiskPositionView,
     apply_position_ledger_runtime_config,
@@ -61,6 +64,7 @@ from src.application.ledger.queries import (
     list_trade_lifecycle_evidence,
     normalize_position_lot_fields,
     normalize_position_lot_snapshot,
+    open_performance_evidence_repository,
     open_position_ledger,
     open_position_ledger_from_data_config,
     open_position_ledger_from_runtime_config,
@@ -73,6 +77,7 @@ from src.application.ledger.queries import (
     resolve_position_data_config_path,
     resolve_position_lot_snapshots,
     summarize_position_lot_shadow_status,
+    trade_event_economic_allocations,
     trade_event_log,
     trade_event_projection_preview,
 )
@@ -85,6 +90,8 @@ from src.application.ledger.store_resolution import (
 )
 
 __all__ = [
+    "AssignedStockEventLog",
+    "assigned_stock_event_log",
     "LedgerPreflightError",
     "LedgerStoreResolution",
     "BrokerTradeOpenPreviewResult",
@@ -114,6 +121,7 @@ __all__ = [
     "ledger_store_write_guard",
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",
+    "open_performance_evidence_repository",
     "open_position_ledger",
     "open_position_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
@@ -144,6 +152,7 @@ __all__ = [
     "record_manual_assignment",
     "record_manual_exercise",
     "record_manual_position_adjust",
+    "record_manual_position_adjustments",
     "record_manual_position_close",
     "record_manual_position_open",
     "record_normalized_trade_event",
@@ -158,6 +167,7 @@ __all__ = [
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
     "summarize_broker_trade_close_candidates",
+    "trade_event_economic_allocations",
     "trade_event_log",
     "trade_event_projection_preview",
     "valid_void_target_event_id",

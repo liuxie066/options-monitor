@@ -232,10 +232,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 60},
                 "combo_yield": {
                     "enabled": False,
+                    "structure_mode": "same_expiry_pair",
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",
-                    "expiry_structure": "same_expiry",
-                    "min_expiry_gap_days": 1,
                     "funding_mode": "credit_or_even",
                     "min_combo_net_credit": None,
                     "min_net_credit_annualized": 0.08,
@@ -245,8 +244,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "max_spread_ratio": 0.35,
                     "max_combo_spread_ratio": 0.5,
                     "call": {
-                        "min_dte": None,
-                        "max_dte": None,
                         "min_delta": 0.1,
                         "max_delta": 0.45,
                     },
@@ -286,10 +283,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 90},
                 "combo_yield": {
                     "enabled": False,
+                    "structure_mode": "same_expiry_pair",
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",
-                    "expiry_structure": "same_expiry",
-                    "min_expiry_gap_days": 1,
                     "funding_mode": "credit_or_even",
                     "min_combo_net_credit": None,
                     "min_net_credit_annualized": 0.08,
@@ -299,8 +295,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "max_spread_ratio": 0.35,
                     "max_combo_spread_ratio": 0.5,
                     "call": {
-                        "min_dte": None,
-                        "max_dte": None,
                         "min_delta": 0.1,
                         "max_delta": 0.45,
                     },

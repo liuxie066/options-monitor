@@ -1167,7 +1167,7 @@ def test_sell_put_steps_combo_yield_put_universe_is_retained_but_pairs_are_cash_
     assert combo_cash_rows[0]["evidence_path"] == "aapl_combo_yield_put_universe_cash_filtered.csv"
 
 
-def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_insurance(
+def test_sell_put_steps_combo_yield_put_universe_reuses_underwriting_gate_for_insurance(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1257,8 +1257,8 @@ def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_ins
         portfolio_ctx={"cash_by_currency": {"USD": 100000}},
     )
 
-    assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths
-    assert len(captured_pairs_input["df"]) == 1
+    assert "aapl_combo_yield_put_universe_underwritten.csv" in underwriting_gate_paths
+    assert captured_pairs_input["df"].empty
 
 
 def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_return_first(

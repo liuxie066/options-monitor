@@ -34,6 +34,14 @@ SNAPSHOT_KEEP_COLUMNS = [
     "delta",
     "bid",
     "ask",
+    "effective_at_ms",
+    "snapshot_time_ms",
+    "timestamp_ms",
+    "update_time_ms",
+    "timestamp",
+    "update_time",
+    "data_time",
+    "time",
 ]
 
 

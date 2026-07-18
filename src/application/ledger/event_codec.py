@@ -130,6 +130,9 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
     diagnostics: list[LedgerDiagnostic] = []
     try:
         contract_key = _contract_key_from_payload(payload.get("contract_key"))
+        raw_payload = dict(payload.get("raw_payload") or {})
+        if isinstance(payload.get("fee_provenance"), dict) and "fee_provenance" not in raw_payload:
+            raw_payload["fee_provenance"] = dict(payload["fee_provenance"])
         event = TradeEvent(
             event_id=event_id,
             event_type=str(payload.get("event_type") or "").strip(),
@@ -144,7 +147,7 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
             target_lot_id=_optional_id(payload.get("target_lot_id")),
             target_event_id=_optional_id(payload.get("target_event_id")),
             lot_id=_optional_id(payload.get("lot_id")),
-            raw_payload=dict(payload.get("raw_payload") or {}),
+            raw_payload=raw_payload,
         )
     except Exception as exc:
         diagnostics.append(
@@ -192,6 +195,8 @@ def _canonical_event_to_application_payload(event: TradeEvent, *, stored_payload
     out.setdefault("strike", contract_key.strike)
     out.setdefault("multiplier", event.multiplier)
     out.setdefault("expiration_ymd", contract_key.expiration_ymd)
+    if isinstance(event.raw_payload.get("fee_provenance"), dict):
+        out.setdefault("fee_provenance", dict(event.raw_payload["fee_provenance"]))
     return out
 
 

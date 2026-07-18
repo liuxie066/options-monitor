@@ -71,6 +71,9 @@ def test_close_advice_metrics_for_put_and_call() -> None:
     assert round(put["capture_ratio"], 6) == 0.8
     assert round(put["remaining_premium"], 6) == 40.0
     assert round(put["realized_if_close"], 6) == 160.0
+    assert round(put["estimated_pnl_if_close_gross"], 6) == 160.0
+    assert put["estimated_close_fee"] is None
+    assert put["estimated_pnl_if_close_net"] is None
     assert round(put["remaining_annualized_return"], 6) == 0.073
 
     call = evaluate_close_advice(_inp(premium=2.0, mid=0.4, dte=20, option_type="call"), CloseAdviceConfig())

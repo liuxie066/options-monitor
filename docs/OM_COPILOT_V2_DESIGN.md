@@ -20,7 +20,7 @@ Channel / CLI UI
 -> generic Agent / Engine
 -> canonical pure-read tools
    -> OM local read models
-   -> portfolio_query -> portfolio-management loopback HTTP API
+   -> portfolio_query / portfolio_capital_bridge -> portfolio-management loopback HTTP API
 
 Agent
 -> request_control_preview
@@ -171,8 +171,11 @@ not a reason for Host to run a hidden business workflow.
 - merges safe defaults and explicit Scene scope;
 - executes only Host-allowed pure-read tools;
 - converts canonical results into flat Agent-friendly observations;
-- exposes `portfolio_query` through the `portfolio` toolset using GET-only stdlib
-  HTTP against `PORTFOLIO_SERVICE_URL` (default `http://127.0.0.1:8765`);
+- exposes `portfolio_query` and `portfolio_capital_bridge` through the `portfolio`
+  toolset using GET-only stdlib HTTP against `PORTFOLIO_SERVICE_URL` (default
+  `http://127.0.0.1:8765`); the bridge loads the shared OM ledger once, uses PM's
+  actual NAV end date as an Asia/Shanghai end-of-day cutoff, and returns structured
+  steps plus Markdown fallback text without image rendering;
 - provides compact previews and continuation metadata.
 
 Tool descriptions, defaults, validation, error hints, and output contracts should

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
+    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     CandidateWindowDefaults,
     resolve_candidate_window,
 )
@@ -371,19 +372,23 @@ def _resolve_combo_yield_call_plan(
 ) -> OptionSideFetchPlan:
     cfg = dict(yield_enhancement_cfg or {})
     call_cfg = dict(cfg.get("call") or {})
-    expiry_structure = str(cfg.get("expiry_structure") or "same_expiry").strip().lower()
-    sell_put_window = resolve_candidate_window(
-        sell_put_cfg,
-        defaults=DEFAULT_SELL_PUT_WINDOW,
-    )
-    dte_source_prefix = "combo_yield.call"
-    defaults = sell_put_window
-    if expiry_structure != "diagonal":
+    structure_mode = str(cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
+    if structure_mode == "staggered_expiry_pair":
+        call_window = resolve_candidate_window(
+            call_cfg,
+            defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+        )
+        dte_source_prefix = "combo_yield.call"
+    else:
         call_cfg.pop("min_dte", None)
         call_cfg.pop("max_dte", None)
         for key in ("min_dte", "max_dte"):
             if key in sell_put_cfg:
                 call_cfg[key] = sell_put_cfg.get(key)
+        call_window = resolve_candidate_window(
+            sell_put_cfg,
+            defaults=DEFAULT_SELL_PUT_WINDOW,
+        )
         dte_source_prefix = "sell_put"
     return _resolve_call_side_plan(
         symbol=symbol,
@@ -391,7 +396,7 @@ def _resolve_combo_yield_call_plan(
         limit_expirations=limit_expirations,
         available_expirations=available_expirations,
         spot_reference=spot_reference,
-        defaults=defaults,
+        defaults=call_window,
         source_prefix="combo_yield.call",
         dte_source_prefix=dte_source_prefix,
         fallback_min_pct=0.0,

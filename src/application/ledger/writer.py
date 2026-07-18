@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from typing import Any, Sequence
 
 from domain.domain.fee_calc import extract_actual_fees
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.performance.models import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,
@@ -39,7 +41,9 @@ def projection_diagnostics_summary(diagnostics: Sequence[Any]) -> dict[str, Any]
     return {
         "projection_diagnostic_count": int(len(diagnostics)),
         "unmatched_explicit_close_count": int(sum(1 for item in diagnostics if item.code in explicit_close_codes)),
-        "unmatched_heuristic_close_count": int(sum(1 for item in diagnostics if item.code == "close_unmatched_contracts")),
+        "unmatched_heuristic_close_count": int(
+            sum(1 for item in diagnostics if item.code == "close_unmatched_contracts")
+        ),
         "projection_diagnostics": [item.to_dict() for item in diagnostics],
     }
 
@@ -136,6 +140,7 @@ def _events_for_storage(repo: Any, event: Any) -> list[Any]:
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
+    fee_splits = _close_fee_splits(event, resolution.matches)
     for index, match in enumerate(resolution.matches):
         event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
         match_payload = {
@@ -147,11 +152,14 @@ def _events_for_storage(repo: Any, event: Any) -> list[Any]:
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             match_payload["close_target_source_event_id"] = source_event_id
+        allocated_fee = fee_splits[index]
+        match_payload = _payload_with_allocated_fee(match_payload, allocated_fee)
         out.append(
             replace(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
+                fees=float(allocated_fee),
                 raw_payload=match_payload,
             )
         )
@@ -184,6 +192,7 @@ def _canonical_close_events_for_storage(repo: Any, event: TradeEvent) -> list[Tr
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
+    fee_splits = _close_fee_splits(event, resolution.matches)
     for index, match in enumerate(resolution.matches):
         event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
         raw_payload = {
@@ -195,15 +204,74 @@ def _canonical_close_events_for_storage(repo: Any, event: TradeEvent) -> list[Tr
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             raw_payload["close_target_source_event_id"] = source_event_id
+        allocated_fee = fee_splits[index]
+        raw_payload = _payload_with_allocated_fee(raw_payload, allocated_fee)
         out.append(
             replace(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
+                fees=float(allocated_fee),
                 target_lot_id=match.record_id,
                 raw_payload=raw_payload,
             )
         )
+    return out
+
+
+def _close_fee_splits(event: Any, matches: Sequence[Any]) -> list[Decimal]:
+    ordered = list(matches)
+    if not ordered:
+        return []
+    total_contracts = sum(int(match.contracts_to_close) for match in ordered)
+    if total_contracts <= 0:
+        raise ValueError("close fee allocation requires positive matched contracts")
+
+    payload = dict(getattr(event, "raw_payload", {}) or {})
+    provenance = payload.get("fee_provenance")
+    amount_raw: Any = getattr(event, "fees", 0.0)
+    if isinstance(provenance, dict):
+        basis = str(provenance.get("basis") or "").strip().lower()
+        if basis in {"actual", "estimated"} and provenance.get("amount") not in (None, ""):
+            amount_raw = provenance["amount"]
+    try:
+        total_fee = quantize_money(to_decimal(amount_raw, field_name="close fee"))
+    except (TypeError, ValueError):
+        try:
+            total_fee = quantize_money(to_decimal(getattr(event, "fees", 0.0), field_name="close fee"))
+        except (TypeError, ValueError):
+            total_fee = Decimal(0)
+
+    allocated_before = Decimal(0)
+    out: list[Decimal] = []
+    for index, match in enumerate(ordered):
+        if index == len(ordered) - 1:
+            allocated = quantize_money(total_fee - allocated_before)
+        else:
+            allocated = quantize_money(total_fee * Decimal(int(match.contracts_to_close)) / Decimal(total_contracts))
+        out.append(allocated)
+        allocated_before = quantize_money(allocated_before + allocated)
+    return out
+
+
+def _payload_with_allocated_fee(payload: dict[str, Any], amount: Decimal) -> dict[str, Any]:
+    out = dict(payload)
+    provenance = out.get("fee_provenance")
+    if not isinstance(provenance, dict):
+        return out
+    updated = dict(provenance)
+    basis = str(updated.get("basis") or "").strip().lower()
+    if basis in {"actual", "estimated"}:
+        existing_amount = updated.get("amount")
+        if existing_amount not in (None, ""):
+            try:
+                to_decimal(existing_amount, field_name="fee provenance amount")
+            except (TypeError, ValueError):
+                return out
+        updated["amount"] = canonical_decimal_text(amount, field_name="allocated close fee")
+    elif basis == "missing":
+        updated.pop("amount", None)
+    out["fee_provenance"] = updated
     return out
 
 

@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from domain.domain.engine import YIELD_ENHANCEMENT_EXPIRY_STRUCTURES
 from src.application.strategy_policy import (
     RETURN_FIRST_PROFILE,
     SELL_PUT_FAMILY,
@@ -17,6 +16,7 @@ from src.application.strategy_policy import (
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_FUNDING_MODES: set[str] = {"credit_or_even", "max_debit"}
+YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair", "staggered_expiry_pair"}
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
     "optimizer_enabled",
     "max_downside_worsen_pct",
@@ -46,10 +46,9 @@ YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS: tuple[str, ...] = (
 )
 YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "enabled": False,
+    "structure_mode": "same_expiry_pair",
     "objective": "premium_funded_long_call",
     "output_mode": "separate",
-    "expiry_structure": "same_expiry",
-    "min_expiry_gap_days": 1,
     "funding_mode": "credit_or_even",
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
@@ -59,10 +58,17 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "max_spread_ratio": 0.35,
     "max_combo_spread_ratio": 0.50,
     "call": {
-        "min_dte": None,
-        "max_dte": None,
         "min_delta": 0.10,
         "max_delta": 0.45,
+    },
+}
+YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "staggered_expiry_pair": {
+        "funding_mode": "credit_or_even",
+        "min_combo_net_credit": 0.0,
+        "min_net_credit_annualized": None,
+        "max_call_cost_to_put_credit": 1.0,
+        "min_net_credit_retention": None,
     },
 }
 YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -194,7 +200,10 @@ def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str
 
 def apply_yield_enhancement_defaults(cfg: dict[str, Any] | None, *, market: str | None = None) -> dict[str, Any]:
     defaults = yield_enhancement_defaults_for_market(market)
-    return _deep_merge_dict(defaults, _as_dict(cfg))
+    raw_cfg = _as_dict(cfg)
+    structure_mode = str(raw_cfg.get("structure_mode") or defaults["structure_mode"]).strip().lower()
+    structure_defaults = YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS.get(structure_mode) or {}
+    return _deep_merge_dict(_deep_merge_dict(defaults, structure_defaults), raw_cfg)
 
 
 def derive_yield_enhancement_policy(
@@ -212,7 +221,10 @@ def derive_yield_enhancement_policy(
     base = yield_enhancement_defaults_for_market(market)
     derived_defaults = YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS.get(mode) or {}
     cfg = _deep_merge_dict(base, derived_defaults)
+    structure_mode = str(raw_cfg.get("structure_mode") or cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
+    cfg = _deep_merge_dict(cfg, YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS.get(structure_mode) or {})
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
+    cfg["structure_mode"] = structure_mode
     cfg["enabled"] = bool(enabled)
     cfg["yield_enhancement_mode"] = mode
     cfg["derived_from_sell_put_strategy"] = combo_strategy

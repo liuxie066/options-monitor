@@ -33,7 +33,7 @@
 -> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 人工策略复盘证据
 ```
 
-`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`combo_yield` 按 Combo Yield 独立策略处理，不继承 Sell Put / Covered Call 的 underwriting gate。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
+`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`combo_yield` 是独立的组合策略；默认 `same_expiry_pair` 保留既有逻辑，`staggered_expiry_pair` 的 Funding Put 则复用完整 Sell Put underwriting 结果，再配对更晚到期的 Long Call。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
 
 ## 入口
 
@@ -411,12 +411,6 @@ Tool Gateway 只读列出：
 ./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --premium-per-share 1.2 --confirm
 ```
 
-错期 Combo Yield 手工开仓必须让 Put/Call 两腿携带同一个显式 group ID；`expiry_structure` 保留在 strategy snapshot 中。两腿仍分别 dry-run/confirm，不会按到期日猜测归组：
-
-```bash
-./om option-positions add --account lx --symbol PDD --option-type put --side short --contracts 1 --currency USD --strike 80 --multiplier 100 --exp 2026-08-21 --premium-per-share 1.0 --strategy-snapshot-json '{"strategy":"combo_yield","leg_role":"sell_put","strategy_group_id":"combo_yield:lx:<pair_fingerprint>","expiry_structure":"diagonal","yield_enhancement_mode":"income_upside"}' --dry-run
-```
-
 普通买平、被指派、主动行权是不同账本语义，分别使用独立入口：
 
 ```bash
@@ -425,10 +419,11 @@ Tool Gateway 只读列出：
 ./om option-positions exercise --account lx --symbol AAPL --option-type call --strike 200 --exp 2026-05-22 --contracts 2 --stock-side buy --stock-qty 200 --stock-price 200 --dry-run
 ```
 
-修复历史 lot 的策略元数据也走 `adjust-lot`，先 dry-run，再确认写入审计事件：
+修复单个历史 lot 的策略元数据可走 `adjust-lot`。若要确认一组错期 Combo Yield，应使用 `pair-combo-yield` 同时校验并原子更新两腿，两个入口都先 dry-run：
 
 ```bash
-./om option-positions adjust-lot --record-id <lot_id> --strategy combo_yield --leg-role enhancement_call --yield-enhancement-mode income_upside_enhancement --dry-run
+./om option-positions adjust-lot --record-id <lot_id> --strategy combo_yield --leg-role participation_call --yield-enhancement-mode income_upside_enhancement --dry-run
+./om option-positions pair-combo-yield --put-record-id <put_lot_id> --call-record-id <call_lot_id> --pair-intent-id <intent_id> --dry-run
 ```
 
 到期生命周期证据和冲突可直接检查：
@@ -462,12 +457,19 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 ./om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-assign_xxx --shares 100 --price 105 --trade-time-ms 1780000000000 --dry-run
 ```
 
-月度收益报表：
+期权收益统计以 `option-performance` / `option_performance_report` 为主入口，支持 MTD、YTD、自然月、自然年和日期范围：
 
 ```bash
-./om option-positions report monthly-income --broker 富途 --account lx --month 2026-04
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+./om option-performance report --config-key us --account lx --period mtd
+./om option-performance report --config-key us --account lx --period ytd --as-of-date 2026-07-17
+./om option-performance report --config-key us --account lx --period month --month 2026-06
+./om option-performance report --config-key us --account lx --period year --year 2025
+./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"ytd","as_of_date":"2026-07-17"}'
 ```
+
+利润、现金和交易活动是三个并列口径：利润看 `pnl`，现金变化看 `cash`，权利金活动看 `activity`。不要把权利金重复加到 PnL，也不要把指派买入正股的本金当作亏损。组合桥接同样分开：`portfolio_pnl_bridge` 对接总资产/PnL 恒等式，`portfolio_cash_bridge` 对接现金余额恒等式。
+
+旧的 `./om option-positions report monthly-income` 和 `monthly_income_report` 仍可用于回滚，但已废弃，不再作为新消费者入口。
 
 ### 通知预览
 
@@ -527,20 +529,53 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 ### Combo Yield
 
-`combo_yield` 是当前 runtime key；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义上，Combo Yield 和 Sell Put / Covered Call 平行。它配对同 symbol、同到期、同乘数、put strike < call strike 的 short put + long call，寻找“可接受接货义务能够合理融资上行参与”的组合。
+`combo_yield` 是当前 runtime key；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。Combo Yield 和 Sell Put / Covered Call 平行，当前支持两种结构：
 
-要点：
+- `same_expiry_pair`：默认值，保留原有同 symbol、同到期配对逻辑。
+- `staggered_expiry_pair`：一张较早到期的 Short Put 对应一张较晚到期的 Long Call；两腿同 symbol、同 currency、同 multiplier，且 `put strike < call strike`。
 
-- 依赖 `sell_put.enabled=true`
-- put 腿先独立通过 Sell Put 的接货价格边界和 `min_annualized_net_return`，再进入 Combo 的事件、现金与配对检查；不因搭配 long call 放宽 Put 的年化收益底线
-- call 腿使用结构价格边界：`call.strike >= max(spot, call.min_strike)`，`call.max_strike` 可选
-- 不继承 Sell Put 的 IV/RV underwriting；只复用事件注释，并默认按 `reject_event_risk=true`、`event_source_fail_closed=true` fail closed
-- 启用收益增强后会为 long call 侧规划 required data，即使没有启用 Covered Call 扫描
-- 核心约束包括 `funding_mode`、`min_net_credit_annualized`、`min_net_credit_retention`、`max_combo_spread_ratio` 和 call delta 区间；默认保留至少 80% short put 净权利金，`min_combo_net_credit` 与 `max_call_cost_to_put_credit` 仅保留为显式兼容门槛
-- 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%
-- candidates 同时输出 Put-only 与 Combo 的净权利金、breakeven、安全垫损耗、彩票预算占比，以及 1.5σ / 2.0σ Call 尾部回报倍数；缺少 expected move 时尾部倍数字段为空，不因此拒绝组合
-- `<report-dir>/<symbol>_combo_yield_rank_shadow.csv` 对比当前生产排序与彩票参与度 Shadow 排序；Shadow 结果只用于研究，不改变生产推荐、inline linked call 或通知顺序
-- `<report-dir>/<symbol>_combo_yield_pair_diagnostics.csv` 保留 Call 预筛和 Put+Call 配对尝试的逐行通过/拒绝证据及关键经济性指标；该文件只用于研究诊断，不会把拒绝项提升为候选
+`staggered_expiry_pair` 的筛选要点：
+
+- 依赖 `sell_put.enabled=true`；Funding Put 直接复用完整 Sell Put underwriting 后的候选，因此接货边界、现金、事件、收益、IV/RV 与流动性门槛不会因搭配 Long Call 而放宽。
+- Put 使用 Sell Put 自己的 DTE 窗口；Call 使用 `combo_yield.call.min_dte/max_dte` 的独立更长期限窗口，并要求 `call.expiration > put.expiration`。
+- Call 可配置 `min_strike` / `max_strike` 和 delta 区间；错期结构不额外要求 Call strike 高于 spot，但仍要求 Call strike 高于 Put strike。
+- 两腿当前固定为 `1 Put : 1 Call`，multiplier 必须一致。
+- 费用按当前费用模型估算：`put_net_credit = Put bid × multiplier - sell fees`，`call_total_cost = Call ask × multiplier + buy fees`。
+- 默认 `credit_or_even`：要求 `combo_net_credit = put_net_credit - call_total_cost >= 0`，并要求 `call_cost_to_put_credit <= 1`，等价于 Put 净收入足以覆盖 Call 总成本。
+- 错期组合不计算或硬筛组合年化、同到期 breakeven、expected-move scenario 指标；这些跨期限指标不具备同一时间基准。
+- 同一 Funding Put 下先选 Call：已融资优先、Call delta 高者优先、资金利用率高者优先、Call DTE 更长者优先，再比较两腿最大 spread、Call OI 和合约标识。
+- 通知中的组合组排序：已融资优先、Put 接货安全边界更大、Funding Put underwriting 补偿更好、Call delta 更高、资金利用率更高、Call DTE 更长、执行质量更好、两腿最小 OI 更高，最后按 symbol/合约稳定排序。
+- `<report-dir>/<symbol>_combo_yield_pair_diagnostics.csv` 保留 Call 预筛和 Put+Call 配对尝试的逐行通过/拒绝证据及关键经济性指标。
+
+示例中的 Call `60–120 DTE` 只用于说明独立期限窗口，不代表生产最优参数；上线前应以 Shadow Replay / outcome 证据校准：
+
+```json
+"combo_yield": {
+  "enabled": true,
+  "structure_mode": "staggered_expiry_pair",
+  "funding_mode": "credit_or_even",
+  "min_combo_net_credit": 0,
+  "max_call_cost_to_put_credit": 1,
+  "call": {
+    "min_dte": 60,
+    "max_dte": 120,
+    "min_delta": 0.10,
+    "max_delta": 0.45
+  }
+}
+```
+
+候选通知使用 `candidate_pair_id` 标识推荐组合；真实成交只有在显式提供 `pair_intent_id` 时才会自动归组。若两腿已经分别入账，可用精确 lot id 进行人工确认，命令不会按合约条件猜测仓位：
+
+```bash
+./om option-positions pair-combo-yield \
+  --put-record-id <put_lot_id> \
+  --call-record-id <call_lot_id> \
+  --pair-intent-id <intent_id> \
+  --dry-run
+```
+
+确认写入时，两条 adjustment event 在同一 SQLite 事务中落账；Put 标记为 `funding_put`，Call 标记为 `participation_call`，共同使用 `strategy_group_id=combo_yield:<account>:<pair_intent_id>`。
 
 ### Close Advice
 
@@ -559,7 +594,7 @@ Short-vol 行还会输出 `remaining_stress_loss`、`remaining_reward_to_stress_
 
 `strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。这些是持仓/平仓侧历史动作字段，本轮不重命名；渲染层只展示已决策的动作，不改变平仓判断。
 
-收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。逐腿建议完成后，runner 再追加 `combo_group_classification/status/action/reason/issues`、Put/Call 未平数量、组合行情状态和证据范围。只有两腿数量匹配、当前行情完整且组合经济性可计算时，put 腿才会显示 `close_both_optional`；数量不匹配、缺行情、缺 group ID 或混合事实统一 `review_required`，不生成组合动作或组合经济性。Put-only 行不会再显示“保留 Call”，Call-only 行按当前真实报价显示为“剩余 Call”；Close Advice 不从 `close_type` 猜 assignment，也不生成卖股或 Call exercise 动作。
+收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。只有配对 call 存在、成本和报价可计算时，put 腿才会显示 `close_both_optional`。
 
 ## 配置心智模型
 

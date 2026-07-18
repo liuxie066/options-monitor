@@ -54,6 +54,10 @@ from src.interfaces.cli.operator_ops import (
     run_close_advice,
     run_scan,
 )
+from src.interfaces.cli.option_performance import (
+    add_option_performance_commands,
+    handle_option_performance_command,
+)
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
     add_runtime_observability_commands,
@@ -139,6 +143,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_service_update_commands(sub)
 
     add_setup_commands(sub)
+
+    add_option_performance_commands(sub)
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -292,6 +298,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "version":
             sys.stdout.write(_dumps(check_version_update()))
             return 0
+
+        if args.command == "option-performance":
+            return _print(handle_option_performance_command(args))
 
         if args.command in {"scheduler", "sell-put-cash"}:
             return handle_scheduler_command(

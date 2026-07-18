@@ -331,22 +331,47 @@ def http_json(
     raise last_err or FeishuPermanentError("unknown error")
 
 
-def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool = False) -> str:
+def get_tenant_access_token(
+    app_id: str,
+    app_secret: str,
+    *,
+    force_refresh: bool = False,
+    timeout: int = 20,
+    retry_max_attempts: int = 3,
+    lock_timeout: float | None = None,
+) -> str:
     """Get Feishu tenant_access_token with module-level cache.
 
     Cache refresh rule:
       - if force_refresh=True
       - or missing token
       - or token expires in < 5 minutes
+
+    ``lock_timeout`` is reserved for fail-fast callers such as reaction ACKs.
+    Default callers preserve the existing blocking refresh-lock behavior.
     """
 
     cache_key = (str(app_id), str(app_secret))
-    cached = _token_cache.get(cache_key) or {}
-    expire_at: datetime | None = cached.get("expire_at")
-    token: str | None = cached.get("token")
 
-    with _token_lock:
-        # Re-check under lock (another thread may have refreshed)
+    if lock_timeout is not None and not force_refresh:
+        cached = _token_cache.get(cache_key) or {}
+        expire_at: datetime | None = cached.get("expire_at")
+        token: str | None = cached.get("token")
+        if token and expire_at and expire_at - _now_utc() >= timedelta(minutes=5):
+            return token
+
+    if lock_timeout is None:
+        acquired = _token_lock.acquire()
+    else:
+        acquired = _token_lock.acquire(timeout=max(0.0, float(lock_timeout)))
+    if not acquired:
+        raise FeishuTransientError(
+            "tenant token refresh lock is busy",
+            response={"error_type": "token_lock_timeout"},
+        )
+
+    try:
+        # Re-check under lock (another thread may have refreshed).
         cached = _token_cache.get(cache_key) or {}
         expire_at = cached.get("expire_at")
         token = cached.get("token")
@@ -356,7 +381,13 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
                 return token
 
         url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
-        res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret}, timeout=20, retry_max_attempts=3)
+        res = http_json(
+            "POST",
+            url,
+            {"app_id": app_id, "app_secret": app_secret},
+            timeout=timeout,
+            retry_max_attempts=retry_max_attempts,
+        )
 
         # res is expected: {code, msg, tenant_access_token, expire}
         if res.get("code") != 0:
@@ -372,18 +403,37 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
         }
 
         return token
+    finally:
+        _token_lock.release()
 
 
 def with_tenant_token_retry(
     app_id: str,
     app_secret: str,
     fn: Callable[[str], Any],
+    *,
+    token_timeout: int | None = None,
+    token_retry_max_attempts: int | None = None,
+    token_lock_timeout: float | None = None,
 ) -> Any:
-    token = get_tenant_access_token(app_id, app_secret)
+    token_kwargs: dict[str, Any] = {}
+    if token_timeout is not None:
+        token_kwargs["timeout"] = int(token_timeout)
+    if token_retry_max_attempts is not None:
+        token_kwargs["retry_max_attempts"] = int(token_retry_max_attempts)
+    if token_lock_timeout is not None:
+        token_kwargs["lock_timeout"] = float(token_lock_timeout)
+
+    token = get_tenant_access_token(app_id, app_secret, **token_kwargs)
     try:
         return fn(token)
     except FeishuAuthError:
-        refreshed = get_tenant_access_token(app_id, app_secret, force_refresh=True)
+        refreshed = get_tenant_access_token(
+            app_id,
+            app_secret,
+            force_refresh=True,
+            **token_kwargs,
+        )
         return fn(refreshed)
 
 
