@@ -10,18 +10,32 @@ _om_python_runtime_error() {
 _om_python_command_path() {
   local candidate="$1"
   local resolved=""
+  local link_target=""
+  local hops=0
 
   if [[ "$candidate" == */* ]]; then
-    local parent base
-    parent="$(dirname "$candidate")"
-    base="$(basename "$candidate")"
-    if [[ -d "$parent" ]]; then
-      resolved="$(cd "$parent" 2>/dev/null && pwd -P)/$base"
-    else
-      resolved="$candidate"
-    fi
+    resolved="$candidate"
   else
     resolved="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+
+  while [[ -L "$resolved" && "$hops" -lt 40 ]]; do
+    link_target="$(readlink "$resolved")"
+    if [[ "$link_target" == /* ]]; then
+      resolved="$link_target"
+    else
+      resolved="$(dirname "$resolved")/$link_target"
+    fi
+    hops=$((hops + 1))
+  done
+
+  if [[ -n "$resolved" ]]; then
+    local parent base
+    parent="$(dirname "$resolved")"
+    base="$(basename "$resolved")"
+    if [[ -d "$parent" ]]; then
+      resolved="$(cd "$parent" 2>/dev/null && pwd -P)/$base"
+    fi
   fi
 
   printf '%s\n' "${resolved:-$candidate}"
