@@ -528,6 +528,54 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
     assert fields["premium"] == 1.235
 
 
+def test_option_positions_cli_add_dry_run_accepts_strategy_snapshot(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    cli_mod.main([
+        "--data-config",
+        str(data_config),
+        "add",
+        "--account",
+        "lx",
+        "--symbol",
+        "PDD",
+        "--option-type",
+        "put",
+        "--side",
+        "short",
+        "--contracts",
+        "1",
+        "--strike",
+        "80",
+        "--multiplier",
+        "100",
+        "--exp",
+        "2026-08-21",
+        "--premium-per-share",
+        "1.0",
+        "--strategy-snapshot-json",
+        json.dumps({
+            "strategy": "combo_yield",
+            "leg_role": "sell_put",
+            "strategy_group_id": group_id,
+            "expiry_structure": "diagonal",
+        }),
+        "--dry-run",
+        "--format",
+        "json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fields"]["strategy"] == "combo_yield"
+    assert payload["fields"]["strategy_group_id"] == group_id
+    assert payload["fields"]["strategy_snapshot"]["expiry_structure"] == "diagonal"
+
+
 def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 

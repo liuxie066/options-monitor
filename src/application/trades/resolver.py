@@ -356,6 +356,14 @@ def resolve_trade_deal(
                 **position_effect_diagnostics,
                 "combo_yield_enrichment": combo_enrichment.diagnostics,
             }
+        elif combo_enrichment.reason.startswith("diagonal_combo_yield_"):
+            return _failure(
+                status="unresolved",
+                action="open",
+                reason=combo_enrichment.reason,
+                deal=deal,
+                diagnostics=combo_enrichment.diagnostics,
+            )
         if deal.side not in {"sell", "buy"}:
             return _failure(status="unresolved", action="open", reason="unsupported_open_side", deal=deal)
         missing = _required_open_missing(deal)
@@ -532,7 +540,18 @@ def _infer_missing_position_effect(
         )
 
     if deal.side == "buy" and deal.option_type == "call":
-        companion = _combo_yield_companion_short_put(repo, deal)
+        companion, companion_issue = _resolve_combo_yield_companion(
+            repo,
+            deal,
+            option_type="put",
+            side="short",
+        )
+        if companion_issue:
+            return _PositionEffectInference(
+                deal=None,
+                reason=companion_issue,
+                diagnostics={**base_diagnostics, "decision": "diagonal_combo_yield_unresolved"},
+            )
         inferred = replace(
             deal,
             position_effect="open",
@@ -594,7 +613,14 @@ def _enrich_combo_yield_open(
     repo: OptionPositionsRepoLike,
 ) -> _PositionEffectInference:
     if deal.side == "buy" and deal.option_type == "call":
-        companion = _combo_yield_companion_short_put(repo, deal)
+        companion, companion_issue = _resolve_combo_yield_companion(
+            repo,
+            deal,
+            option_type="put",
+            side="short",
+        )
+        if companion_issue:
+            return _PositionEffectInference(deal=None, reason=companion_issue)
         return _PositionEffectInference(
             deal=replace(
                 deal,
@@ -609,12 +635,19 @@ def _enrich_combo_yield_open(
             diagnostics={
                 "decision": "tag_long_call",
                 "companion_short_put": companion,
-                "strategy_group_id": _stable_combo_yield_group_id(deal),
+                "strategy_group_id": _explicit_strategy_group_id(deal.raw_payload) or _stable_combo_yield_group_id(deal),
             },
         )
     if deal.side == "sell" and deal.option_type == "put":
-        companion = _combo_yield_companion_long_call(repo, deal)
-        if companion is None:
+        companion, companion_issue = _resolve_combo_yield_companion(
+            repo,
+            deal,
+            option_type="call",
+            side="long",
+        )
+        if companion_issue:
+            return _PositionEffectInference(deal=None, reason=companion_issue)
+        if companion is None and not _is_explicit_diagonal_combo_yield(deal.raw_payload):
             return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
         return _PositionEffectInference(
             deal=replace(
@@ -625,7 +658,7 @@ def _enrich_combo_yield_open(
             diagnostics={
                 "decision": "tag_sell_put",
                 "companion_long_call": companion,
-                "strategy_group_id": _stable_combo_yield_group_id(deal),
+                "strategy_group_id": _explicit_strategy_group_id(deal.raw_payload) or _stable_combo_yield_group_id(deal),
             },
         )
     return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
@@ -649,26 +682,29 @@ def _with_combo_yield_long_call_payload(
                 else "buy_call_without_close_target"
             ),
         )
-    group_id = _stable_combo_yield_group_id(deal)
+    group_id = _explicit_strategy_group_id(payload) or _stable_combo_yield_group_id(deal)
+    expiry_structure = _payload_expiry_structure(payload)
     payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
     payload.setdefault("leg_role", "enhancement_call")
     payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
     if group_id:
         payload.setdefault("strategy_group_id", group_id)
+    if expiry_structure:
+        payload.setdefault("expiry_structure", expiry_structure)
     if companion is not None:
         paired_record_id = str(companion.get("record_id") or "").strip()
         if paired_record_id:
             payload.setdefault("paired_short_put_record_id", paired_record_id)
-    snapshot = payload.get("strategy_snapshot")
-    if not isinstance(snapshot, dict):
-        payload["strategy_snapshot"] = {
-            "strategy": STRATEGY_COMBO_YIELD,
-            "strategy_source": "trade_intake_inference",
-            "leg_role": "enhancement_call",
-            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
-        }
-        if group_id:
-            payload["strategy_snapshot"]["strategy_group_id"] = group_id
+    snapshot = dict(payload.get("strategy_snapshot") or {}) if isinstance(payload.get("strategy_snapshot"), dict) else {}
+    snapshot.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    snapshot.setdefault("strategy_source", "trade_intake_inference")
+    snapshot.setdefault("leg_role", "enhancement_call")
+    snapshot.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    if group_id:
+        snapshot.setdefault("strategy_group_id", group_id)
+    if expiry_structure:
+        snapshot.setdefault("expiry_structure", expiry_structure)
+    payload["strategy_snapshot"] = snapshot
     return payload
 
 
@@ -676,29 +712,223 @@ def _with_combo_yield_sell_put_payload(
     raw_payload: dict[str, Any],
     *,
     deal: NormalizedTradeDeal,
-    companion: dict[str, Any],
+    companion: dict[str, Any] | None,
 ) -> dict[str, Any]:
     payload = dict(raw_payload or {})
-    group_id = _stable_combo_yield_group_id(deal)
+    group_id = _explicit_strategy_group_id(payload) or _stable_combo_yield_group_id(deal)
+    expiry_structure = _payload_expiry_structure(payload)
     payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
     payload.setdefault("leg_role", "sell_put")
     payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
     if group_id:
         payload.setdefault("strategy_group_id", group_id)
-    paired_record_id = str(companion.get("record_id") or "").strip()
+    if expiry_structure:
+        payload.setdefault("expiry_structure", expiry_structure)
+    paired_record_id = str((companion or {}).get("record_id") or "").strip()
     if paired_record_id:
         payload.setdefault("paired_long_call_record_id", paired_record_id)
+    snapshot = dict(payload.get("strategy_snapshot") or {}) if isinstance(payload.get("strategy_snapshot"), dict) else {}
+    snapshot.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    snapshot.setdefault("strategy_source", "trade_intake_inference")
+    snapshot.setdefault("leg_role", "sell_put")
+    snapshot.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    if group_id:
+        snapshot.setdefault("strategy_group_id", group_id)
+    if expiry_structure:
+        snapshot.setdefault("expiry_structure", expiry_structure)
+    payload["strategy_snapshot"] = snapshot
+    return payload
+
+
+def _payload_expiry_structure(raw_payload: dict[str, Any] | None) -> str:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    snapshot = payload.get("strategy_snapshot")
+    value = payload.get("expiry_structure")
+    if not value and isinstance(snapshot, dict):
+        value = snapshot.get("expiry_structure")
+    return str(value or "").strip().lower()
+
+
+def _explicit_strategy_group_id(raw_payload: dict[str, Any] | None) -> str:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    snapshot = payload.get("strategy_snapshot")
+    value = payload.get("strategy_group_id")
+    if not value and isinstance(snapshot, dict):
+        value = snapshot.get("strategy_group_id")
+    return str(value or "").strip()
+
+
+def _is_explicit_diagonal_combo_yield(raw_payload: dict[str, Any] | None) -> bool:
+    return _payload_expiry_structure(raw_payload) == "diagonal"
+
+
+def _resolve_combo_yield_companion(
+    repo: OptionPositionsRepoLike,
+    deal: NormalizedTradeDeal,
+    *,
+    option_type: str,
+    side: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    metadata_conflict = _combo_yield_metadata_conflict(deal.raw_payload)
+    if metadata_conflict:
+        return None, metadata_conflict
+    if not _is_explicit_diagonal_combo_yield(deal.raw_payload):
+        companion = (
+            _combo_yield_companion_short_put(repo, deal)
+            if option_type == "put"
+            else _combo_yield_companion_long_call(repo, deal)
+        )
+        if companion is None and _has_different_expiry_opposite_lot(
+            repo,
+            deal,
+            option_type=option_type,
+            side=side,
+        ):
+            return None, "diagonal_combo_yield_missing_group_metadata"
+        return companion, None
+
+    group_id = _explicit_strategy_group_id(deal.raw_payload)
+    if not group_id:
+        return None, "diagonal_combo_yield_missing_group_metadata"
+    account = str(deal.internal_account or "").strip().lower()
+    if not group_id.startswith(f"combo_yield:{account}:"):
+        return None, "diagonal_combo_yield_conflicting_group_metadata"
+
+    symbol = canonical_symbol(deal.symbol) or str(deal.symbol or "").strip().upper()
+    expiration = str(deal.expiration_ymd or "").strip()
+    incoming_lot_side = "long" if deal.side == "buy" else "short"
+    incoming_open = _safe_nonnegative_int(deal.contracts)
+    if incoming_open is None:
+        return None, "diagonal_combo_yield_invalid_quantity_evidence"
+
+    compatible: list[dict[str, Any]] = []
+    companion_expirations: set[str] = set()
+    existing_same_leg_open = 0
+    invalid_order = False
+    for row in repo.list_position_lots():
+        fields = row.get("fields") if isinstance(row.get("fields"), dict) else row
+        if str(fields.get("strategy_group_id") or "").strip() != group_id:
+            continue
+
+        row_account = str(fields.get("account") or "").strip().lower()
+        row_symbol = canonical_symbol(fields.get("symbol")) or str(fields.get("symbol") or "").strip().upper()
+        if row_account != account or row_symbol != symbol:
+            return None, "diagonal_combo_yield_conflicting_group_metadata"
+        if _row_expiry_structure(fields) not in {"", "diagonal"}:
+            return None, "diagonal_combo_yield_conflicting_expiry_structure"
+
+        open_quantity = _safe_nonnegative_int(fields.get("contracts_open"))
+        if open_quantity is None:
+            return None, "diagonal_combo_yield_invalid_quantity_evidence"
+        if open_quantity <= 0:
+            continue
+
+        row_option_type = str(fields.get("option_type") or "").strip().lower()
+        row_side = str(fields.get("side") or "").strip().lower()
+        row_expiration = str(fields.get("expiration_ymd") or "").strip()
+        if row_option_type == deal.option_type and row_side == incoming_lot_side:
+            if row_expiration != expiration:
+                return None, "diagonal_combo_yield_ambiguous_companion"
+            existing_same_leg_open += open_quantity
+            continue
+        if row_option_type != option_type or row_side != side:
+            continue
+
+        expected_role = "sell_put" if option_type == "put" else "enhancement_call"
+        row_role = str(fields.get("leg_role") or "").strip().lower()
+        if row_role not in {"", expected_role}:
+            return None, "diagonal_combo_yield_conflicting_group_metadata"
+        ordered = row_expiration < expiration if option_type == "put" else row_expiration > expiration
+        if not row_expiration or not ordered:
+            invalid_order = True
+            continue
+        compatible.append(row)
+        companion_expirations.add(row_expiration)
+
+    if invalid_order:
+        return None, "diagonal_combo_yield_invalid_expiry_order"
+    if len(companion_expirations) > 1:
+        return None, "diagonal_combo_yield_ambiguous_companion"
+    if not compatible:
+        return None, None
+
+    companion_open = sum(
+        _safe_nonnegative_int(
+            (row.get("fields") if isinstance(row.get("fields"), dict) else row).get("contracts_open")
+        )
+        or 0
+        for row in compatible
+    )
+    if existing_same_leg_open + incoming_open > companion_open:
+        return None, "diagonal_combo_yield_quantity_conflict"
+    if len(compatible) == 1:
+        return compatible[0], None
+    return {
+        "record_ids": sorted(str(row.get("record_id") or "").strip() for row in compatible if row.get("record_id")),
+        "contracts_open_total": companion_open,
+        "lot_count": len(compatible),
+    }, None
+
+
+def _row_expiry_structure(fields: dict[str, Any]) -> str:
+    snapshot = fields.get("strategy_snapshot")
+    value = fields.get("expiry_structure")
+    if not value and isinstance(snapshot, dict):
+        value = snapshot.get("expiry_structure")
+    return str(value or "").strip().lower()
+
+
+def _safe_nonnegative_int(value: Any) -> int | None:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+def _combo_yield_metadata_conflict(raw_payload: dict[str, Any] | None) -> str | None:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
     snapshot = payload.get("strategy_snapshot")
     if not isinstance(snapshot, dict):
-        payload["strategy_snapshot"] = {
-            "strategy": STRATEGY_COMBO_YIELD,
-            "strategy_source": "trade_intake_inference",
-            "leg_role": "sell_put",
-            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
-        }
-        if group_id:
-            payload["strategy_snapshot"]["strategy_group_id"] = group_id
-    return payload
+        return None
+    top_group = str(payload.get("strategy_group_id") or "").strip()
+    snapshot_group = str(snapshot.get("strategy_group_id") or "").strip()
+    if top_group and snapshot_group and top_group != snapshot_group:
+        return "diagonal_combo_yield_conflicting_group_metadata"
+    top_structure = str(payload.get("expiry_structure") or "").strip().lower()
+    snapshot_structure = str(snapshot.get("expiry_structure") or "").strip().lower()
+    if top_structure and snapshot_structure and top_structure != snapshot_structure:
+        return "diagonal_combo_yield_conflicting_expiry_structure"
+    return None
+
+
+def _has_different_expiry_opposite_lot(
+    repo: OptionPositionsRepoLike,
+    deal: NormalizedTradeDeal,
+    *,
+    option_type: str,
+    side: str,
+) -> bool:
+    account = str(deal.internal_account or "").strip().lower()
+    symbol = canonical_symbol(deal.symbol) or str(deal.symbol or "").strip().upper()
+    expiration = str(deal.expiration_ymd or "").strip()
+    for row in repo.list_position_lots():
+        fields = row.get("fields") if isinstance(row.get("fields"), dict) else row
+        if str(fields.get("account") or "").strip().lower() != account:
+            continue
+        row_symbol = canonical_symbol(fields.get("symbol")) or str(fields.get("symbol") or "").strip().upper()
+        if row_symbol != symbol:
+            continue
+        if str(fields.get("option_type") or "").strip().lower() != option_type:
+            continue
+        if str(fields.get("side") or "").strip().lower() != side:
+            continue
+        open_quantity = _safe_nonnegative_int(fields.get("contracts_open"))
+        if open_quantity is None or open_quantity <= 0:
+            continue
+        row_expiration = str(fields.get("expiration_ymd") or "").strip()
+        if row_expiration and row_expiration != expiration:
+            return True
+    return False
 
 
 def _stable_combo_yield_group_id(deal: NormalizedTradeDeal) -> str:
