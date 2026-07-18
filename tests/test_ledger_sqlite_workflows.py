@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -2789,3 +2790,197 @@ def test_projection_matches_explicit_close_with_legacy_hk_symbol_alias() -> None
     assert projection.lots[0].fields["contracts_closed"] == 1
     assert projection.lots[0].fields["status"] == "close"
     assert [item.code for item in projection.diagnostics] == []
+
+
+def test_ledger_api_exposes_economic_allocations(tmp_path: Path) -> None:
+    from src.application.ledger.api import trade_event_economic_allocations
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "economic_allocations.sqlite3")
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    open_event = TradeEvent(
+        event_id="open-economic",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=key,
+        contracts=1,
+        price=2,
+        currency="USD",
+        source="test",
+        lot_id="lot-economic",
+        raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+    )
+    close_event = TradeEvent(
+        event_id="close-economic",
+        event_type="close",
+        event_time_ms=2000,
+        contract_key=key,
+        contracts=1,
+        price=1,
+        currency="USD",
+        source="test",
+        target_lot_id="lot-economic",
+        raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+    )
+    repo.upsert_trade_event(open_event)
+    repo.upsert_trade_event(close_event)
+
+    allocations = trade_event_economic_allocations(repo)
+
+    assert len(allocations) == 1
+    assert allocations[0].realized_pnl_gross == Decimal("100.000000")
+
+
+def test_event_codec_preserves_top_level_fee_provenance_for_compatibility() -> None:
+    from src.application.ledger.event_codec import import_stored_trade_events
+
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    payload = TradeEvent(
+        event_id="open-fee",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=key,
+        contracts=1,
+        price=1.0,
+        currency="USD",
+        source="manual",
+        multiplier=100,
+        fees=0.0,
+        lot_id="lot-open-fee",
+    ).to_dict()
+    payload["fee_provenance"] = {"basis": "actual", "source": "manual-zero"}
+
+    imported, diagnostics = import_stored_trade_events([payload])
+
+    assert diagnostics == []
+    assert imported[0].raw_payload["fee_provenance"] == {"basis": "actual", "source": "manual-zero"}
+
+
+def test_multi_lot_close_writer_conserves_total_close_fee_across_allocations(tmp_path: Path) -> None:
+    from src.application.ledger.api import trade_event_economic_allocations
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "multi_lot_close_fees.sqlite3")
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    for index in (1, 2):
+        ledger_writer.persist_trade_event_object(
+            repo,
+            TradeEvent(
+                event_id=f"open-fee-{index}",
+                event_type="open",
+                event_time_ms=1000 + index,
+                contract_key=key,
+                contracts=1,
+                price=2,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                fees=0,
+                lot_id=f"lot-fee-{index}",
+                raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+            ),
+        )
+
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="close-fee-both",
+            event_type="close",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=2,
+            price=1,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            fees=2,
+            raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+        ),
+    )
+
+    allocations = trade_event_economic_allocations(repo)
+
+    assert len(allocations) == 2
+    assert [item.contracts for item in allocations] == [1, 1]
+    assert [item.close_fee.amount for item in allocations] == [Decimal("1.000000"), Decimal("1.000000")]
+    assert sum(item.close_fee.amount or Decimal(0) for item in allocations) == Decimal("2.000000")
+    assert sum(item.realized_pnl_net or Decimal(0) for item in allocations) == Decimal("198.000000")
+
+
+def test_close_writer_preserves_invalid_explicit_fee_amount_as_missing(tmp_path: Path) -> None:
+    from src.application.ledger.api import trade_event_economic_allocations
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "invalid_close_fee.sqlite3")
+    key = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd="2026-08-21",
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="open-invalid-close-fee",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=key,
+            contracts=1,
+            price=2,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            fees=0,
+            lot_id="lot-invalid-close-fee",
+            raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
+        ),
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="close-invalid-fee",
+            event_type="close",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=1,
+            price=1,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            fees=1,
+            raw_payload={"fee_provenance": {"basis": "actual", "amount": "bad", "source": "test"}},
+        ),
+    )
+
+    allocations = trade_event_economic_allocations(repo)
+
+    assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
+    assert len(allocations) == 1
+    assert allocations[0].realized_pnl_gross == Decimal("100.000000")
+    assert allocations[0].close_fee.amount is None
+    assert "invalid fee provenance amount" in str(allocations[0].close_fee.reason)
+    assert allocations[0].realized_pnl_net is None

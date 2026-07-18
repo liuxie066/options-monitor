@@ -457,12 +457,19 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 ./om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-assign_xxx --shares 100 --price 105 --trade-time-ms 1780000000000 --dry-run
 ```
 
-月度收益报表：
+期权收益统计以 `option-performance` / `option_performance_report` 为主入口，支持 MTD、YTD、自然月、自然年和日期范围：
 
 ```bash
-./om option-positions report monthly-income --broker 富途 --account lx --month 2026-04
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+./om option-performance report --config-key us --account lx --period mtd
+./om option-performance report --config-key us --account lx --period ytd --as-of-date 2026-07-17
+./om option-performance report --config-key us --account lx --period month --month 2026-06
+./om option-performance report --config-key us --account lx --period year --year 2025
+./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"ytd","as_of_date":"2026-07-17"}'
 ```
+
+利润、现金和交易活动是三个并列口径：利润看 `pnl`，现金变化看 `cash`，权利金活动看 `activity`。不要把权利金重复加到 PnL，也不要把指派买入正股的本金当作亏损。组合桥接同样分开：`portfolio_pnl_bridge` 对接总资产/PnL 恒等式，`portfolio_cash_bridge` 对接现金余额恒等式。
+
+旧的 `./om option-positions report monthly-income` 和 `monthly_income_report` 仍可用于回滚，但已废弃，不再作为新消费者入口。
 
 ### 通知预览
 

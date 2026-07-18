@@ -32,19 +32,19 @@ def _call(name: str, arguments: dict[str, Any], call_id: str) -> ToolCall:
 
 SCENARIOS = (
     Scenario(
-        name="monthly_income_synthesis",
+        name="option_performance_synthesis",
         question="7月收益",
         turns=(
             ModelTurn(
                 tool_calls=(
                     _call(
                         "analysis_query",
-                        {"views": ["account_monthly_performance"], "month": "2026-07"},
+                        {"views": ["option_monthly_performance"], "period": "month", "month": "2026-07"},
                         "income_1",
                     ),
                 )
             ),
-            ModelTurn(text="结论：7月收益主要来自权利金 800 美元，已实现平仓收益 400 美元，总计 1,200 美元。"),
+            ModelTurn(text="结论：7月期间总 PnL 为 400 美元；收到权利金 800 美元属于交易活动，现金净变动为 1,200 美元，三者不能相加。"),
         ),
         tool_results={
             "analysis_query": {
@@ -54,15 +54,16 @@ SCENARIOS = (
                         {
                             "month": "2026-07",
                             "currency": "USD",
-                            "premium": 800,
-                            "realized": 400,
+                            "premium_collected": 800,
+                            "period_total_pnl": 400,
+                            "total_cash_change": 1200,
                         }
                     ]
                 },
             }
         },
         expected_tools=("analysis_query",),
-        expected_terms=("结论", "权利金", "已实现", "1,200"),
+        expected_terms=("结论", "期间总 PnL", "权利金", "不能相加"),
         forbidden_terms=("共 1 行", "分析完成"),
     ),
     Scenario(
@@ -115,17 +116,17 @@ SCENARIOS = (
         turns=(
             ModelTurn(
                 tool_calls=(
-                    _call("monthly_income_report", {"month": "2026-07"}, "partial_1"),
+                    _call("option_performance_report", {"period": "month", "month": "2026-07"}, "partial_1"),
                     _call("option_positions_read", {"action": "list", "status": "open"}, "partial_2"),
                 )
             ),
             ModelTurn(text="结论：已确认本月权利金收入 800 美元；持仓数据源暂不可用，因此不能判断当前风险集中度。"),
         ),
         tool_results={
-            "monthly_income_report": {"ok": True, "data": {"month": "2026-07", "premium": 800, "currency": "USD"}},
+            "option_performance_report": {"ok": True, "data": {"month": "2026-07", "premium": 800, "currency": "USD"}},
             "option_positions_read": {"ok": False, "error": {"code": "READ_ERROR", "message": "position store unavailable"}},
         },
-        expected_tools=("monthly_income_report", "option_positions_read"),
+        expected_tools=("option_performance_report", "option_positions_read"),
         expected_terms=("已确认", "800", "暂不可用", "不能判断"),
     ),
     Scenario(
@@ -195,8 +196,8 @@ def test_freeform_loop_recovers_from_bad_arguments(monkeypatch) -> None:
 
     turns = iter(
         (
-            ModelTurn(tool_calls=(_call("monthly_income_report", {"month": "2026-13"}, "retry_1"),)),
-            ModelTurn(tool_calls=(_call("monthly_income_report", {"month": "2026-07"}, "retry_2"),)),
+            ModelTurn(tool_calls=(_call("option_performance_report", {"period": "month", "month": "2026-13"}, "retry_1"),)),
+            ModelTurn(tool_calls=(_call("option_performance_report", {"period": "month", "month": "2026-07"}, "retry_2"),)),
             ModelTurn(text="结论：修正月份后确认 7月权利金收入为 800 美元。"),
         )
     )
