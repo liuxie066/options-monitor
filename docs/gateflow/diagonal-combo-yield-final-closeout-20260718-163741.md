@@ -7,6 +7,7 @@
 - Base: `main@0af7adac` (v1.2.411)
 - Accepted PR-review integration commit: `c41c639c`
 - PR scope-fix commit: `40053b34`
+- Clean isolated closeout head before this update: `fa01606e`
 - Artifact path: `docs/gateflow/diagonal-combo-yield-final-closeout-20260718-163741.md`
 
 ## What Changed
@@ -71,15 +72,16 @@ Historical early artifacts retain the original `diagonal` / `sell_put` / `enhanc
 ## Finding Status
 
 - `PR-F1` severe stale-base/duplicate-architecture finding: accepted, fixed, re-reviewed **已修复**.
-- `PR-F2` unrelated work-unit artifact accidentally included in PR: accepted, removed from PR tracking, local working copy preserved, re-reviewed **已修复**.
+- `PR-F2` unrelated work-unit artifact/commit accidentally included in PR: accepted, removed from PR #73 with an exact `--force-with-lease`, preserved on the independent `codex/combo-yield-sell-put-runtime-decoupling` branch, re-reviewed **已修复**.
 - New material findings: none.
 
 ## Residual Risks / Owners
 
 1. Broker explicit-intent validation inherits the ledger/intake read-then-write concurrency model; no new lock was introduced. Owner: ledger/intake architecture; later work unit only if concurrent duplicate-fill evidence appears.
 2. Group Close Advice is intentionally option-inventory scoped. Assignment-aware truth remains in full-lifecycle reporting. Owner: documented product boundary; no current change required.
-3. The separate Combo Yield/Sell Put runtime-decoupling work unit remains untracked locally and is not part of PR #73. Owner: its own future Gateflow.
-4. Production config/notification promotion is not part of this work unit and requires a separate CEO decision.
+3. The separate Combo Yield/Sell Put runtime-decoupling work unit is preserved on `codex/combo-yield-sell-put-runtime-decoupling` at `4727bff6` and is not part of PR #73. Owner: its own Gateflow.
+4. The cross-expiry capital-attribution goal/plan documents remain untracked in the primary workspace and were not staged into either branch. Owner: its separate Gateflow.
+5. Production config/notification promotion is not part of this work unit and requires a separate CEO decision.
 
 ## Safety / External Actions
 
@@ -99,4 +101,4 @@ The user reviews and merges draft PR #73 when satisfied. After merge, any produc
 ## Completion Status
 
 - draft-PR-pass achieved.
-- final closeout prepared; this docs-only closeout artifact will be pushed and its final CI rechecked before reporting `final closeout pass`.
+- concurrent work units have been isolated without loss; this updated docs-only closeout artifact will be pushed and its final CI rechecked before reporting `final closeout pass`.
