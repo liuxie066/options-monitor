@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -12,6 +13,9 @@ from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class _PrefilterResultLike(Protocol):
@@ -50,6 +54,10 @@ class SymbolMonitoringDependencies:
     empty_sell_put_summary_fn: Callable[..., object]
     run_sell_call_scan_fn: Callable[..., object]
     empty_sell_call_summary_fn: Callable[..., object]
+    run_combo_yield_scan_fn: Callable[..., object] | None = None
+    empty_combo_yield_summary_fn: Callable[..., object] | None = None
+    materialize_empty_sell_put_artifacts_fn: Callable[..., None] | None = None
+    materialize_empty_combo_yield_artifacts_fn: Callable[..., object] | None = None
 
 
 def _append_summary_result(summary_rows: list[dict[str, Any]], result: object) -> None:
@@ -80,7 +88,6 @@ def run_symbol_monitoring(
     want_put = bool(sp.get("enabled", False))
     want_call = bool(cc.get("enabled", False))
     market_sp = dict(sp)
-    market_want_put = bool(want_put)
 
     exchange_rate_converter = deps.build_converter_fn(
         usd_per_cny_exchange_rate=inputs.usd_per_cny_exchange_rate,
@@ -118,7 +125,7 @@ def run_symbol_monitoring(
         if effective_min_strike is not None:
             cc["min_strike"] = effective_min_strike
             symbol_cfg["sell_call"] = cc
-    want_yield_enhancement = bool(market_want_put and yield_enhancement_policy.enabled)
+    want_yield_enhancement = bool(yield_enhancement_policy.enabled)
     fetch_want_put = bool(want_put or want_yield_enhancement)
     fetch_want_call = bool(want_call or want_yield_enhancement)
     fetch_sell_put_cfg = market_sp if want_yield_enhancement else sp
@@ -194,32 +201,82 @@ def run_symbol_monitoring(
 
     summary_rows: list[dict[str, Any]] = []
 
-    if want_put or want_yield_enhancement:
-        _append_summary_result(
-            summary_rows,
-            deps.run_sell_put_scan_fn(
-                py=inputs.py,
-                base=inputs.base,
-                sym=symbol,
-                symbol=symbol,
-                symbol_lower=symbol_lower,
-                symbol_cfg=symbol_cfg,
-                sp=sp,
-                top_n=inputs.top_n,
-                required_data_dir=inputs.required_data_dir,
-                report_dir=inputs.report_dir,
-                timeout_sec=inputs.timeout_sec,
-                is_scheduled=bool(inputs.is_scheduled),
-                exchange_rate_converter=exchange_rate_converter,
-                portfolio_ctx=inputs.portfolio_ctx,
-                global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
-                global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
-                run_sell_put=want_put,
-                yield_enhancement_sell_put_cfg=market_sp,
+    if want_put:
+        try:
+            _append_summary_result(
+                summary_rows,
+                deps.run_sell_put_scan_fn(
+                    py=inputs.py,
+                    base=inputs.base,
+                    sym=symbol,
+                    symbol=symbol,
+                    symbol_lower=symbol_lower,
+                    symbol_cfg=symbol_cfg,
+                    sp=sp,
+                    top_n=inputs.top_n,
+                    required_data_dir=inputs.required_data_dir,
+                    report_dir=inputs.report_dir,
+                    timeout_sec=inputs.timeout_sec,
+                    is_scheduled=bool(inputs.is_scheduled),
+                    exchange_rate_converter=exchange_rate_converter,
+                    portfolio_ctx=inputs.portfolio_ctx,
+                    global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                    global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
+                    run_sell_put=True,
+                )
             )
-        )
+        except Exception:
+            log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
+            if deps.materialize_empty_sell_put_artifacts_fn is not None:
+                deps.materialize_empty_sell_put_artifacts_fn(
+                    report_dir=inputs.report_dir, symbol_lower=symbol_lower
+                )
+            _append_summary_result(
+                summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
+            )
     else:
+        if deps.materialize_empty_sell_put_artifacts_fn is not None:
+            deps.materialize_empty_sell_put_artifacts_fn(
+                report_dir=inputs.report_dir, symbol_lower=symbol_lower
+            )
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
+
+    if want_yield_enhancement and deps.run_combo_yield_scan_fn is not None:
+        try:
+            _append_summary_result(
+                summary_rows,
+                deps.run_combo_yield_scan_fn(
+                    base=inputs.base,
+                    sym=symbol,
+                    symbol=symbol,
+                    symbol_lower=symbol_lower,
+                    symbol_cfg=symbol_cfg,
+                    sell_put_cfg=market_sp,
+                    top_n=inputs.top_n,
+                    required_data_dir=inputs.required_data_dir,
+                    report_dir=inputs.report_dir,
+                    is_scheduled=bool(inputs.is_scheduled),
+                    exchange_rate_converter=exchange_rate_converter,
+                    portfolio_ctx=inputs.portfolio_ctx,
+                    global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                    global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
+                )
+            )
+        except Exception:
+            log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
+            if deps.materialize_empty_combo_yield_artifacts_fn is not None:
+                deps.materialize_empty_combo_yield_artifacts_fn(
+                    report_dir=inputs.report_dir, symbol_lower=symbol_lower
+                )
+            if deps.empty_combo_yield_summary_fn is not None:
+                _append_summary_result(
+                    summary_rows,
+                    deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
+                )
+    elif not want_yield_enhancement and deps.materialize_empty_combo_yield_artifacts_fn is not None:
+        deps.materialize_empty_combo_yield_artifacts_fn(
+            report_dir=inputs.report_dir, symbol_lower=symbol_lower
+        )
 
     if want_call:
         option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}

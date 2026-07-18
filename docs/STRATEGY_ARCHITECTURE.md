@@ -150,6 +150,8 @@ Covered Call 的 `premium_edge_score` 使用与 Sell Put 相同的去重补偿�
 
 Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。当前 runtime key 是 `combo_yield`；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。
 
+运行所有权同样独立：per-symbol pipeline 分别调用 Sell Put step 与 Combo Yield step。`sell_put.enabled=false`、Sell Put 扫描失败或 Sell Put 无候选都不会隐式禁用 Combo Yield；Combo Yield 只由自身 `enabled` 和共享 required-data 是否可用决定。它可以复用 Sell Put 配置作为 funding-put 的期限、价格边界和 underwriting 输入，但不复用 Sell Put step 的候选结果或成功状态。共享 required-data 获取仍是 symbol 级前置边界。
+
 当前结构由 `structure_mode` 决定：
 
 | 结构 | 期限关系 | 当前定位 |
@@ -277,7 +279,8 @@ funding_ratio = put_net_credit / call_total_cost
 - 承保定价核心：`domain/domain/insurance_underwriting.py`
 - Sell Put 开仓入口：`src/application/sell_put_strategy_risk.py::enrich_and_filter_sell_put_underwriting`
 - Covered Call 开仓入口：`src/application/covered_call_strategy_risk.py::enrich_and_filter_covered_call_underwriting`
-- Combo Yield 开仓编排：`src/application/combo_yield_steps.py::run_combo_yield_scan_and_summarize`
+- Combo Yield symbol-level 入口：`src/application/combo_yield_steps.py::run_combo_yield_for_symbol_and_summarize`
+- Combo Yield 低层开仓编排：`src/application/combo_yield_steps.py::run_combo_yield_scan_and_summarize`
 - 策略语义解析：`src/application/strategy_policy.py`
 - 扫描上下文装配：`src/application/pipeline_context.py`
 

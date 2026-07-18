@@ -499,10 +499,12 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         apply_prefilters_fn=_apply_prefilters_fn,
         apply_multiplier_cache_fn=lambda **kwargs: None,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
-        run_sell_put_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
-        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: (_ for _ in ()).throw(AssertionError("sell_put scan should still run for yield enhancement")),
+        run_sell_put_scan_fn=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put recommendation should be prefiltered")),
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+        run_combo_yield_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield"},
     )
 
     out = mod.run_symbol_monitoring(
@@ -535,12 +537,146 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         deps=deps,
     )
 
-    assert [row["strategy"] for row in out] == ["combo_yield", "sell_call"]
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True
     assert captured_required_data["max_strike"] == 50.0
     assert captured_plan["want_put"] is True
     assert captured_plan["sell_put_cfg"]["max_strike"] == 50
-    assert captured_scan["run_sell_put"] is False
-    assert captured_scan["sp"]["max_strike"] == 0
-    assert captured_scan["yield_enhancement_sell_put_cfg"]["max_strike"] == 50
+    assert captured_scan["sell_put_cfg"]["max_strike"] == 50
+
+
+
+def _run_strategy_decoupling_case(monkeypatch, tmp_path: Path, *, sell_put_enabled: bool, sell_put_runner, combo_runner):
+    import src.application.symbol_monitoring as mod
+
+    captured_required_data: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=sell_put_runner,
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put", "count": 0},
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call", "count": 0},
+        run_combo_yield_scan_fn=combo_runner,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
+        materialize_empty_sell_put_artifacts_fn=lambda **kwargs: __import__(
+            "src.application.sell_put_steps", fromlist=["materialize_empty_sell_put_artifacts"]
+        ).materialize_empty_sell_put_artifacts(**kwargs),
+        materialize_empty_combo_yield_artifacts_fn=lambda **kwargs: __import__(
+            "src.application.combo_yield_steps", fromlist=["materialize_empty_combo_yield_artifacts"]
+        ).materialize_empty_combo_yield_artifacts(**kwargs),
+    )
+    out = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+                "sell_put": {"enabled": sell_put_enabled, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+        ),
+        deps=deps,
+    )
+    return out, captured_required_data
+
+
+def test_combo_yield_runs_when_sell_put_is_disabled(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    out, required = _run_strategy_decoupling_case(
+        monkeypatch,
+        tmp_path,
+        sell_put_enabled=False,
+        sell_put_runner=lambda **kwargs: (_ for _ in ()).throw(AssertionError("sell_put must stay disabled")),
+        combo_runner=lambda **kwargs: calls.append("combo") or {"strategy": "combo_yield", "count": 1},
+    )
+
+    assert calls == ["combo"]
+    assert required["want_put"] is True
+    assert required["want_call"] is True
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
+
+
+def test_combo_yield_runs_after_sell_put_failure_and_stale_put_artifacts_are_cleared(monkeypatch, tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "nvda_sell_put_candidates.csv").write_text("stale\n1\n", encoding="utf-8")
+    calls: list[str] = []
+
+    out, _required = _run_strategy_decoupling_case(
+        monkeypatch,
+        tmp_path,
+        sell_put_enabled=True,
+        sell_put_runner=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("sell put failed")),
+        combo_runner=lambda **kwargs: calls.append("combo") or {"strategy": "combo_yield", "count": 1},
+    )
+
+    assert calls == ["combo"]
+    assert (report_dir / "nvda_sell_put_candidates.csv").read_text(encoding="utf-8") == "\n"
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
+
+
+def test_combo_yield_runs_when_sell_put_returns_no_candidates(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    out, _required = _run_strategy_decoupling_case(
+        monkeypatch,
+        tmp_path,
+        sell_put_enabled=True,
+        sell_put_runner=lambda **kwargs: {"strategy": "sell_put", "count": 0},
+        combo_runner=lambda **kwargs: calls.append("combo") or {"strategy": "combo_yield", "count": 1},
+    )
+
+    assert calls == ["combo"]
+    assert [row["count"] for row in out[:2]] == [0, 1]
+
+
+def test_sell_put_result_survives_combo_yield_failure_and_stale_combo_artifacts_are_cleared(monkeypatch, tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "nvda_combo_yield_candidates.csv").write_text("stale\n1\n", encoding="utf-8")
+
+    out, _required = _run_strategy_decoupling_case(
+        monkeypatch,
+        tmp_path,
+        sell_put_enabled=True,
+        sell_put_runner=lambda **kwargs: {"strategy": "sell_put", "count": 1},
+        combo_runner=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("combo failed")),
+    )
+
+    assert (report_dir / "nvda_combo_yield_candidates.csv").read_text(encoding="utf-8") == "\n"
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
+    assert [row["count"] for row in out[:2]] == [1, 0]
