@@ -54,10 +54,10 @@ class SymbolMonitoringDependencies:
     empty_sell_put_summary_fn: Callable[..., object]
     run_sell_call_scan_fn: Callable[..., object]
     empty_sell_call_summary_fn: Callable[..., object]
-    run_combo_yield_scan_fn: Callable[..., object] | None = None
-    empty_combo_yield_summary_fn: Callable[..., object] | None = None
-    materialize_empty_sell_put_artifacts_fn: Callable[..., None] | None = None
-    materialize_empty_combo_yield_artifacts_fn: Callable[..., object] | None = None
+    run_combo_yield_scan_fn: Callable[..., object]
+    empty_combo_yield_summary_fn: Callable[..., object]
+    materialize_empty_sell_put_artifacts_fn: Callable[..., None]
+    materialize_empty_combo_yield_artifacts_fn: Callable[..., object]
 
 
 def _append_summary_result(summary_rows: list[dict[str, Any]], result: object) -> None:
@@ -227,21 +227,19 @@ def run_symbol_monitoring(
             )
         except Exception:
             log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
-            if deps.materialize_empty_sell_put_artifacts_fn is not None:
-                deps.materialize_empty_sell_put_artifacts_fn(
-                    report_dir=inputs.report_dir, symbol_lower=symbol_lower
-                )
+            deps.materialize_empty_sell_put_artifacts_fn(
+                report_dir=inputs.report_dir, symbol_lower=symbol_lower
+            )
             _append_summary_result(
                 summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
     else:
-        if deps.materialize_empty_sell_put_artifacts_fn is not None:
-            deps.materialize_empty_sell_put_artifacts_fn(
-                report_dir=inputs.report_dir, symbol_lower=symbol_lower
-            )
+        deps.materialize_empty_sell_put_artifacts_fn(
+            report_dir=inputs.report_dir, symbol_lower=symbol_lower
+        )
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
-    if want_yield_enhancement and deps.run_combo_yield_scan_fn is not None:
+    if want_yield_enhancement:
         try:
             _append_summary_result(
                 summary_rows,
@@ -264,16 +262,14 @@ def run_symbol_monitoring(
             )
         except Exception:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
-            if deps.materialize_empty_combo_yield_artifacts_fn is not None:
-                deps.materialize_empty_combo_yield_artifacts_fn(
-                    report_dir=inputs.report_dir, symbol_lower=symbol_lower
-                )
-            if deps.empty_combo_yield_summary_fn is not None:
-                _append_summary_result(
-                    summary_rows,
-                    deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
-                )
-    elif not want_yield_enhancement and deps.materialize_empty_combo_yield_artifacts_fn is not None:
+            deps.materialize_empty_combo_yield_artifacts_fn(
+                report_dir=inputs.report_dir, symbol_lower=symbol_lower
+            )
+            _append_summary_result(
+                summary_rows,
+                deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
+            )
+    elif not want_yield_enhancement:
         deps.materialize_empty_combo_yield_artifacts_fn(
             report_dir=inputs.report_dir, symbol_lower=symbol_lower
         )
