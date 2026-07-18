@@ -31,6 +31,7 @@ from domain.domain.performance.models import (
     to_decimal,
 )
 from domain.domain.performance.period import PeriodWindow, REPORTING_TIMEZONE
+from domain.domain.performance.strategy_attribution import build_strategy_attribution
 
 
 _MONETARY_KINDS = frozenset(
@@ -157,6 +158,7 @@ class PeriodPerformance:
     cash: Mapping[str, Any]
     pnl: Mapping[str, Any]
     capital: Mapping[str, Any]
+    attribution: Mapping[str, Any]
     assigned_stock: Mapping[str, Any]
     breakdowns: Mapping[str, Any]
     quality: MetricQuality
@@ -171,6 +173,7 @@ class PeriodPerformance:
             "cash": dict(self.cash),
             "pnl": dict(self.pnl),
             "capital": dict(self.capital),
+            "attribution": dict(self.attribution),
             "assigned_stock": dict(self.assigned_stock),
             "breakdowns": dict(self.breakdowns),
             "quality": self.quality.to_dict(),
@@ -279,12 +282,19 @@ def build_period_performance(
         )
     )
     summary = _summarize(ordered_facts, fx_rates=fx_rates)
-    capital = _capital_report(
+    capital, capital_segments = _capital_report(
         events=scoped_events,
         allocations=scoped_all_allocations,
         period=period,
         ending_assigned_stock=ending_assigned_stock or {},
         pnl=summary["pnl"],
+    )
+    attribution = build_strategy_attribution(
+        events=scoped_events,
+        allocations=scoped_all_allocations,
+        facts=ordered_facts,
+        capital_segments=capital_segments,
+        period=period,
     )
     breakdowns = {
         "monthly": _breakdown(
@@ -398,6 +408,7 @@ def build_period_performance(
         cash=summary["cash"],
         pnl=summary["pnl"],
         capital=capital,
+        attribution=attribution,
         assigned_stock=_assigned_stock_report_summary(
             opening_assigned_stock or {},
             ending_assigned_stock or {},
@@ -417,7 +428,7 @@ def _capital_report(
     period: PeriodWindow,
     ending_assigned_stock: Mapping[str, Any],
     pnl: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[CapitalExposureSegment, ...]]:
     segments: list[CapitalExposureSegment] = []
     missing: set[str] = set()
     warnings: set[str] = set()
@@ -513,7 +524,7 @@ def _capital_report(
         if relevant_segments
         else MetricStatus.NOT_OBSERVED
     )
-    return {
+    report = {
         "capital_basis": "notional_days_v1",
         "capital_days_by_currency": {currency: float(value) for currency, value in rounded_sums.items()},
         "period_total_net_annualized_efficiency": _annualized_efficiency(
@@ -539,6 +550,7 @@ def _capital_report(
             for item in relevant_segments
         ],
     }
+    return report, tuple(relevant_segments)
 
 
 def _append_option_capital_segment(
