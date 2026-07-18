@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from domain.domain.engine import YIELD_ENHANCEMENT_EXPIRY_STRUCTURES
 from src.application.strategy_policy import (
     RETURN_FIRST_PROFILE,
     SELL_PUT_FAMILY,
@@ -47,6 +48,8 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "objective": "premium_funded_long_call",
     "output_mode": "separate",
+    "expiry_structure": "same_expiry",
+    "min_expiry_gap_days": 1,
     "funding_mode": "credit_or_even",
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
@@ -56,6 +59,8 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "max_spread_ratio": 0.35,
     "max_combo_spread_ratio": 0.50,
     "call": {
+        "min_dte": None,
+        "max_dte": None,
         "min_delta": 0.10,
         "max_delta": 0.45,
     },

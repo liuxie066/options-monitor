@@ -371,24 +371,29 @@ def _resolve_combo_yield_call_plan(
 ) -> OptionSideFetchPlan:
     cfg = dict(yield_enhancement_cfg or {})
     call_cfg = dict(cfg.get("call") or {})
-    call_cfg.pop("min_dte", None)
-    call_cfg.pop("max_dte", None)
-    for key in ("min_dte", "max_dte"):
-        if key in sell_put_cfg:
-            call_cfg[key] = sell_put_cfg.get(key)
+    expiry_structure = str(cfg.get("expiry_structure") or "same_expiry").strip().lower()
     sell_put_window = resolve_candidate_window(
         sell_put_cfg,
         defaults=DEFAULT_SELL_PUT_WINDOW,
     )
+    dte_source_prefix = "combo_yield.call"
+    defaults = sell_put_window
+    if expiry_structure != "diagonal":
+        call_cfg.pop("min_dte", None)
+        call_cfg.pop("max_dte", None)
+        for key in ("min_dte", "max_dte"):
+            if key in sell_put_cfg:
+                call_cfg[key] = sell_put_cfg.get(key)
+        dte_source_prefix = "sell_put"
     return _resolve_call_side_plan(
         symbol=symbol,
         sell_call_cfg=call_cfg,
         limit_expirations=limit_expirations,
         available_expirations=available_expirations,
         spot_reference=spot_reference,
-        defaults=sell_put_window,
+        defaults=defaults,
         source_prefix="combo_yield.call",
-        dte_source_prefix="sell_put",
+        dte_source_prefix=dte_source_prefix,
         fallback_min_pct=0.0,
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
     )

@@ -255,6 +255,8 @@
           "enabled": false,
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
+          "expiry_structure": "same_expiry",
+          "min_expiry_gap_days": 1,
           "funding_mode": "credit_or_even",
           "min_combo_net_credit": null,
           "min_net_credit_annualized": 0.08,
@@ -264,6 +266,8 @@
           "max_spread_ratio": 0.35,
           "max_combo_spread_ratio": 0.5,
           "call": {
+            "min_dte": null,
+            "max_dte": null,
             "min_delta": 0.1,
             "max_delta": 0.45
           }
@@ -331,6 +335,8 @@
           "enabled": false,
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
+          "expiry_structure": "same_expiry",
+          "min_expiry_gap_days": 1,
           "funding_mode": "credit_or_even",
           "min_combo_net_credit": null,
           "min_net_credit_annualized": 0.08,
@@ -340,6 +346,8 @@
           "max_spread_ratio": 0.35,
           "max_combo_spread_ratio": 0.5,
           "call": {
+            "min_dte": null,
+            "max_dte": null,
             "min_delta": 0.1,
             "max_delta": 0.45
           }

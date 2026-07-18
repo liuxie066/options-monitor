@@ -21,6 +21,7 @@ from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
+    YIELD_ENHANCEMENT_EXPIRY_STRUCTURES,
     YIELD_ENHANCEMENT_FUNDING_MODES,
     YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
     YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
@@ -554,6 +555,11 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         output_mode = str(cfg.get('output_mode') or '').strip().lower()
         if output_mode not in YIELD_ENHANCEMENT_OUTPUT_MODES:
             die(f"{path}.output_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OUTPUT_MODES))}")
+    expiry_structure = str(cfg.get('expiry_structure') or 'same_expiry').strip().lower()
+    if expiry_structure not in YIELD_ENHANCEMENT_EXPIRY_STRUCTURES:
+        die(f"{path}.expiry_structure must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_EXPIRY_STRUCTURES))}")
+    if cfg.get('min_expiry_gap_days') is not None:
+        validate_positive_integer(cfg.get('min_expiry_gap_days'), f'{path}.min_expiry_gap_days')
     for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (
@@ -577,6 +583,11 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     call_leg = cfg.get('call')
     if call_leg is not None and not isinstance(call_leg, dict):
         die(f'{path}.call must be an object')
+    if expiry_structure == 'diagonal':
+        if not isinstance(call_leg, dict) or call_leg.get('min_dte') is None or call_leg.get('max_dte') is None:
+            die(f'{path}.expiry_structure=diagonal requires call.min_dte and call.max_dte')
+        validate_positive_integer(call_leg.get('min_dte'), f'{path}.call.min_dte')
+        validate_positive_integer(call_leg.get('max_dte'), f'{path}.call.max_dte')
     if isinstance(call_leg, dict):
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')
@@ -588,6 +599,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             )
         for key in ('min_delta', 'max_delta'):
             _validate_optional_unit_interval_number(call_leg, key, f'{path}.call')
+    if expiry_structure == 'diagonal':
         min_delta = call_leg.get('min_delta')
         max_delta = call_leg.get('max_delta')
         if (min_delta is not None) and (max_delta is not None):
