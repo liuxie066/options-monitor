@@ -94,7 +94,7 @@ if [[ "${CHECK_DEPS}" -eq 1 ]]; then
   run_step "dependency graph check" "${PYTHON_BIN}" scripts/generate_dependency_graph.py --check
 fi
 
-if [[ "${FOCUSED}" -eq 1 ]]; then
+if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
   run_step "agent/plugin focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 fi

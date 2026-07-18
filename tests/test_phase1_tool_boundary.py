@@ -163,7 +163,7 @@ def test_prefetch_required_data_idempotency_audit() -> None:
         mod.ToolExecutionService.execute = old_exec
 
 
-def test_prefetch_required_data_protections_minimal() -> None:
+def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:
     from src.application.multi_tick import required_data_prefetch as mod
 
     old_has = mod.has_shared_required_data
@@ -171,6 +171,8 @@ def test_prefetch_required_data_protections_minimal() -> None:
     mod.has_shared_required_data = lambda symbol, shared_dir: False
 
     calls: list[str] = []
+    cooldowns: list[float] = []
+    monkeypatch.setattr(mod, "_sleep_after_rate_limit_wave", lambda wait_sec: cooldowns.append(float(wait_sec)))
 
     def _fake_execute(self, intent):
         sym = str(intent.symbol)
@@ -253,6 +255,7 @@ def test_prefetch_required_data_protections_minimal() -> None:
         assert out["budget_triggered"] is False
         assert "US" in (out.get("opend_rate_limit_classes") or [])
         assert calls == ["AAPL", "MSFT", "TSLA", "BABA"]
+        assert cooldowns == [30.0]
     finally:
         mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
