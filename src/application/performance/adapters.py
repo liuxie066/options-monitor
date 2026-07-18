@@ -5,6 +5,7 @@ from typing import Any
 
 from domain.domain.assigned_stock import project_assigned_stock_lifecycle
 from domain.domain.ledger import ContractKey, OptionEconomicAllocation, PositionLot, TradeEvent, fee_fact_for_event
+from domain.domain.performance.attribution import resolve_event_attribution
 from domain.domain.performance.models import (
     FeeBasis,
     OptionInstrumentKey,
@@ -166,6 +167,10 @@ def load_option_valuation_inputs(
             else:
                 remaining_fee = None
                 fee_quality = fee.basis.value
+            attribution_resolution = resolve_event_attribution(
+                open_event,
+                lifecycle_source_id=lot.lot_id,
+            )
             positions.append(
                 OptionValuationPosition(
                     lot_id=lot.lot_id,
@@ -179,6 +184,8 @@ def load_option_valuation_inputs(
                     open_fee_quality=fee_quality,
                     opened_at_ms=lot.opened_at_ms,
                     market_code=_event_market_code(open_event),
+                    attribution=attribution_resolution.attribution,
+                    attribution_issues=attribution_resolution.issues,
                 )
             )
         except (TypeError, ValueError) as exc:

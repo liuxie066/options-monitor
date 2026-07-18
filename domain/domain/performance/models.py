@@ -307,6 +307,30 @@ class FeeFact:
 
 
 @dataclass(frozen=True)
+class StrategyAttribution:
+    strategy: str
+    leg_role: str
+    strategy_group_id: str
+    lifecycle_id: str
+    expiry_structure: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("strategy", "leg_role", "strategy_group_id", "lifecycle_id"):
+            value = _required_text(getattr(self, field_name), field_name=field_name)
+            object.__setattr__(self, field_name, value)
+        object.__setattr__(self, "expiry_structure", _optional_text(self.expiry_structure))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "leg_role": self.leg_role,
+            "strategy_group_id": self.strategy_group_id,
+            "lifecycle_id": self.lifecycle_id,
+            "expiry_structure": self.expiry_structure,
+        }
+
+
+@dataclass(frozen=True)
 class CapitalExposureSegment:
     account: str
     broker: str
@@ -319,6 +343,8 @@ class CapitalExposureSegment:
     notional: Decimal
     quantity: Decimal
     incremental: bool = True
+    attribution: StrategyAttribution | None = None
+    attribution_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         account = str(self.account or "").strip().lower()
@@ -348,6 +374,11 @@ class CapitalExposureSegment:
         object.__setattr__(self, "end_at_ms", end_at_ms)
         object.__setattr__(self, "notional", notional)
         object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(
+            self,
+            "attribution_issues",
+            tuple(sorted({str(item) for item in self.attribution_issues if str(item)})),
+        )
 
     def overlap_ms(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> int:
         return max(
@@ -383,6 +414,8 @@ class CapitalExposureSegment:
             "quantity": float(self.quantity),
             "incremental": self.incremental,
             "overlap_ms": overlap_ms,
+            "attribution": None if self.attribution is None else self.attribution.to_dict(),
+            "attribution_issues": list(self.attribution_issues),
             "capital_days": float(
                 self.capital_days(
                     period_start_at_ms=period_start_at_ms,
@@ -409,6 +442,7 @@ __all__ = [
     "OptionInstrumentKey",
     "OptionValuationPosition",
     "StockInstrumentKey",
+    "StrategyAttribution",
     "ValuationMarkFact",
     "canonical_decimal_text",
     "normalize_currency",
@@ -689,6 +723,8 @@ class OptionValuationPosition:
     open_fee_quality: str
     opened_at_ms: int
     market_code: str | None = None
+    attribution: StrategyAttribution | None = None
+    attribution_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         lot_id = _required_text(self.lot_id, field_name="lot_id")
@@ -719,6 +755,11 @@ class OptionValuationPosition:
         object.__setattr__(self, "open_fee_quality", quality)
         object.__setattr__(self, "opened_at_ms", _positive_ms(self.opened_at_ms, field_name="opened_at_ms"))
         object.__setattr__(self, "market_code", _optional_text(self.market_code))
+        object.__setattr__(
+            self,
+            "attribution_issues",
+            tuple(sorted({str(item) for item in self.attribution_issues if str(item)})),
+        )
 
     @property
     def symbol(self) -> str:
