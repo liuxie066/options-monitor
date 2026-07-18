@@ -26,11 +26,16 @@ def _text(value: Any) -> str:
 
 def _expiry_structure(row: dict[str, Any]) -> str:
     snapshot = row.get("strategy_snapshot")
-    if isinstance(snapshot, dict):
-        value = snapshot.get("expiry_structure")
-        if value:
-            return _text(value).lower()
-    return _text(row.get("expiry_structure") or "same_expiry").lower()
+    snapshot_fields = snapshot if isinstance(snapshot, dict) else {}
+    value = snapshot_fields.get("expiry_structure") or row.get("expiry_structure")
+    if value:
+        return _text(value).lower()
+    structure_mode = _text(snapshot_fields.get("structure_mode") or row.get("structure_mode")).lower()
+    if structure_mode == "staggered_expiry_pair":
+        return "diagonal"
+    if structure_mode == "same_expiry_pair":
+        return "same_expiry"
+    return "same_expiry"
 
 
 def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -112,7 +117,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
                     labels.add("put_open")
                 if closed_count:
                     labels.add("put_closed")
-                if leg_role not in {"", "sell_put"}:
+                if leg_role not in {"", "sell_put", "funding_put"}:
                     issues.append("put_leg_role_invalid")
             elif option_type == "call" and side == "long":
                 call_opened += opened_count
@@ -124,7 +129,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
                     labels.add("call_open")
                 if closed_count:
                     labels.add("call_closed")
-                if leg_role not in {"", "enhancement_call"}:
+                if leg_role not in {"", "enhancement_call", "participation_call"}:
                     issues.append("call_leg_role_invalid")
             else:
                 issues.append("unsupported_option_leg")

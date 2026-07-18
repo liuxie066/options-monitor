@@ -253,3 +253,55 @@ def test_yield_enhancement_position_role_identifies_grouped_sell_put_leg() -> No
     )
 
     assert role.is_yield_enhancement_short_put is True
+
+
+def test_yield_enhancement_position_role_recognizes_canonical_funding_put() -> None:
+    role = resolve_yield_enhancement_position_role(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "leg_role": "funding_put",
+        }
+    )
+
+    assert role.is_yield_enhancement_short_put is True
+
+
+def test_yield_enhancement_position_role_recognizes_canonical_participation_call() -> None:
+    role = resolve_yield_enhancement_position_role(
+        {
+            "symbol": "NVDA",
+            "option_type": "call",
+            "position_side": "long",
+            "leg_role": "participation_call",
+        }
+    )
+
+    assert role.is_yield_enhancement_long_call is True
+
+
+def test_yield_enhancement_position_role_keeps_legacy_aliases_readable() -> None:
+    put_aliases = ("sell_put", "enhancement_put", "yield_enhancement_put")
+    call_aliases = ("enhancement_call", "long_call", "upside_call", "convexity_call")
+
+    for leg_role in put_aliases:
+        role = resolve_yield_enhancement_position_role(
+            {
+                "option_type": "put",
+                "position_side": "short",
+                "leg_role": leg_role,
+                "strategy_group_id": "combo_yield:legacy",
+            }
+        )
+        assert role.is_yield_enhancement_short_put is True
+
+    for leg_role in call_aliases:
+        role = resolve_yield_enhancement_position_role(
+            {
+                "option_type": "call",
+                "position_side": "long",
+                "leg_role": leg_role,
+            }
+        )
+        assert role.is_yield_enhancement_long_call is True

@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+## 1.2.411 - 2026-07-18
+
+### Added
+- Introduced Option Performance v1 with MTD, YTD, specified natural-month, and specified natural-year reporting under the `Asia/Shanghai` operator-date boundary.
+- Added evidence-backed activity, cash, realized/unrealized PnL, capital, valuation/FX, and assigned-stock lifecycle reporting across the Agent tool, CLI, Assistant, and Feishu read paths.
+- Added strict portfolio PnL and cash bridges plus old/new reconciliation, replay/coverage gates, and an exact legacy-reference inventory.
+
+### Changed
+- Separated option premium activity, option/assignment cash movement, option and assigned-stock profit, and capital metrics instead of exposing the legacy mixed monthly-income value as a generic return.
+- Made exact account ownership, reporting timezone, report-level quality, fee/FX/valuation coverage, assignment settlement, and proven-zero evidence binding before totals or bridge amounts can be reported as observed.
+
+### Deprecated
+- Kept `monthly_income_report`, the monthly-income CLI adapter, and `portfolio_capital_bridge` only as documented rollback boundaries pending a later versioned removal gate.
+
+## 1.2.410 - 2026-07-18
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values at the final HTTP request boundary, preventing `Typing` from being sent as invalid `TYPING`.
+
+## 1.2.409 - 2026-07-17
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values such as `Typing`, so inbound ACKs can use the keyboard-typing reaction without being rewritten to an invalid all-uppercase value.
+
+## 1.2.408 - 2026-07-17
+
+### Fixed
+- Dispatched configured Feishu inbound Reaction acknowledgements through an independent bounded worker after allowlist and business-queue acceptance, so long Copilot turns no longer delay later message ACKs.
+- Gave Reaction token and HTTP calls fail-fast budgets, bounded stale/queue/shutdown drops, and sanitized stage timing logs without changing normal Feishu reply/send retry defaults.
+
+## 1.2.407 - 2026-07-17
+
+### Added
+- Added the read-only `portfolio_capital_bridge` Copilot tool for selectable MTD/YTD total-asset bridge analysis across portfolio change, external cash flow, and option cash evidence.
+- Added structured bridge `steps[]` and Markdown-friendly `fallback_text` output without image or chart generation.
+
+### Changed
+- Required an explicit data month for MTD analysis and preserved partial, unavailable, observed, not-observed, and not-applicable evidence instead of treating missing inputs as zero.
+- Reused one shared option-ledger load per request and consumed the portfolio-management capital facts API through the existing loopback-only boundary.
+
+### Fixed
+- Enforced historical cutoffs in option income reporting so period analysis never uses transactions after the requested end date.
+
+## 1.2.406 - 2026-07-17
+
+### Fixed
+- Prevented broker trade payloads from overriding canonical staggered Combo Yield strategy and leg relationship metadata.
+- Revalidated Combo Yield lot state and strategy-group uniqueness inside the SQLite write transaction before recording paired adjustments.
+- Removed same-expiry breakeven and max-loss metrics from staggered-expiry Combo Yield candidates.
+
+## 1.2.405 - 2026-07-17
+
+### Changed
+- Increased the per-account monitoring notification candidate limit from five to six while preserving cross-strategy coverage and priority ordering.
+- Simplified the production compact monitoring notification layout and candidate wording, including concise `Put`, `Call`, and `组合` sections plus `组合·同期` / `组合·跨期` labels.
+
+### Fixed
+- Counted compact notification candidates within their strategy sections so cross-expiry Combo Yield leg details no longer inflate the Put or Call totals.
+
+## 1.2.404 - 2026-07-17
+
+### Added
+- Added `staggered_expiry_pair` Combo Yield candidates that pair one underwriting-approved short Put with one later-expiring long Call, using independent leg horizons, fee-aware full-funding checks, structure-specific ranking, notifications, diagnostics, and replay support.
+- Added explicit `pair_intent_id` trade grouping and `option-positions pair-combo-yield`, which validates exact open lot IDs and atomically records the `funding_put` / `participation_call` relationship without heuristic matching.
+
+### Changed
+- Kept `same_expiry_pair` as the default while documenting the staggered filtering, notification ordering, candidate-versus-trade identity boundary, receipt wording, and illustrative non-production Call horizon configuration.
+
+## 1.2.403 - 2026-07-16
+
+### Fixed
+- Restored trade-intake state persistence and receipt notifications after typed ledger operations replaced dictionary payloads, preventing applied broker fills from failing before notification delivery.
+
 ## 1.2.402 - 2026-07-16
 
 ### Added

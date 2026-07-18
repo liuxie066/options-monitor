@@ -249,6 +249,12 @@ def _tool_payload(
         if not query.get("symbol"):
             payload["market_scope"] = "all"
         return payload
+    if intent_name == "option_performance_report":
+        payload = {**base, "period": str(arguments.get("period") or "mtd")}
+        for key in ("account", "broker", "as_of_date", "month", "year", "start_date", "end_date"):
+            if arguments.get(key) not in (None, ""):
+                payload[key] = arguments[key]
+        return payload
     if intent_name == "monthly_income_report":
         payload = dict(base)
         for key in ("account", "month"):

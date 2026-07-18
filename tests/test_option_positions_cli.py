@@ -528,54 +528,6 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
     assert fields["premium"] == 1.235
 
 
-def test_option_positions_cli_add_dry_run_accepts_strategy_snapshot(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    cli_mod.main([
-        "--data-config",
-        str(data_config),
-        "add",
-        "--account",
-        "lx",
-        "--symbol",
-        "PDD",
-        "--option-type",
-        "put",
-        "--side",
-        "short",
-        "--contracts",
-        "1",
-        "--strike",
-        "80",
-        "--multiplier",
-        "100",
-        "--exp",
-        "2026-08-21",
-        "--premium-per-share",
-        "1.0",
-        "--strategy-snapshot-json",
-        json.dumps({
-            "strategy": "combo_yield",
-            "leg_role": "sell_put",
-            "strategy_group_id": group_id,
-            "expiry_structure": "diagonal",
-        }),
-        "--dry-run",
-        "--format",
-        "json",
-    ])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["fields"]["strategy"] == "combo_yield"
-    assert payload["fields"]["strategy_group_id"] == group_id
-    assert payload["fields"]["strategy_snapshot"]["expiry_structure"] == "diagonal"
-
-
 def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
@@ -1688,40 +1640,15 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
     assert payload["filters"]["account"] == "lx"
     assert payload["filters"]["broker"] == "富途"
     assert payload["filters"]["month"] == "2026-04"
-    assert len(payload["summary"]) == 1
-    row = payload["summary"][0]
-    assert {key: row.get(key) for key in {
-        "month",
-        "account",
-        "currency",
-        "net_cashflow_gross",
-        "realized_pnl_gross",
-        "open_basis_lifecycle_pnl_gross",
-        "realized_gross",
-        "premium_received_gross",
-        "premium_received_gross_cny",
-        "closed_contracts",
-        "positions",
-        "premium_contracts",
-        "premium_positions",
-    }} == {
-        "month": "2026-04",
-        "account": "lx",
-        "currency": "USD",
-        "net_cashflow_gross": 250.0,
-        "realized_pnl_gross": 0.0,
-        "open_basis_lifecycle_pnl_gross": 250.0,
-        "realized_gross": 0.0,
-        "premium_received_gross": 250.0,
-        "premium_received_gross_cny": 1800.0,
-        "closed_contracts": 0,
-        "positions": 0,
-        "premium_contracts": 1,
-        "premium_positions": 1,
-    }
-    assert payload["return_summary"][0]["account"] == "lx"
-    assert payload["return_summary"][0]["cash_secured_by_ccy"] == {"USD": 10000.0}
-    assert payload["return_summary"][0]["premium_return_rate"] == round(1800.0 / 72000.0, 6)
+    assert payload["schema_version"] == "option_performance_report.output.v1"
+    assert payload["deprecation"]["status"] == "deprecated_alias"
+    assert payload["period"]["kind"] == "month"
+    assert payload["scope"]["account"] == "lx"
+    assert payload["activity"]["premium_collected_gross"]["by_currency"] == {"USD": 250.0}
+    assert payload["cash"]["option_trade_cash_gross"]["by_currency"] == {"USD": 250.0}
+    assert payload["pnl"]["realized_gross"]["by_currency"] == {}
+    assert "summary" not in payload
+    assert "return_summary" not in payload
 
 
 def test_option_positions_cli_assigned_stock_sale_records_independent_event(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1859,7 +1786,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     cli_mod.main()
 
     report = json.loads(capsys.readouterr().out)
-    lifecycle = [row for row in report["assignment_lifecycle_rows"] if row["stock_lot_id"] == stock_lot_id][0]
+    lifecycle = [row for row in report["assignment_lifecycle"]["ending_lots"] if row["stock_lot_id"] == stock_lot_id][0]
     assert lifecycle["status"] == "closed"
     assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
     assert lifecycle["option_premium_attribution"] == 250.0
@@ -1872,14 +1799,8 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
 
-    class _EmptyRepo:
-        def list_records(self, *, page_size: int = 500):
-            return []
-
-        def list_position_lots(self):
-            return []
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, _EmptyRepo()))
+    empty_repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, empty_repo))
     monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
     monkeypatch.setattr(
         sys,
@@ -1900,85 +1821,84 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
     cli_mod.main()
 
     out = capsys.readouterr().out
-    assert "# Position Lots Monthly Income" in out
+    assert "# Option Performance (monthly-income deprecated alias)" in out
     assert "filters: month=2026-04 | account=lx | broker=富途" in out
-    assert "| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 | 0 |" in out
+    assert "## PnL" in out
+    assert "## Cash" in out
+    assert "## Activity" in out
+    assert "parallel namespaces" in out
 
 
-def test_combo_yield_lifecycle_events_copy_group_metadata(tmp_path: Path) -> None:
+def test_option_positions_cli_pair_combo_yield_dry_run_outputs_both_patches(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application.ledger.commands import record_lifecycle_expire_close, record_manual_assignment
 
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-
-    def snapshot(group_id: str) -> dict:
-        return {
-            "strategy": "combo_yield",
-            "leg_role": "sell_put",
-            "strategy_group_id": group_id,
-            "expiry_structure": "diagonal",
-            "yield_enhancement_mode": "income_upside",
-        }
-
-    assignment_group = "combo_yield:lx:assignment-pair"
-    expiry_group = "combo_yield:lx:expiry-pair"
-    for symbol, group_id, opened_at_ms in (
-        ("PDD", assignment_group, 1000),
-        ("TSLA", expiry_group, 2000),
-    ):
-        ledger_manual_trades.persist_manual_open_event(
-            repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol=symbol,
-                option_type="put",
-                side="short",
-                contracts=1,
-                currency="USD",
-                strike=80.0,
-                multiplier=100,
-                expiration_ymd="2026-08-21",
-                premium_per_share=1.0,
-                opened_at_ms=opened_at_ms,
-                strategy_snapshot=snapshot(group_id),
-            ),
-        )
-
-    assignment_lot = next(lot for lot in repo.list_position_lots() if lot["fields"]["symbol"] == "PDD")
-    record_manual_assignment(
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    put_result = ledger_manual_trades.persist_manual_open_event(
         repo,
-        record_id=assignment_lot["record_id"],
-        contracts_to_close=1,
-        stock_side="buy",
-        stock_qty=100,
-        stock_price=80.0,
-        as_of_ms=3000,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
     )
-    record_lifecycle_expire_close(
+    call_result = ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        position_side="short",
-        strike=80.0,
-        expiration_ymd="2026-08-21",
-        contracts_to_close=1,
-        event_time_ms=4000,
-        case_id="expiry-case",
-        evidence_ids=["evidence-1"],
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="call",
+            side="long",
+            contracts=1,
+            currency="USD",
+            strike=140.0,
+            multiplier=100,
+            expiration_ymd="2026-12-18",
+            premium_per_share=1.0,
+            opened_at_ms=2000,
+        ),
     )
 
-    lifecycle_events = {
-        event["event_type"]: event
-        for event in repo.list_trade_events()
-        if event.get("event_type") in {"assignment", "expire_close"}
-    }
-    assert set(lifecycle_events) == {"assignment", "expire_close"}
-    for event_type, expected_group in (("assignment", assignment_group), ("expire_close", expiry_group)):
-        payload = lifecycle_events[event_type]["raw_payload"]
-        assert payload["strategy"] == "combo_yield"
-        assert payload["leg_role"] == "sell_put"
-        assert payload["strategy_group_id"] == expected_group
-        assert payload["strategy_snapshot"]["expiry_structure"] == "diagonal"
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "pair-combo-yield",
+            "--put-record-id",
+            str(put_result.record_id),
+            "--call-record-id",
+            str(call_result.record_id),
+            "--pair-intent-id",
+            "intent-nvda-20260717-1",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    assert "[DRY_RUN] Combo Yield pair" in out
+    assert "combo_yield:lx:intent-nvda-20260717-1" in out
+    assert '"leg_role": "funding_put"' in out
+    assert '"leg_role": "participation_call"' in out
+    assert len(repo.list_trade_events()) == 2

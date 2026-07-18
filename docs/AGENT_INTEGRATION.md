@@ -86,6 +86,8 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_query --input-json '{"view":"overview","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
 ```
 
 `portfolio_query` 是同机 portfolio-management 的纯读适配器。它只发送 GET，
@@ -94,6 +96,20 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_quer
 `health|accounts|overview|holdings|cash|nav|distribution|full_report`。服务返回的
 业务字段保留在结果顶层，并补充 `source`、`scope`、`freshness`。portfolio-management
 返回 `success=false`、HTTP 错误、无效 JSON 或超时时，工具返回标准失败 envelope。
+
+`portfolio_pnl_bridge` 和 `portfolio_cash_bridge` 都要求
+`period=mtd|ytd`、`as_of_month=YYYY-MM` 和账户列表，并使用 PM 返回的实际期末日期
+调用只读的 `option_performance_report`。PnL 桥使用 PM `/analysis/capital-facts` 的
+期初/期末总资产、外部出入金和期间盈亏，以及
+`pnl.period_total_net`；指派股票本金不会进入 PnL 方程。Cash 桥只使用 PM
+`/analysis/cash-facts` 的期初/期末现金和外部现金流，以及
+`cash.total_cash_change_net`，不会拿总资产代替现金。两者都要求 CNY、期末日期、
+FX 和实际费用覆盖对齐；缺失或不完整证据保持 `amount=null`，不会按 0 处理。
+输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
+
+`portfolio_capital_bridge` 仍可用于短期回滚，但已标记为 deprecated；它保留旧的
+`monthly_income_report.return_summary[].net_income_cny` 混合语义，不再是新集成的
+推荐入口。
 
 Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
@@ -204,7 +220,7 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, optionally adds the configured Inbound `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. When `inbound.feishu_ws.ack_reaction` is configured, an independent bounded ACK lane adds the Reaction after the allowlisted text event has entered the business queue; the Reaction is best-effort and does not mean that Control, Copilot, a tool, or the final reply has completed. Unauthorized senders remain silent, and ACK failures or drops do not block business processing. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 `openclaw_readiness` has been retired. Use `healthcheck` for environment readiness and
 `runtime_status` for existing runtime artifacts.

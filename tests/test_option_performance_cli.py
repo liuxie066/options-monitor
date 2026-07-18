@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from src.interfaces.cli.main import parse_args
+from src.interfaces.cli import option_performance
+
+
+def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def _report(payload, **_kwargs):
+        captured.update(payload)
+        return {"schema_version": "option_performance_report.output.v1", "period": {}, "scope": {}}, [], {}
+
+    monkeypatch.setattr(option_performance, "option_performance_report_tool", _report)
+    args = parse_args(
+        [
+            "option-performance",
+            "report",
+            "--period",
+            "range",
+            "--start-date",
+            "2026-04-01",
+            "--end-date",
+            "2026-06-30",
+            "--account",
+            "LX",
+            "--include-rows",
+            "--no-refresh-quotes",
+        ]
+    )
+
+    result = option_performance.handle_option_performance_command(args)
+
+    assert result["schema_version"] == "option_performance_report.output.v1"
+    assert captured == {
+        "config_key": "us",
+        "config_path": None,
+        "data_config": None,
+        "account": "LX",
+        "broker": None,
+        "period": "range",
+        "as_of_date": None,
+        "month": None,
+        "year": None,
+        "start_date": "2026-04-01",
+        "end_date": "2026-06-30",
+        "include_rows": True,
+        "refresh_quotes": False,
+    }
+
+
+def test_evidence_flags_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "option-performance",
+                "evidence",
+                "import",
+                "--file",
+                "facts.json",
+                "--dry-run",
+                "--apply",
+            ]
+        )
+
+
+def test_evidence_import_does_not_advertise_unapplied_scope_filters() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "option-performance",
+                "evidence",
+                "import",
+                "--file",
+                "facts.json",
+                "--account",
+                "lx",
+            ]
+        )
+
+
+class _ImportResult:
+    def __init__(self, applied: bool):
+        self.applied = applied
+
+    def to_dict(self):
+        return {"applied": self.applied, "inserted_count": int(self.applied), "envelope": {}}
+
+
+class _EvidenceRepo:
+    def __init__(self):
+        self.calls = []
+
+    def import_envelope(self, value, *, apply, migrated_at_ms):
+        self.calls.append((value, apply, migrated_at_ms))
+        return _ImportResult(apply)
+
+
+def _patch_import_dependencies(monkeypatch: pytest.MonkeyPatch, repo: _EvidenceRepo, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        option_performance,
+        "load_runtime_config",
+        lambda **_kwargs: (tmp_path / "config.us.json", {"portfolio": {}}),
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "resolve_public_data_config_path",
+        lambda _payload, _portfolio: tmp_path / "portfolio.runtime.json",
+    )
+    monkeypatch.setattr(
+        option_performance,
+        "open_position_ledger_from_data_config",
+        lambda **_kwargs: (tmp_path / "portfolio.runtime.json", object()),
+    )
+    monkeypatch.setattr(option_performance, "open_performance_evidence_repository", lambda _ledger: repo)
+    monkeypatch.setattr(option_performance, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(option_performance, "mask_path", lambda value: str(value))
+
+
+def test_evidence_import_defaults_to_dry_run_and_apply_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"schema_version": "option_performance_evidence.v1", "valuation_marks": [], "fx_rates": []}))
+    repo = _EvidenceRepo()
+    _patch_import_dependencies(monkeypatch, repo, tmp_path)
+
+    dry_args = parse_args(["option-performance", "evidence", "import", "--file", str(facts)])
+    dry = option_performance.handle_option_performance_command(dry_args)
+    apply_args = parse_args(
+        ["option-performance", "evidence", "import", "--file", str(facts), "--apply"]
+    )
+    applied = option_performance.handle_option_performance_command(apply_args)
+
+    assert dry["dry_run"] is True
+    assert applied["dry_run"] is False
+    assert [call[1] for call in repo.calls] == [False, True]
+
+
+def test_evidence_capture_defaults_to_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def _capture(payload, *, apply, **_kwargs):
+        captured.update(payload)
+        captured["apply"] = apply
+        return {"schema_version": "option_performance_evidence_capture.output.v1", "dry_run": not apply}, [], {}
+
+    monkeypatch.setattr(option_performance, "capture_option_performance_evidence", _capture)
+    args = parse_args(
+        ["option-performance", "evidence", "capture", "--config-key", "us", "--account", "lx"]
+    )
+
+    data = option_performance.handle_option_performance_command(args)
+
+    assert data["dry_run"] is True
+    assert captured["apply"] is False
+    assert captured["account"] == "lx"

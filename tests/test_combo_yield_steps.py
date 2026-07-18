@@ -40,6 +40,7 @@ def _run(
     candidates: list[dict],
     find_pairs_fn,
     yield_sp: dict | None = None,
+    underwriting_filter_put_candidates_fn=None,
 ):
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +89,10 @@ def _run(
         find_pairs_fn=capture_pairs,
         select_pairs_fn=lambda df: df,
         cash_filter_put_candidates_fn=None,
+        underwriting_filter_put_candidates_fn=(
+            underwriting_filter_put_candidates_fn
+            or (lambda **kwargs: kwargs["df_labeled"])
+        ),
     )
     trace = [
         json.loads(line)
@@ -95,6 +100,31 @@ def _run(
         if line.strip()
     ]
     return captured["df"], trace, captured["scan_kwargs"]
+
+
+def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path) -> None:
+    captured_underwriting: dict[str, object] = {}
+
+    def underwriting_gate(**kwargs):
+        captured_underwriting.update(kwargs)
+        out = kwargs["df_labeled"].copy()
+        out["premium_edge_score"] = 0.25
+        out["strike_safety_margin_pct"] = 0.12
+        return out
+
+    captured, _trace, _scan_kwargs = _run(
+        tmp_path,
+        candidates=[_candidate(annualized_net_return_on_cash_basis=0.18)],
+        find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        yield_sp={"strategy": "insurance_underwriting", "min_annualized_net_return": 0.15},
+        underwriting_filter_put_candidates_fn=underwriting_gate,
+    )
+
+    assert captured_underwriting["sell_put_cfg"]["strategy"] == "insurance_underwriting"
+    assert captured_underwriting["symbol"] == "NVDA"
+    assert len(captured) == 1
+    assert float(captured.iloc[0]["premium_edge_score"]) == 0.25
+    assert float(captured.iloc[0]["strike_safety_margin_pct"]) == 0.12
 
 
 def test_combo_yield_event_gate_fails_closed_without_iv_rv_underwriting(tmp_path: Path) -> None:

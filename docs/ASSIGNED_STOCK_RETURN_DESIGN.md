@@ -569,3 +569,50 @@ assignment_lifecycle_pnl_as_of = 50
 - 全量普通股票交易账本。
 - 未被 assignment 产生的普通股票持仓成本。
 - 用 LLM 自动修账或自动确认历史成交。
+
+## 11. S5 统一投影与期权收益集成
+
+S5 将被指派正股生命周期的语义所有权收敛到：
+
+```text
+domain.domain.assigned_stock.project_assigned_stock_lifecycle
+```
+
+`positions.reporting` 只负责把旧报表参数适配给该投影，不再保留第二套 assignment lot、sale、fee、covered-call 或 holdings reconciliation 算法。新期权收益服务通过 `src.application.ledger.api.assigned_stock_event_log` 读取正股 sale facts；repository capability probing 只允许存在于 ledger query boundary。缺能力、读取异常、非 list payload 和坏行都返回结构化 diagnostics，不静默假设为空。
+
+### 11.1 Performance 口径
+
+新 performance 口径严格区分 principal、fee 和 option premium：
+
+```text
+stock_realized_gross = sale_gross_cash - sold_settlement_principal
+stock_unrealized_gross = market_value - remaining_settlement_principal
+stock_period_total = realized + ending_unrealized - opening_unrealized
+```
+
+- assignment option premium 仍由 canonical option allocation 计入 option realized PnL；stock side 不重复加入。
+- assignment settlement fee 在 assignment 时点只计一次 net PnL / cash fee fact。
+- sale fee 在 sale 时点只计一次 net PnL / cash fee fact。
+- `actual zero` 是完整费用证据；`estimated` / `missing` 保留 gross，但对应 net 为 partial。
+- 旧 monthly lifecycle 展示仍可保留 estimated fee 估算；production option-performance net 不使用估算费用。
+
+### 11.2 Boundary、估值和 void
+
+opening / ending assigned-stock inventory 和 option inventory 使用同一 restated boundary 规则。重建历史边界时会纳入合法的 later void，因此一个后来被 void 的 assignment 不会在更早边界重新生成幽灵 stock lot。
+
+历史报告只选择持久化 `StockInstrumentKey` mark，不调用实时 quote。当前 partial report 才能把开放 assigned-stock instruments 交给 read-through collector；读取报告本身不持久化 mark。
+
+### 11.3 Covered Call 归因
+
+Covered Call 与 assigned-stock lot 的关联顺序：
+
+1. 优先使用 open call 上显式的 `stock_lot_id` / `target_stock_lot_id` / `source_stock_lot_id`。
+2. 没有显式 link 时，只有在 holdings evidence 不显示普通股与 assigned stock 混仓时，才允许 FIFO 推导。
+3. FIFO 归因必须输出 `covered_call_allocation_quality=heuristic`，并将 lifecycle quality 降级。
+4. mixed ordinary/assigned inventory、股数不足或显式目标不成立时 fail closed，输出 `covered_call_unallocated`。
+5. share reservation 防止同一股数支撑重叠 call；closed call realized 和 open call marked unrealized 都进入 lifecycle 展示。
+6. Covered Call option economics 不再次加入 top-level option-performance PnL，因为 canonical option facts 已经拥有这些收益。
+
+### 11.4 当前范围外
+
+S5 仍不创建普通股票账本，也不处理 dividend、tax、split、short-call assignment stock basis 或未知来源股票 inventory。上述场景保持 `incomplete_inventory_basis` 或独立后续 work unit，不用推测值补齐。

@@ -60,7 +60,9 @@ def add_message_reaction(
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
     message_id_value = str(message_id or "").strip()
-    emoji_type_value = str(emoji_type or "").strip().upper()
+    emoji_type_value = str(emoji_type or "").strip()
+    if not (any(char.islower() for char in emoji_type_value) and any(char.isupper() for char in emoji_type_value)):
+        emoji_type_value = emoji_type_value.upper()
     if not message_id_value:
         raise ValueError("message_id is required")
     if not emoji_type_value:
@@ -78,9 +80,18 @@ def add_message_reaction(
                 "Authorization": f"Bearer {tenant_token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
+            timeout=2,
+            retry_max_attempts=1,
         )
 
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return with_tenant_token_retry(
+        app_id,
+        app_secret,
+        _send,
+        token_timeout=2,
+        token_retry_max_attempts=1,
+        token_lock_timeout=0.0,
+    )
 
 
 def send_text_message(
