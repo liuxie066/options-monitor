@@ -559,7 +559,7 @@ Short-vol 行还会输出 `remaining_stress_loss`、`remaining_reward_to_stress_
 
 `strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。这些是持仓/平仓侧历史动作字段，本轮不重命名；渲染层只展示已决策的动作，不改变平仓判断。
 
-收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。只有配对 call 存在、成本和报价可计算时，put 腿才会显示 `close_both_optional`。
+收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。逐腿建议完成后，runner 再追加 `combo_group_classification/status/action/reason/issues`、Put/Call 未平数量、组合行情状态和证据范围。只有两腿数量匹配、当前行情完整且组合经济性可计算时，put 腿才会显示 `close_both_optional`；数量不匹配、缺行情、缺 group ID 或混合事实统一 `review_required`，不生成组合动作或组合经济性。Put-only 行不会再显示“保留 Call”，Call-only 行按当前真实报价显示为“剩余 Call”；Close Advice 不从 `close_type` 猜 assignment，也不生成卖股或 Call exercise 动作。
 
 ## 配置心智模型
 

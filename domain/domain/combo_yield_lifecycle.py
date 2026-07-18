@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
+from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD, canonical_strategy_id
 from domain.domain.symbol_identity import canonical_symbol
 
 
@@ -37,7 +37,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for index, source in enumerate(rows):
         row = dict(source or {})
-        strategy = _text(row.get("strategy")).lower()
+        strategy = canonical_strategy_id(_text(row.get("strategy")))
         group_id = _text(row.get("strategy_group_id"))
         if strategy != STRATEGY_COMBO_YIELD and not group_id.startswith("combo_yield:"):
             continue
@@ -63,7 +63,11 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
             issues.append("account_missing")
         elif len(accounts) > 1:
             issues.append("multiple_accounts")
-        if group_id and len(accounts) == 1 and not group_id.startswith(f"combo_yield:{next(iter(accounts))}:"):
+        if (
+            group_id.startswith("combo_yield:")
+            and len(accounts) == 1
+            and not group_id.startswith(f"combo_yield:{next(iter(accounts))}:")
+        ):
             issues.append("group_account_mismatch")
         structures = {_expiry_structure(row) for row in lots}
         if len(structures) > 1:
