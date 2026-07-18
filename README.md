@@ -411,6 +411,12 @@ Tool Gateway 只读列出：
 ./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --premium-per-share 1.2 --confirm
 ```
 
+错期 Combo Yield 手工开仓必须让 Put/Call 两腿携带同一个显式 group ID；`expiry_structure` 保留在 strategy snapshot 中。两腿仍分别 dry-run/confirm，不会按到期日猜测归组：
+
+```bash
+./om option-positions add --account lx --symbol PDD --option-type put --side short --contracts 1 --currency USD --strike 80 --multiplier 100 --exp 2026-08-21 --premium-per-share 1.0 --strategy-snapshot-json '{"strategy":"combo_yield","leg_role":"sell_put","strategy_group_id":"combo_yield:lx:<pair_fingerprint>","expiry_structure":"diagonal","yield_enhancement_mode":"income_upside"}' --dry-run
+```
+
 普通买平、被指派、主动行权是不同账本语义，分别使用独立入口：
 
 ```bash

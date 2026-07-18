@@ -737,6 +737,17 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
     event_time_ms = int(command.opened_at_ms or now_ms())
     resolved_command = replace(command, opened_at_ms=event_time_ms)
     fields = build_position_lot_fields(resolved_command).to_dict()
+    fields.update(
+        strategy_metadata_fields_from_payload(
+            {
+                "strategy_snapshot": (
+                    dict(resolved_command.strategy_snapshot)
+                    if isinstance(resolved_command.strategy_snapshot, dict)
+                    else None
+                )
+            }
+        )
+    )
     contract_key = _contract_key_from_fields(fields)
     trade_side = "sell" if str(resolved_command.side or "").strip().lower() == "short" else "buy"
     currency = resolve_open_currency(fields.get("symbol"), fields.get("currency"))
@@ -768,7 +779,15 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         raw_payload={
             "source": "om option-positions",
             "mode": "manual_open",
-            "strategy_snapshot": dict(resolved_command.strategy_snapshot) if isinstance(resolved_command.strategy_snapshot, dict) else None,
+            **strategy_metadata_fields_from_payload(
+                {
+                    "strategy_snapshot": (
+                        dict(resolved_command.strategy_snapshot)
+                        if isinstance(resolved_command.strategy_snapshot, dict)
+                        else None
+                    )
+                }
+            ),
         },
     )
     return resolved_command, fields, event

@@ -192,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
     p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for covered call locking shares')
     p_add.add_argument('--note', default=None)
+    p_add.add_argument('--strategy-snapshot-json', default=None, help='JSON object carrying explicit strategy/group metadata')
     p_add.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_add, high_risk=True)
 
@@ -528,6 +529,10 @@ def main(argv: list[str] | None = None) -> int:
                 premium_per_share=args.premium_per_share,
                 underlying_share_locked=args.underlying_share_locked,
                 note=args.note,
+                strategy_snapshot=_parse_json_object_arg(
+                    args.strategy_snapshot_json,
+                    name="--strategy-snapshot-json",
+                ),
                 dry_run=dry_run,
             )
         except ValueError as e:

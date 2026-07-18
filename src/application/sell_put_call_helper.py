@@ -27,8 +27,12 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from domain.domain.fee_calc import calc_futu_option_fee
+from domain.domain.combo_yield_identity import (
+    combo_yield_pair_fingerprint,
+    combo_yield_strategy_group_id,
+)
 from domain.domain.sell_put_risk_bands import classify_sell_put_risk
-from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_models import CandidateContractInput
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.yield_enhancement_config import derive_yield_enhancement_policy
@@ -65,14 +69,10 @@ def _format_contract(expiration: str, strike: float, option_suffix: str) -> str:
 
 
 def _combo_pair_fingerprint(put_leg: YieldEnhancementLeg, call_leg: YieldEnhancementLeg) -> str:
-    symbol = canonical_symbol(put_leg.symbol) or str(put_leg.symbol or "").strip().upper()
-    return "|".join(
-        (
-            "combo_yield",
-            symbol,
-            str(put_leg.contract_symbol or "").strip(),
-            str(call_leg.contract_symbol or "").strip(),
-        )
+    return combo_yield_pair_fingerprint(
+        symbol=put_leg.symbol,
+        put_contract_symbol=put_leg.contract_symbol,
+        call_contract_symbol=call_leg.contract_symbol,
     )
 
 
@@ -377,10 +377,9 @@ def _build_pair_row(
         min_expiry_gap_days=min_expiry_gap_days,
     )
     row.update(_funding_decision_row_fields(decision))
-    row["strategy_group_id"] = (
-        f"combo_yield:{normalized_account}:{fingerprint}"
-        if normalized_account
-        else None
+    row["strategy_group_id"] = combo_yield_strategy_group_id(
+        account=normalized_account,
+        pair_fingerprint=fingerprint,
     )
     return row
 
