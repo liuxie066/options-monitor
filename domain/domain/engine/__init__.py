@@ -73,6 +73,7 @@ from .candidate_strategy import (
     sort_columns,
 )
 from .yield_enhancement import (
+    YIELD_ENHANCEMENT_EXPIRY_STRUCTURES,
     YieldEnhancementFundingDecision,
     YieldEnhancementLeg,
     YieldEnhancementMetrics,
@@ -155,6 +156,7 @@ __all__ = [
     'score_candidates',
     'sort_columns',
     'YieldEnhancementFundingDecision',
+    'YIELD_ENHANCEMENT_EXPIRY_STRUCTURES',
     'YieldEnhancementLeg',
     'YieldEnhancementMetrics',
     'compute_yield_enhancement_funding_decision',

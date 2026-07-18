@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -383,3 +384,90 @@ def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> No
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
         assert "NVDA.combo_yield has removed target-price fields" in str(exc)
+
+
+def test_validate_config_rejects_diagonal_combo_without_explicit_call_dte_window() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {
+                    "enabled": True,
+                    "expiry_structure": "diagonal",
+                    "call": {"min_delta": 0.10, "max_delta": 0.20},
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.combo_yield.expiry_structure=diagonal requires call.min_dte and call.max_dte" in str(exc)
+
+
+def test_validate_config_rejects_invalid_combo_expiry_structure_and_gap() -> None:
+    from src.application.config_validator import validate_config
+
+    base = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {"enabled": True},
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    invalid_structure = json.loads(json.dumps(base))
+    invalid_structure["symbols"][0]["combo_yield"]["expiry_structure"] = "calendar_guess"
+    try:
+        validate_config(invalid_structure)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.combo_yield.expiry_structure must be one of" in str(exc)
+
+    invalid_gap = json.loads(json.dumps(base))
+    invalid_gap["symbols"][0]["combo_yield"]["min_expiry_gap_days"] = 0
+    try:
+        validate_config(invalid_gap)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.combo_yield.min_expiry_gap_days must be > 0" in str(exc)
+
+
+def test_validate_config_rejects_zero_diagonal_call_dte_bounds() -> None:
+    from src.application.config_validator import validate_config
+
+    base = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {
+                    "enabled": True,
+                    "expiry_structure": "diagonal",
+                    "call": {"min_dte": 61, "max_dte": 90},
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    for field in ("min_dte", "max_dte"):
+        cfg = json.loads(json.dumps(base))
+        cfg["symbols"][0]["combo_yield"]["call"][field] = 0
+        try:
+            validate_config(cfg)
+            raise AssertionError("expected config validation failure")
+        except SystemExit as exc:
+            assert f"NVDA.combo_yield.call.{field} must be > 0" in str(exc)

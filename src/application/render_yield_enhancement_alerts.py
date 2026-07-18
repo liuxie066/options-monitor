@@ -47,10 +47,15 @@ def _default_report_file(report_dir_path: Path, basename: str, *, symbol: str | 
 def render_one(row: pd.Series) -> str:
     symbol = str(row.get("symbol") or "-")
     expiration = str(row.get("expiration") or "-")
+    expiry_structure = str(row.get("expiry_structure") or "same_expiry").strip().lower()
+    put_expiration = str(row.get("put_expiration") or expiration)
+    call_expiration = str(row.get("call_expiration") or expiration)
     put_strike = _strike_token(row.get("put_strike"))
     call_strike = _strike_token(row.get("call_strike"))
     option_ccy = str(row.get("option_ccy") or row.get("currency") or "").strip().upper() or "N/A"
     dte = _safe_float(row.get("dte"))
+    put_dte = _safe_float(row.get("put_dte"))
+    call_dte = _safe_float(row.get("call_dte"))
     put_delta = _safe_float(row.get("put_delta"))
     put_bid = _safe_float(row.get("put_bid"))
     if put_bid is None:
@@ -76,22 +81,42 @@ def render_one(row: pd.Series) -> str:
     candidate_line = None
     if call_candidate_count is not None and call_candidate_count > 1:
         candidate_line = f"Call候选: {int(call_candidate_count)}个"
+    diagonal = expiry_structure == "diagonal"
+    title = (
+        f"[组合收益推荐] {symbol} Put {put_expiration} {put_strike}P + Call {call_expiration} {call_strike}C"
+        if diagonal
+        else f"[组合收益推荐] {symbol} {expiration} {put_strike}P + {call_strike}C"
+    )
+    dte_line = (
+        f"DTE: Put={int(put_dte) if put_dte is not None else '-'} | Call={int(call_dte) if call_dte is not None else '-'}"
+        if diagonal
+        else f"DTE: {int(dte) if dte is not None else '-'}"
+    )
+    terminal_line = (
+        "到期终值指标: 不可评估（不预测 Put 到期时 Call 剩余价值）"
+        if diagonal
+        else None
+    )
     return "\n".join(
         [
-            f"[组合收益推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",
+            title,
             "",
-            f"DTE: {int(dte) if dte is not None else '-'}",
+            dte_line,
             *([mode_line] if mode_line else []),
             f"净权利金({option_ccy}): {num(row.get('net_credit'))}",
             f"净权利金年化: {('-' if annualized_net_credit_yield is None else pct(annualized_net_credit_yield))}",
             f"资金覆盖: Call成本/Put权利金={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))} | 净权利金保留={('-' if net_credit_retention is None else pct(net_credit_retention))}",
-            f"上行弹性: 潜在收益={('-' if upside_lift is None else num(upside_lift))} | 成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')} | 权利金倍数={('-' if upside_lift_to_put_credit is None else f'{upside_lift_to_put_credit:.2f}x')}",
-            f"场景评分: {('-' if scenario_score is None else pct(scenario_score))}",
-            f"场景年化: {('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
+            *([] if diagonal else [
+                f"上行弹性: 潜在收益={('-' if upside_lift is None else num(upside_lift))} | 成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')} | 权利金倍数={('-' if upside_lift_to_put_credit is None else f'{upside_lift_to_put_credit:.2f}x')}",
+                f"场景评分: {('-' if scenario_score is None else pct(scenario_score))}",
+                f"场景年化: {('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
+            ]),
             f"Put: strike={put_strike} | bid={('-' if put_bid is None else num(put_bid))} | delta={('-' if put_delta is None else f'{put_delta:.2f}')}",
             f"Call: strike={call_strike} | ask={('-' if call_ask is None else num(call_ask))} | delta={('-' if call_delta is None else f'{call_delta:.2f}')}",
             *( [candidate_line] if candidate_line else [] ),
-            f"Expected Move: {('-' if expected_move is None else num(expected_move))} | IV={('-' if expected_move_iv is None else pct(expected_move_iv))}",
+            *([terminal_line] if terminal_line else [
+                f"Expected Move: {('-' if expected_move is None else num(expected_move))} | IV={('-' if expected_move_iv is None else pct(expected_move_iv))}",
+            ]),
             f"组合价差比: {pct(row.get('combo_spread_ratio'))}",
             "",
             "判断: 已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。",

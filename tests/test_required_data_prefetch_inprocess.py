@@ -274,6 +274,40 @@ def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_
     assert out["include_realized_volatility"] is False
 
 
+def test_strategy_prefetch_kwargs_preserves_diagonal_call_dte_window() -> None:
+    out = strategy_prefetch_kwargs(
+        {
+            "symbol": "NVDA",
+            "sell_put": {
+                "enabled": True,
+                "strategy": "return_first",
+                "min_dte": 20,
+                "max_dte": 60,
+                "max_strike": 95,
+            },
+            "sell_call": {"enabled": False},
+            "combo_yield": {
+                "enabled": True,
+                "expiry_structure": "diagonal",
+                "call": {
+                    "min_dte": 61,
+                    "max_dte": 90,
+                    "min_strike": 110,
+                    "max_strike": 125,
+                },
+            },
+        },
+        enabled=True,
+    )
+
+    assert out["option_types"] == "put,call"
+    assert out["min_dte"] == 20
+    assert out["max_dte"] == 90
+    assert out["side_strike_windows"]["put"]["max_strike"] == 95
+    assert out["side_strike_windows"]["call"]["min_strike"] == 110
+    assert out["side_strike_windows"]["call"]["max_strike"] == 127.5
+
+
 def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() -> None:
     try:
         strategy_prefetch_kwargs(

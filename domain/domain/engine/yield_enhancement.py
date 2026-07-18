@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from math import sqrt
 from typing import Any
+
+
+YIELD_ENHANCEMENT_EXPIRY_STRUCTURES = {"same_expiry", "diagonal"}
 
 
 @dataclass(frozen=True)
@@ -42,12 +46,12 @@ class YieldEnhancementMetrics:
     lottery_budget_ratio: float | None
     residual_premium_ratio: float | None
     downside_breakeven: float
-    upside_breakeven: float
+    upside_breakeven: float | None
     max_loss_if_zero: float
     put_otm_pct: float
     call_otm_pct: float
     gap_width_pct: float
-    upside_breakeven_pct_above_spot: float
+    upside_breakeven_pct_above_spot: float | None
     combo_spread_ratio: float | None
     expected_move_iv: float | None = None
     expected_move: float | None = None
@@ -117,16 +121,41 @@ def _normalize_weights(weights: tuple[float, ...], count: int) -> tuple[float, .
     return tuple(value / total for value in cleaned)
 
 
-def validate_yield_enhancement_pair(put_leg: YieldEnhancementLeg, call_leg: YieldEnhancementLeg) -> list[str]:
+def _expiration_gap_days(put_expiration: str, call_expiration: str) -> int | None:
+    try:
+        return (date.fromisoformat(call_expiration) - date.fromisoformat(put_expiration)).days
+    except Exception:
+        return None
+
+
+def validate_yield_enhancement_pair(
+    put_leg: YieldEnhancementLeg,
+    call_leg: YieldEnhancementLeg,
+    *,
+    expiry_structure: str = "same_expiry",
+    min_expiry_gap_days: int = 1,
+) -> list[str]:
     rejects: list[str] = []
+    structure = str(expiry_structure or "same_expiry").strip().lower()
+    if structure not in YIELD_ENHANCEMENT_EXPIRY_STRUCTURES:
+        rejects.append("expiry_structure")
     if str(put_leg.option_type).lower() != "put":
         rejects.append("put_leg_option_type")
     if str(call_leg.option_type).lower() != "call":
         rejects.append("call_leg_option_type")
     if put_leg.symbol.upper() != call_leg.symbol.upper():
         rejects.append("symbol_mismatch")
-    if put_leg.expiration != call_leg.expiration:
-        rejects.append("expiration_mismatch")
+    if structure == "same_expiry":
+        if put_leg.expiration != call_leg.expiration:
+            rejects.append("expiration_mismatch")
+    elif structure == "diagonal":
+        gap_days = _expiration_gap_days(put_leg.expiration, call_leg.expiration)
+        if gap_days is None:
+            rejects.append("expiration_invalid")
+        elif gap_days <= 0:
+            rejects.append("call_expiration_not_later")
+        elif gap_days < max(int(min_expiry_gap_days or 1), 1):
+            rejects.append("expiry_gap_below_minimum")
     if put_leg.currency.upper() != call_leg.currency.upper():
         rejects.append("currency_mismatch")
     if float(put_leg.multiplier) != float(call_leg.multiplier):
@@ -152,8 +181,16 @@ def compute_yield_enhancement_metrics(
     scenario_move_factors: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5),
     scenario_weights: tuple[float, ...] = (0.2, 0.3, 0.4, 0.1),
     min_combo_notional_floor: float = 1.0,
+    expiry_structure: str = "same_expiry",
+    min_expiry_gap_days: int = 1,
 ) -> YieldEnhancementMetrics:
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+    structure = str(expiry_structure or "same_expiry").strip().lower()
+    rejects = validate_yield_enhancement_pair(
+        put_leg,
+        call_leg,
+        expiry_structure=structure,
+        min_expiry_gap_days=min_expiry_gap_days,
+    )
     if rejects:
         raise ValueError(f"invalid yield enhancement pair: {', '.join(rejects)}")
 
@@ -168,7 +205,11 @@ def compute_yield_enhancement_metrics(
     lottery_budget_ratio = (call_cost / put_proceeds) if put_proceeds > 0 else None
     residual_premium_ratio = (net_credit / put_proceeds) if put_proceeds > 0 else None
     iv = _positive(expected_move_iv)
-    expected_move = spot * iv * sqrt(float(dte) / 365.0) if iv is not None and dte > 0 else None
+    expected_move = (
+        spot * iv * sqrt(float(dte) / 365.0)
+        if structure == "same_expiry" and iv is not None and dte > 0
+        else None
+    )
 
     cash_required = float(put_leg.strike) * multiplier - net_credit
     if cash_required <= 0:
@@ -180,7 +221,11 @@ def compute_yield_enhancement_metrics(
     combo_breakeven = float(put_leg.strike) - net_credit / multiplier
     downside_breakeven_penalty = call_cost / multiplier
     downside_breakeven = combo_breakeven
-    upside_breakeven = float(call_leg.strike) + net_debit / multiplier
+    upside_breakeven = (
+        float(call_leg.strike) + net_debit / multiplier
+        if structure == "same_expiry"
+        else None
+    )
     max_loss_if_zero = float(put_leg.strike) * multiplier - net_credit
     call_payoff_multiple_at_1_5_sigma = None
     call_payoff_multiple_at_2_0_sigma = None
@@ -209,7 +254,11 @@ def compute_yield_enhancement_metrics(
     put_otm_pct = _pct_distance(spot - float(put_leg.strike), spot)
     call_otm_pct = _pct_distance(float(call_leg.strike) - spot, spot)
     gap_width_pct = _pct_distance(float(call_leg.strike) - float(put_leg.strike), spot)
-    upside_breakeven_pct_above_spot = _pct_distance(upside_breakeven - spot, spot)
+    upside_breakeven_pct_above_spot = (
+        _pct_distance(upside_breakeven - spot, spot)
+        if upside_breakeven is not None
+        else None
+    )
 
     put_spread = _safe_float(put_leg.spread)
     call_spread = _safe_float(call_leg.spread)
@@ -237,12 +286,12 @@ def compute_yield_enhancement_metrics(
         lottery_budget_ratio=_round_optional(lottery_budget_ratio),
         residual_premium_ratio=_round_optional(residual_premium_ratio),
         downside_breakeven=round(downside_breakeven, 6),
-        upside_breakeven=round(upside_breakeven, 6),
+        upside_breakeven=_round_optional(upside_breakeven),
         max_loss_if_zero=round(max_loss_if_zero, 6),
         put_otm_pct=round(put_otm_pct, 6),
         call_otm_pct=round(call_otm_pct, 6),
         gap_width_pct=round(gap_width_pct, 6),
-        upside_breakeven_pct_above_spot=round(upside_breakeven_pct_above_spot, 6),
+        upside_breakeven_pct_above_spot=_round_optional(upside_breakeven_pct_above_spot),
         combo_spread_ratio=(round(combo_spread_ratio, 6) if combo_spread_ratio is not None else None),
         expected_move_iv=(round(iv, 6) if iv is not None else None),
         expected_move=(round(expected_move, 6) if expected_move is not None else None),
@@ -268,9 +317,16 @@ def compute_yield_enhancement_funding_decision(
     max_call_cost_to_put_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
+    expiry_structure: str = "same_expiry",
+    min_expiry_gap_days: int = 1,
 ) -> YieldEnhancementFundingDecision:
     """Decide whether the put premium can sensibly fund a speculative long call."""
-    rejects = validate_yield_enhancement_pair(put_leg, call_leg)
+    rejects = validate_yield_enhancement_pair(
+        put_leg,
+        call_leg,
+        expiry_structure=expiry_structure,
+        min_expiry_gap_days=min_expiry_gap_days,
+    )
     reject_reasons: list[str] = list(rejects)
 
     multiplier = float(put_leg.multiplier)
@@ -375,6 +431,7 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
         -assignment_margin,
         -f("annualized_net_credit_yield"),
         f("combo_spread_ratio", default=999.0),
+        f("expiry_gap_days", default=999999.0),
         -f("combo_net_credit"),
         f("upside_breakeven_pct_above_spot", default=999.0),
         -f("net_credit"),
