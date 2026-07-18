@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.409 - 2026-07-17
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values such as `Typing`, so inbound ACKs can use the keyboard-typing reaction without being rewritten to an invalid all-uppercase value.
+
+## 1.2.408 - 2026-07-17
+
+### Fixed
+- Dispatched configured Feishu inbound Reaction acknowledgements through an independent bounded worker after allowlist and business-queue acceptance, so long Copilot turns no longer delay later message ACKs.
+- Gave Reaction token and HTTP calls fail-fast budgets, bounded stale/queue/shutdown drops, and sanitized stage timing logs without changing normal Feishu reply/send retry defaults.
+
 ## 1.2.407 - 2026-07-17
 
 ### Added
