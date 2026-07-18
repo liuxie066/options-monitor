@@ -85,6 +85,16 @@ SELL_PUT_EMPTY_FIELDS = {
 }
 
 YIELD_ENHANCEMENT_EMPTY_FIELDS = {
+    'structure_mode': None,
+    'put_expiration': None,
+    'put_dte': None,
+    'call_expiration': None,
+    'call_dte': None,
+    'expiry_gap_days': None,
+    'expiration_scope': None,
+    'dte_scope': None,
+    'put_contracts': None,
+    'call_contracts': None,
     'put_strike': None,
     'call_strike': None,
     'call_candidate_count': None,
@@ -123,6 +133,13 @@ YIELD_ENHANCEMENT_EMPTY_FIELDS = {
     'upside_lift_to_put_credit': None,
     'premium_funding_score': None,
     'funding_score_components': None,
+    'net_credit_retention': None,
+    'strike_safety_margin_pct': None,
+    'premium_edge_score': None,
+    'cash_required_usd': None,
+    'cash_required_cny': None,
+    'max_leg_spread_ratio': None,
+    'fee_basis': None,
 }
 
 def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -212,11 +229,14 @@ def _format_top_contract(top: pd.Series, suffix: str) -> str:
 
 
 def _format_combo_contract(top: pd.Series) -> str:
-    expiration = _safe_text(top.get('expiration'))
+    put_expiration = _safe_text(top.get('put_expiration') or top.get('expiration'))
+    call_expiration = _safe_text(top.get('call_expiration') or top.get('expiration'))
     put_token = _strike_token(top.get('put_strike'))
     call_token = _strike_token(top.get('call_strike'))
-    if expiration and put_token and call_token:
-        return f"{expiration} {put_token}P+{call_token}C"
+    if put_expiration and call_expiration and put_token and call_token:
+        if put_expiration != call_expiration:
+            return f"{put_expiration} {put_token}P + {call_expiration} {call_token}C"
+        return f"{put_expiration} {put_token}P+{call_token}C"
     return _safe_text(top.get('combo_contract') or top.get('contract_symbol') or top.get('top_contract'))
 
 
@@ -395,7 +415,11 @@ def summarize_yield_enhancement(df: pd.DataFrame, symbol: str, *, symbol_cfg: di
         'bid': _safe_float(top.get('put_bid')),
         'ask': _safe_float(top.get('call_ask')),
         'option_ccy': top.get('option_ccy') or top.get('currency') or _option_ccy(symbol),
-        'note': '已按组合收益筛出推荐Call',
+        'note': (
+            'Put已独立通过接货、现金、事件、收益和流动性门槛'
+            if str(top.get('structure_mode') or '').strip().lower() == 'staggered_expiry_pair'
+            else '已按组合收益筛出推荐Call'
+        ),
     })
     for key in YIELD_ENHANCEMENT_EMPTY_FIELDS:
         row[key] = top.get(key)

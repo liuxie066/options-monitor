@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.application.ledger.api import BrokerTradeOperation
 from src.application.ledger.store_resolution import LedgerStoreResolution
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.state import upsert_deal_state
@@ -83,7 +84,7 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
         reason = "applied_open"
         deal_id = "deal-1"
         account = "lx"
-        operations = [{"record_id": "rec_1"}]
+        operations = [BrokerTradeOperation(action="open", record_id="rec_1")]
 
         def to_dict(self) -> dict:
             return {
@@ -92,7 +93,7 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
                 "reason": self.reason,
                 "deal_id": self.deal_id,
                 "account": self.account,
-                "operations": self.operations,
+                "operations": [item.to_payload() for item in self.operations],
             }
 
     monkeypatch.setattr(intake, "load_trade_intake_state", lambda _path: {})
@@ -811,7 +812,7 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
         reason = "applied_open"
         deal_id = "deal-receipt-1"
         account = "lx"
-        operations = [{"record_id": "lot_deal-receipt-1"}]
+        operations = [BrokerTradeOperation(action="open", record_id="lot_deal-receipt-1")]
 
         def to_dict(self) -> dict:
             return {
@@ -820,7 +821,7 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
                 "reason": self.reason,
                 "deal_id": self.deal_id,
                 "account": self.account,
-                "operations": self.operations,
+                "operations": [item.to_payload() for item in self.operations],
             }
 
     writes: list[dict] = []

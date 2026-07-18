@@ -40,7 +40,7 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
     def run_channel_request(**kwargs):
         calls.append((kwargs["user_message"], kwargs["conversation_id"]))
         tool = {
-            "7月收益": "monthly_income_report",
+            "7月收益": "option_performance_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
             "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
@@ -69,7 +69,7 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
 def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, tmp_path) -> None:
     def run_channel_request(**kwargs):
         tool = {
-            "7月收益": "monthly_income_report",
+            "7月收益": "option_performance_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
             "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
@@ -156,7 +156,7 @@ def test_p1_eval_checks_scope_conclusion_and_protocol(monkeypatch, tmp_path) -> 
     def run_channel_request(**kwargs):
         question = kwargs["user_message"]
         tool = {
-            "7月收益": "monthly_income_report",
+            "7月收益": "option_performance_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
             "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",
@@ -198,7 +198,7 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
         preview_intents.update(str(item.get("intent_name") or "") for item in kwargs["control_preview_specs"])
         question = kwargs["user_message"]
         tool = {
-            "7月收益": "monthly_income_report",
+            "7月收益": "option_performance_report",
             "当前期权风险主要集中在哪里": "option_positions_read",
             "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
             "为什么 NVDA 没进候选": "candidate_filter_explain",

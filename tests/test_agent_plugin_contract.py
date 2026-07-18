@@ -27,6 +27,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
     assert "monthly_income_report" in tool_names
+    assert "option_performance_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
     assert "runtime_runs" in tool_names
@@ -34,6 +35,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
     assert "portfolio_query" in tool_names
+    assert "portfolio_capital_bridge" in tool_names
     assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
@@ -81,6 +83,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert portfolio_query["safe_default_input"] == {"view": "health"}
     assert "view" in portfolio_query["input_schema"]
     assert "url" not in portfolio_query["input_schema"]
+    portfolio_bridge = next(item for item in spec["tools"] if item["name"] == "portfolio_capital_bridge")
+    assert portfolio_bridge["risk_level"] == "read_only"
+    assert portfolio_bridge["requires_confirm"] is False
+    assert portfolio_bridge["side_effects"] == []
+    assert portfolio_bridge["safe_default_input"] == {}
+    assert set(portfolio_bridge["input_json_schema"]["required"]) == {"period", "as_of_month", "accounts"}
+    assert "url" not in portfolio_bridge["input_schema"]
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -92,6 +101,14 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
     assert "month" in income_report["input_schema"]
+    performance_report = next(item for item in spec["tools"] if item["name"] == "option_performance_report")
+    assert performance_report["risk_level"] == "read_only"
+    assert performance_report["requires_confirm"] is False
+    assert performance_report["safe_default_input"]["config_key"] == "us"
+    assert performance_report["safe_default_input"]["period"] == "mtd"
+    assert performance_report["safe_default_input"]["refresh_quotes"] is True
+    assert "capital.period_realized_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
+    assert "capital.period_total_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
     option_positions_read = next(item for item in spec["tools"] if item["name"] == "option_positions_read")
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"
@@ -224,6 +241,9 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
         "freshness.status",
         "freshness.observed_at",
     ]
+    assert tools["portfolio_capital_bridge"]["output_contract"]["schema_version"] == "portfolio.capital_bridge.v1"
+    assert "accounts[].steps" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
+    assert "fallback_text" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None
@@ -341,6 +361,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "portfolio_query" in PURE_READ_TOOLS
+    assert "portfolio_capital_bridge" in PURE_READ_TOOLS
     assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
@@ -436,8 +457,12 @@ def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
         safe_default = tool.get("safe_default_input") if isinstance(tool, dict) else {}
         if isinstance(schema, dict) and "config_key" in schema:
             assert isinstance(safe_default, dict)
-            assert "config_key" not in safe_default
-            assert "config_path" not in safe_default
+            if tool.get("name") == "option_performance_report":
+                assert safe_default.get("config_key") == "us"
+                assert safe_default.get("config_path") is None
+            else:
+                assert "config_key" not in safe_default
+                assert "config_path" not in safe_default
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:

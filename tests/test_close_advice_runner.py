@@ -3293,7 +3293,33 @@ def test_buy_to_close_fee_exposes_explicit_close_economics(monkeypatch: pytest.M
     assert row["buy_to_close_fee"] == 2.0
     assert row["buy_to_close_cost"] == 22.0
     assert row["close_fee_to_remaining_premium"] == pytest.approx(0.10)
+    assert row["estimated_pnl_if_close_gross"] == 80.0
+    assert row["estimated_close_fee"] == 2.0
+    assert row["estimated_pnl_if_close_net"] == 78.0
     assert row["realized_if_close"] == 78.0
+
+
+def test_close_economics_do_not_claim_net_pnl_when_fee_is_unavailable() -> None:
+    from src.application import close_advice_runner
+
+    row = close_advice_runner._apply_buy_to_close_fee(
+        {
+            "position_side": "short",
+            "currency": "USD",
+            "close_mid": 0.20,
+            "contracts_open": 1,
+            "multiplier": None,
+            "estimated_pnl_if_close_gross": 80.0,
+            "estimated_close_fee": None,
+            "estimated_pnl_if_close_net": None,
+            "realized_if_close": 80.0,
+        }
+    )
+
+    assert row["estimated_pnl_if_close_gross"] == 80.0
+    assert row["estimated_close_fee"] is None
+    assert row["estimated_pnl_if_close_net"] is None
+    assert "fee_calc_unavailable" in row["data_quality_flags"]
 
 
 def test_close_calibration_uses_only_explicit_replacement_and_willingness() -> None:

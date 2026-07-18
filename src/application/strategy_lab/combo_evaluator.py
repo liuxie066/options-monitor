@@ -3,6 +3,7 @@ from __future__ import annotations
 """Read-only Combo Yield group outcome evaluator."""
 
 from collections import Counter, defaultdict
+from datetime import date
 from typing import Any
 
 from src.application.shadow_replay.common import (
@@ -21,6 +22,8 @@ from src.application.shadow_replay.settlement import mark_time
 COMBO_GROUP_EXPERIMENT_SCHEMA_VERSION = "strategy_lab_combo_yield_group_experiment.v1"
 
 _ACCEPTED_STATUSES = {"accepted", "notified"}
+_SAME_EXPIRY_PAIR = "same_expiry_pair"
+_STAGGERED_EXPIRY_PAIR = "staggered_expiry_pair"
 
 
 def run_combo_yield_group_experiment(
@@ -126,7 +129,9 @@ def _group_payload(
     blockers = list(extra_blockers or [])
     blockers.extend(_leg_blockers(legs))
     roles = {text(row.get("leg_role")).lower() for row in legs if text(row.get("leg_role"))}
-    blockers.extend(_identity_blockers(legs))
+    structure_mode, structure_blockers = _group_structure_mode(legs)
+    blockers.extend(structure_blockers)
+    blockers.extend(_identity_blockers(legs, structure_mode=structure_mode))
     metrics, missing_metrics = _group_metrics(legs)
     if missing_metrics:
         blockers.append("combo_yield_group_metric_missing")
@@ -136,6 +141,7 @@ def _group_payload(
         legs=legs,
         metrics=metrics,
         group_blockers=group_blockers,
+        structure_mode=structure_mode,
         marks_by_key=marks_by_key,
         outcomes_by_key=outcomes_by_key,
     )
@@ -143,6 +149,7 @@ def _group_payload(
         "group_id": group_id,
         "strategy_group_id": group_id if strategy_group_id is None and not extra_blockers else strategy_group_id,
         "decision_status": status,
+        "structure_mode": structure_mode,
         "leg_count": len(legs),
         "leg_roles": sorted(roles),
         "candidate_ids": [instrument_key(row) for row in legs if instrument_key(row)],
@@ -193,12 +200,23 @@ def _leg_blockers(legs: list[dict[str, Any]]) -> list[str]:
     return blockers
 
 
-def _identity_blockers(legs: list[dict[str, Any]]) -> list[str]:
+def _group_structure_mode(legs: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    modes = {text(row.get("structure_mode")).lower() for row in legs if text(row.get("structure_mode"))}
+    if not modes:
+        return _SAME_EXPIRY_PAIR, []
+    if len(modes) > 1:
+        return sorted(modes)[0], ["combo_yield_structure_mode_mismatch"]
+    mode = next(iter(modes))
+    if mode not in {_SAME_EXPIRY_PAIR, _STAGGERED_EXPIRY_PAIR}:
+        return mode, ["combo_yield_structure_mode_invalid"]
+    return mode, []
+
+
+def _identity_blockers(legs: list[dict[str, Any]], *, structure_mode: str) -> list[str]:
     blockers: list[str] = []
     for key, missing_blocker, mismatch_blocker in (
         ("symbol", "combo_yield_symbol_missing", "combo_yield_symbol_mismatch"),
         ("account", "combo_yield_account_missing", "combo_yield_account_mismatch"),
-        ("expiration", "combo_yield_expiration_missing", "combo_yield_expiration_mismatch"),
         ("multiplier", "combo_yield_multiplier_missing", "combo_yield_multiplier_mismatch"),
     ):
         values = [_identity_value(row, key) for row in legs]
@@ -206,7 +224,33 @@ def _identity_blockers(legs: list[dict[str, Any]]) -> list[str]:
             blockers.append(missing_blocker)
         elif len(set(values)) > 1:
             blockers.append(mismatch_blocker)
+
+    expirations = [_identity_value(row, "expiration") for row in legs]
+    if not expirations or any(value is None for value in expirations):
+        blockers.append("combo_yield_expiration_missing")
+    elif structure_mode == _SAME_EXPIRY_PAIR:
+        if len(set(expirations)) > 1:
+            blockers.append("combo_yield_expiration_mismatch")
+    elif structure_mode == _STAGGERED_EXPIRY_PAIR:
+        put_leg = _role_leg(legs, option_type="put")
+        call_leg = _role_leg(legs, option_type="call")
+        put_expiration = _expiration_date(put_leg)
+        call_expiration = _expiration_date(call_leg)
+        if put_expiration is None or call_expiration is None:
+            blockers.append("combo_yield_expiration_invalid")
+        elif call_expiration <= put_expiration:
+            blockers.append("combo_yield_expiration_order_invalid")
     return blockers
+
+
+def _expiration_date(row: dict[str, Any] | None) -> date | None:
+    value = _identity_value(row or {}, "expiration")
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _identity_value(row: dict[str, Any], key: str) -> str | float | None:
@@ -343,10 +387,13 @@ def _group_outcome_evaluation(
     legs: list[dict[str, Any]],
     metrics: dict[str, Any],
     group_blockers: list[str],
+    structure_mode: str,
     marks_by_key: dict[str, list[dict[str, Any]]],
     outcomes_by_key: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     blockers = list(group_blockers)
+    if structure_mode == _STAGGERED_EXPIRY_PAIR:
+        blockers.append("combo_yield_multi_horizon_outcome_evidence_insufficient")
     realized_pnls: list[float] = []
     outcome_labels: list[str] = []
     for leg in legs:

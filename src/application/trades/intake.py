@@ -494,7 +494,7 @@ def process_trade_payload(
                     "status": "applied",
                     "action": result.action,
                     "account": result.account,
-                    "applied_record_ids": [op.get("record_id") for op in result.operations if op.get("record_id")],
+                    "applied_record_ids": [op.record_id for op in result.operations if op.record_id],
                     "reason": result.reason,
                 },
             )
