@@ -95,3 +95,59 @@ def test_attributed_fact_serialization_is_additive() -> None:
         "lifecycle_id": f"funding_cycle:{lot_id_for_open_event(event)}",
         "expiry_structure": None,
     }
+
+
+def test_close_cash_facts_reuse_target_lot_lifecycle_identity() -> None:
+    from domain.domain.performance.engine import _close_event_cash_facts
+
+    open_event = _open_event(
+        raw_payload={
+            "strategy": "combo_yield",
+            "leg_role": "funding_put",
+            "strategy_group_id": "combo_yield:lx:pair-1",
+        }
+    )
+    lot_id = lot_id_for_open_event(open_event)
+    close_event = TradeEvent(
+        event_id="put-close",
+        event_type="expire_close",
+        event_time_ms=1_782_000_000_000,
+        contract_key=open_event.contract_key,
+        contracts=1,
+        price=0,
+        currency="USD",
+        multiplier=100,
+        source="test",
+        target_lot_id=lot_id,
+        raw_payload=dict(open_event.raw_payload),
+    )
+
+    facts = _close_event_cash_facts(close_event)
+
+    assert facts
+    assert all(fact.attribution is not None for fact in facts)
+    assert {fact.attribution.lifecycle_id for fact in facts if fact.attribution} == {f"funding_cycle:{lot_id}"}
+
+
+def test_tagged_close_without_target_lot_fails_closed_for_attribution() -> None:
+    event = TradeEvent(
+        event_id="orphan-close",
+        event_type="close",
+        event_time_ms=1_782_000_000_000,
+        contract_key=_open_event().contract_key,
+        contracts=1,
+        price=1,
+        currency="USD",
+        multiplier=100,
+        source="test",
+        raw_payload={
+            "strategy": "combo_yield",
+            "leg_role": "funding_put",
+            "strategy_group_id": "combo_yield:lx:pair-1",
+        },
+    )
+
+    resolved = resolve_event_attribution(event)
+
+    assert resolved.attribution is None
+    assert resolved.issues == ("strategy_lifecycle_source_missing:orphan-close",)

@@ -1390,10 +1390,10 @@ def _fact_currency(value: Any, *, context: str) -> tuple[str | None, str | None]
 
 
 def _event_fact_kwargs(event: TradeEvent, *, currency: str | None) -> dict[str, Any]:
-    resolution = resolve_event_attribution(
-        event,
-        lifecycle_source_id=lot_id_for_open_event(event) if event.event_type == "open" else None,
+    lifecycle_source_id = (
+        lot_id_for_open_event(event) if event.event_type == "open" else event.target_lot_id
     )
+    resolution = resolve_event_attribution(event, lifecycle_source_id=lifecycle_source_id)
     return {
         "account": event.contract_key.account,
         "broker": event.contract_key.broker,
