@@ -1,5 +1,5 @@
 flowchart LR
-  src_application["src.application"] -->|154| domain_domain["domain.domain"]
+  src_application["src.application"] -->|156| domain_domain["domain.domain"]
   src_interfaces["src.interfaces"] -->|99| src_application["src.application"]
   src_application["src.application"] -->|73| src_infrastructure["src.infrastructure"]
   src_application_ledger["src.application.ledger"] -->|28| domain_domain["domain.domain"]
@@ -18,10 +18,10 @@ flowchart LR
   src_application_trades["src.application.trades"] -->|13| domain_domain["domain.domain"]
   src_application_trades["src.application.trades"] -->|12| src_application["src.application"]
   src_application_positions["src.application.positions"] -->|11| domain_domain_ledger["domain.domain.ledger"]
+  domain_domain["domain.domain"] -->|10| domain_domain_ledger["domain.domain.ledger"]
   src_application_ledger["src.application.ledger"] -->|8| src_infrastructure["src.infrastructure"]
   src_application_multi_tick["src.application.multi_tick"] -->|8| src_infrastructure["src.infrastructure"]
   src_application_positions["src.application.positions"] -->|8| src_infrastructure["src.infrastructure"]
-  domain_domain["domain.domain"] -->|7| domain_domain_ledger["domain.domain.ledger"]
   src_application_positions["src.application.positions"] -->|7| domain_storage["domain.storage"]
   domain_domain_ledger["domain.domain.ledger"] -->|6| domain_domain["domain.domain"]
   scripts["scripts"] -->|6| src_application["src.application"]
