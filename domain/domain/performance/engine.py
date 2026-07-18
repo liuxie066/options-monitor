@@ -1558,7 +1558,7 @@ def _diagnostic_is_relevant(
 ) -> bool:
     if isinstance(item, str):
         return True
-    if str(item.get("context") or "").strip() == "valuation":
+    if str(item.get("context") or "").strip() in {"valuation", "assigned_stock"}:
         diagnostic_account = normalize_account(item.get("account"))
         diagnostic_broker = normalize_broker(str(item.get("broker") or ""))
         return (not account_filter or diagnostic_account == account_filter) and (

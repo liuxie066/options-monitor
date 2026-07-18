@@ -233,8 +233,13 @@ def _cash_bridge_facts(account: str, *, end_date: str = "2026-07-16") -> dict:
 
 def _option_performance(account: str, *, end_date: str = "2026-07-16") -> dict:
     return {
-        "period": {"kind": "mtd", "requested_end_date": end_date},
+        "period": {
+            "kind": "mtd",
+            "requested_end_date": end_date,
+            "reporting_timezone": "Asia/Shanghai",
+        },
         "scope": {"account": account},
+        "quality": {"status": "observed", "evidence_fact_ids": []},
         "cash": {
             "total_cash_change_net": {"cny": -200.0, "status": "observed"},
         },
