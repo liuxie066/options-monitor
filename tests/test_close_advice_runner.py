@@ -1032,7 +1032,7 @@ def test_run_close_advice_uses_yield_enhancement_put_exit_action(
     assert rows[0]["strategy_exit_mode"] == "yield_enhancement_put_leg"
     assert rows[0]["yield_enhancement_mode"] == "income_upside_enhancement"
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
-    assert "买回 Put，保留收益增强 Call" in text
+    assert "买回 Put（Call 腿缺失）" in text
 
 
 def test_run_close_advice_holds_yield_enhancement_put_when_threshold_not_met(
@@ -1164,7 +1164,7 @@ def test_run_close_advice_uses_yield_enhancement_long_call_exit_action(
     assert rows[0]["close_action"] == "sell_call_take_profit"
     assert rows[0]["strategy_exit_mode"] == "yield_enhancement_long_call_leg"
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
-    assert "卖出收益增强 Call 止盈" in text
+    assert "卖出剩余 Call 止盈" in text
     assert "Call价值: 现值/成本=2.2x | 剩余DTE=29 | 浮盈=+120%" in text
     assert "建议出价=$2.20 | 买一/卖一=$2.10/$2.30" in text
 
@@ -3375,4 +3375,432 @@ def test_close_calibration_uses_only_explicit_replacement_and_willingness() -> N
 
     from src.application.agent_tools.close_advice_read_impl import _public_row
 
-    assert _public_row(row)["continued_willingness"] is False
+    public = _public_row({**row, "combo_group_classification": "residual_call", "combo_group_action": "hold_residual_call"})
+    assert public["continued_willingness"] is False
+    assert public["combo_group_classification"] == "residual_call"
+    assert public["combo_group_action"] == "hold_residual_call"
+
+
+def _combo_advice_leg(
+    *,
+    option_type: str,
+    contracts: int,
+    group_id: str | None,
+    premium: float,
+    close_mid: float | None,
+    realized_if_close: float | None = None,
+    exit_state: str = "hold",
+    quote_status: str = "priced",
+    evaluation_status: str = "priced",
+) -> dict[str, object]:
+    is_put = option_type == "put"
+    row: dict[str, object] = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": option_type,
+        "position_side": "short" if is_put else "long",
+        "contracts_open": contracts,
+        "premium": premium,
+        "close_mid": close_mid,
+        "multiplier": 100,
+        "realized_if_close": realized_if_close,
+        "strategy": "combo_yield",
+        "leg_role": "sell_put" if is_put else "enhancement_call",
+        "strategy_group_id": group_id or "",
+        "yield_enhancement_mode": "income_upside_enhancement",
+        "exit_state": exit_state,
+        "tier": "strong" if exit_state == "profit_capture" else "none",
+        "quote_status": quote_status,
+        "evaluation_status": evaluation_status,
+    }
+    return row
+
+
+def _combo_position(
+    *,
+    option_type: str,
+    contracts: int,
+    group_id: str | None,
+    expiration: str,
+    record_id: str,
+    side: str | None = None,
+    leg_role: str | None = None,
+) -> dict[str, object]:
+    is_put = option_type == "put"
+    return {
+        "record_id": record_id,
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": option_type,
+        "side": side or ("short" if is_put else "long"),
+        "contracts": contracts,
+        "contracts_open": contracts,
+        "contracts_closed": 0,
+        "expiration": expiration,
+        "expiration_ymd": expiration,
+        "strategy": "combo_yield",
+        "leg_role": leg_role or ("sell_put" if is_put else "enhancement_call"),
+        "strategy_group_id": group_id,
+        "yield_enhancement_mode": "income_upside_enhancement",
+        "strategy_snapshot": {"expiry_structure": "diagonal"},
+    }
+
+
+def _apply_combo_group_advice(
+    rows: list[dict[str, object]],
+    positions: list[dict[str, object]],
+) -> None:
+    from src.application import close_advice_runner
+
+    for row in rows:
+        close_advice_runner._apply_close_action_semantics(row)
+    close_advice_runner._apply_yield_enhancement_combo_economics(rows, positions=positions)
+
+
+def test_combo_group_advice_aggregates_multi_lot_quantities_and_economics() -> None:
+    group_id = "combo_yield:lx:diagonal-multi-lot"
+    rows = [
+        _combo_advice_leg(
+            option_type="put",
+            contracts=1,
+            group_id=group_id,
+            premium=1.5,
+            close_mid=0.7,
+            realized_if_close=80.0,
+            exit_state="profit_capture",
+        ),
+        _combo_advice_leg(
+            option_type="put",
+            contracts=1,
+            group_id=group_id,
+            premium=1.4,
+            close_mid=0.7,
+            realized_if_close=70.0,
+            exit_state="profit_capture",
+        ),
+        _combo_advice_leg(
+            option_type="call", contracts=1, group_id=group_id, premium=0.3, close_mid=0.5
+        ),
+        _combo_advice_leg(
+            option_type="call", contracts=1, group_id=group_id, premium=0.4, close_mid=0.6
+        ),
+    ]
+    positions = [
+        _combo_position(
+            option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put-1"
+        ),
+        _combo_position(
+            option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put-2"
+        ),
+        _combo_position(
+            option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call-1"
+        ),
+        _combo_position(
+            option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call-2"
+        ),
+    ]
+
+    _apply_combo_group_advice(rows, positions)
+
+    for row in rows:
+        assert row["combo_group_classification"] == "active_combo"
+        assert row["combo_group_status"] == "evaluable"
+        assert row["combo_put_contracts_open"] == 2
+        assert row["combo_call_contracts_open"] == 2
+    for put_row in rows[:2]:
+        assert put_row["close_action"] == "close_put_keep_call"
+        assert put_row["combo_call_cost"] == pytest.approx(70.0)
+        assert put_row["combo_call_value_if_close"] == pytest.approx(110.0)
+        assert put_row["combo_net_locked_if_close_put_keep_call"] == pytest.approx(80.0)
+        assert put_row["combo_net_if_close_both"] == pytest.approx(190.0)
+        assert put_row["optional_combo_action"] == "close_both_optional"
+
+
+def test_combo_group_advice_fails_closed_on_quantity_mismatch_without_overwriting_legs() -> None:
+    group_id = "combo_yield:lx:diagonal-mismatch"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=2,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=160.0,
+        exit_state="profit_capture",
+    )
+    call_row = _combo_advice_leg(
+        option_type="call", contracts=1, group_id=group_id, premium=0.3, close_mid=0.5
+    )
+
+    _apply_combo_group_advice(
+        [put_row, call_row],
+        [
+            _combo_position(
+                option_type="put", contracts=2, group_id=group_id, expiration="2026-08-21", record_id="put"
+            ),
+            _combo_position(
+                option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call"
+            ),
+        ],
+    )
+
+    assert put_row["close_action"] == "close_put_keep_call"
+    assert put_row["strategy_exit_mode"] == "yield_enhancement_put_leg"
+    assert put_row["combo_group_classification"] == "review_required"
+    assert put_row["combo_group_action"] is None
+    assert put_row["combo_cost_basis_status"] == "review_required"
+    assert "open_quantity_mismatch" in str(put_row["combo_group_issues"])
+    assert put_row.get("combo_net_if_close_both") is None
+
+
+def test_combo_group_advice_fails_closed_when_current_call_quote_is_missing() -> None:
+    group_id = "combo_yield:lx:diagonal-missing-quote"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    call_row = _combo_advice_leg(
+        option_type="call",
+        contracts=1,
+        group_id=group_id,
+        premium=0.3,
+        close_mid=None,
+        exit_state="not_evaluable",
+        quote_status="quote_unusable",
+        evaluation_status="quote_unusable",
+    )
+
+    _apply_combo_group_advice(
+        [put_row, call_row],
+        [
+            _combo_position(
+                option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put"
+            ),
+            _combo_position(
+                option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call"
+            ),
+        ],
+    )
+
+    assert put_row["combo_group_classification"] == "review_required"
+    assert put_row["combo_group_action"] is None
+    assert put_row["combo_group_quote_status"] == "incomplete"
+    assert "call_quote_unavailable" in str(put_row["combo_group_issues"])
+    assert put_row.get("combo_call_value_if_close") is None
+
+
+def test_combo_group_advice_labels_put_only_and_residual_call_without_false_pair_wording() -> None:
+    from src.application import close_advice_runner
+
+    put_group = "combo_yield:lx:put-only"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=put_group,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    _apply_combo_group_advice(
+        [put_row],
+        [
+            _combo_position(
+                option_type="put", contracts=1, group_id=put_group, expiration="2026-08-21", record_id="put"
+            )
+        ],
+    )
+
+    assert put_row["close_action"] == "close_put_keep_call"
+    assert put_row["combo_group_classification"] == "missing_call"
+    assert put_row["combo_group_action"] == "close_put_unpaired"
+    put_label = close_advice_runner._close_action_label(put_row)
+    assert "Call 腿缺失" in put_label
+    assert "保留收益增强 Call" not in put_label
+
+    call_group = "combo_yield:lx:residual-call"
+    call_row = _combo_advice_leg(
+        option_type="call",
+        contracts=1,
+        group_id=call_group,
+        premium=0.3,
+        close_mid=0.8,
+        exit_state="take_profit",
+    )
+    _apply_combo_group_advice(
+        [call_row],
+        [
+            _combo_position(
+                option_type="call", contracts=1, group_id=call_group, expiration="2026-09-18", record_id="call"
+            )
+        ],
+    )
+
+    assert call_row["close_action"] == "sell_call_take_profit"
+    assert call_row["combo_group_classification"] == "residual_call"
+    assert call_row["combo_group_action"] == "sell_residual_call_take_profit"
+    call_label = close_advice_runner._close_action_label(call_row)
+    assert "剩余 Call" in call_label
+    assert "Put" not in call_label
+
+
+def test_combo_group_advice_requires_group_identity_and_rejects_mixed_inventory() -> None:
+    missing_id_row = _combo_advice_leg(
+        option_type="call", contracts=1, group_id=None, premium=0.3, close_mid=0.8
+    )
+    _apply_combo_group_advice(
+        [missing_id_row],
+        [
+            _combo_position(
+                option_type="call", contracts=1, group_id=None, expiration="2026-09-18", record_id="call-missing-id"
+            )
+        ],
+    )
+    assert missing_id_row["combo_group_classification"] == "review_required"
+    assert missing_id_row["combo_group_action"] is None
+    assert "missing_group_identity" in str(missing_id_row["combo_group_issues"])
+
+    group_id = "combo_yield:lx:mixed-inventory"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    _apply_combo_group_advice(
+        [put_row],
+        [
+            _combo_position(
+                option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put"
+            ),
+            _combo_position(
+                option_type="call",
+                contracts=1,
+                group_id=group_id,
+                expiration="2026-09-18",
+                record_id="unsupported-short-call",
+                side="short",
+                leg_role="enhancement_call",
+            ),
+        ],
+    )
+    assert put_row["combo_group_classification"] == "review_required"
+    assert put_row["combo_group_action"] is None
+    assert "unsupported_option_leg" in str(put_row["combo_group_issues"])
+
+
+def test_combo_group_advice_reconciles_both_authoritative_leg_actions() -> None:
+    group_id = "combo_yield:lx:both-close"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    call_row = _combo_advice_leg(
+        option_type="call",
+        contracts=1,
+        group_id=group_id,
+        premium=0.3,
+        close_mid=0.8,
+        exit_state="take_profit",
+    )
+    _apply_combo_group_advice(
+        [put_row, call_row],
+        [
+            _combo_position(
+                option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put"
+            ),
+            _combo_position(
+                option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call"
+            ),
+        ],
+    )
+
+    assert put_row["close_action"] == "close_put_keep_call"
+    assert call_row["close_action"] == "sell_call_take_profit"
+    assert put_row["combo_group_action"] == "close_both"
+    assert call_row["combo_group_action"] == "close_both"
+    assert put_row.get("optional_combo_action") is None
+
+
+def test_combo_group_inventory_adapter_preserves_snapshot_only_diagonal_metadata() -> None:
+    group_id = "combo_yield:lx:snapshot-only"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    call_row = _combo_advice_leg(
+        option_type="call", contracts=1, group_id=group_id, premium=0.3, close_mid=0.5
+    )
+    positions = [
+        _combo_position(
+            option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put"
+        ),
+        _combo_position(
+            option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call"
+        ),
+    ]
+    for position in positions:
+        position["strategy_snapshot"] = {
+            "strategy": position.pop("strategy"),
+            "leg_role": position.pop("leg_role"),
+            "strategy_group_id": position.pop("strategy_group_id"),
+            "yield_enhancement_mode": position.pop("yield_enhancement_mode"),
+            "expiry_structure": "diagonal",
+        }
+
+    _apply_combo_group_advice([put_row, call_row], positions)
+
+    assert put_row["combo_group_classification"] == "active_combo"
+    assert put_row["combo_group_status"] == "evaluable"
+    assert put_row["combo_group_issues"] == ""
+
+
+def test_combo_group_economics_remain_unknown_when_fee_calculation_is_unavailable() -> None:
+    group_id = "combo_yield:lx:fee-unavailable"
+    put_row = _combo_advice_leg(
+        option_type="put",
+        contracts=1,
+        group_id=group_id,
+        premium=1.5,
+        close_mid=0.7,
+        realized_if_close=80.0,
+        exit_state="profit_capture",
+    )
+    call_row = _combo_advice_leg(
+        option_type="call", contracts=1, group_id=group_id, premium=0.3, close_mid=0.5
+    )
+    call_row["data_quality_flags"] = "fee_calc_unavailable"
+    _apply_combo_group_advice(
+        [put_row, call_row],
+        [
+            _combo_position(
+                option_type="put", contracts=1, group_id=group_id, expiration="2026-08-21", record_id="put"
+            ),
+            _combo_position(
+                option_type="call", contracts=1, group_id=group_id, expiration="2026-09-18", record_id="call"
+            ),
+        ],
+    )
+
+    assert put_row["combo_group_status"] == "evaluable"
+    assert put_row["combo_cost_basis_status"] == "fee_calc_unavailable"
+    assert put_row.get("combo_net_locked_if_close_put_keep_call") is None
+    assert put_row.get("combo_net_if_close_both") is None
+    assert put_row.get("optional_combo_action") is None

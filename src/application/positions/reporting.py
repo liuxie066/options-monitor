@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from src.infrastructure.feishu_bitable import safe_float
 from domain.domain.assigned_stock import project_assigned_stock_lifecycle
+from domain.domain.combo_yield_lifecycle import build_full_group_lifecycle, build_option_group_inventory
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
@@ -25,6 +26,7 @@ from domain.domain.ledger.position_fields import (
     normalize_option_type,
     normalize_status,
     norm_symbol,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import normalize_trade_side
@@ -241,25 +243,35 @@ def _active_trade_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(out, key=lambda x: (int(_event_ts(x) or 0), str(x.get("event_id") or "")))
 
 
+def _event_strategy_metadata(event: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    metadata = strategy_metadata_fields_from_payload(_event_payload(event))
+    for key in ("strategy", "leg_role", "strategy_group_id", "yield_enhancement_mode"):
+        if key not in metadata and event.get(key) not in (None, ""):
+            metadata[key] = str(event.get(key)).strip()
+    if "strategy_snapshot" not in metadata and isinstance(event.get("strategy_snapshot"), dict):
+        metadata["strategy_snapshot"] = dict(event["strategy_snapshot"])
+    return metadata
+
+
 def _event_strategy(event: dict[str, Any]) -> str:
-    payload = _event_payload(event)
-    return str(payload.get("strategy") or event.get("strategy") or "").strip().lower()
+    return str(_event_strategy_metadata(event).get("strategy") or "").strip().lower()
 
 
 def _event_leg_role(event: dict[str, Any]) -> str:
-    payload = _event_payload(event)
-    return str(payload.get("leg_role") or event.get("leg_role") or "").strip().lower()
+    return str(_event_strategy_metadata(event).get("leg_role") or "").strip().lower()
 
 
 def _event_group_id(event: dict[str, Any]) -> str:
+    metadata = _event_strategy_metadata(event)
     payload = _event_payload(event)
-    return str(
-        payload.get("strategy_group_id")
-        or payload.get("group_id")
-        or event.get("strategy_group_id")
-        or event.get("group_id")
-        or ""
-    ).strip()
+    return str(metadata.get("strategy_group_id") or payload.get("group_id") or event.get("group_id") or "").strip()
+
+
+def _event_strategy_snapshot(event: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = _event_strategy_metadata(event).get("strategy_snapshot")
+    return dict(snapshot) if isinstance(snapshot, dict) else None
 
 
 def _empty_summary_bucket(month: str, account: str, currency: str) -> dict[str, Any]:
@@ -1110,7 +1122,7 @@ def _build_assigned_stock_lifecycle_report(
     month: str | None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
-    return project_assigned_stock_lifecycle(
+    report = project_assigned_stock_lifecycle(
         trade_events,
         assignment_option_rows=assignment_option_rows,
         option_open_lots=option_open_lots,
@@ -1122,6 +1134,56 @@ def _build_assigned_stock_lifecycle_report(
         month=month,
         as_of_ms=as_of_ms,
     )
+    all_stock_lots = list(report.pop("_all_assigned_stock_lots", []) or [])
+    option_groups = build_option_group_inventory(
+        [
+            {
+                "record_id": lot.get("record_id") or lot.get("open_event_id"),
+                "account": lot.get("account"),
+                "symbol": lot.get("symbol"),
+                "option_type": lot.get("option_type"),
+                "side": lot.get("position_side"),
+                "contracts": lot.get("contracts"),
+                "contracts_open": lot.get("remaining"),
+                "contracts_closed": int(lot.get("contracts") or 0) - int(lot.get("remaining") or 0),
+                "expiration_ymd": lot.get("expiration_ymd"),
+                "strategy": lot.get("strategy"),
+                "leg_role": lot.get("leg_role"),
+                "strategy_group_id": lot.get("strategy_group_id"),
+                "strategy_snapshot": lot.get("strategy_snapshot"),
+            }
+            for lot in option_open_lots
+        ]
+    )
+    valid_assignment_ids = {
+        str(lot.get("source_assignment_event_id") or "").strip()
+        for lot in all_stock_lots
+        if str(lot.get("source_assignment_event_id") or "").strip()
+    }
+    assignment_group_events = []
+    for event in _active_trade_events(trade_events):
+        group_id = _event_group_id(event)
+        if not group_id or _event_close_type(event) != "assignment":
+            continue
+        try:
+            contracts = int(abs(float(event.get("contracts") or 0)))
+        except (TypeError, ValueError, OverflowError):
+            contracts = 0
+        event_id = str(event.get("event_id") or "").strip()
+        assignment_group_events.append(
+            {
+                "event_id": event_id,
+                "strategy_group_id": group_id,
+                "contracts": contracts,
+                "stock_settlement_valid": event_id in valid_assignment_ids,
+            }
+        )
+    report["full_group_lifecycle"] = build_full_group_lifecycle(
+        option_groups,
+        assigned_stock_lots=all_stock_lots,
+        assignment_events=assignment_group_events,
+    )
+    return report
 
 
 def _build_open_basis_rows(open_lots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1258,6 +1320,7 @@ def _build_monthly_income_report_from_events(
         strategy = _event_strategy(event)
         leg_role = _event_leg_role(event)
         strategy_group_id = _event_group_id(event)
+        strategy_snapshot = _event_strategy_snapshot(event)
         event_id = str(event.get("event_id") or "").strip()
 
         if effect == "open":
@@ -1283,6 +1346,7 @@ def _build_monthly_income_report_from_events(
                     "strategy": strategy,
                     "leg_role": leg_role,
                     "strategy_group_id": strategy_group_id,
+                    "strategy_snapshot": strategy_snapshot,
                     "close_amount": 0.0,
                     "realized_pnl": 0.0,
                     "closed_contracts": 0,
@@ -1325,6 +1389,7 @@ def _build_monthly_income_report_from_events(
                 "strategy": strategy,
                 "leg_role": leg_role,
                 "strategy_group_id": strategy_group_id,
+                "strategy_snapshot": strategy_snapshot,
             }
         )
         stock_cashflow_row = _stock_settlement_cashflow_row(
@@ -1375,6 +1440,7 @@ def _build_monthly_income_report_from_events(
             row_strategy = strategy or str(lot.get("strategy") or "")
             row_leg_role = leg_role or str(lot.get("leg_role") or "")
             row_group_id = strategy_group_id or str(lot.get("strategy_group_id") or "")
+            row_strategy_snapshot = strategy_snapshot or lot.get("strategy_snapshot")
             realized_rows.append(
                 {
                     "record_id": event_id,
@@ -1407,6 +1473,9 @@ def _build_monthly_income_report_from_events(
                     "strategy": row_strategy,
                     "leg_role": row_leg_role,
                     "strategy_group_id": row_group_id,
+                    "strategy_snapshot": (
+                        dict(row_strategy_snapshot) if isinstance(row_strategy_snapshot, dict) else None
+                    ),
                 }
             )
             remaining_to_close -= qty
@@ -1452,6 +1521,7 @@ def _build_monthly_income_report_from_events(
                 "strategy": lot.get("strategy"),
                 "leg_role": lot.get("leg_role"),
                 "strategy_group_id": lot.get("strategy_group_id"),
+                "strategy_snapshot": lot.get("strategy_snapshot"),
             }
         )
         if position_side == "short":
@@ -1666,6 +1736,7 @@ def _build_monthly_income_report_from_events(
         "lifecycle_efficiency_summary": assigned_stock_report.get("lifecycle_efficiency_summary") or [],
         "assigned_stock_sale_rows": assigned_stock_report.get("assigned_stock_sale_rows") or [],
         "assigned_stock_review_rows": assigned_stock_report.get("assigned_stock_review_rows") or [],
+        "full_group_lifecycle": assigned_stock_report.get("full_group_lifecycle") or [],
         "realized_rows": sorted(filtered_realized_rows, key=_event_detail_sort_key),
         "open_basis_rows": filtered_open_basis_rows,
         "enhancement_rows": enhancement_rows,

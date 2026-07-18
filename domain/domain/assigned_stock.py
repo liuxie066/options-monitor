@@ -13,6 +13,7 @@ from domain.domain.fee_calc import (
 )
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.events import validate_trade_event
+from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
 from domain.domain.option_position_identity import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -61,6 +62,16 @@ def _round_money(value: float | int | None) -> float:
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("raw_payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def _event_strategy_metadata(event: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    metadata = strategy_metadata_fields_from_payload(_event_payload(event))
+    for key in ("strategy", "leg_role", "strategy_group_id", "yield_enhancement_mode"):
+        if key not in metadata and event.get(key) not in (None, ""):
+            metadata[key] = str(event.get(key)).strip()
+    return metadata
 
 def _event_ts(event: dict[str, Any]) -> int | None:
     return parse_event_at_ms(event.get("trade_time_ms"))
@@ -909,6 +920,32 @@ def project_assigned_stock_lifecycle(
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))
+        strategy_metadata = _event_strategy_metadata(event)
+        if not strategy_metadata.get("strategy_group_id"):
+            strategy_metadata = {**_event_strategy_metadata(source_open_event), **strategy_metadata}
+        source_option_leg_role = str(strategy_metadata.get("leg_role") or "").strip() or None
+        stock_snapshot = (
+            dict(strategy_metadata.get("strategy_snapshot"))
+            if isinstance(strategy_metadata.get("strategy_snapshot"), dict)
+            else {}
+        )
+        if stock_snapshot:
+            stock_snapshot["source_option_leg_role"] = source_option_leg_role
+            stock_snapshot["leg_role"] = "assigned_stock"
+        stock_strategy_fields = {
+            key: value
+            for key, value in {
+                "strategy": strategy_metadata.get("strategy"),
+                "leg_role": "assigned_stock" if strategy_metadata.get("strategy_group_id") else None,
+                "strategy_group_id": strategy_metadata.get("strategy_group_id"),
+                "yield_enhancement_mode": strategy_metadata.get("yield_enhancement_mode"),
+                "strategy_snapshot": stock_snapshot or None,
+                "structure_mode": stock_snapshot.get("structure_mode") if stock_snapshot else None,
+                "expiry_structure": stock_snapshot.get("expiry_structure") if stock_snapshot else None,
+                "source_option_leg_role": source_option_leg_role,
+            }.items()
+            if value not in (None, "", {})
+        }
         if source_open_event is not None:
             open_contracts = max(1, int(abs(float(source_open_event.get("contracts") or 0))))
             fee_facts.append(
@@ -944,6 +981,7 @@ def project_assigned_stock_lifecycle(
             "stock_lot_id": stock_lot_id,
             "source_assignment_event_id": event_id,
             "source_option_lot_id": source_option_lot_id,
+            **stock_strategy_fields,
             "account": account,
             "broker": broker,
             "symbol": symbol,
@@ -1116,6 +1154,18 @@ def project_assigned_stock_lifecycle(
             "source": str(sale.get("source") or "").strip() or None,
             "source_deal_id": str(sale.get("source_deal_id") or "").strip() or None,
         }
+        for key in (
+            "strategy",
+            "leg_role",
+            "strategy_group_id",
+            "yield_enhancement_mode",
+            "strategy_snapshot",
+            "structure_mode",
+            "expiry_structure",
+            "source_option_leg_role",
+        ):
+            if lot.get(key) not in (None, "", {}):
+                sale_row[key] = lot.get(key)
         lot["_sale_rows"].append(sale_row)
 
     effective_as_of_ms = int(as_of_ms) if as_of_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -1340,6 +1390,7 @@ def project_assigned_stock_lifecycle(
         key=_assigned_stock_row_sort_key,
     )
     return {
+        "_all_assigned_stock_lots": sorted(lot_rows, key=_assigned_stock_row_sort_key),
         "assigned_stock_lots": sorted(
             [row for row in lot_rows if _lifecycle_row_in_month(row, month)],
             key=_assigned_stock_row_sort_key,

@@ -508,13 +508,17 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
 def strategy_metadata_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
+    snapshot = payload.get("strategy_snapshot")
+    snapshot_fields = snapshot if isinstance(snapshot, dict) else {}
     out: dict[str, Any] = {}
     for key in POSITION_LOT_STRATEGY_PATCH_FIELDS:
         value = payload.get(key)
         if key == "strategy_snapshot":
-            if isinstance(value, dict):
-                out[key] = dict(value)
+            if snapshot_fields:
+                out[key] = dict(snapshot_fields)
             continue
+        if value in (None, ""):
+            value = snapshot_fields.get(key)
         text = str(value or "").strip()
         if text:
             out[key] = text

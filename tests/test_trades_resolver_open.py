@@ -89,6 +89,32 @@ def _position_record(
     }
 
 
+def _tag_staggered_combo_lot(
+    row: dict,
+    *,
+    pair_intent_id: str,
+    leg_role: str,
+) -> dict:
+    fields = row["fields"]
+    group_id = f"combo_yield:lx:{pair_intent_id}"
+    fields.update(
+        {
+            "strategy": "combo_yield",
+            "leg_role": leg_role,
+            "strategy_group_id": group_id,
+            "yield_enhancement_mode": "income_upside_enhancement",
+            "strategy_snapshot": {
+                "strategy": "combo_yield",
+                "leg_role": leg_role,
+                "strategy_group_id": group_id,
+                "structure_mode": "staggered_expiry_pair",
+                "pair_intent_id": pair_intent_id,
+            },
+        }
+    )
+    return row
+
+
 def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     result = resolve_trade_deal(_deal(), repo=FakeRepo(), state={}, apply_changes=False)
 
@@ -634,3 +660,102 @@ def test_staggered_combo_yield_overrides_conflicting_relation_metadata() -> None
     assert snapshot["structure_mode"] == "staggered_expiry_pair"
     assert snapshot["pair_intent_id"] == "intent-authoritative"
     assert snapshot["strategy_group_id"] == expected_group_id
+
+
+def test_staggered_combo_yield_rejects_pair_intent_reuse_after_put_cycle_consumed() -> None:
+    intent_id = "intent-consumed-cycle"
+    closed_put = _tag_staggered_combo_lot(
+        _position_record(
+            "lot-consumed-put",
+            symbol="PDD",
+            option_type="put",
+            side="short",
+            expiration_ymd="2026-08-21",
+            contracts_open=0,
+        ),
+        pair_intent_id=intent_id,
+        leg_role="funding_put",
+    )
+    closed_put["fields"]["contracts"] = 1
+    closed_put["fields"]["contracts_closed"] = 1
+    residual_call = _tag_staggered_combo_lot(
+        _position_record(
+            "lot-residual-call",
+            symbol="PDD",
+            option_type="call",
+            side="long",
+            strike=100.0,
+            expiration_ymd="2026-10-16",
+            contracts_open=1,
+        ),
+        pair_intent_id=intent_id,
+        leg_role="participation_call",
+    )
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-reused-put",
+            symbol="PDD",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            strike=75.0,
+            expiration_ymd="2026-09-18",
+            currency="USD",
+            raw_payload={
+                "structure_mode": "staggered_expiry_pair",
+                "pair_intent_id": intent_id,
+            },
+        ),
+        repo=FakeRepo([closed_put, residual_call]),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason == "staggered_combo_yield_cycle_reuse"
+    diagnostics = result.diagnostics["combo_yield_enrichment"]
+    assert diagnostics["decision"] == "reject_explicit_pair_intent"
+    assert diagnostics["consumed_record_id"] == "lot-consumed-put"
+
+
+def test_staggered_combo_yield_rejects_quantity_overmatch() -> None:
+    intent_id = "intent-quantity-overmatch"
+    funding_put = _tag_staggered_combo_lot(
+        _position_record(
+            "lot-one-put",
+            symbol="PDD",
+            option_type="put",
+            side="short",
+            expiration_ymd="2026-08-21",
+            contracts_open=1,
+        ),
+        pair_intent_id=intent_id,
+        leg_role="funding_put",
+    )
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-two-calls",
+            symbol="PDD",
+            option_type="call",
+            side="buy",
+            position_effect="open",
+            contracts=2,
+            strike=100.0,
+            expiration_ymd="2026-10-16",
+            currency="USD",
+            raw_payload={
+                "structure_mode": "staggered_expiry_pair",
+                "pair_intent_id": intent_id,
+            },
+        ),
+        repo=FakeRepo([funding_put]),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason == "staggered_combo_yield_quantity_conflict"
+    diagnostics = result.diagnostics["combo_yield_enrichment"]
+    assert diagnostics["companion_contracts_open"] == 1
+    assert diagnostics["incoming_contracts"] == 2
