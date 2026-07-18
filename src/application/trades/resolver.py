@@ -805,6 +805,7 @@ def _resolve_combo_yield_companion(
     companion_expirations: set[str] = set()
     existing_same_leg_open = 0
     invalid_order = False
+    consumed_cycle_capacity = False
     for row in repo.list_position_lots():
         fields = row.get("fields") if isinstance(row.get("fields"), dict) else row
         if str(fields.get("strategy_group_id") or "").strip() != group_id:
@@ -817,15 +818,21 @@ def _resolve_combo_yield_companion(
         if _row_expiry_structure(fields) not in {"", "diagonal"}:
             return None, "diagonal_combo_yield_conflicting_expiry_structure"
 
+        opened_quantity = _safe_nonnegative_int(fields.get("contracts"))
         open_quantity = _safe_nonnegative_int(fields.get("contracts_open"))
-        if open_quantity is None:
+        closed_quantity = _safe_nonnegative_int(fields.get("contracts_closed"))
+        if opened_quantity is None or open_quantity is None or closed_quantity is None:
             return None, "diagonal_combo_yield_invalid_quantity_evidence"
-        if open_quantity <= 0:
-            continue
+        if open_quantity > opened_quantity or closed_quantity > opened_quantity:
+            return None, "diagonal_combo_yield_invalid_quantity_evidence"
+        if closed_quantity > 0 or open_quantity < opened_quantity:
+            consumed_cycle_capacity = True
 
         row_option_type = str(fields.get("option_type") or "").strip().lower()
         row_side = str(fields.get("side") or "").strip().lower()
         row_expiration = str(fields.get("expiration_ymd") or "").strip()
+        if open_quantity <= 0:
+            continue
         if row_option_type == deal.option_type and row_side == incoming_lot_side:
             if row_expiration != expiration:
                 return None, "diagonal_combo_yield_ambiguous_companion"
@@ -845,6 +852,8 @@ def _resolve_combo_yield_companion(
         compatible.append(row)
         companion_expirations.add(row_expiration)
 
+    if consumed_cycle_capacity:
+        return None, "diagonal_combo_yield_cycle_reuse"
     if invalid_order:
         return None, "diagonal_combo_yield_invalid_expiry_order"
     if len(companion_expirations) > 1:

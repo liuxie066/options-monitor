@@ -656,6 +656,64 @@ def test_diagonal_combo_yield_quantity_conflict_fails_closed() -> None:
     assert result.reason == "diagonal_combo_yield_quantity_conflict"
 
 
+def test_diagonal_combo_yield_residual_call_cannot_fund_a_second_put_cycle() -> None:
+    group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
+    call_lot = _position_record(
+        "call-lot",
+        symbol="PDD",
+        option_type="call",
+        side="long",
+        strike=100.0,
+        expiration_ymd="2026-09-18",
+        contracts_open=1,
+    )
+    closed_put_lot = _position_record(
+        "closed-put-lot",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        strike=80.0,
+        expiration_ymd="2026-08-21",
+        contracts_open=1,
+    )
+    for lot, role in ((call_lot, "enhancement_call"), (closed_put_lot, "sell_put")):
+        lot["fields"].update(
+            {
+                "strategy": "combo_yield",
+                "leg_role": role,
+                "strategy_group_id": group_id,
+                "strategy_snapshot": {"expiry_structure": "diagonal", "strategy_group_id": group_id},
+            }
+        )
+    closed_put_lot["fields"].update(
+        {
+            "status": "closed",
+            "contracts": 1,
+            "contracts_open": 0,
+            "contracts_closed": 1,
+        }
+    )
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-pdd-second-put-cycle",
+            symbol="PDD",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            expiration_ymd="2026-08-21",
+            raw_payload=_diagonal_intent(group_id),
+        ),
+        repo=FakeRepo([call_lot, closed_put_lot]),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason == "diagonal_combo_yield_cycle_reuse"
+
+
 def test_diagonal_combo_yield_partial_fills_accept_aggregate_companion_quantity() -> None:
     group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
     call_lots = []
