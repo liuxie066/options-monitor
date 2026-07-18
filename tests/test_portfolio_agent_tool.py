@@ -50,7 +50,12 @@ def test_portfolio_tools_share_one_pure_read_toolset() -> None:
     assert definition.requires_confirm is False
     assert definition.safe_default_input == {"view": "health"}
     assert "url" not in definition.input_schema
-    assert pure_read_toolsets()["portfolio"] == ("portfolio_query", "portfolio_capital_bridge")
+    assert pure_read_toolsets()["portfolio"] == (
+        "portfolio_query",
+        "portfolio_pnl_bridge",
+        "portfolio_cash_bridge",
+        "portfolio_capital_bridge",
+    )
 
 
 def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatch) -> None:
@@ -203,6 +208,42 @@ def _bridge_facts(account: str, *, end_date: str = "2026-07-16") -> dict:
     }
 
 
+def _cash_bridge_facts(account: str, *, end_date: str = "2026-07-16") -> dict:
+    return {
+        "schema_version": "portfolio.cash_facts.v1",
+        "success": True,
+        "status": "ok",
+        "account": account,
+        "period": {
+            "kind": "mtd",
+            "requested_as_of_month": "2026-07",
+            "calendar_start": "2026-07-01",
+            "anchor_date": "2026-06-30",
+            "end_date": end_date,
+            "timezone": "Asia/Shanghai",
+        },
+        "amounts": {
+            "currency": "CNY",
+            "opening_cash": 500.0,
+            "external_cash_flow": 100.0,
+            "ending_cash": 550.0,
+        },
+    }
+
+
+def _option_performance(account: str, *, end_date: str = "2026-07-16") -> dict:
+    return {
+        "period": {"kind": "mtd", "requested_end_date": end_date},
+        "scope": {"account": account},
+        "cash": {
+            "total_cash_change_net": {"cny": -200.0, "status": "observed"},
+        },
+        "pnl": {
+            "period_total_net": {"cny": 40.0, "status": "observed"},
+        },
+    }
+
+
 def test_portfolio_capital_bridge_reads_capital_facts_endpoint(monkeypatch) -> None:
     seen = {}
 
@@ -349,3 +390,117 @@ def test_portfolio_capital_bridge_rejects_endpoint_fields_and_missing_required_i
                 "service_url": "http://127.0.0.1:9999",
             }
         )
+
+
+def test_portfolio_cash_bridge_reads_cash_facts_endpoint(monkeypatch) -> None:
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["request"] = request
+        seen["timeout"] = timeout
+        return _Response(_cash_bridge_facts("lx"))
+
+    monkeypatch.delenv(portfolio.SERVICE_URL_ENV, raising=False)
+    monkeypatch.setattr(portfolio.urllib.request, "urlopen", fake_urlopen)
+
+    result = portfolio._read_cash_facts(account="lx", period="mtd", as_of_month="2026-07")
+
+    parsed = urlsplit(seen["request"].full_url)
+    assert parsed.path == "/analysis/cash-facts"
+    assert parse_qs(parsed.query) == {"account": ["lx"], "period": ["mtd"], "as_of_month": ["2026-07"]}
+    assert seen["request"].get_method() == "GET"
+    assert seen["timeout"] == 30.0
+    assert result["status"] == "ok"
+
+
+@pytest.mark.parametrize("tool_name", ["portfolio_pnl_bridge", "portfolio_cash_bridge"])
+def test_primary_portfolio_bridges_are_pure_read_and_require_explicit_scope(tool_name) -> None:
+    definition = get_tool_definition(tool_name)
+
+    assert definition is not None
+    assert definition.is_pure_read() is True
+    assert definition.side_effects == ()
+    assert definition.requires_confirm is False
+    assert definition.safe_default_input == {}
+    schema = definition.input_json_schema()
+    assert schema["required"] == ["period", "as_of_month", "accounts"]
+    assert "url" not in schema["properties"]
+
+
+def test_primary_bridges_read_aligned_option_performance_per_account(monkeypatch) -> None:
+    pnl = get_tool_definition("portfolio_pnl_bridge")
+    cash = get_tool_definition("portfolio_cash_bridge")
+    assert pnl is not None
+    assert cash is not None
+    calls = []
+
+    def fake_capital(*, account, period, as_of_month):
+        calls.append(("capital", account, period, as_of_month))
+        return _bridge_facts(account)
+
+    def fake_cash(*, account, period, as_of_month):
+        calls.append(("cash", account, period, as_of_month))
+        return _cash_bridge_facts(account)
+
+    def fake_option(*, account, period, end_date):
+        calls.append(("option", account, period, end_date))
+        return _option_performance(account, end_date=end_date), [], {"data_config": ".../runtime.json"}
+
+    monkeypatch.setattr(portfolio, "_read_capital_facts", fake_capital)
+    monkeypatch.setattr(portfolio, "_read_cash_facts", fake_cash)
+    monkeypatch.setattr(portfolio, "_read_option_performance", fake_option)
+
+    pnl_data, pnl_warnings, pnl_meta = pnl.call(
+        {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx"]}
+    )
+    cash_data, cash_warnings, cash_meta = cash.call(
+        {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx"]}
+    )
+
+    assert calls == [
+        ("capital", "lx", "mtd", "2026-07"),
+        ("option", "lx", "mtd", "2026-07-16"),
+        ("cash", "lx", "mtd", "2026-07"),
+        ("option", "lx", "mtd", "2026-07-16"),
+    ]
+    assert pnl_data["status"] == "ok"
+    assert pnl_data["accounts"][0]["option_pnl_evidence"]["amount_cny"] == 40.0
+    assert cash_data["status"] == "ok"
+    assert cash_data["accounts"][0]["option_cash_evidence"]["amount_cny"] == -200.0
+    assert pnl_warnings == cash_warnings == []
+    assert pnl_meta == cash_meta == {"data_config": ".../runtime.json"}
+
+
+def test_cash_facts_404_returns_structured_unavailable_without_option_fallback(monkeypatch) -> None:
+    definition = get_tool_definition("portfolio_cash_bridge")
+    assert definition is not None
+
+    def fail(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "missing", None, None)
+
+    monkeypatch.setattr(portfolio.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(
+        portfolio,
+        "_read_option_performance",
+        lambda **_kwargs: pytest.fail("option report must not load when cash facts are unavailable"),
+    )
+
+    data, warnings, meta = definition.call(
+        {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx"]}
+    )
+
+    assert data["success"] is True
+    assert data["status"] == "unavailable"
+    assert data["accounts"][0]["reason"] == "portfolio_cash_facts_unavailable"
+    assert data["accounts"][0]["steps"] == []
+    assert data["combined"]["reason"] == "account_bridge_unavailable"
+    assert warnings == []
+    assert meta == {}
+
+
+def test_legacy_capital_bridge_is_explicitly_deprecated() -> None:
+    definition = get_tool_definition("portfolio_capital_bridge")
+
+    assert definition is not None
+    assert "DEPRECATED" in definition.description
+    assert "deprecated" in definition.capabilities
