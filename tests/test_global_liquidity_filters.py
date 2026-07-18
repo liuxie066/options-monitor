@@ -935,71 +935,12 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert 'require_bid_ask' not in kwargs
 
 
-def test_sell_put_steps_combo_yield_put_universe_reuses_sell_put_return_floor() -> None:
+def test_sell_put_steps_does_not_trigger_combo_yield() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[dict] = []
-    orig_run_sell_put_scan = steps.run_sell_put_scan
-    orig_add_labels = steps.add_sell_put_labels
-
-    def _fake_run_sell_put_scan(**kwargs):
-        calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
-
-    steps.run_sell_put_scan = _fake_run_sell_put_scan
-    steps.add_sell_put_labels = lambda *args, **kwargs: None
-    try:
-        out = steps.run_sell_put_scan_and_summarize(
-            py='python',
-            base=base,
-            sym='AAPL',
-            symbol='AAPL',
-            symbol_lower='aapl',
-            symbol_cfg={'symbol': 'AAPL', 'combo_yield': {'enabled': True}},
-            sp={
-                'enabled': True,
-                'strategy': 'return_first',
-                'min_dte': 7,
-                'max_dte': 45,
-                'min_strike': 1,
-                'max_strike': 200,
-                'min_annualized_net_return': 0.25,
-                'min_net_income': 500,
-            },
-            top_n=3,
-            required_data_dir=base / 'output',
-            report_dir=base / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-            portfolio_ctx=None,
-        )
-    finally:
-        steps.run_sell_put_scan = orig_run_sell_put_scan
-        steps.add_sell_put_labels = orig_add_labels
-
-    assert [row['strategy'] for row in out] == ['sell_put', 'combo_yield']
-    assert len(calls) == 2
-    assert calls[0]['min_annualized_net_return'] == 0.25
-    assert calls[0]['min_net_income'] == 70.0
-    assert calls[1]['min_annualized_net_return'] == 0.25
-    assert calls[1]['min_net_income'] == 0.0
-    assert calls[1]['min_dte'] == 7
-    assert calls[1]['max_dte'] == 45
-
-
-def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_path: Path) -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_put_steps as steps
-    import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
     calls: list[dict] = []
     orig_run_sell_put_scan = steps.run_sell_put_scan
     orig_add_labels = steps.add_sell_put_labels
@@ -1021,6 +962,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
             symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
             sp={
                 "enabled": True,
+                "strategy": "return_first",
                 "min_dte": 7,
                 "max_dte": 45,
                 "min_strike": 1,
@@ -1029,326 +971,21 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
                 "min_net_income": 500,
             },
             top_n=3,
-            required_data_dir=tmp_path / "required_data",
-            report_dir=report_dir,
+            required_data_dir=base / "output",
+            report_dir=base / "output" / "reports",
             timeout_sec=10,
             is_scheduled=True,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=1.0)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
             portfolio_ctx=None,
         )
     finally:
         steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
-    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield"]
-    assert len(calls) == 2
+    assert [row["strategy"] for row in out] == ["sell_put"]
+    assert len(calls) == 1
     assert calls[0]["min_annualized_net_return"] == 0.25
-    assert calls[0]["min_net_income"] == 500.0
-    assert calls[1]["min_annualized_net_return"] == 0.25
-    assert calls[1]["min_net_income"] == 0.0
-
-
-def test_sell_put_steps_combo_yield_put_universe_is_retained_but_pairs_are_cash_filtered(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_put_steps as steps
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    captured_pairs_input: dict[str, pd.DataFrame] = {}
-    enrich_calls: list[Path] = []
-
-    candidate = {
-        "symbol": "AAPL",
-        "expiration": "2026-06-19",
-        "dte": 35,
-        "contract_symbol": "AAPL260619P00180000",
-        "multiplier": 100,
-        "currency": "USD",
-        "strike": 180.0,
-        "spot": 200.0,
-        "bid": 2.4,
-        "ask": 2.6,
-        "mid": 2.5,
-        "net_income": 250.0,
-        "annualized_net_return_on_cash_basis": 0.14,
-        "otm_pct": 0.1,
-        "risk_label": "中性",
-        "open_interest": 100,
-        "volume": 20,
-        "implied_volatility": 0.25,
-        "delta": -0.2,
-        "event_source_status": "ok",
-    }
-
-    def _fake_run_sell_put_scan(**kwargs):
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(kwargs["output"], index=False)
-
-    def _fake_add_sell_put_labels(_base, _input, output):
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(output, index=False)
-
-    def _fake_enrich(*, df_labeled, symbol, portfolio_ctx, exchange_rate_converter, out_path):
-        enrich_calls.append(Path(out_path))
-        df = df_labeled.copy()
-        df["cash_required_cny"] = 20000.0
-        df["cash_free_cny"] = 1000.0
-        df.to_csv(out_path, index=False)
-        return df
-
-    def _fake_find_pairs(**kwargs):
-        captured_pairs_input["df"] = kwargs["df_candidates"].copy()
-        return pd.DataFrame()
-
-    def _fake_underwriting_gate(**kwargs):
-        df = kwargs["df_labeled"].copy()
-        df.to_csv(kwargs["out_path"], index=False)
-        return df
-
-    monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
-    monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
-    monkeypatch.setattr(steps, "enrich_sell_put_candidates_with_cash", _fake_enrich)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
-    monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
-
-    out = steps.run_sell_put_scan_and_summarize(
-        py="python",
-        base=base,
-        sym="AAPL",
-        symbol="AAPL",
-        symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
-        sp={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 7,
-            "max_dte": 45,
-            "min_strike": 1,
-            "max_strike": 200,
-            "min_annualized_net_return": 0.1,
-        },
-        top_n=3,
-        required_data_dir=tmp_path / "required_data",
-        report_dir=report_dir,
-        timeout_sec=10,
-        is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        portfolio_ctx={"cash_by_currency": {"CNY": 1000}},
-    )
-
-    filtered_sell_put = pd.read_csv(report_dir / "aapl_sell_put_candidates_labeled.csv")
-    retained_universe = pd.read_csv(report_dir / "aapl_combo_yield_put_universe_labeled.csv")
-    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield"]
-    assert filtered_sell_put.empty
-    assert len(retained_universe) == 1
-    assert "cash_required_cny" not in retained_universe.columns
-    assert len(enrich_calls) == 2
-    assert enrich_calls[0].name == "aapl_sell_put_candidates_labeled.csv"
-    assert enrich_calls[1].name == "aapl_combo_yield_put_universe_cash_filtered.csv"
-    assert captured_pairs_input["df"].empty
-    assert "cash_required_cny" in captured_pairs_input["df"].columns
-
-    trace_rows = [
-        json.loads(line)
-        for line in (report_dir / "candidate_filter_trace.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    combo_cash_rows = [
-        row
-        for row in trace_rows
-        if row["function"] == "cash_reserve" and row.get("strategy_family") == "combo_yield"
-    ]
-    assert combo_cash_rows
-    assert combo_cash_rows[0]["rule"] == "base_cny_cash_insufficient"
-    assert combo_cash_rows[0]["evidence_path"] == "aapl_combo_yield_put_universe_cash_filtered.csv"
-
-
-def test_sell_put_steps_combo_yield_put_universe_reuses_underwriting_gate_for_insurance(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_put_steps as steps
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    captured_pairs_input: dict[str, pd.DataFrame] = {}
-    underwriting_gate_paths: list[str] = []
-
-    candidate = {
-        "symbol": "AAPL",
-        "expiration": "2026-06-19",
-        "dte": 35,
-        "contract_symbol": "AAPL260619P00180000",
-        "multiplier": 100,
-        "currency": "USD",
-        "strike": 180.0,
-        "spot": 200.0,
-        "bid": 2.4,
-        "ask": 2.6,
-        "mid": 2.5,
-        "net_income": 250.0,
-        "annualized_net_return_on_cash_basis": 0.14,
-        "otm_pct": 0.1,
-        "risk_label": "中性",
-        "open_interest": 100,
-        "volume": 20,
-        "implied_volatility": 0.18,
-        "realized_volatility_estimate": 0.20,
-        "delta": -0.2,
-        "event_source_status": "ok",
-    }
-
-    def _fake_run_sell_put_scan(**kwargs):
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(kwargs["output"], index=False)
-
-    def _fake_add_sell_put_labels(_base, _input, output):
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(output, index=False)
-
-    def _fake_underwriting_gate(**kwargs):
-        out_path = Path(kwargs["out_path"])
-        underwriting_gate_paths.append(out_path.name)
-        if "combo_yield_put_universe" in out_path.name:
-            empty = kwargs["df_labeled"].iloc[0:0].copy()
-            empty.to_csv(out_path, index=False)
-            return empty
-        df = kwargs["df_labeled"].copy()
-        df.to_csv(out_path, index=False)
-        return df
-
-    def _fake_find_pairs(**kwargs):
-        captured_pairs_input["df"] = kwargs["df_candidates"].copy()
-        return pd.DataFrame()
-
-    monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
-    monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
-    monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
-
-    steps.run_sell_put_scan_and_summarize(
-        py="python",
-        base=base,
-        sym="AAPL",
-        symbol="AAPL",
-        symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
-        sp={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 7,
-            "max_dte": 45,
-            "min_strike": 1,
-            "max_strike": 200,
-            "min_annualized_net_return": 0.10,
-        },
-        top_n=3,
-        required_data_dir=tmp_path / "required_data",
-        report_dir=report_dir,
-        timeout_sec=10,
-        is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        portfolio_ctx={"cash_by_currency": {"USD": 100000}},
-    )
-
-    assert "aapl_combo_yield_put_universe_underwritten.csv" in underwriting_gate_paths
-    assert captured_pairs_input["df"].empty
-
-
-def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_return_first(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_put_steps as steps
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    captured_pairs_input: dict[str, pd.DataFrame] = {}
-    underwriting_gate_paths: list[str] = []
-
-    candidate = {
-        "symbol": "AAPL",
-        "expiration": "2026-06-19",
-        "dte": 35,
-        "contract_symbol": "AAPL260619P00180000",
-        "multiplier": 100,
-        "currency": "USD",
-        "strike": 180.0,
-        "spot": 200.0,
-        "bid": 2.4,
-        "ask": 2.6,
-        "mid": 2.5,
-        "net_income": 250.0,
-        "annualized_net_return_on_cash_basis": 0.14,
-        "otm_pct": 0.1,
-        "risk_label": "中性",
-        "open_interest": 100,
-        "volume": 20,
-        "implied_volatility": 0.18,
-        "realized_volatility_estimate": 0.20,
-        "delta": -0.2,
-        "event_source_status": "ok",
-    }
-
-    def _fake_run_sell_put_scan(**kwargs):
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(kwargs["output"], index=False)
-
-    def _fake_add_sell_put_labels(_base, _input, output):
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([candidate]).to_csv(output, index=False)
-
-    def _fake_underwriting_gate(**kwargs):
-        out_path = Path(kwargs["out_path"])
-        underwriting_gate_paths.append(out_path.name)
-        df = kwargs["df_labeled"].copy()
-        df.to_csv(out_path, index=False)
-        return df
-
-    def _fake_find_pairs(**kwargs):
-        captured_pairs_input["df"] = kwargs["df_candidates"].copy()
-        return pd.DataFrame()
-
-    monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
-    monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
-    monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
-
-    steps.run_sell_put_scan_and_summarize(
-        py="python",
-        base=base,
-        sym="AAPL",
-        symbol="AAPL",
-        symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
-        sp={
-            "enabled": True,
-            "strategy": "return_first",
-            "min_dte": 7,
-            "max_dte": 45,
-            "min_strike": 1,
-            "max_strike": 200,
-            "min_annualized_net_return": 0.10,
-        },
-        top_n=3,
-        required_data_dir=tmp_path / "required_data",
-        report_dir=report_dir,
-        timeout_sec=10,
-        is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
-        portfolio_ctx={"cash_by_currency": {"USD": 100000}},
-    )
-
-    assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths
-    assert len(captured_pairs_input["df"]) == 1
+    assert calls[0]["min_net_income"] == 70.0
 
 
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:

@@ -26,15 +26,9 @@ from src.application.render_sell_put_alerts import render_sell_put_alerts
 from src.application.report_labels import add_sell_put_labels
 from src.application.report_summaries import summarize_sell_put
 from src.application.scan_sell_put import run_sell_put_scan
-from src.application.sell_put_call_helper import (
-    attach_best_linked_calls,
-    find_sell_put_yield_enhancement_pairs,
-    select_best_yield_enhancement_pairs,
-)
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
-from src.application.combo_yield_steps import run_combo_yield_scan_and_summarize
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -43,10 +37,6 @@ from src.application.candidate_filter_trace import (
 )
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
-from src.application.yield_enhancement_config import (
-    derive_yield_enhancement_policy,
-    resolve_yield_enhancement_cfg,
-)
 
 log = logging.getLogger(__name__)
 
@@ -254,14 +244,6 @@ def run_sell_put_scan_and_summarize(
 ) -> list[dict[str, Any]]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
-    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
-    yield_enhancement_policy = derive_yield_enhancement_policy(
-        yield_enhancement_cfg,
-        yield_sp,
-        market=symbol_market(symbol),
-    )
-
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
     resolved_min_annualized_net_return = 0.0 if sell_put_semantics.scan_uses_underwriting_gate else validate_min_annualized_net_return(
         sp.get('min_annualized_net_return'),
@@ -271,7 +253,6 @@ def run_sell_put_scan_and_summarize(
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     event_risk = resolve_event_risk_config(global_sell_put_event_risk)
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
-    yield_window = resolve_candidate_window(yield_sp, defaults=DEFAULT_SELL_PUT_WINDOW)
     global_min_net_income = float((global_sell_put_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
@@ -344,34 +325,6 @@ def run_sell_put_scan_and_summarize(
         except Exception as exc:
             log.warning("sell_put_steps: failed to write fail-closed sell-put CSV for %s: %s", symbol, exc)
 
-    _yield_result, yield_summary = run_combo_yield_scan_and_summarize(
-        base=base,
-        sym=sym,
-        symbol=symbol,
-        symbol_lower=symbol_lower,
-        symbol_cfg=symbol_cfg,
-        yield_enhancement_cfg=yield_enhancement_cfg,
-        yield_sp=yield_sp,
-        yield_enhancement_policy=yield_enhancement_policy,
-        df_sell_put_labeled=df_sp_lab,
-        sell_put_labeled_path=symbol_sp_labeled,
-        required_data_dir=required_data_dir,
-        report_dir=report_dir,
-        yield_window=yield_window,
-        liquidity=liquidity,
-        event_risk=event_risk,
-        exchange_rate_converter=exchange_rate_converter,
-        portfolio_ctx=portfolio_ctx,
-        top_n=top_n,
-        is_scheduled=bool(is_scheduled),
-        run_put_scan_fn=run_sell_put_scan,
-        label_put_candidates_fn=add_sell_put_labels,
-        find_pairs_fn=find_sell_put_yield_enhancement_pairs,
-        select_pairs_fn=select_best_yield_enhancement_pairs,
-        attach_calls_fn=attach_best_linked_calls,
-        cash_filter_put_candidates_fn=_enrich_and_filter_sell_put_cash,
-        underwriting_filter_put_candidates_fn=enrich_and_filter_sell_put_underwriting,
-    )
 
     if not is_scheduled:
         render_sell_put_alerts(
@@ -383,10 +336,16 @@ def run_sell_put_scan_and_summarize(
             base_dir=base,
         )
 
-    rows = [summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)]
-    if yield_summary is not None:
-        rows.append(yield_summary)
-    return rows
+    return [summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)]
+
+
+def materialize_empty_sell_put_artifacts(*, report_dir: Path, symbol_lower: str) -> None:
+    """Replace current Sell Put outputs with explicit empty artifacts."""
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame().to_csv((report_dir / f"{symbol_lower}_sell_put_candidates.csv").resolve(), index=False)
+    pd.DataFrame().to_csv((report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve(), index=False)
+    (report_dir / f"{symbol_lower}_sell_put_alerts.txt").resolve().write_text("", encoding="utf-8")
 
 
 def empty_sell_put_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:
