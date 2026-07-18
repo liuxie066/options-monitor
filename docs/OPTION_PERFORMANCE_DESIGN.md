@@ -181,3 +181,74 @@ than attributing them to the requested account or treating them as zero.
 - S8: analysis, Assistant, Copilot, and legacy CLI consumers migrated to explicit activity/cash/PnL semantics.
 - S9: independent portfolio PnL and cash bridges implemented; the mixed capital bridge is deprecated.
 - S10: old/new reconciliation, replay and coverage gates, explicit legacy-reference allowlist, proven-scope zero semantics, and rollback/removal documentation implemented.
+
+## Combo Yield Cross-Expiry Attribution
+
+Option Performance keeps canonical accounting and management attribution separate. The existing
+`activity`, `cash`, `pnl`, `capital`, assigned-stock and breakdown totals remain the source of truth.
+The additive `attribution` object is a read model over those canonical facts:
+
+```text
+attribution.schema_version = option_strategy_attribution.v1
+```
+
+Three timelines must not be collapsed:
+
+1. cash timing records the real Put credit and Call debit on their trade dates;
+2. economic PnL recognizes option realized PnL from canonical close allocations and period
+   unrealized changes from opening/ending valuation evidence;
+3. management attribution groups those facts by strategy group and lifecycle without moving or
+   duplicating them.
+
+For staggered/diagonal Combo Yield, `strategy_group_id` owns the full structure. The current V1
+requires exactly one `funding_put` lot and one `participation_call` lot. Stable identities are based
+on canonical lot IDs, not expiration dates:
+
+```text
+funding_cycle:<funding-put-lot-id>
+participation:<participation-call-lot-id>
+assigned_stock:<stock-lot-id>
+residual_tail:<strategy-group-id>:<put-close-event-id>
+```
+
+The Call opening premium remains the Participation Call cost basis. It is not an immediate loss of
+the Funding Put cycle. The group-lifetime funding snapshot separately explains affordability:
+
+```text
+put_open_credit_gross
+call_open_debit_gross
+call_cost_funded_by_put = min(put_open_credit_gross, call_open_debit_gross)
+funding_surplus = put_open_credit_gross - call_open_debit_gross
+funding_ratio = put_open_credit_gross / call_open_debit_gross
+```
+
+This snapshot is informational. It is never added to period cash or PnL. Gross funding remains
+visible when fee provenance is incomplete; net funding is not manufactured without actual fee
+evidence.
+
+Attribution reuses `notional_days_v1`:
+
+```text
+capital_days = sum(incremental_notional * exact_overlap_days)
+average_incremental_capital = capital_days / exact_report_duration_days
+annualized_efficiency = scope_matched_period_net_pnl / capital_days * 365
+```
+
+Funding Put efficiency uses only Funding Put PnL and Put strike-notional days. Participation Call
+efficiency uses only Call PnL and Call premium-basis days. Group efficiency uses all attributable
+group PnL and all group incremental capital-days. Assigned stock enters only with explicit canonical
+`strategy_group_id` provenance and uses remaining stock cost basis.
+
+When a report begins after the Put fully closes, the residual Call tail has isolated opening/ending
+valuation boundaries and may report tail PnL and efficiency. A report that crosses the Put close
+timestamp cannot split Call PnL between active-combo and residual-tail phases without an exact
+transition mark; V1 reports `transition_mark_required` instead of interpolating.
+
+Conservation is computed per native currency from Decimal source facts before serialization for
+realized gross/net, opening and ending unrealized gross/net, and period total gross/net. Missing or
+partial source evidence produces partial conservation, never synthetic zero. Malformed or legacy
+untagged Combo groups remain in canonical totals and are explicit in attribution coverage.
+
+`include_rows=false` only omits raw fact rows. Attribution summaries and conservation are computed
+before serialization and remain identical. A proven scope with no Combo Yield group produces an
+observed empty attribution object; ordinary Sell Put or Covered Call reports are not downgraded.
