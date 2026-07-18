@@ -2,11 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VPY="$ROOT/.venv/bin/python"
+# shellcheck source=scripts/python_runtime.sh
+source "$ROOT/scripts/python_runtime.sh"
+VPY="$(om_select_repo_python "$ROOT")"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-if [[ -x "$VPY" ]]; then
-  exec "$VPY" -m src.interfaces.cli.main "$@"
-fi
-
-exec python3 -m src.interfaces.cli.main "$@"
+exec "$VPY" -m src.interfaces.cli.main "$@"

@@ -16,7 +16,7 @@ def test_install_script_is_shell_parseable_and_has_no_service_side_effects() -> 
     assert "resolved latest release" in text
     assert "Default: latest published GitHub release, never main." in text
     assert "xcode-select --install" in text
-    assert "python3-venv" in text
+    assert "python3.12-venv" in text
     assert "systemctl enable" not in text
     assert "launchctl bootstrap" not in text
     assert "OM_FEISHU_BOT_APP_SECRET" not in text
@@ -66,10 +66,14 @@ set -euo pipefail
 printf '{"tag_name":"v9.9.10"}\\n'
 """,
     )
-    _write_executable(
-        bin_dir / "python3",
-        """#!/usr/bin/env bash
+    fake_python = """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  if [[ "$2" == *"sys.version_info"* ]]; then
+    printf '3.12.0\n'
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
   venv="$3"
   mkdir -p "$venv/bin"
@@ -82,8 +86,9 @@ SH
 fi
 cat >/dev/null || true
 exit 0
-""",
-    )
+"""
+    _write_executable(bin_dir / "python3", fake_python)
+    _write_executable(bin_dir / "python3.12", fake_python)
     return bin_dir
 
 
@@ -243,3 +248,33 @@ def test_install_script_custom_bin_dir_uses_path_without_warning(tmp_path: Path)
     assert (bin_dir / "om-agent").exists()
     assert "Warning:" not in result.stdout
     assert "  om setup check" in result.stdout
+
+
+def test_install_script_rejects_incompatible_explicit_python(tmp_path: Path) -> None:
+    old_python = _write_executable(
+        tmp_path / "python3.11",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  printf '3.11.9\n'
+  exit 42
+fi
+exit 0
+""",
+    )
+
+    result = _run_installer(tmp_path, "--python", str(old_python))
+
+    assert result.returncode != 0
+    assert "Python >= 3.12 is required" in result.stderr
+    assert f"executable={old_python}" in result.stderr
+    assert "observed=3.11.9" in result.stderr
+    assert not (tmp_path / "apps" / "options-monitor" / "current").exists()
+
+
+def test_install_script_prefers_python312_when_no_override(tmp_path: Path) -> None:
+    text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    assert 'command -v python3.12' in text
+    assert 'PYTHON_BIN="python3.12"' in text
+    assert 'sys.version_info >= (3, 12)' in text
