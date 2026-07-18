@@ -316,3 +316,93 @@ def test_http_json_logs_error_when_all_retries_fail() -> None:
     assert err["max_attempts"] == 2
     assert err["category"] == "transient"
     assert err["url_path"] == "example.com/other"
+
+
+def test_get_tenant_access_token_ack_fast_path_skips_busy_lock() -> None:
+    from datetime import timedelta
+
+    from src.infrastructure import feishu_bitable as fb
+
+    fb._token_cache.clear()
+    fb._token_cache[("app", "secret")] = {
+        "token": "cached-token",
+        "expire_at": fb._now_utc() + timedelta(hours=1),
+    }
+
+    fb._token_lock.acquire()
+    try:
+        assert fb.get_tenant_access_token("app", "secret", lock_timeout=0.0) == "cached-token"
+    finally:
+        fb._token_lock.release()
+
+
+def test_get_tenant_access_token_ack_fails_fast_when_refresh_lock_busy() -> None:
+    from src.infrastructure import feishu_bitable as fb
+
+    fb._token_cache.clear()
+    fb._token_lock.acquire()
+    try:
+        with patch.object(fb, "http_json") as http_mock:
+            try:
+                fb.get_tenant_access_token("app", "secret", lock_timeout=0.0)
+                assert False, "should fail fast"
+            except fb.FeishuTransientError as exc:
+                assert exc.response["error_type"] == "token_lock_timeout"
+            http_mock.assert_not_called()
+    finally:
+        fb._token_lock.release()
+
+
+def test_get_tenant_access_token_forwards_custom_http_budget() -> None:
+    from src.infrastructure import feishu_bitable as fb
+
+    fb._token_cache.clear()
+    calls: list[dict] = []
+
+    def _http_json(method, url, payload, **kwargs):
+        calls.append({"method": method, "url": url, "payload": payload, **kwargs})
+        return {"code": 0, "tenant_access_token": "token", "expire": 7200}
+
+    with patch.object(fb, "http_json", side_effect=_http_json):
+        out = fb.get_tenant_access_token(
+            "app",
+            "secret",
+            timeout=2,
+            retry_max_attempts=1,
+            lock_timeout=0.0,
+        )
+
+    assert out == "token"
+    assert calls[0]["timeout"] == 2
+    assert calls[0]["retry_max_attempts"] == 1
+
+
+def test_with_tenant_token_retry_forwards_optional_budget() -> None:
+    from src.infrastructure import feishu_bitable as fb
+
+    calls: list[dict] = []
+
+    def _get_token(app_id: str, app_secret: str, **kwargs) -> str:
+        calls.append({"app_id": app_id, "app_secret": app_secret, **kwargs})
+        return "token"
+
+    with patch.object(fb, "get_tenant_access_token", side_effect=_get_token):
+        out = fb.with_tenant_token_retry(
+            "app",
+            "secret",
+            lambda token: token,
+            token_timeout=2,
+            token_retry_max_attempts=1,
+            token_lock_timeout=0.0,
+        )
+
+    assert out == "token"
+    assert calls == [
+        {
+            "app_id": "app",
+            "app_secret": "secret",
+            "timeout": 2,
+            "retry_max_attempts": 1,
+            "lock_timeout": 0.0,
+        }
+    ]
