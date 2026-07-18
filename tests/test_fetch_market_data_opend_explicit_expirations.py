@@ -429,8 +429,15 @@ def test_fetch_symbol_reports_snapshot_rate_limit_errors(monkeypatch, tmp_path: 
         def close(self):  # noqa: ANN201
             return None
 
+    fetch_option_snapshots = mod.fetch_option_snapshots
+
+    def _fetch_option_snapshots(**kwargs):  # type: ignore[no-untyped-def]
+        kwargs["rate_limited_call"] = lambda **call_kwargs: call_kwargs["call"]()
+        return fetch_option_snapshots(**kwargs)
+
     monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
+    monkeypatch.setattr(mod, "fetch_option_snapshots", _fetch_option_snapshots)
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
 
     payload = mod.fetch_symbol(

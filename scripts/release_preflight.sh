@@ -18,18 +18,9 @@ EOF
 }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python_has_pytest() {
-  "$1" -c 'import pytest' >/dev/null 2>&1
-}
-
-PYTHON_BIN="${PYTHON:-}"
-if [[ -z "${PYTHON_BIN}" ]]; then
-  if [[ -x "${ROOT}/.venv/bin/python" ]] && python_has_pytest "${ROOT}/.venv/bin/python"; then
-    PYTHON_BIN="${ROOT}/.venv/bin/python"
-  else
-    PYTHON_BIN="python3"
-  fi
-fi
+# shellcheck source=python_runtime.sh
+source "${ROOT}/scripts/python_runtime.sh"
+PYTHON_BIN="$(om_select_repo_python "${ROOT}")"
 
 FULL=0
 REQUIRE_CLEAN=0
@@ -103,7 +94,7 @@ if [[ "${CHECK_DEPS}" -eq 1 ]]; then
   run_step "dependency graph check" "${PYTHON_BIN}" scripts/generate_dependency_graph.py --check
 fi
 
-if [[ "${FOCUSED}" -eq 1 ]]; then
+if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
   run_step "agent/plugin focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 fi
