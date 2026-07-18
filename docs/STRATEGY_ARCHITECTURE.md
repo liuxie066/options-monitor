@@ -294,3 +294,33 @@ funding_ratio = put_net_credit / call_total_cost
 - 重命名 close advice 的 short-vol thesis 字段
 - 重构 shadow replay 的历史策略画像
 - 重命名 Combo Yield 的 legacy `yield_enhancement` 文件名和持仓标记
+
+### 跨期收益与资金占用归因
+
+错期 Combo Yield 同时维护三种不同语义：真实现金流、canonical economic PnL 和 management
+attribution。三者不能互相替代。
+
+- Funding Put 收到的 premium 可以为 Participation Call 提供 funding，但不会把 Call premium
+  再次记为 Put 周期损失。
+- Participation Call 的 premium 是 Call 自身生命周期成本基础。Call 的 realized PnL 在 canonical
+  close allocation 时确认；跨报表期间的价值变化来自 opening/ending marks。
+- `strategy_group_id` 表示完整组合；Funding Put、Participation Call、assigned stock 和 residual Call
+  分别使用 canonical lot identity 派生 lifecycle ID。
+- 本版本支持一张 Funding Put、一张 Participation Call 和 Put 结束后的 residual-call tail；不实现自动
+  roll 或一张长期 Call 对多个连续 Put cycles。
+
+资金效率使用风险资本日，而不是净开仓现金流：
+
+```text
+Funding Put capital = strike * multiplier * remaining contracts
+Participation Call capital = remaining opening premium debit
+Assigned stock capital = remaining stock cost basis
+capital_days = sum(capital * exact overlap days)
+```
+
+`Call debit - Put credit` 可作为资金来源说明，但不得替代 cash-secured Put 的 strike notional；否则
+收到 premium 会人为压低风险资本分母。只有 PnL owner、capital owner 和时间窗口完全一致时才输出
+annualized efficiency。
+
+如果报表窗口跨过 Put close，而该时点没有精确 Call valuation mark，系统只报告完整 Call lifecycle 和
+strategy-group PnL，不把 Call 价格变化启发式切分给 Funding cycle 或 residual tail。
