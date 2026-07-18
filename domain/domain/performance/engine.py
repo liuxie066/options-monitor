@@ -31,6 +31,7 @@ from domain.domain.performance.models import (
     to_decimal,
 )
 from domain.domain.performance.period import PeriodWindow, REPORTING_TIMEZONE
+from domain.domain.performance.strategy_attribution import build_strategy_attribution
 
 
 _MONETARY_KINDS = frozenset(
@@ -157,6 +158,7 @@ class PeriodPerformance:
     cash: Mapping[str, Any]
     pnl: Mapping[str, Any]
     capital: Mapping[str, Any]
+    attribution: Mapping[str, Any]
     assigned_stock: Mapping[str, Any]
     breakdowns: Mapping[str, Any]
     quality: MetricQuality
@@ -171,6 +173,7 @@ class PeriodPerformance:
             "cash": dict(self.cash),
             "pnl": dict(self.pnl),
             "capital": dict(self.capital),
+            "attribution": dict(self.attribution),
             "assigned_stock": dict(self.assigned_stock),
             "breakdowns": dict(self.breakdowns),
             "quality": self.quality.to_dict(),
@@ -279,12 +282,19 @@ def build_period_performance(
         )
     )
     summary = _summarize(ordered_facts, fx_rates=fx_rates)
-    capital = _capital_report(
+    capital, capital_segments = _capital_report(
         events=scoped_events,
         allocations=scoped_all_allocations,
         period=period,
         ending_assigned_stock=ending_assigned_stock or {},
         pnl=summary["pnl"],
+    )
+    attribution = build_strategy_attribution(
+        events=scoped_events,
+        allocations=scoped_all_allocations,
+        facts=ordered_facts,
+        capital_segments=capital_segments,
+        period=period,
     )
     breakdowns = {
         "monthly": _breakdown(
@@ -398,6 +408,7 @@ def build_period_performance(
         cash=summary["cash"],
         pnl=summary["pnl"],
         capital=capital,
+        attribution=attribution,
         assigned_stock=_assigned_stock_report_summary(
             opening_assigned_stock or {},
             ending_assigned_stock or {},
@@ -417,7 +428,7 @@ def _capital_report(
     period: PeriodWindow,
     ending_assigned_stock: Mapping[str, Any],
     pnl: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[CapitalExposureSegment, ...]]:
     segments: list[CapitalExposureSegment] = []
     missing: set[str] = set()
     warnings: set[str] = set()
@@ -513,7 +524,7 @@ def _capital_report(
         if relevant_segments
         else MetricStatus.NOT_OBSERVED
     )
-    return {
+    report = {
         "capital_basis": "notional_days_v1",
         "capital_days_by_currency": {currency: float(value) for currency, value in rounded_sums.items()},
         "period_total_net_annualized_efficiency": _annualized_efficiency(
@@ -539,6 +550,7 @@ def _capital_report(
             for item in relevant_segments
         ],
     }
+    return report, tuple(relevant_segments)
 
 
 def _append_option_capital_segment(
@@ -714,6 +726,8 @@ def _append_stock_capital_segment(
             end_at_ms=end_at_ms,
             notional=notional,
             quantity=shares,
+            attribution=_assigned_stock_attribution(lot, source_id=lot_id)[0],
+            attribution_issues=_assigned_stock_attribution(lot, source_id=lot_id)[1],
         )
     except ValueError:
         missing.add(f"assigned_stock_basis_unavailable:{lot_id}")
@@ -1191,13 +1205,47 @@ def _assigned_stock_unrealized_facts(
 
 
 def _assigned_stock_fact_kwargs(row: Mapping[str, Any], *, source_event_id: str) -> dict[str, Any]:
+    attribution, issues = _assigned_stock_attribution(row, source_id=source_event_id)
     return {
         "account": str(row.get("account") or ""),
         "broker": str(row.get("broker") or ""),
         "symbol": str(row.get("symbol") or ""),
         "currency": str(row.get("currency") or "") or None,
         "source_event_id": source_event_id,
+        "attribution": attribution,
+        "attribution_issues": issues,
     }
+
+
+def _assigned_stock_attribution(
+    row: Mapping[str, Any],
+    *,
+    source_id: str,
+) -> tuple[StrategyAttribution | None, tuple[str, ...]]:
+    snapshot = row.get("strategy_snapshot") if isinstance(row.get("strategy_snapshot"), Mapping) else {}
+    snapshot_group = str(snapshot.get("strategy_group_id") or "").strip()
+    row_group = str(row.get("strategy_group_id") or "").strip()
+    if snapshot_group and row_group and snapshot_group != row_group:
+        return None, (f"assigned_stock_strategy_group_conflict:{source_id}",)
+    group_id = snapshot_group or row_group
+    strategy = str(snapshot.get("strategy") or row.get("strategy") or "").strip()
+    if not strategy and group_id.startswith("combo_yield:"):
+        strategy = "combo_yield"
+    if not group_id:
+        return None, ()
+    lifecycle_source_id = str(row.get("stock_lot_id") or source_id or "").strip()
+    if strategy != "combo_yield" or not lifecycle_source_id:
+        return None, (f"assigned_stock_attribution_unavailable:{source_id or 'unknown'}",)
+    return (
+        StrategyAttribution(
+            strategy=strategy,
+            leg_role="assigned_stock",
+            strategy_group_id=group_id,
+            lifecycle_id=f"assigned_stock:{lifecycle_source_id}",
+            expiry_structure=str(snapshot.get("expiry_structure") or row.get("expiry_structure") or "").strip() or None,
+        ),
+        (),
+    )
 
 
 def _assigned_stock_fee(row: Mapping[str, Any], *, component: str) -> Mapping[str, Any]:
@@ -1390,10 +1438,10 @@ def _fact_currency(value: Any, *, context: str) -> tuple[str | None, str | None]
 
 
 def _event_fact_kwargs(event: TradeEvent, *, currency: str | None) -> dict[str, Any]:
-    resolution = resolve_event_attribution(
-        event,
-        lifecycle_source_id=lot_id_for_open_event(event) if event.event_type == "open" else None,
+    lifecycle_source_id = (
+        lot_id_for_open_event(event) if event.event_type == "open" else event.target_lot_id
     )
+    resolution = resolve_event_attribution(event, lifecycle_source_id=lifecycle_source_id)
     return {
         "account": event.contract_key.account,
         "broker": event.contract_key.broker,
