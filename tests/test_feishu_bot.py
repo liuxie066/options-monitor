@@ -52,6 +52,39 @@ def test_add_message_reaction_posts_feishu_reaction_payload(monkeypatch: pytest.
     ]
 
 
+def test_add_message_reaction_preserves_official_mixed_case_emoji(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads: list[dict] = []
+
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda _app_id, _app_secret, fn, **_kwargs: fn("tenant_token"),
+    )
+
+    def _http_json(
+        _method: str,
+        _url: str,
+        payload: dict,
+        headers: dict,
+        **_kwargs,
+    ) -> dict:
+        assert headers["Authorization"] == "Bearer tenant_token"
+        payloads.append(payload)
+        return {"code": 0}
+
+    feishu_bot.add_message_reaction(
+        app_id="app_1",
+        app_secret="secret_1",
+        message_id="msg_1",
+        emoji_type="Typing",
+        http_json_fn=_http_json,
+    )
+
+    assert payloads == [{"reaction_type": {"emoji_type": "Typing"}}]
+
+
 def test_add_message_reaction_requires_message_and_emoji() -> None:
     with pytest.raises(ValueError, match="message_id is required"):
         feishu_bot.add_message_reaction(app_id="app_1", app_secret="secret_1", message_id="", emoji_type="SMILE")

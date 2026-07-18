@@ -60,7 +60,9 @@ def add_message_reaction(
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
     message_id_value = str(message_id or "").strip()
-    emoji_type_value = str(emoji_type or "").strip().upper()
+    emoji_type_value = str(emoji_type or "").strip()
+    if not (any(char.islower() for char in emoji_type_value) and any(char.isupper() for char in emoji_type_value)):
+        emoji_type_value = emoji_type_value.upper()
     if not message_id_value:
         raise ValueError("message_id is required")
     if not emoji_type_value:
