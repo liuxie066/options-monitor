@@ -53,7 +53,7 @@ def current_platform_profile(*, system: str | None = None, home: str | Path | No
             default_env_file=Path("/etc/options-monitor/options-monitor.env"),
             local_env_file=local_env_file,
             prerequisite_hints=(
-                "Install git, python3, and python3 venv support before running scripts/install.sh.",
+                "Install git, Python 3.12+, and Python 3.12 venv support before running scripts/install.sh.",
                 "Use --with-server when this host will run Feishu long-connection inbound.",
             ),
             service_notes=(
@@ -73,7 +73,7 @@ def current_platform_profile(*, system: str | None = None, home: str | Path | No
             default_env_file=runtime_root / "options-monitor.env",
             local_env_file=local_env_file,
             prerequisite_hints=(
-                "Install Apple Command Line Tools with xcode-select --install, or install git/python through Homebrew.",
+                "Install Apple Command Line Tools with xcode-select --install and install Python 3.12+ through Homebrew.",
                 "Use --with-server when this Mac will run Feishu long-connection inbound.",
             ),
             service_notes=(
