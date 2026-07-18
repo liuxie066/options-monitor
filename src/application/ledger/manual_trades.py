@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
@@ -240,6 +241,13 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
         currency=currency,
         trade_time_ms=trade_time_ms,
     )
+    strategy_payload = strategy_metadata_fields_from_payload(
+        {
+            "strategy_snapshot": (
+                dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None
+            )
+        }
+    )
     event = TradeEvent(
         event_id=event_id,
         event_type="open",
@@ -265,7 +273,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
             "mode": "manual_open",
             "side": normalized_side,
             "multiplier_source": "payload" if command.multiplier is not None else None,
-            "strategy_snapshot": dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None,
+            **strategy_payload,
         },
     )
     return persist_trade_event_object(repo, event)

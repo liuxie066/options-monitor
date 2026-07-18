@@ -10,6 +10,7 @@ from typing import Any
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
+from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
@@ -54,6 +55,7 @@ def _empty_context(
         "exchange_rates": (rates or {}),
         "raw_selected_count": raw_selected_count,
         "open_positions_min": [],
+        "combo_yield_groups": [],
     }
     if ledger_status is not None:
         out["ledger"] = ledger_status
@@ -227,6 +229,27 @@ def build_context(
         "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),
         "open_positions_min": open_positions_min,
+        "combo_yield_groups": build_option_group_inventory(
+            [
+                {
+                    "record_id": item.record_id,
+                    "account": item.account,
+                    "symbol": item.canonical_underlying_symbol,
+                    "option_type": item.option_type,
+                    "side": item.side,
+                    "contracts": item.contracts,
+                    "contracts_open": item.contracts_open,
+                    "contracts_closed": item.contracts_closed,
+                    "expiration_ymd": item.expiration_ymd,
+                    "strategy": item.fields.get("strategy"),
+                    "leg_role": item.fields.get("leg_role"),
+                    "strategy_group_id": item.fields.get("strategy_group_id"),
+                    "yield_enhancement_mode": item.fields.get("yield_enhancement_mode"),
+                    "strategy_snapshot": item.fields.get("strategy_snapshot"),
+                }
+                for item in selected_items
+            ]
+        ),
     }
     out["ledger"] = ledger_status
     return out

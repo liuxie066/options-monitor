@@ -29,7 +29,9 @@ from domain.domain.close_advice import (
     safe_float,
     safe_int,
     sort_advice_rows,
+    synthesize_combo_yield_group_close_advice,
 )
+from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.fee_calc import calc_futu_option_fee
 from src.infrastructure.io_utils import atomic_write_text, read_json, safe_read_csv
 from domain.domain.ledger.position_fields import (
@@ -115,6 +117,15 @@ OUTPUT_COLUMNS = [
     "combo_net_if_close_both",
     "combo_cost_basis_status",
     "paired_leg_status",
+    "combo_group_classification",
+    "combo_group_status",
+    "combo_group_action",
+    "combo_group_reason",
+    "combo_group_issues",
+    "combo_put_contracts_open",
+    "combo_call_contracts_open",
+    "combo_group_quote_status",
+    "combo_group_evidence_scope",
     "long_call_value_ratio",
     "long_call_cost_basis",
     "long_call_current_value",
@@ -1518,52 +1529,189 @@ def _gross_leg_value(row: dict[str, Any], price_key: str) -> float | None:
     return price * multiplier * contracts
 
 
-def _apply_yield_enhancement_combo_economics(rows: list[dict[str, Any]]) -> None:
-    calls_by_group: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        group_id = _strategy_group_id(row)
-        if not group_id or not _is_yield_enhancement_long_call(row):
-            continue
-        calls_by_group.setdefault(group_id, row)
+def _combo_inventory_input(pos: dict[str, Any]) -> dict[str, Any]:
+    snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
+    return {
+        "record_id": pos.get("record_id"),
+        "account": pos.get("account"),
+        "symbol": pos.get("symbol"),
+        "option_type": pos.get("option_type"),
+        "side": pos.get("side"),
+        "contracts": pos.get("contracts"),
+        "contracts_open": pos.get("contracts_open"),
+        "contracts_closed": pos.get("contracts_closed"),
+        "expiration_ymd": pos.get("expiration_ymd") or _position_expiration(pos),
+        "strategy": pos.get("strategy") or snapshot.get("strategy"),
+        "leg_role": pos.get("leg_role") or snapshot.get("leg_role"),
+        "strategy_group_id": pos.get("strategy_group_id") or snapshot.get("strategy_group_id"),
+        "yield_enhancement_mode": pos.get("yield_enhancement_mode") or snapshot.get("yield_enhancement_mode"),
+        "expiry_structure": pos.get("expiry_structure") or snapshot.get("expiry_structure"),
+        "strategy_snapshot": snapshot,
+    }
 
+
+def _group_sum(rows: list[dict[str, Any]], value_fn: Callable[[dict[str, Any]], float | None]) -> float | None:
+    values = [value_fn(row) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(float(value) for value in values if value is not None)
+
+
+def _apply_combo_group_fields(
+    rows: list[dict[str, Any]],
+    *,
+    group: dict[str, Any],
+) -> None:
+    put_rows = [row for row in rows if _is_yield_enhancement_short_put(row)]
+    call_rows = [row for row in rows if _is_yield_enhancement_long_call(row)]
+    evidence_issues: list[str] = []
+    for leg_name, leg_rows in (("put", put_rows), ("call", call_rows)):
+        for row in leg_rows:
+            if str(row.get("quote_status") or "").strip().lower() != "priced":
+                evidence_issues.append(f"{leg_name}_quote_unavailable")
+            if str(row.get("evaluation_status") or "").strip().lower() != "priced":
+                evidence_issues.append(f"{leg_name}_advice_not_evaluable")
+
+    synthesis = synthesize_combo_yield_group_close_advice(
+        inventory_classification=group.get("summary_classification"),
+        inventory_issues=list(group.get("inventory_issues") or []),
+        put_actions=[str(row.get("close_action") or "") for row in put_rows],
+        call_actions=[str(row.get("close_action") or "") for row in call_rows],
+        evidence_issues=evidence_issues,
+    )
+    issue_list = list(synthesis.get("combo_group_issues") or [])
+    common = {
+        **synthesis,
+        "combo_group_issues": ";".join(issue_list),
+        "combo_put_contracts_open": group.get("put_contracts_open"),
+        "combo_call_contracts_open": group.get("call_contracts_open"),
+        "combo_group_quote_status": "priced" if not evidence_issues else "incomplete",
+        "combo_group_evidence_scope": "open_option_lots_and_current_quotes",
+    }
     for row in rows:
-        if not _is_yield_enhancement_short_put(row):
-            continue
-        row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
-        group_id = _strategy_group_id(row)
-        if not group_id:
-            row["combo_cost_basis_status"] = "missing_strategy_group_id"
-            row["paired_leg_status"] = "missing"
-            continue
-        call = calls_by_group.get(group_id)
-        if call is None:
+        row.update(common)
+        _with_extra_flags(row, [f"combo_group_{issue}" for issue in issue_list])
+
+    classification = str(synthesis.get("combo_group_classification") or "").strip().lower()
+    status = str(synthesis.get("combo_group_status") or "").strip().lower()
+    if classification == "review_required" or status == "review_required":
+        for row in put_rows:
+            row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
+            row["combo_cost_basis_status"] = "review_required"
+            row["paired_leg_status"] = "review_required"
+        return
+    if classification == "missing_call":
+        for row in put_rows:
+            row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
             row["combo_cost_basis_status"] = "missing_paired_call"
             row["paired_leg_status"] = "missing"
-            continue
+        return
+    if classification == "residual_call":
+        for row in call_rows:
+            row["combo_cost_basis_status"] = "not_applicable_residual_call"
+            row["paired_leg_status"] = "residual_call"
+        return
+    if classification != "active_combo":
+        return
 
+    for row in put_rows:
+        row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
         row["paired_leg_status"] = "paired"
-        call_cost = _gross_leg_value(call, "premium")
-        call_value = _gross_leg_value(call, "close_mid")
-        call_fee = safe_float(call.get("sell_to_close_fee")) or safe_float(call.get("close_fee")) or 0.0
-        put_realized = safe_float(row.get("put_leg_realized_if_close"))
-        row["combo_call_cost"] = call_cost
-        row["combo_call_value_if_close"] = (
-            call_value - call_fee if call_value is not None else None
-        )
 
+    fee_unavailable = any(
+        "fee_calc_unavailable" in {
+            flag for flag in str(row.get("data_quality_flags") or "").split(";") if flag
+        }
+        for row in [*put_rows, *call_rows]
+    )
+    if fee_unavailable:
+        for row in put_rows:
+            row["combo_cost_basis_status"] = "fee_calc_unavailable"
+        return
+
+    call_cost = _group_sum(call_rows, lambda row: _gross_leg_value(row, "premium"))
+    call_value_before_fee = _group_sum(call_rows, lambda row: _gross_leg_value(row, "close_mid"))
+    call_fees = _group_sum(
+        call_rows,
+        lambda row: safe_float(row.get("sell_to_close_fee"))
+        if safe_float(row.get("sell_to_close_fee")) is not None
+        else (safe_float(row.get("close_fee")) or 0.0),
+    )
+    put_realized = _group_sum(put_rows, lambda row: safe_float(row.get("realized_if_close")))
+    call_value = (
+        call_value_before_fee - (call_fees or 0.0)
+        if call_value_before_fee is not None and call_fees is not None
+        else None
+    )
+    for row in put_rows:
+        row["combo_call_cost"] = call_cost
+        row["combo_call_value_if_close"] = call_value
         if call_cost is None:
             row["combo_cost_basis_status"] = "missing_call_cost"
             continue
         if put_realized is None:
             row["combo_cost_basis_status"] = "missing_put_realized"
             continue
-
         row["combo_net_locked_if_close_put_keep_call"] = put_realized - call_cost
         if call_value is None:
             row["combo_cost_basis_status"] = "missing_call_quote"
             continue
-        row["combo_net_if_close_both"] = put_realized - call_cost + call_value - call_fee
+        row["combo_net_if_close_both"] = put_realized - call_cost + call_value
         row["combo_cost_basis_status"] = "ok"
+        if (
+            _is_actionable_close(row)
+            and str(row.get("combo_group_action") or "").strip().lower() == "close_put_keep_call"
+        ):
+            row["optional_combo_action"] = "close_both_optional"
+
+
+def _apply_yield_enhancement_combo_economics(
+    rows: list[dict[str, Any]],
+    *,
+    positions: list[dict[str, Any]],
+) -> None:
+    inventory = build_option_group_inventory(
+        [_combo_inventory_input(pos) for pos in positions if isinstance(pos, dict)]
+    )
+    inventory_by_group = {
+        str(group.get("strategy_group_id") or "").strip(): group
+        for group in inventory
+        if str(group.get("strategy_group_id") or "").strip()
+    }
+    rows_by_group: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not (_is_yield_enhancement_short_put(row) or _is_yield_enhancement_long_call(row)):
+            continue
+        group_id = _strategy_group_id(row)
+        if not group_id:
+            group = {
+                "summary_classification": "review_required",
+                "inventory_issues": ["missing_group_identity"],
+                "put_contracts_open": safe_int(row.get("contracts_open")) if _is_yield_enhancement_short_put(row) else 0,
+                "call_contracts_open": safe_int(row.get("contracts_open")) if _is_yield_enhancement_long_call(row) else 0,
+            }
+            _apply_combo_group_fields([row], group=group)
+            continue
+        rows_by_group.setdefault(group_id, []).append(row)
+
+    for group_id, group_rows in rows_by_group.items():
+        group = inventory_by_group.get(group_id)
+        if group is None:
+            group = {
+                "summary_classification": "review_required",
+                "inventory_issues": ["missing_group_inventory"],
+                "put_contracts_open": sum(
+                    safe_int(row.get("contracts_open")) or 0
+                    for row in group_rows
+                    if _is_yield_enhancement_short_put(row)
+                ),
+                "call_contracts_open": sum(
+                    safe_int(row.get("contracts_open")) or 0
+                    for row in group_rows
+                    if _is_yield_enhancement_long_call(row)
+                ),
+            }
+        _apply_combo_group_fields(group_rows, group=group)
 
 
 def _with_extra_flags(row: dict[str, Any], flags: list[str]) -> dict[str, Any]:
@@ -1677,6 +1825,32 @@ def _close_action_label(row: dict[str, Any]) -> str:
         realized = safe_float(row.get("realized_if_close"))
         return "风险止损" if realized is not None and realized < 0 else "风险平仓"
     action = str(row.get("close_action") or "").strip().lower()
+    group_status = str(row.get("combo_group_status") or "").strip().lower()
+    group_action = str(row.get("combo_group_action") or "").strip().lower()
+    group_mapping = {
+        "close_put_unpaired": "买回 Put（Call 腿缺失）",
+        "hold_put_unpaired": "持有 Put（Call 腿缺失）",
+        "sell_residual_call_take_profit": "卖出剩余 Call 止盈",
+        "sell_residual_call_salvage": "卖出剩余 Call 回收残值",
+        "hold_residual_call_to_expiry_or_expire": "剩余 Call 保留至到期或允许归零",
+        "hold_residual_call_as_convexity": "继续持有剩余 Call 凸性腿",
+        "hold_residual_call": "继续持有剩余 Call",
+    }
+    if group_action in group_mapping:
+        return group_mapping[group_action]
+    if group_status == "review_required":
+        review_mapping = {
+            "close_put_keep_call": "逐腿建议：买回 Put；组合需人工复核",
+            "hold_put_keep_call": "逐腿建议：持有 Put；组合需人工复核",
+            "sell_call_take_profit": "逐腿建议：卖出 Call 止盈；组合需人工复核",
+            "sell_call_salvage": "逐腿建议：卖出 Call 回收残值；组合需人工复核",
+            "hold_to_expiry_or_expire": "逐腿建议：Call 保留至到期；组合需人工复核",
+            "hold_call_as_convexity": "逐腿建议：持有 Call 凸性腿；组合需人工复核",
+            "hold_call": "逐腿建议：持有 Call；组合需人工复核",
+            "not_evaluable": "逐腿无法评估；组合需人工复核",
+        }
+        if action in review_mapping:
+            return review_mapping[action]
     mapping = {
         "close_put_keep_call": "买回 Put，保留收益增强 Call",
         "hold_put_keep_call": "继续持有 Put，保留收益增强 Call",
@@ -2300,10 +2474,10 @@ def run_close_advice(
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
         rows.append(row)
 
-    _apply_yield_enhancement_combo_economics(rows)
-
     for row in rows:
         _apply_close_action_semantics(row)
+
+    _apply_yield_enhancement_combo_economics(rows, positions=positions)
 
     rows = sort_advice_rows(rows)
     notify_levels = advice_cfg.get("notify_levels") or ["strong", "medium"]

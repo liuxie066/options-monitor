@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import (
     effective_strike,
     normalize_account,
     normalize_broker,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
@@ -286,6 +287,7 @@ def _lifecycle_close_event(
     multiplier = effective_multiplier(fields)
     event_id = f"{event_type}-{record_id}-{uuid.uuid4().hex}"
     raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
+    strategy_payload = strategy_metadata_fields_from_payload(fields)
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -320,6 +322,7 @@ def _lifecycle_close_event(
             "stock_settlement": dict(stock_settlement),
             "close_target_resolution": dict(close_target_resolution),
             "contracts_open_before": effective_contracts_open(fields),
+            **strategy_payload,
         },
     )
 

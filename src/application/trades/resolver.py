@@ -5,6 +5,12 @@ from typing import Any, Protocol
 
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.ledger.position_fields import (
+    effective_contracts,
+    effective_contracts_closed,
+    effective_contracts_open,
+    effective_expiration_ymd,
+)
 from src.application.strategy_policy import YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 from src.application.ledger.api import (
     BrokerTradeOperation,
@@ -359,6 +365,17 @@ def resolve_trade_deal(
                 **position_effect_diagnostics,
                 "combo_yield_enrichment": combo_enrichment.diagnostics,
             }
+        elif combo_enrichment.reason.startswith("staggered_combo_yield_"):
+            return _failure(
+                status="unresolved",
+                action="open",
+                reason=combo_enrichment.reason,
+                deal=deal,
+                diagnostics={
+                    **position_effect_diagnostics,
+                    "combo_yield_enrichment": combo_enrichment.diagnostics,
+                },
+            )
         if deal.side not in {"sell", "buy"}:
             return _failure(status="unresolved", action="open", reason="unsupported_open_side", deal=deal)
         missing = _required_open_missing(deal)
@@ -622,7 +639,7 @@ def _enrich_combo_yield_open(
     repo: OptionPositionsRepoLike,
 ) -> _PositionEffectInference:
     if _combo_yield_structure_mode(deal) == STAGGERED_EXPIRY_PAIR:
-        return _enrich_staggered_combo_yield_open(deal)
+        return _enrich_staggered_combo_yield_open(deal, repo=repo)
 
     if deal.side == "buy" and deal.option_type == "call":
         companion = _combo_yield_companion_short_put(repo, deal)
@@ -662,7 +679,11 @@ def _enrich_combo_yield_open(
     return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
 
 
-def _enrich_staggered_combo_yield_open(deal: NormalizedTradeDeal) -> _PositionEffectInference:
+def _enrich_staggered_combo_yield_open(
+    deal: NormalizedTradeDeal,
+    *,
+    repo: OptionPositionsRepoLike,
+) -> _PositionEffectInference:
     leg_role = _staggered_combo_yield_leg_role(deal)
     if leg_role is None:
         return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
@@ -681,6 +702,25 @@ def _enrich_staggered_combo_yield_open(deal: NormalizedTradeDeal) -> _PositionEf
         )
 
     group_id = _explicit_combo_yield_group_id(deal, pair_intent_id=pair_intent_id)
+    validation_reason, validation_diagnostics = _validate_staggered_combo_yield_open(
+        repo,
+        deal=deal,
+        leg_role=leg_role,
+        strategy_group_id=group_id,
+    )
+    if validation_reason:
+        return _PositionEffectInference(
+            deal=None,
+            reason=validation_reason,
+            diagnostics={
+                "decision": "reject_explicit_pair_intent",
+                "structure_mode": STAGGERED_EXPIRY_PAIR,
+                "pair_intent_id": pair_intent_id,
+                "strategy_group_id": group_id,
+                "leg_role": leg_role,
+                **validation_diagnostics,
+            },
+        )
     return _PositionEffectInference(
         deal=replace(
             deal,
@@ -701,6 +741,147 @@ def _enrich_staggered_combo_yield_open(deal: NormalizedTradeDeal) -> _PositionEf
             "combination_relation_pending": False,
         },
     )
+
+
+def _validate_staggered_combo_yield_open(
+    repo: OptionPositionsRepoLike,
+    *,
+    deal: NormalizedTradeDeal,
+    leg_role: str,
+    strategy_group_id: str,
+) -> tuple[str | None, dict[str, Any]]:
+    account = str(deal.internal_account or "").strip().lower()
+    symbol = canonical_symbol(deal.symbol) or str(deal.symbol or "").strip().upper()
+    incoming_expiration = str(deal.expiration_ymd or "").strip()
+    incoming_contracts = _safe_nonnegative_int(deal.contracts)
+    if incoming_contracts is None or incoming_contracts <= 0:
+        return "staggered_combo_yield_invalid_quantity_evidence", {}
+
+    expected_option_type = "put" if leg_role == "funding_put" else "call"
+    expected_side = "short" if leg_role == "funding_put" else "long"
+    companion_option_type = "call" if expected_option_type == "put" else "put"
+    companion_side = "long" if expected_side == "short" else "short"
+    expected_companion_role = "participation_call" if leg_role == "funding_put" else "funding_put"
+
+    existing_same_leg_open = 0
+    companion_open = 0
+    companion_expirations: set[str] = set()
+    inspected_record_ids: list[str] = []
+
+    for row in repo.list_position_lots():
+        if not isinstance(row, dict):
+            continue
+        fields = row.get("fields") if isinstance(row.get("fields"), dict) else row
+        if not isinstance(fields, dict) or _lot_strategy_value(fields, "strategy_group_id") != strategy_group_id:
+            continue
+
+        record_id = str(row.get("record_id") or fields.get("record_id") or "").strip()
+        if record_id:
+            inspected_record_ids.append(record_id)
+        row_account = str(fields.get("account") or "").strip().lower()
+        row_symbol = canonical_symbol(fields.get("symbol")) or str(fields.get("symbol") or "").strip().upper()
+        if row_account != account or row_symbol != symbol:
+            return "staggered_combo_yield_conflicting_group_metadata", {
+                "conflicting_record_id": record_id or None,
+            }
+        structure_mode = _lot_strategy_value(fields, "structure_mode").lower()
+        if structure_mode not in {"", STAGGERED_EXPIRY_PAIR}:
+            return "staggered_combo_yield_conflicting_structure_mode", {
+                "conflicting_record_id": record_id or None,
+                "existing_structure_mode": structure_mode,
+            }
+
+        opened = _safe_nonnegative_int(effective_contracts(fields))
+        open_quantity = _safe_nonnegative_int(effective_contracts_open(fields))
+        closed_quantity = _safe_nonnegative_int(effective_contracts_closed(fields))
+        if (
+            opened is None
+            or open_quantity is None
+            or closed_quantity is None
+            or open_quantity > opened
+            or closed_quantity > opened
+        ):
+            return "staggered_combo_yield_invalid_quantity_evidence", {
+                "conflicting_record_id": record_id or None,
+            }
+        if closed_quantity > 0 or open_quantity < opened:
+            return "staggered_combo_yield_cycle_reuse", {
+                "consumed_record_id": record_id or None,
+                "contracts_opened": opened,
+                "contracts_open": open_quantity,
+                "contracts_closed": closed_quantity,
+            }
+        if open_quantity <= 0:
+            continue
+
+        row_option_type = str(fields.get("option_type") or "").strip().lower()
+        row_side = str(fields.get("side") or "").strip().lower()
+        row_role = _lot_strategy_value(fields, "leg_role").lower()
+        row_expiration = effective_expiration_ymd(fields) or str(fields.get("expiration_ymd") or "").strip()
+
+        if row_option_type == expected_option_type and row_side == expected_side:
+            if row_role not in {"", leg_role} or row_expiration != incoming_expiration:
+                return "staggered_combo_yield_conflicting_group_metadata", {
+                    "conflicting_record_id": record_id or None,
+                }
+            existing_same_leg_open += open_quantity
+            continue
+
+        if row_option_type != companion_option_type or row_side != companion_side:
+            return "staggered_combo_yield_conflicting_group_metadata", {
+                "conflicting_record_id": record_id or None,
+            }
+        if row_role not in {"", expected_companion_role}:
+            return "staggered_combo_yield_conflicting_group_metadata", {
+                "conflicting_record_id": record_id or None,
+            }
+        if not row_expiration:
+            return "staggered_combo_yield_conflicting_group_metadata", {
+                "conflicting_record_id": record_id or None,
+            }
+        ordered = (
+            incoming_expiration < row_expiration
+            if expected_option_type == "put"
+            else row_expiration < incoming_expiration
+        )
+        if not ordered:
+            return "staggered_combo_yield_invalid_expiry_order", {
+                "conflicting_record_id": record_id or None,
+                "incoming_expiration": incoming_expiration,
+                "companion_expiration": row_expiration,
+            }
+        companion_open += open_quantity
+        companion_expirations.add(row_expiration)
+
+    if len(companion_expirations) > 1:
+        return "staggered_combo_yield_ambiguous_companion", {
+            "companion_expirations": sorted(companion_expirations),
+        }
+    if companion_open > 0 and existing_same_leg_open + incoming_contracts > companion_open:
+        return "staggered_combo_yield_quantity_conflict", {
+            "existing_same_leg_open": existing_same_leg_open,
+            "incoming_contracts": incoming_contracts,
+            "companion_contracts_open": companion_open,
+        }
+    return None, {"inspected_record_ids": sorted(inspected_record_ids)}
+
+
+def _lot_strategy_value(fields: dict[str, Any], key: str) -> str:
+    value = fields.get(key)
+    if value not in (None, ""):
+        return str(value).strip()
+    snapshot = fields.get("strategy_snapshot")
+    if isinstance(snapshot, dict):
+        return str(snapshot.get(key) or "").strip()
+    return ""
+
+
+def _safe_nonnegative_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _staggered_combo_yield_leg_role(deal: NormalizedTradeDeal) -> str | None:
