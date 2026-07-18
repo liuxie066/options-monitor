@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.411 - 2026-07-18
+
+### Added
+- Introduced Option Performance v1 with MTD, YTD, specified natural-month, and specified natural-year reporting under the `Asia/Shanghai` operator-date boundary.
+- Added evidence-backed activity, cash, realized/unrealized PnL, capital, valuation/FX, and assigned-stock lifecycle reporting across the Agent tool, CLI, Assistant, and Feishu read paths.
+- Added strict portfolio PnL and cash bridges plus old/new reconciliation, replay/coverage gates, and an exact legacy-reference inventory.
+
+### Changed
+- Separated option premium activity, option/assignment cash movement, option and assigned-stock profit, and capital metrics instead of exposing the legacy mixed monthly-income value as a generic return.
+- Made exact account ownership, reporting timezone, report-level quality, fee/FX/valuation coverage, assignment settlement, and proven-zero evidence binding before totals or bridge amounts can be reported as observed.
+
+### Deprecated
+- Kept `monthly_income_report`, the monthly-income CLI adapter, and `portfolio_capital_bridge` only as documented rollback boundaries pending a later versioned removal gate.
+
 ## 1.2.410 - 2026-07-18
 
 ### Fixed
