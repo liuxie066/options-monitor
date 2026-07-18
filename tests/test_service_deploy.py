@@ -5,9 +5,14 @@ import json
 import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+
+CURRENT_PYTHON = sys.executable
+PYTHON_MINOR = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
@@ -1563,7 +1568,7 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
             (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
             (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -1596,7 +1601,9 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "archive"] for command in calls)
     assert any(command[:2] == ["tar", "-xf"] for command in calls)
     assert not any(command[:4] == ["git", "clone", "--depth", "1"] for command in calls)
-    assert any(command[:3] == ["python3", "-m", "venv"] for command in calls)
+    assert any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
+    target_python = str(releases / "1.0.1" / ".venv" / "bin" / "python")
+    assert [target_python, "scripts/release_check.py", "--tag", "v1.0.1"] in calls
     runtime_prepare = out["runtime_prepare"]
     venv_python = str(Path(runtime_prepare["shared_venv_build_path"]) / "bin" / "python")
     assert [venv_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
@@ -1691,7 +1698,7 @@ def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconci
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2227,7 +2234,7 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2287,7 +2294,7 @@ def test_service_upgrade_confirm_noops_when_latest_is_current(tmp_path: Path) ->
     assert out["changed"] is False
     assert out["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
     assert current.resolve() == v101.resolve()
-    assert not any(command[:3] == ["python3", "-m", "venv"] for command in calls)
+    assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
     assert load_upgrade_status(runtime_root=runtime)["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
 
 
@@ -2304,7 +2311,7 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
         calls.append(list(command))
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2337,7 +2344,7 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
         calls.append(list(command))
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
-        if command[:4] == ["uv", "venv", "--python", "python3"]:
+        if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
             _create_fake_venv_python_at(Path(command[-1]))
         if command[:3] == ["uv", "pip", "install"]:
             uv_envs.append(dict(kwargs["env"]))
@@ -2349,13 +2356,13 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
     build_python = str(build_venv / "bin" / "python")
     assert out["installer"] == "uv"
     assert out["fallback"] is False
-    assert ["uv", "venv", "--python", "python3", str(build_venv)] in calls
+    assert ["uv", "venv", "--python", CURRENT_PYTHON, str(build_venv)] in calls
     assert ["uv", "pip", "install", "-p", build_python, "-r", "requirements.txt", "-c", "constraints.txt"] in calls
     assert ["uv", "pip", "install", "-p", build_python, "-r", "requirements/server.txt", "-c", "constraints/server.txt"] in calls
     assert uv_envs and uv_envs[0]["UV_INDEX_URL"] == "https://mirrors.aliyun.com/pypi/simple/"
     assert uv_envs[0]["UV_CACHE_DIR"] == str(tmp_path / "_cache" / "uv")
     assert uv_envs[0]["PIP_CACHE_DIR"] == str(tmp_path / "_cache" / "pip")
-    assert out["python_spec"] == "python3"
+    assert out["python_spec"] == PYTHON_MINOR
     assert out["uv_cache_dir"] == str(tmp_path / "_cache" / "uv")
 
 
@@ -2369,7 +2376,7 @@ def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2392,7 +2399,7 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2405,12 +2412,12 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
     assert second_out["installer"] == "cache"
     assert second_out["venv_reused"] is True
     assert second_out["dependency_hash"] == first_out["dependency_hash"]
-    assert second_out["dependency_context"]["python_spec"] == "python3"
+    assert second_out["dependency_context"]["python_spec"] == PYTHON_MINOR
     assert "duration_seconds" in second_out
     assert Path(first_out["shared_venv_path"]) == Path(second_out["shared_venv_path"])
     assert (second / ".venv").is_symlink()
     assert not Path(second_out["shared_venv_build_path"]).exists()
-    assert not any(command[:3] == ["python3", "-m", "venv"] for command in second_calls)
+    assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in second_calls)
     assert not any(command[1:4] == ["-m", "pip", "install"] for command in second_calls)
 
 
@@ -2435,7 +2442,7 @@ def test_service_upgrade_runtime_prepare_removes_temp_venv_on_install_failure(mo
     _write_runtime_target_with_server_deps(target)
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[1:4] == ["-m", "pip", "install"] and "-r" in command:
@@ -2463,7 +2470,7 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:4] == ["uv", "venv", "--python", "python3"]:
+        if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2476,7 +2483,7 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
     else:  # pragma: no cover - defensive assertion branch
         raise AssertionError("expected RuntimePrepareError")
 
-    assert not any(command[:3] == ["python3", "-m", "venv"] for command in calls)
+    assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
 
 
 def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure(monkeypatch, tmp_path: Path) -> None:
@@ -2491,12 +2498,12 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
         calls.append(list(command))
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
-        if command[:4] == ["uv", "venv", "--python", "python3"]:
+        if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="uv venv\n", stderr="")
         if command[:3] == ["uv", "pip", "install"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv install failed\n")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2506,7 +2513,7 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
     assert out["fallback"] is True
     assert out["fallback_from"] == "uv"
     assert "uv install failed" in str(out["uv_error"])
-    assert any(command[:3] == ["python3", "-m", "venv"] for command in calls)
+    assert any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
 
 
 def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
@@ -2601,7 +2608,7 @@ def test_service_upgrade_partial_success_when_restart_denied_after_switch(monkey
             (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
             (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:4] == ["sudo", "-n", "systemctl", "restart"]:
@@ -2804,7 +2811,7 @@ def test_service_upgrade_requires_yaml_authoring_source_before_switch(monkeypatc
             (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
             (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
@@ -2879,7 +2886,7 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
             (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
             (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2943,7 +2950,7 @@ def test_service_upgrade_does_not_recover_legacy_user_configs_from_older_release
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
@@ -3011,7 +3018,7 @@ def test_service_upgrade_ignores_runtime_legacy_overlay_dir(tmp_path: Path) -> N
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
@@ -3087,7 +3094,7 @@ def test_service_upgrade_ignores_runtime_config_legacy_metadata_overlay_source(t
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
@@ -3155,7 +3162,7 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
@@ -3219,7 +3226,7 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
@@ -3376,7 +3383,7 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -3445,7 +3452,7 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == ["python3", "-m", "venv"]:
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:

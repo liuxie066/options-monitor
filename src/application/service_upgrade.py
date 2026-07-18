@@ -1125,9 +1125,15 @@ def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
     ]
 
 
-def _uv_install_commands(venv_python: Path, *, venv_dir: Path, include_server: bool) -> list[tuple[list[str], int]]:
+def _uv_install_commands(
+    venv_python: Path,
+    *,
+    venv_dir: Path,
+    include_server: bool,
+    bootstrap_python: str,
+) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
-        (["uv", "venv", "--python", "python3", str(venv_dir)], 300),
+        (["uv", "venv", "--python", bootstrap_python, str(venv_dir)], 300),
         (["uv", "pip", "install", "-p", str(venv_python), "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
     if include_server:
@@ -1177,9 +1183,10 @@ def _run_pip_runtime_prepare(
     operations: list[dict[str, Any]],
     commands: list[list[str]],
     env: dict[str, str],
+    bootstrap_python: str,
 ) -> None:
     if not venv_python.exists():
-        command = ["python3", "-m", "venv", str(venv_dir)]
+        command = [bootstrap_python, "-m", "venv", str(venv_dir)]
         _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, env=env, timeout=300)
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
@@ -1243,13 +1250,14 @@ def _dependency_hash(
     target_dir: Path,
     *,
     include_server: bool,
-    python_spec: str = "python3",
+    python_spec: str | None = None,
     installer_mode: str = "auto",
 ) -> str:
     digest = hashlib.sha256()
+    selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
     context = _dependency_context(
         include_server=include_server,
-        python_spec=python_spec,
+        python_spec=selected_python_spec,
         installer_mode=installer_mode,
     )
     digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
@@ -1371,7 +1379,8 @@ def _ensure_release_runtime(
     server_constraints = target_dir / "constraints" / "server.txt"
     include_server = server_requirements.exists() and server_constraints.exists()
     mode = _upgrade_installer_mode()
-    python_spec = "python3"
+    bootstrap_python = sys.executable
+    python_spec = f"{sys.version_info.major}.{sys.version_info.minor}"
     dependency_hash = _dependency_hash(
         target_dir,
         include_server=include_server,
@@ -1432,6 +1441,7 @@ def _ensure_release_runtime(
                 build_python,
                 venv_dir=build_venv,
                 include_server=include_server,
+                bootstrap_python=bootstrap_python,
             )
             commands.extend(command for command, _timeout in uv_commands)
             try:
@@ -1462,6 +1472,7 @@ def _ensure_release_runtime(
                     operations=operations,
                     commands=commands,
                     env=install_env,
+                    bootstrap_python=bootstrap_python,
                 )
         else:
             if mode == "uv":
@@ -1477,6 +1488,7 @@ def _ensure_release_runtime(
                 operations=operations,
                 commands=commands,
                 env=install_env,
+                bootstrap_python=bootstrap_python,
             )
 
         if not runtime_prepare["venv_reused"]:
@@ -2026,7 +2038,7 @@ def service_upgrade(
                 },
             )
             _run_required(
-                ["python3", "scripts/release_check.py", "--tag", str(tag)],
+                [str(_release_python(target_dir)), "scripts/release_check.py", "--tag", str(tag)],
                 cwd=target_dir,
                 run_cmd=run_cmd,
                 operations=operations,

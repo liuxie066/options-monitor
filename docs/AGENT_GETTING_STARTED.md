@@ -17,7 +17,7 @@ bash scripts/install_agent_plugin.sh
 如果本地还没有 Python 环境：
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
 ```

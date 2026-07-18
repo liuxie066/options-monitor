@@ -1,4 +1,8 @@
-PYTHON ?= $(if $(wildcard .venv/bin/python),./.venv/bin/python,python3)
+SELECTED_PYTHON := $(shell bash -c 'source scripts/python_runtime.sh && om_select_repo_python "$(CURDIR)"')
+ifeq ($(strip $(SELECTED_PYTHON)),)
+$(error options-monitor requires Python >= 3.12; runtime selection failed)
+endif
+PYTHON := $(SELECTED_PYTHON)
 
 test:
 	$(PYTHON) tests/run_tests.py
