@@ -197,3 +197,88 @@ def test_residual_tail_pnl_is_available_when_report_window_starts_after_put_clos
     assert tail["quality"] == {"status": "observed", "issues": []}
     assert tail["pnl"]["period_total_gross"]["by_currency"] == {"USD": 100.0}
     assert tail["capital"]["capital_days_by_currency"] == {"USD": 12000.0}
+
+
+def test_non_combo_strategy_produces_observed_empty_attribution() -> None:
+    event = _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5)
+    event.raw_payload["strategy_snapshot"] = {"strategy": "sell_put", "leg_role": "funding_put"}
+
+    report = _report([event])
+
+    assert report["attribution"]["groups"] == []
+    assert report["attribution"]["coverage"] == {"status": "observed", "group_count": 0, "issues": []}
+
+
+def test_group_closed_before_period_is_not_emitted() -> None:
+    events = [
+        _event("put-open", "open", "2026-04-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5),
+        _event("call-open", "open", "2026-04-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4),
+        _event("put-expire", "expire_close", "2026-04-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-04-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    report = _report(events)
+
+    assert report["attribution"]["groups"] == []
+    assert report["attribution"]["coverage"]["status"] == "observed"
+
+
+def test_period_total_conservation_is_reported_separately() -> None:
+    events = [
+        _event("put-open", "open", "2026-05-01T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=5),
+        _event("call-open", "open", "2026-05-01T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=4),
+        _event("put-expire", "expire_close", "2026-05-10T00:00:00", role="funding_put", option_type="put", side="short", strike=100, price=0, target_lot_id="lot-put-open"),
+        _event("call-close", "close", "2026-05-20T00:00:00", role="participation_call", option_type="call", side="long", strike=120, price=7, target_lot_id="lot-call-open"),
+    ]
+
+    conservation = _report(events)["attribution"]["conservation"]
+
+    assert conservation["period_total_gross"]["status"] == "observed"
+    assert conservation["period_total_gross"]["residual_by_currency"] == {"USD": 0.0}
+    assert conservation["period_total_net"]["status"] == "observed"
+
+
+def test_assigned_stock_requires_explicit_group_provenance() -> None:
+    from domain.domain.performance.engine import _assigned_stock_fact_kwargs
+
+    attributed = _assigned_stock_fact_kwargs(
+        {
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "stock_lot_id": "stock-lot-1",
+            "strategy": "combo_yield",
+            "strategy_group_id": "combo_yield:lx:pair-1",
+        },
+        source_event_id="stock-lot-1",
+    )
+    unproven = _assigned_stock_fact_kwargs(
+        {"account": "lx", "broker": "futu", "symbol": "NVDA", "currency": "USD"},
+        source_event_id="stock-lot-2",
+    )
+
+    assert attributed["attribution"].leg_role == "assigned_stock"
+    assert attributed["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"
+    assert attributed["attribution_issues"] == ()
+    assert unproven["attribution"] is None
+
+
+def test_assigned_stock_partial_sales_keep_stock_lot_lifecycle_identity() -> None:
+    from domain.domain.performance.engine import _assigned_stock_fact_kwargs
+
+    row = {
+        "account": "lx",
+        "broker": "futu",
+        "symbol": "NVDA",
+        "currency": "USD",
+        "stock_lot_id": "stock-lot-1",
+        "strategy": "combo_yield",
+        "strategy_group_id": "combo_yield:lx:pair-1",
+    }
+
+    first = _assigned_stock_fact_kwargs(row, source_event_id="sale-1")
+    second = _assigned_stock_fact_kwargs(row, source_event_id="sale-2")
+
+    assert first["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"
+    assert second["attribution"].lifecycle_id == "assigned_stock:stock-lot-1"

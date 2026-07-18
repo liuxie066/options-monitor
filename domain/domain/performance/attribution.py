@@ -43,6 +43,9 @@ def resolve_event_attribution(
         strategy = _COMBO_YIELD
     if not any((strategy, leg_role, group_id)):
         return AttributionResolution(None)
+    combo_indicated = strategy == _COMBO_YIELD or group_id.startswith(f"{_COMBO_YIELD}:")
+    if not combo_indicated:
+        return AttributionResolution(None)
     if strategy != _COMBO_YIELD or not group_id:
         return AttributionResolution(None, (f"strategy_attribution_incomplete:{event.event_id}",))
     if not _text(lifecycle_source_id):

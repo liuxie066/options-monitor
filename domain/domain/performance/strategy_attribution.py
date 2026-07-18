@@ -47,11 +47,15 @@ def build_strategy_attribution(
         topology = groups[group_id]
         if topology.get("status") != "ready":
             continue
+        group_facts = facts_by_group.get(group_id, ())
+        group_segments = segments_by_group.get(group_id, ())
+        if not group_facts and not group_segments:
+            continue
         rows.append(
             _group_report(
                 topology=topology,
-                facts=facts_by_group.get(group_id, ()),
-                segments=segments_by_group.get(group_id, ()),
+                facts=group_facts,
+                segments=group_segments,
                 period=period,
             )
         )
@@ -175,6 +179,8 @@ def _group_report(
     call_facts = [item for item in facts if getattr(item.attribution, "leg_role", "") == "participation_call"]
     put_segments = [item for item in segments if getattr(item.attribution, "leg_role", "") == "funding_put"]
     call_segments = [item for item in segments if getattr(item.attribution, "leg_role", "") == "participation_call"]
+    stock_facts = [item for item in facts if getattr(item.attribution, "leg_role", "") == "assigned_stock"]
+    stock_segments = [item for item in segments if getattr(item.attribution, "leg_role", "") == "assigned_stock"]
     put_pnl = _pnl_report(put_facts)
     call_pnl = _pnl_report(call_facts)
     group_pnl = _pnl_report(facts)
@@ -215,11 +221,45 @@ def _group_report(
             }
         ],
         "residual_tails": [] if tail is None else [tail],
+        "assigned_stock_lifecycles": _assigned_stock_lifecycles(
+            facts=stock_facts,
+            segments=stock_segments,
+            period=period,
+        ),
         "funding": _funding_snapshot(put["event"], call["event"]),
         "pnl": group_pnl,
         "capital": group_capital,
         "quality": {"status": "partial" if issues else "observed", "issues": issues},
     }
+
+
+def _assigned_stock_lifecycles(
+    *,
+    facts: Sequence[Any],
+    segments: Sequence[CapitalExposureSegment],
+    period: PeriodWindow,
+) -> list[dict[str, Any]]:
+    lifecycle_ids = sorted(
+        {
+            attribution.lifecycle_id
+            for item in (*facts, *segments)
+            if (attribution := getattr(item, "attribution", None)) is not None
+            and attribution.leg_role == "assigned_stock"
+        }
+    )
+    rows: list[dict[str, Any]] = []
+    for lifecycle_id in lifecycle_ids:
+        lifecycle_facts = [item for item in facts if getattr(item.attribution, "lifecycle_id", "") == lifecycle_id]
+        lifecycle_segments = [item for item in segments if getattr(item.attribution, "lifecycle_id", "") == lifecycle_id]
+        pnl = _pnl_report(lifecycle_facts)
+        rows.append(
+            {
+                "assigned_stock_lifecycle_id": lifecycle_id,
+                "pnl": pnl,
+                "capital": _capital_report(lifecycle_segments, period=period, pnl=pnl),
+            }
+        )
+    return rows
 
 
 def _funding_snapshot(put: TradeEvent, call: TradeEvent) -> dict[str, Any]:
@@ -421,7 +461,59 @@ def _conservation(*, facts: Sequence[Any], groups: Sequence[Mapping[str, Any]]) 
             "residual_by_currency": {key: float(value) for key, value in residual.items()},
             "fact_ids": sorted(set(fact_ids)),
         }
+    for suffix in ("gross", "net"):
+        realized = result[f"realized_{suffix}"]
+        opening = result[f"opening_unrealized_{suffix}"]
+        ending = result[f"ending_unrealized_{suffix}"]
+        result[f"period_total_{suffix}"] = _period_total_conservation(
+            realized=realized,
+            opening=opening,
+            ending=ending,
+            groups=groups,
+            metric=f"period_total_{suffix}",
+        )
     return result
+
+
+def _period_total_conservation(
+    *,
+    realized: Mapping[str, Any],
+    opening: Mapping[str, Any],
+    ending: Mapping[str, Any],
+    groups: Sequence[Mapping[str, Any]],
+    metric: str,
+) -> dict[str, Any]:
+    component_statuses = {str(realized.get("status")), str(opening.get("status")), str(ending.get("status"))}
+    source_realized = realized.get("source_by_currency") or {}
+    source_opening = opening.get("source_by_currency") or {}
+    source_ending = ending.get("source_by_currency") or {}
+    currencies = sorted({*source_realized, *source_opening, *source_ending})
+    source = {
+        currency: quantize_money(
+            to_decimal(source_realized.get(currency, 0), field_name=metric)
+            + to_decimal(source_ending.get(currency, 0), field_name=metric)
+            - to_decimal(source_opening.get(currency, 0), field_name=metric)
+        )
+        for currency in currencies
+    }
+    grouped: dict[str, Decimal] = defaultdict(Decimal)
+    for group in groups:
+        for currency, amount in (group["pnl"].get(metric, {}).get("by_currency") or {}).items():
+            grouped[currency] += to_decimal(amount, field_name=metric)
+    all_currencies = sorted({*source, *grouped})
+    residual = {
+        currency: quantize_money(source.get(currency, Decimal(0)) - grouped.get(currency, Decimal(0)))
+        for currency in all_currencies
+    }
+    complete = "partial" not in component_statuses and all(value == 0 for value in residual.values())
+    observed = bool(source or grouped)
+    return {
+        "status": "observed" if complete and observed else "partial" if observed or "partial" in component_statuses else "not_observed",
+        "source_by_currency": {key: float(value) for key, value in source.items()},
+        "grouped_by_currency": {key: float(quantize_money(value)) for key, value in sorted(grouped.items())},
+        "residual_by_currency": {key: float(value) for key, value in residual.items()},
+        "component_metrics": [f"realized_{metric.rsplit('_', 1)[-1]}", f"opening_unrealized_{metric.rsplit('_', 1)[-1]}", f"ending_unrealized_{metric.rsplit('_', 1)[-1]}"],
+    }
 
 
 __all__ = ["build_strategy_attribution"]
