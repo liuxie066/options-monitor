@@ -1857,3 +1857,203 @@ def test_monthly_income_report_event_yield_enhancement_tracks_call_realized_and_
         },
     )
     assert may["enhancement_rows"][0]["realized_pnl_gross"] == 80.0
+
+
+def _combo_snapshot(group_id: str, leg_role: str) -> dict[str, Any]:
+    return {
+        "strategy": "combo_yield",
+        "leg_role": leg_role,
+        "strategy_group_id": group_id,
+        "expiry_structure": "diagonal",
+        "yield_enhancement_mode": "income_upside",
+    }
+
+
+def test_full_group_lifecycle_reports_partial_assignment_with_residual_call() -> None:
+    group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
+    events = [
+        _trade_event(
+            "put-open",
+            side="sell",
+            position_effect="open",
+            price=1.5,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            contracts=2,
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "sell_put")},
+        ),
+        _trade_event(
+            "call-open",
+            side="buy",
+            position_effect="open",
+            price=1.0,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            option_type="call",
+            contracts=2,
+            strike=100.0,
+            expiration_ymd="2026-09-18",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "enhancement_call")},
+        ),
+        _trade_event(
+            "put-assign-one",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-08-22",
+            symbol="PDD",
+            contracts=1,
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 80.0},
+                "strategy_snapshot": _combo_snapshot(group_id, "sell_put"),
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+        quote_snapshots=[{"symbol": "PDD", "spot": 82.0, "quote_time_ms": _ms("2026-08-23")}],
+        as_of_ms=_ms("2026-08-23"),
+    )
+
+    stock_lot = report["assigned_stock_lots"][0]
+    assert stock_lot["strategy_group_id"] == group_id
+    assert stock_lot["strategy_snapshot"]["expiry_structure"] == "diagonal"
+    lifecycle = report["full_group_lifecycle"][0]
+    assert lifecycle["summary_classification"] == "assigned_stock_with_residual_call"
+    assert lifecycle["put_contracts_open"] == 1
+    assert lifecycle["call_contracts_open"] == 2
+    assert lifecycle["residual_call_contracts"] == 1
+    assert lifecycle["assigned_shares_remaining"] == 100
+    assert lifecycle["lifecycle_issues"] == []
+
+    sold_report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        trade_events=events,
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "stock-sale",
+                "target_stock_lot_id": stock_lot["stock_lot_id"],
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "PDD",
+                "side": "sell",
+                "shares": 100,
+                "price": 85.0,
+                "currency": "USD",
+                "fees": 0.0,
+                "trade_time_ms": _ms("2026-08-24"),
+            }
+        ],
+    )
+    sold_lifecycle = sold_report["full_group_lifecycle"][0]
+    assert sold_lifecycle["summary_classification"] == "review_required"
+    assert sold_lifecycle["assigned_shares_sold"] == 100
+    assert sold_lifecycle["assignment_event_ids"] == ["put-assign-one"]
+    assert sold_report["assigned_stock_sale_rows"][0]["strategy_group_id"] == group_id
+    assert sold_report["assigned_stock_sale_rows"][0]["strategy_snapshot"]["expiry_structure"] == "diagonal"
+
+
+def test_full_group_lifecycle_reports_normal_put_close_as_residual_call() -> None:
+    group_id = "combo_yield:lx:normal-close"
+    events = [
+        _trade_event(
+            "put-open-normal",
+            side="sell",
+            position_effect="open",
+            price=1.5,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "sell_put")},
+        ),
+        _trade_event(
+            "call-open-normal",
+            side="buy",
+            position_effect="open",
+            price=1.0,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            option_type="call",
+            strike=100.0,
+            expiration_ymd="2026-09-18",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "enhancement_call")},
+        ),
+        _trade_event(
+            "put-close-normal",
+            side="buy",
+            position_effect="close",
+            price=0.2,
+            trade_date="2026-08-01",
+            symbol="PDD",
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "sell_put")},
+        ),
+    ]
+
+    report = build_monthly_income_report([], account="lx", broker="富途", trade_events=events)
+
+    lifecycle = report["full_group_lifecycle"][0]
+    assert lifecycle["summary_classification"] == "residual_call"
+    assert lifecycle["assigned_shares_opened"] == 0
+    assert lifecycle["residual_call_contracts"] == 1
+
+
+def test_full_group_lifecycle_reports_put_expiry_as_residual_call() -> None:
+    group_id = "combo_yield:lx:expiry-residual"
+    events = [
+        _trade_event(
+            "put-open-expiry",
+            side="sell",
+            position_effect="open",
+            price=1.5,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "sell_put")},
+        ),
+        _trade_event(
+            "call-open-expiry",
+            side="buy",
+            position_effect="open",
+            price=1.0,
+            trade_date="2026-07-01",
+            symbol="PDD",
+            option_type="call",
+            strike=100.0,
+            expiration_ymd="2026-09-18",
+            raw_payload={"strategy_snapshot": _combo_snapshot(group_id, "enhancement_call")},
+        ),
+        _trade_event(
+            "put-expire",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-08-22",
+            symbol="PDD",
+            strike=80.0,
+            expiration_ymd="2026-08-21",
+            raw_payload={
+                "close_type": EXPIRE_AUTO_CLOSE,
+                "strategy_snapshot": _combo_snapshot(group_id, "sell_put"),
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report([], account="lx", broker="富途", trade_events=events)
+
+    assert report["full_group_lifecycle"][0]["summary_classification"] == "residual_call"
