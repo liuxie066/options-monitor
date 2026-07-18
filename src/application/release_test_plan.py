@@ -32,7 +32,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="event source or event-risk files changed",
         commands=(
-            "python3 -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py",
+            "./.venv/bin/python -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py",
         ),
     ),
     TestRule(
@@ -49,7 +49,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="config generation or validation files changed",
         commands=(
-            "python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py tests/test_validate_config_notifications.py",
+            "./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_layered_config.py tests/test_validate_config_notifications.py",
             "./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example",
             "./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example",
             "./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run",
@@ -68,7 +68,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="CLI or agent tool surface changed",
         commands=(
-            "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_cli_operator_commands.py",
+            "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_cli_operator_commands.py",
         ),
     ),
     TestRule(
@@ -84,7 +84,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="tick orchestration files changed",
         commands=(
-            "python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py tests/test_tick_cron.py",
+            "./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py tests/test_tick_cron.py",
         ),
     ),
     TestRule(
@@ -98,7 +98,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="ledger, position, or trade state files changed",
         commands=(
-            "python3 -m pytest tests/test_option_positions*.py tests/test_trade*.py",
+            "./.venv/bin/python -m pytest tests/test_option_positions*.py tests/test_trade*.py",
         ),
         risk="full",
     ),
@@ -119,7 +119,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
-            "python3 -m pytest tests/test_service_deploy.py tests/test_version_check.py tests/test_install_script.py tests/test_release_test_plan.py",
+            "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_version_check.py tests/test_install_script.py tests/test_release_test_plan.py",
         ),
     ),
     TestRule(
@@ -142,10 +142,10 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="Assistant runtime, tool contract, or read surface files changed",
         commands=(
-            "python3 -m pytest tests/test_assistant_runtime.py tests/test_inbound_control.py "
+            "./.venv/bin/python -m pytest tests/test_assistant_runtime.py tests/test_inbound_control.py "
             "tests/test_assistant_permission_request.py tests/test_cli_operator_commands.py "
             "tests/test_assistant_diagnostics.py tests/test_architecture_guards.py",
-            "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
+            "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
             "tests/test_candidate_filter_trace.py tests/test_analysis_tools.py",
         ),
     ),
@@ -158,7 +158,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "src/**",
         ),
         reason="import graph may have changed",
-        commands=("python3 scripts/generate_dependency_graph.py --check",),
+        commands=("./.venv/bin/python scripts/generate_dependency_graph.py --check",),
         risk="fast",
     ),
 )
@@ -201,7 +201,7 @@ def build_release_test_plan(
 
     requires_full_pytest = selected_mode == "full" or risk == "full"
     if requires_full_pytest:
-        commands.append("python3 -m pytest")
+        commands.append("./.venv/bin/python -m pytest")
         risk = "full"
 
     return {
@@ -245,9 +245,9 @@ def _normalize_mode(mode: str) -> str:
 def _release_check_command(version: str | None) -> str:
     text = str(version or "").strip()
     if not text:
-        return "python3 scripts/release_check.py"
+        return "./.venv/bin/python scripts/release_check.py"
     tag = text if text.startswith("v") else f"v{text}"
-    return f"python3 scripts/release_check.py --tag {tag}"
+    return f"./.venv/bin/python scripts/release_check.py --tag {tag}"
 
 
 def _normalize_changed_files(changed_files: Sequence[str]) -> list[str]:
