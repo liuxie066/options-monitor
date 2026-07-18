@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -155,3 +156,55 @@ def test_python_ci_workflows_use_supported_runtime() -> None:
         assert 'python-version: "3.12"' in text or "python-version: '3.12'" in text
         assert 'python-version: "3.11"' not in text
         assert "python-version: '3.11'" not in text
+
+
+def _run_release_preflight_with_fake_python(tmp_path: Path, *args: str) -> list[str]:
+    root = Path(__file__).resolve().parents[1]
+    log_path = tmp_path / "python-commands.log"
+    fake_python = tmp_path / "python3.12"
+    fake_python.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  printf '3.12.0\\n'
+  exit 0
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'Python 3.12.0\\n'
+  exit 0
+fi
+printf '%s\\n' "$*" >> "${OM_TEST_PYTHON_LOG}"
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = dict(os.environ)
+    env.update({"OM_PYTHON": str(fake_python), "OM_TEST_PYTHON_LOG": str(log_path)})
+
+    proc = subprocess.run(
+        ["bash", "scripts/release_preflight.sh", "--allow-dirty", *args],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return log_path.read_text(encoding="utf-8").splitlines()
+
+
+def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
+    commands = _run_release_preflight_with_fake_python(tmp_path, "--full")
+
+    pytest_commands = [command for command in commands if command.startswith("-m pytest")]
+    assert pytest_commands == ["-m pytest"]
+
+
+def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> None:
+    commands = _run_release_preflight_with_fake_python(tmp_path)
+
+    pytest_commands = [command for command in commands if command.startswith("-m pytest")]
+    assert pytest_commands == [
+        "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py"
+    ]
