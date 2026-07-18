@@ -726,6 +726,8 @@ def _append_stock_capital_segment(
             end_at_ms=end_at_ms,
             notional=notional,
             quantity=shares,
+            attribution=_assigned_stock_attribution(lot, source_id=lot_id)[0],
+            attribution_issues=_assigned_stock_attribution(lot, source_id=lot_id)[1],
         )
     except ValueError:
         missing.add(f"assigned_stock_basis_unavailable:{lot_id}")
@@ -1203,13 +1205,47 @@ def _assigned_stock_unrealized_facts(
 
 
 def _assigned_stock_fact_kwargs(row: Mapping[str, Any], *, source_event_id: str) -> dict[str, Any]:
+    attribution, issues = _assigned_stock_attribution(row, source_id=source_event_id)
     return {
         "account": str(row.get("account") or ""),
         "broker": str(row.get("broker") or ""),
         "symbol": str(row.get("symbol") or ""),
         "currency": str(row.get("currency") or "") or None,
         "source_event_id": source_event_id,
+        "attribution": attribution,
+        "attribution_issues": issues,
     }
+
+
+def _assigned_stock_attribution(
+    row: Mapping[str, Any],
+    *,
+    source_id: str,
+) -> tuple[StrategyAttribution | None, tuple[str, ...]]:
+    snapshot = row.get("strategy_snapshot") if isinstance(row.get("strategy_snapshot"), Mapping) else {}
+    snapshot_group = str(snapshot.get("strategy_group_id") or "").strip()
+    row_group = str(row.get("strategy_group_id") or "").strip()
+    if snapshot_group and row_group and snapshot_group != row_group:
+        return None, (f"assigned_stock_strategy_group_conflict:{source_id}",)
+    group_id = snapshot_group or row_group
+    strategy = str(snapshot.get("strategy") or row.get("strategy") or "").strip()
+    if not strategy and group_id.startswith("combo_yield:"):
+        strategy = "combo_yield"
+    if not group_id:
+        return None, ()
+    lifecycle_source_id = str(row.get("stock_lot_id") or source_id or "").strip()
+    if strategy != "combo_yield" or not lifecycle_source_id:
+        return None, (f"assigned_stock_attribution_unavailable:{source_id or 'unknown'}",)
+    return (
+        StrategyAttribution(
+            strategy=strategy,
+            leg_role="assigned_stock",
+            strategy_group_id=group_id,
+            lifecycle_id=f"assigned_stock:{lifecycle_source_id}",
+            expiry_structure=str(snapshot.get("expiry_structure") or row.get("expiry_structure") or "").strip() or None,
+        ),
+        (),
+    )
 
 
 def _assigned_stock_fee(row: Mapping[str, Any], *, component: str) -> Mapping[str, Any]:
