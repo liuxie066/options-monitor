@@ -10,15 +10,29 @@ _om_python_runtime_error() {
 _om_python_command_path() {
   local candidate="$1"
   local resolved=""
-  local link_target=""
-  local hops=0
 
   if [[ "$candidate" == */* ]]; then
-    resolved="$candidate"
+    local parent base
+    parent="$(dirname "$candidate")"
+    base="$(basename "$candidate")"
+    if [[ -d "$parent" ]]; then
+      resolved="$(cd "$parent" 2>/dev/null && pwd -P)/$base"
+    else
+      resolved="$candidate"
+    fi
   else
     resolved="$(command -v "$candidate" 2>/dev/null || true)"
   fi
 
+  printf '%s\n' "${resolved:-$candidate}"
+}
+
+_om_python_real_path() {
+  local candidate="$1"
+  local resolved link_target
+  local hops=0
+
+  resolved="$(_om_python_command_path "$candidate")"
   while [[ -L "$resolved" && "$hops" -lt 40 ]]; do
     link_target="$(readlink "$resolved")"
     if [[ "$link_target" == /* ]]; then
@@ -141,7 +155,7 @@ om_select_bootstrap_python() {
     return 1
   fi
 
-  candidate_path="$(_om_python_command_path "$candidate")"
+  candidate_path="$(_om_python_real_path "$candidate")"
   if _om_path_is_within "$candidate_path" "$target_path"; then
     _om_python_runtime_error "candidate=${label}; executable=${candidate_path}; target_venv=${target_path}. The bootstrap interpreter must be outside the venv it creates or updates."
     return 1

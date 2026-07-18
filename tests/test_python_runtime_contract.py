@@ -96,6 +96,33 @@ def test_incompatible_repo_venv_blocks_python_and_path_fallback(tmp_path: Path) 
     assert not fallback_log.exists()
 
 
+def test_repo_selector_preserves_venv_python_symlink_entrypoint(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    external = _write_fake_python(tmp_path / "runtime" / "python3.12", version="3.12.3")
+    repo_python = repo / ".venv" / "bin" / "python"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.symlink_to(external)
+    env = _runtime_env(tmp_path / "empty-bin")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && om_select_repo_python "$2"',
+            "repo-test",
+            str(ROOT / "scripts" / "python_runtime.sh"),
+            str(repo),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(repo_python)
+
+
 def test_missing_repo_venv_prefers_python312_and_forwards_agent_argv(tmp_path: Path) -> None:
     repo = _copy_launcher_repo(tmp_path, launcher="om-agent")
     log = tmp_path / "python312.log"
