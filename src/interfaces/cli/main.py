@@ -46,6 +46,7 @@ from src.interfaces.cli.config_ops import (
     validate_yaml_runtime_config,
 )
 from src.interfaces.cli.copilot_ops import add_copilot_commands, handle_copilot_command
+from src.interfaces.cli.daily_brief_ops import add_daily_brief_commands, handle_daily_brief_command
 from src.interfaces.cli.event_source_ops import add_event_source_commands, handle_event_source_command
 from src.interfaces.cli.operator_ops import (
     add_operator_commands,
@@ -146,6 +147,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_setup_commands(sub)
 
     add_option_performance_commands(sub)
+
+    add_daily_brief_commands(sub)
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -303,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "option-performance":
             return _print(handle_option_performance_command(args))
+
+        if args.command == "daily-brief":
+            return handle_daily_brief_command(args, repo_base_fn=repo_base)
 
         if args.command in {"scheduler", "sell-put-cash"}:
             return handle_scheduler_command(
