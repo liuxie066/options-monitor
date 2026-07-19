@@ -503,3 +503,23 @@ Commands, outputs, runtime artifacts, or failing tests.
 ## Next Steps
 Smallest remaining actions, with blockers called out.
 ```
+
+## Daily Decision Brief read model
+
+`daily_decision_brief.v1` is the canonical account+market+trading-date decision read model. It is advisory-only: never interpret an action as an order, execution authorization, or permission to mutate config, positions, Feishu, broker state, or notification routing.
+
+- Scheduled source: the existing market scheduler. The first normal US opportunity is start+10 (09:40 market time); a process-level failure relies on later eligible timer slots, with 10:00 as the next explicit recovery point rather than a guaranteed 09:45 retry.
+- Delivery: first confirmed single-market brief is full; later notifications are material deltas against the last confirmed revision.
+- Closed market: do not create a fake LIVE run. Read the latest local brief for planning/replay; once `valid_until_utc` expires, the read surface reports effective `planning_only`.
+- Safety: `notifications.daily_brief.enabled` defaults to `false`. Production enablement, notification canary, release and remote upgrade require separate operator authorization.
+- Multi-market: state/artifacts are market-qualified, but combined outbound is intentionally fail-closed in v1.3.0.
+
+Read surfaces:
+
+```bash
+./om daily-brief latest --account lx [--market US] [--json]
+./om daily-brief day --account lx --date YYYY-MM-DD [--market US] [--revision N] [--json]
+./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
+```
+
+Both surfaces read the same repository and renderer. They do not refresh quotes, run scans, send notifications, or advance delivery state. Missing historical artifacts return an explicit unavailable result.
