@@ -46,7 +46,7 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: P
         def __init__(self, **_kwargs):
             self.close_count = 0
 
-        def start(self):
+        def start(self, **_kwargs):
             return None
 
         def check_health(self):
@@ -92,7 +92,7 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
         def __init__(self, **_kwargs):
             return None
 
-        def start(self):
+        def start(self, **_kwargs):
             type(self).starts += 1
 
         def check_health(self):
@@ -131,7 +131,7 @@ def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -
         def __init__(self, **_kwargs):
             return None
 
-        def start(self):
+        def start(self, **_kwargs):
             return None
 
         def check_health(self):
@@ -163,3 +163,24 @@ def test_multi_source_auth_stops_sibling_and_propagates_exit_code() -> None:
 
     assert rc == auto_intake.TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE
     assert sibling_stopped.is_set()
+
+
+def test_source_loop_treats_start_cancellation_as_clean_stop(tmp_path: Path, monkeypatch) -> None:
+    from src.application.trades.push_listener import TradeIntakeStartCancelled
+
+    class _Listener:
+        def __init__(self, **_kwargs):
+            return None
+
+        def start(self, **_kwargs):
+            raise TradeIntakeStartCancelled("cancelled")
+
+        def close(self):
+            return None
+
+    rc = _run(tmp_path, monkeypatch, _Listener, stop_event=threading.Event())
+
+    assert rc == 0
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "stopped"
+    assert status["stage"] == "start_cancelled"

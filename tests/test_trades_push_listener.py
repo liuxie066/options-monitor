@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import sys
+import threading
 from types import SimpleNamespace
 
 from src.application.trades.push_listener import OpenDTradePushListener
@@ -158,3 +160,102 @@ def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> N
         assert "OPEND_API_ERROR" in str(exc)
     else:
         raise AssertionError("expected retryable RuntimeError")
+
+
+def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) -> None:
+    from src.application.trades.push_listener import TradeIntakeAuthRequired
+
+    release_constructor = threading.Event()
+
+    class _FakeHandlerBase:
+        pass
+
+    class _BlockingContext:
+        def __init__(self, **_kwargs):
+            logging.getLogger("FTConsoleLog").warning(
+                "[open_context_base.py:407] _init_connect_sync: init connect fail: "
+                "msg=需要手机验证码 context=<futu.trade.open_trade_context.OpenSecTradeContext object>"
+            )
+            release_constructor.wait(5)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(OpenSecTradeContext=_BlockingContext, TradeDealHandlerBase=_FakeHandlerBase),
+    )
+    sdk_logger = logging.getLogger("FTConsoleLog")
+    handlers_before = list(sdk_logger.handlers)
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+
+    try:
+        listener.start()
+    except TradeIntakeAuthRequired as exc:
+        assert exc.error_code == "OPEND_NEEDS_PHONE_VERIFY"
+    else:
+        raise AssertionError("expected terminal auth while constructor is blocked")
+    finally:
+        release_constructor.set()
+
+    assert list(sdk_logger.handlers) == handlers_before
+
+
+def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(monkeypatch) -> None:
+    from src.application.trades.push_listener import TradeIntakeStartCancelled
+
+    release_constructor = threading.Event()
+
+    class _FakeHandlerBase:
+        pass
+
+    class _BlockingContext:
+        def __init__(self, **_kwargs):
+            release_constructor.wait(5)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(OpenSecTradeContext=_BlockingContext, TradeDealHandlerBase=_FakeHandlerBase),
+    )
+    sdk_logger = logging.getLogger("FTConsoleLog")
+    handlers_before = list(sdk_logger.handlers)
+    cancel_event = threading.Event()
+    cancel_event.set()
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+
+    try:
+        listener.start(cancel_event=cancel_event)
+    except TradeIntakeStartCancelled:
+        pass
+    else:
+        raise AssertionError("expected cancelled construction")
+    finally:
+        release_constructor.set()
+
+    assert list(sdk_logger.handlers) == handlers_before
+
+
+def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> None:
+    class _FakeHandlerBase:
+        pass
+
+    class _FailingContext:
+        def __init__(self, **_kwargs):
+            raise ConnectionRefusedError("refused")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(OpenSecTradeContext=_FailingContext, TradeDealHandlerBase=_FakeHandlerBase),
+    )
+    sdk_logger = logging.getLogger("FTConsoleLog")
+    handlers_before = list(sdk_logger.handlers)
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+
+    try:
+        listener.start()
+    except RuntimeError as exc:
+        assert "failed to initialize" in str(exc)
+    else:
+        raise AssertionError("expected retryable constructor failure")
+
+    assert list(sdk_logger.handlers) == handlers_before
