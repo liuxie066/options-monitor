@@ -152,6 +152,7 @@ def _coordinate_listener_sources(
     sources: list[dict[str, Any]],
     *,
     run_source: Callable[[dict[str, Any], threading.Event], int],
+    shutdown_timeout_sec: float = 5.0,
 ) -> int:
     stop_event = threading.Event()
     results: queue.Queue[int] = queue.Queue()
@@ -163,33 +164,48 @@ def _coordinate_listener_sources(
             _log(f"[ERROR] listener source={source.get('id')} crashed: {type(exc).__name__}: {exc}")
             result = 1
         results.put(result)
+        # A source finishing is terminal for the coordinated listener set. Stop
+        # siblings so the service cannot remain partially alive.
+        stop_event.set()
 
     threads = [
-        threading.Thread(target=_worker, args=(source,), name=f"trade-intake-{source.get('id')}", daemon=False)
+        threading.Thread(target=_worker, args=(source,), name=f"trade-intake-{source.get('id')}", daemon=True)
         for source in sources
     ]
     exit_code = 0
     completed = 0
+    shutdown_deadline: float | None = None
+    timeout_sec = max(0.0, float(shutdown_timeout_sec))
     try:
         for thread in threads:
             thread.start()
         while completed < len(threads):
+            wait_timeout = 0.2
+            if shutdown_deadline is not None:
+                remaining = shutdown_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait_timeout = min(wait_timeout, remaining)
             try:
-                source_code = results.get(timeout=0.2)
+                source_code = results.get(timeout=wait_timeout)
             except queue.Empty:
                 continue
             completed += 1
+            if shutdown_deadline is None:
+                shutdown_deadline = time.monotonic() + timeout_sec
             if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
                 exit_code = source_code
-                stop_event.set()
             elif source_code != 0 and exit_code == 0:
                 exit_code = source_code
         for thread in threads:
-            thread.join()
+            remaining = None if shutdown_deadline is None else max(0.0, shutdown_deadline - time.monotonic())
+            thread.join(timeout=remaining)
+            if thread.is_alive():
+                _log(f"[ERROR] listener thread={thread.name} did not stop within {timeout_sec:g} sec")
     except KeyboardInterrupt:
         stop_event.set()
         for thread in threads:
-            thread.join(timeout=5)
+            thread.join(timeout=timeout_sec)
         return 0
     return exit_code
 
