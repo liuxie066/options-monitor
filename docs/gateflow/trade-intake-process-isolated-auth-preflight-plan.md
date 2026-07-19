@@ -131,7 +131,7 @@ Broader before draft PR:
 
 ```bash
 python3.12 -m pytest tests/test_trades_*.py tests/test_service_deploy.py tests/test_service_drift.py -q
-python3.12 scripts/check_dependency_graph.py --check
+python3.12 scripts/generate_dependency_graph.py --check
 python3.12 -m pytest -q
 python3.12 tests/run_smoke.py
 ```
