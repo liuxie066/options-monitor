@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -29,7 +30,7 @@ from src.application.trades.state import (
 )
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
-from src.application.trades.push_listener import OpenDTradePushListener
+from src.application.trades.push_listener import OpenDTradePushListener, TradeIntakeAuthRequired
 from src.application.trades.receipt import send_trade_intake_receipt
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
@@ -37,6 +38,9 @@ from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import process_trade_payload
 from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import atomic_write_json, utc_now
+
+
+TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE = 78
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -138,6 +142,52 @@ class _ReplayRepo:
     def create_record(self, fields: dict[str, Any]) -> dict[str, Any]:
         return {"record": {"record_id": "dry_run_replay"}}
 
+
+
+def _coordinate_listener_sources(
+    sources: list[dict[str, Any]],
+    *,
+    run_source: Callable[[dict[str, Any], threading.Event], int],
+) -> int:
+    stop_event = threading.Event()
+    results: queue.Queue[int] = queue.Queue()
+
+    def _worker(source: dict[str, Any]) -> None:
+        try:
+            result = run_source(source, stop_event)
+        except Exception as exc:
+            _log(f"[ERROR] listener source={source.get('id')} crashed: {type(exc).__name__}: {exc}")
+            result = 1
+        results.put(result)
+
+    threads = [
+        threading.Thread(target=_worker, args=(source,), name=f"trade-intake-{source.get('id')}", daemon=False)
+        for source in sources
+    ]
+    exit_code = 0
+    completed = 0
+    try:
+        for thread in threads:
+            thread.start()
+        while completed < len(threads):
+            try:
+                source_code = results.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            completed += 1
+            if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
+                exit_code = source_code
+                stop_event.set()
+            elif source_code != 0 and exit_code == 0:
+                exit_code = source_code
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=5)
+        return 0
+    return exit_code
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
@@ -344,39 +394,22 @@ def main(argv: list[str] | None = None) -> int:
             process_lock=process_lock,
         )
 
-    stop_event = threading.Event()
-    threads = [
-        threading.Thread(
-            target=_run_listener_source_loop,
-            kwargs={
-                "source": source,
-                "repo": repo,
-                "cfg": cfg,
-                "cfg_path": cfg_path,
-                "runtime_root": runtime_root,
-                "runtime_root_source": runtime_resolution.source,
-                "intake_cfg": intake_cfg,
-                "apply_changes": apply_changes,
-                "receipt_callback": receipt_callback,
-                "process_lock": process_lock,
-                "stop_event": stop_event,
-            },
-            name=f"trade-intake-{source.get('id')}",
-            daemon=False,
-        )
-        for source in sources
-    ]
-    try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    except KeyboardInterrupt:
-        stop_event.set()
-        for thread in threads:
-            thread.join(timeout=5)
-        return 0
-    return 0
+    return _coordinate_listener_sources(
+        sources,
+        run_source=lambda source, stop_event: _run_listener_source_loop(
+            source=source,
+            repo=repo,
+            cfg=cfg,
+            cfg_path=cfg_path,
+            runtime_root=runtime_root,
+            runtime_root_source=runtime_resolution.source,
+            intake_cfg=intake_cfg,
+            apply_changes=apply_changes,
+            receipt_callback=receipt_callback,
+            process_lock=process_lock,
+            stop_event=stop_event,
+        ),
+    )
 
 
 def _build_receipt_callback(
@@ -585,8 +618,10 @@ def _run_listener_source_loop(
     listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
     restart_count = 0
     last_backfill_monotonic: float | None = None
+    last_heartbeat_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
-    reconnect_sec = int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5)
+    reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
+    reconnect_delay_sec = reconnect_floor_sec
     while not stop.is_set():
         try:
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
@@ -596,6 +631,8 @@ def _run_listener_source_loop(
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
                 last_backfill_monotonic = time.monotonic()
             while not stop.is_set():
+                listener.check_health()
+                reconnect_delay_sec = reconnect_floor_sec
                 should_backfill = bool(backfill_cfg.get("enabled", True))
                 now_mono = time.monotonic()
                 if should_backfill:
@@ -646,14 +683,32 @@ def _run_listener_source_loop(
                         last_backfill_monotonic = time.monotonic()
                         status_state.update(_update_status_from_backfill(status_state, result))
                         _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
-                _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
-                if stop.wait(60):
+                if last_heartbeat_monotonic is None or now_mono - last_heartbeat_monotonic >= 60:
+                    _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
+                    last_heartbeat_monotonic = now_mono
+                if stop.wait(5):
                     break
         except KeyboardInterrupt:
             stop.set()
             listener.close()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
+        except TradeIntakeAuthRequired as exc:
+            listener.close()
+            stop.set()
+            status_state["last_error"] = str(exc)
+            _write_listener_status(
+                status_path,
+                status_state,
+                status="blocked",
+                stage="auth_required",
+                restart_count=restart_count,
+                last_error=str(exc),
+                error_code=exc.error_code,
+                error_message=exc.message,
+            )
+            _log(f"[ERROR] listener source={source.get('id')} blocked: {exc}")
+            return TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE
         except Exception as exc:
             listener.close()
             restart_count += 1
@@ -665,10 +720,12 @@ def _run_listener_source_loop(
                 stage="listener_exception",
                 restart_count=restart_count,
                 last_error=f"{type(exc).__name__}: {exc}",
+                reconnect_delay_sec=reconnect_delay_sec,
             )
-            _log(f"[WARN] listener source={source.get('id')} exited: {exc}; retry in {reconnect_sec} sec")
-            if stop.wait(reconnect_sec):
+            _log(f"[WARN] listener source={source.get('id')} exited: {exc}; retry in {reconnect_delay_sec} sec")
+            if stop.wait(reconnect_delay_sec):
                 break
+            reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()
     _write_listener_status(status_path, status_state, status="stopped", stage="stop_event", restart_count=restart_count)
     return 0

@@ -96,6 +96,10 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "--journal-summary" in runtime_status
     assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
+    assert "RestartPreventExitStatus=78" in intake
+    assert "RestartPreventExitStatus=" not in tick
+    assert "RestartPreventExitStatus=" not in runtime_status
+    assert "RestartPreventExitStatus=" not in verify
     assert "RuntimeMaxSec=" not in tick
     assert "RuntimeMaxSec=" not in runtime_status
     assert "RuntimeMaxSec=" not in verify

@@ -785,6 +785,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | 两个账户结果看起来串了 | `scheduler_status`、账户级 source 配置、账户级状态文件 |
 | 通知没发出来 | `preview_notification`、`notifications.channel`、secret 文件、通知 route |
 | 自动交易监听没有回执 | `runtime_status` 的 `trade_intake.summary`、`auto_trade_intake_status.json`、`trade_intake.receipt.enabled`、通知 route |
+| 自动交易监听因认证停止 | 检查 `auto_trade_intake_status.json` 的 `stage=auth_required` / `error_code=OPEND_NEEDS_PHONE_VERIFY`；完成 OpenD 手机验证后再人工启动服务，退出码 `78` 不会被 systemd 自动重启 |
 | 过期自动平仓没有回执 | `runtime_status` 最新 run 里的 `auto_close_receipt` / `expired_position_maintenance`、`option_positions.auto_close.receipt.enabled`、通知 route；每日维护 cron 重跑时还要看 `receipt_key` 是否已确认发送 |
 | 平仓建议异常 | `prepare_close_advice_inputs`、本地 `option_positions`、required data |
 
