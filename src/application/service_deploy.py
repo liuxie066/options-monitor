@@ -397,6 +397,7 @@ def _systemd_unit(
     wants: list[str] | None = None,
     before: list[str] | None = None,
     runtime_max_sec: int | None = None,
+    restart_prevent_exit_statuses: list[int] | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
     wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
@@ -435,6 +436,11 @@ def _systemd_unit(
     if restart:
         lines.append(f"Restart={restart}")
         lines.append("RestartSec=10")
+        if restart_prevent_exit_statuses:
+            statuses = [int(status) for status in restart_prevent_exit_statuses]
+            if any(status < 0 or status > 255 for status in statuses):
+                raise ValueError("restart_prevent_exit_statuses must be between 0 and 255")
+            lines.append("RestartPreventExitStatus=" + " ".join(str(status) for status in statuses))
     lines.extend(["StandardOutput=journal", "StandardError=journal", ""])
     if restart:
         lines.extend(["[Install]", "WantedBy=multi-user.target", ""])
@@ -930,6 +936,7 @@ def render_service_bundle(
                 exec_args=trade_args,
                 service_type="simple",
                 restart="always",
+                restart_prevent_exit_statuses=[78],
                 after=opend_dependency_units or None,
                 wants=opend_dependency_units or None,
             ),
