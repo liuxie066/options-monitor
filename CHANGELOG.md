@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.418 - 2026-07-19
+
+### Fixed
+- Isolated the complete trade-intake runtime in a disposable child process so Futu SDK non-daemon threads cannot keep the service alive after terminal OpenD phone-verification detection.
+- Propagated the existing auth-required exit status 78 through a normal parent supervisor, allowing systemd restart prevention to stop the authentication log loop deterministically.
+
 ## 1.2.417 - 2026-07-19
 
 ### Fixed
