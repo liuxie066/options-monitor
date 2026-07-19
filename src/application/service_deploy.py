@@ -396,6 +396,7 @@ def _systemd_unit(
     after: list[str] | None = None,
     wants: list[str] | None = None,
     before: list[str] | None = None,
+    runtime_max_sec: int | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
     wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
@@ -427,6 +428,10 @@ def _systemd_unit(
     if env_file is not None:
         lines.append(_systemd_environment_file(env_file))
     lines.append("ExecStart=" + _systemd_join_args(exec_args))
+    if runtime_max_sec is not None:
+        if int(runtime_max_sec) <= 0:
+            raise ValueError("runtime_max_sec must be positive")
+        lines.append(f"RuntimeMaxSec={int(runtime_max_sec)}")
     if restart:
         lines.append(f"Restart={restart}")
         lines.append("RestartSec=10")
@@ -820,6 +825,7 @@ def render_service_bundle(
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
                     exec_args=auto_close_args,
+                    runtime_max_sec=600,
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_service}",
                 kind="systemd_service",
@@ -1049,6 +1055,7 @@ def render_service_bundle(
                     deploy_home=systemd_home,
                     exec_args=recorder_sample_args,
                     after=opend_dependency_units if recorder_source == "opend" else None,
+                    runtime_max_sec=600,
                     wants=opend_dependency_units if recorder_source == "opend" else None,
                 ),
                 install_path=f"/etc/systemd/system/{recorder_sample_service}",
