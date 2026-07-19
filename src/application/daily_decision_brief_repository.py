@@ -91,9 +91,13 @@ def prepare_daily_decision_brief(
                     f"daily brief current state digest mismatch: {current_path}"
                 )
 
-        revision = 0
-        if current is not None and current["market_trading_date"] == market_date:
-            revision = int(current["revision"]) + 1
+        existing_revisions = _list_revision_numbers(
+            base=base_path,
+            account=account,
+            market=market,
+            market_trading_date=market_date,
+        )
+        revision = (existing_revisions[-1] + 1) if existing_revisions else 0
 
         candidate = dict(source)
         candidate.update(
@@ -384,13 +388,12 @@ def list_daily_decision_brief_revisions(
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     date_norm = _normalize_market_date(market_trading_date)
-    state_dir = paths.account_state_dir(base_path, account_norm)
-    prefix = f"daily_decision_brief.{market_norm}.{date_norm}.r"
-    revisions: list[int] = []
-    for path in sorted(state_dir.glob(f"{prefix}*.json")):
-        match = _REVISION_RE.search(path.name)
-        if match:
-            revisions.append(int(match.group("revision")))
+    revisions = _list_revision_numbers(
+        base=base_path,
+        account=account_norm,
+        market=market_norm,
+        market_trading_date=date_norm,
+    )
     if not revisions:
         return {
             "available": False,
@@ -406,7 +409,7 @@ def list_daily_decision_brief_revisions(
         "account": account_norm,
         "market": market_norm,
         "market_trading_date": date_norm,
-        "revisions": sorted(set(revisions)),
+        "revisions": revisions,
     }
 
 
@@ -459,6 +462,23 @@ def _revision_path(base: Path, account: str, market: str, market_date: str, revi
 
 def _delivery_path(base: Path, account: str, market: str) -> Path:
     return paths.account_state_dir(base, account) / f"daily_decision_brief.{market}.delivery.json"
+
+
+def _list_revision_numbers(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+) -> list[int]:
+    state_dir = paths.account_state_dir(base, account)
+    prefix = f"daily_decision_brief.{market}.{market_trading_date}.r"
+    revisions: list[int] = []
+    for path in sorted(state_dir.glob(f"{prefix}*.json")):
+        match = _REVISION_RE.search(path.name)
+        if match:
+            revisions.append(int(match.group("revision")))
+    return sorted(set(revisions))
 
 
 def _normalize_persisted_brief(raw: Any, *, path: Path, account: str, market: str) -> dict[str, Any]:

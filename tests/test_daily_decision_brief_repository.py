@@ -118,6 +118,47 @@ def test_same_day_revision_is_monotonic_and_new_day_resets_to_zero(tmp_path: Pat
     assert next_day["paths"]["revision"].name.endswith("2026-07-20.r0000.json")
 
 
+@pytest.mark.parametrize("seed_current", [False, True])
+def test_prepare_advances_past_orphan_revision_after_interrupted_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_current: bool,
+) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    if seed_current:
+        repository.prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-seed"))
+
+    original_write = repository.atomic_write_json
+    write_count = 0
+
+    def interrupt_after_revision(path: Path, payload: object, **kwargs: object) -> None:
+        nonlocal write_count
+        write_count += 1
+        if write_count == 2:
+            raise RuntimeError("injected interruption after immutable revision write")
+        original_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(repository, "atomic_write_json", interrupt_after_revision)
+    with pytest.raises(RuntimeError, match="injected interruption"):
+        repository.prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-interrupted"))
+    monkeypatch.setattr(repository, "atomic_write_json", original_write)
+
+    recovered = repository.prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-recovered"))
+
+    orphan_revision = 1 if seed_current else 0
+    expected_revision = orphan_revision + 1
+    assert recovered["current_revision"] == expected_revision
+    assert recovered["paths"]["revision"].name.endswith(f".r{expected_revision:04d}.json")
+    listed = repository.list_daily_decision_brief_revisions(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date="2026-07-17",
+    )
+    assert listed["revisions"] == list(range(expected_revision + 1))
+
+
 def test_full_not_delivered_reuses_key_for_same_semantic_content(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
 
