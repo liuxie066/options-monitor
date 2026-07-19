@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
@@ -399,6 +400,7 @@ def test_put_and_call_same_expirations_merge_into_single_request(monkeypatch, tm
 
 def test_put_and_call_different_expirations_split_requests(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
 
     monkeypatch.setattr(
         mod,
@@ -406,6 +408,7 @@ def test_put_and_call_different_expirations_split_requests(monkeypatch, tmp_path
         lambda *args, **kwargs: ["2026-05-09", "2026-05-29", "2026-06-26", "2026-08-28"],
     )
     monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda _market: date(2026, 4, 30))
 
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,
