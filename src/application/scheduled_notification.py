@@ -18,6 +18,7 @@ from domain.domain.engine import (
 )
 from src.application.notification_delivery_adapter import (
     build_notification_idempotency_key,
+    build_notification_transport_key,
     normalize_notification_delivery_result,
 )
 
@@ -535,16 +536,24 @@ def send_account_message_with_retry(
     sleep_fn: Callable[[float], Any] = sleep,
     max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
     retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
+    idempotency_key_override: str | None = None,
 ) -> dict[str, object]:
     attempts = max(1, int(max_attempts or 1))
     final_record: dict[str, object] | None = None
     attempt_records: list[dict[str, object]] = []
-    idempotency_key = build_notification_idempotency_key(
-        run_id=run_id,
-        account=account,
-        target=target,
-        message=message,
+    logical_override = str(idempotency_key_override or "").strip()
+    idempotency_key = (
+        build_notification_transport_key(logical_override)
+        if logical_override
+        else ""
     )
+    if not idempotency_key:
+        idempotency_key = build_notification_idempotency_key(
+            run_id=run_id,
+            account=account,
+            target=target,
+            message=message,
+        )
 
     for attempt in range(1, attempts + 1):
         t_notify0 = monotonic()
@@ -780,6 +789,7 @@ def execute_per_account_delivery(
     base,
     failure_stage: str = "send_notification_message",
     sleep_fn: Callable[[float], Any] = sleep,
+    idempotency_keys_by_account: dict[str, str] | None = None,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
@@ -817,6 +827,7 @@ def execute_per_account_delivery(
             failure_fields_builder=failure_fields_builder,
             failure_stage=failure_stage,
             sleep_fn=sleep_fn,
+            idempotency_key_override=(idempotency_keys_by_account or {}).get(str(acct)),
         )
         if not bool(send_result.get("ok")):
             send_results.append(dict(send_result))
