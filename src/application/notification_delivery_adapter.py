@@ -50,6 +50,15 @@ def build_notification_idempotency_key(
     return "om-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def build_notification_transport_key(logical_key: str) -> str:
+    """Map a stable logical delivery key to a provider-safe compact key."""
+
+    value = str(logical_key or "").strip()
+    if not value:
+        raise ValueError("logical notification idempotency key is required")
+    return "om-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+
+
 def resolve_feishu_bot_send_target(
     *,
     notifications: dict[str, Any] | None = None,
