@@ -21,3 +21,23 @@ def test_prepare_tick_run_workspace_creates_required_dirs(tmp_path) -> None:
     assert (tmp_path / "output_runs" / "20260513T010203" / "state").is_dir()
     pointer = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
     assert pointer.read_text(encoding="utf-8").strip() == str(workspace.run_dir)
+
+
+def test_prepare_tick_run_workspace_preserves_historical_runs(tmp_path) -> None:
+    import os
+    import time
+
+    from src.application.tick_run_workspace import prepare_tick_run_workspace
+
+    historical_run = tmp_path / "output_runs" / "20260101T000000"
+    historical_run.mkdir(parents=True)
+    old_timestamp = time.time() - 8 * 86400
+    os.utime(historical_run, (old_timestamp, old_timestamp))
+
+    prepare_tick_run_workspace(
+        base=tmp_path,
+        run_id="20260719T120000",
+        default_account="lx",
+    )
+
+    assert historical_run.is_dir()
