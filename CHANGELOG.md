@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.420 - 2026-07-19
+
+### Fixed
+- Preserved snapshot analysis views when applying month filters while deriving trade-event months from Beijing timestamps or epoch milliseconds.
+- Added explicit query-filter metadata and empty-result evidence semantics for current exposure and requested-period trade-event queries.
+
 ## 1.2.419 - 2026-07-19
 
 ### Fixed
