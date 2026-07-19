@@ -167,7 +167,7 @@ def handle_run_command(
 
     if args.run_command == "trade-intake":
         if run_trade_intake_fn is None:
-            from src.application.trades.auto_intake import main as run_trade_intake_fn
+            from src.application.trades.process_supervisor import run_trade_intake_process as run_trade_intake_fn
 
         return int(run_trade_intake_fn(_trade_intake_argv(args)))
 
