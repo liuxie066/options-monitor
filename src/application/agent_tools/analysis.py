@@ -1026,6 +1026,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "source_tools": ("option_positions_read",),
         "semantic_source": "option_positions_read.list",
         "freshness": "snapshot",
+        "empty_result_meaning": "valid_current_negative_evidence",
         "recommended_filters": ("account", "symbol", "option_type", "expiration_ymd", "strategy"),
         "safe_join_keys": ("account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
         "alias_of": "position_lots",
@@ -1038,6 +1039,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "source_tools": ("option_positions_read",),
         "semantic_source": "open_option_exposure",
         "freshness": "snapshot",
+        "empty_result_meaning": "valid_current_negative_evidence",
         "recommended_filters": ("account", "expiration_bucket", "currency"),
         "safe_join_keys": ("account", "currency"),
     },
@@ -1475,6 +1477,9 @@ def _analysis_views_mode_result(
             "row_count": row_count,
             "truncated": row_count > len(display_rows),
         }
+        empty_result_meaning = _view_empty_result_meaning(view_name, payload=payload)
+        if empty_result_meaning:
+            view_datasets[view_name]["empty_result_meaning"] = empty_result_meaning
         for row in display_rows:
             if len(preview_rows) >= limit:
                 truncated = True
@@ -1483,6 +1488,10 @@ def _analysis_views_mode_result(
     columns = _columns_for_rows(preview_rows, ("view",))
     coverage = _query_coverage(all_rows)
     diagnostics = _query_diagnostics(rows=all_rows, views_used=view_names, warnings=warnings)
+    query = {"mode": "views", "views": view_names, "limit": limit}
+    filters = _payload_filter_summary(payload)
+    if filters:
+        query["filters"] = filters
     evidence = {
         "cells": _cell_refs(preview_rows),
         "coverage": {"views": view_names, **coverage},
@@ -1495,7 +1504,7 @@ def _analysis_views_mode_result(
         "source_label": "OM read-only analysis workspace",
         "source": {"label": "OM read-only analysis workspace", "kind": "materialized_views"},
         "scope": {"views": view_names, "limit": limit},
-        "query": {"mode": "views", "views": view_names, "limit": limit},
+        "query": query,
         "preflight": {"ok": True, "warnings": semantic_warnings},
         "columns": columns,
         "rows": preview_rows,
@@ -1555,7 +1564,7 @@ def _filter_views_mode_rows(rows: list[dict[str, Any]], *, payload: dict[str, An
         return rows
     out: list[dict[str, Any]] = []
     for row in rows:
-        if months and str(row.get("month") or "").strip() not in months:
+        if months and _row_has_month_scope(row) and not (months & _row_month_values(row)):
             continue
         if accounts and str(row.get("account") or "").strip() not in accounts:
             continue
@@ -1563,6 +1572,37 @@ def _filter_views_mode_rows(rows: list[dict[str, Any]], *, payload: dict[str, An
             continue
         out.append(row)
     return out
+
+
+def _view_empty_result_meaning(view_name: str, *, payload: dict[str, Any]) -> str:
+    if view_name == "trade_events" and _payload_filter_values(payload, "month", "months"):
+        return "valid_requested_period_negative_evidence"
+    return str(VIEW_SPECS.get(view_name, {}).get("empty_result_meaning") or "").strip()
+
+
+def _row_has_month_scope(row: dict[str, Any]) -> bool:
+    if "month" in row:
+        return True
+    return bool(row.get("trade_time_beijing") or row.get("trade_time_ms"))
+
+
+def _row_month_values(row: dict[str, Any]) -> set[str]:
+    month = str(row.get("month") or "").strip()
+    if month:
+        return {month}
+
+    text = str(row.get("trade_time_beijing") or "").strip()
+    match = re.search(r"\b(20\d{2})[-/年.](0?[1-9]|1[0-2])", text)
+    if match:
+        return {f"{match.group(1)}-{int(match.group(2)):02d}"}
+
+    try:
+        timestamp_ms = int(row.get("trade_time_ms"))
+    except (TypeError, ValueError, OverflowError):
+        return set()
+    return {
+        datetime.fromtimestamp(timestamp_ms / 1000, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
+    }
 
 
 def _payload_filter_values(payload: dict[str, Any], single_key: str, multi_key: str) -> set[str]:
@@ -1576,6 +1616,19 @@ def _payload_filter_values(payload: dict[str, Any], single_key: str, multi_key: 
     elif isinstance(multi, (list, tuple, set)):
         values.extend(multi)
     return {str(item or "").strip() for item in values if str(item or "").strip()}
+
+
+def _payload_filter_summary(payload: dict[str, Any]) -> dict[str, list[str]]:
+    filters: dict[str, list[str]] = {}
+    for output_key, single_key, multi_key in (
+        ("months", "month", "months"),
+        ("accounts", "account", "accounts"),
+        ("symbols", "symbol", "symbols"),
+    ):
+        values = sorted(_payload_filter_values(payload, single_key, multi_key))
+        if values:
+            filters[output_key] = values
+    return filters
 
 
 def _requested_views(value: Any) -> set[str]:
