@@ -118,8 +118,8 @@ Diff 必须相对最后成功送达 revision。若首份完整 brief 尚未成�
 
 新增 application repository/service `src/application/daily_decision_brief_repository.py`，仅使用 JSON + existing state paths：
 
-- run-scoped：`output_runs/<run_id>/accounts/<account>/state/daily_decision_brief.json`
-- run-scoped diff：`.../daily_decision_brief_diff.json`
+- run-scoped：`output_runs/<run_id>/accounts/<account>/state/daily_decision_brief.<market>.json`
+- run-scoped diff：`.../daily_decision_brief_diff.<market>.json`
 - account current：`output_accounts/<account>/state/daily_decision_brief.<market>.current.json`
 - account revision：`output_accounts/<account>/state/daily_decision_brief.<market>.<date>.rNNNN.json`
 - account delivery pointer：`output_accounts/<account>/state/daily_decision_brief.<market>.delivery.json`
@@ -137,8 +137,10 @@ Diff 必须相对最后成功送达 revision。若首份完整 brief 尚未成�
 
 稳定 provider idempotency key：
 
-- full：`daily-brief:<market>:<date>:<account>:full`
+- full：`daily-brief:<market>:<date>:<account>:full:<semantic-brief-digest>`；digest 排除 revision、run_id、generated/data-as-of 时间、strategy summary/action 展示文案和 source artifact/provenance，但保留会改变完整日报语义或数值内容的 canonical payload
 - delta：`daily-brief:<market>:<date>:<account>:from:<last-delivered-brief-digest>:<material-diff-digest>`；current revision 只进 audit，不进入 provider key，确保 post-send/pre-pointer crash 后相同 material diff 仍使用同一 key
+
+2026-07-19 S2 re-review amendment：原固定 daily full key 会在“provider 已送达旧 full、进程在 pointer 写入前崩溃、下一轮生成不同内容”的窗口中，让新 revision 被 provider 当成旧消息重试。用户确认采用 semantic-content key：相同语义重试复用 key，完整日报内容变化则换 key。详见 `docs/gateflow/daily-decision-brief-plan-amendment-20260719.md`。
 
 `scheduled_notification.send_account_message_with_retry()` 增加可选 idempotency override；默认调用行为不变。
 
