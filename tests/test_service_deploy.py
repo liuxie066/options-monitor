@@ -84,12 +84,22 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert str(repo / "om") + " run tick-cron --market us" in tick
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
     assert str(repo / "om") + " option-positions auto-close-expired" in files["systemd/options-monitor-auto-close-us.service"]["content"]
-    assert "--apply --yes --quiet" in files["systemd/options-monitor-auto-close-us.service"]["content"]
+    auto_close = files["systemd/options-monitor-auto-close-us.service"]["content"]
+    assert "--apply --yes --quiet" in auto_close
+    assert "RuntimeMaxSec=600" in auto_close
     assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York" in tick_timer
     assert "OnUnitActiveSec=10min" not in tick_timer
     assert "OnBootSec=2min" not in tick_timer
     assert str(repo / "om") + " run trade-intake" in intake
+    runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
+    assert str(repo / "om") + " status --profile-path " + str(runtime / "service.profile.json") in runtime_status
+    assert "--journal-summary" in runtime_status
+    assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
+    assert "RuntimeMaxSec=" not in tick
+    assert "RuntimeMaxSec=" not in runtime_status
+    assert "RuntimeMaxSec=" not in verify
+    assert "RuntimeMaxSec=" not in intake
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
     assert "OnCalendar=*-*-* 09:00:00 Asia/Shanghai" in auto_close_timer
@@ -104,6 +114,42 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
+
+
+
+
+def test_systemd_unit_rejects_non_positive_runtime_limit(tmp_path: Path) -> None:
+    from src.application.service_deploy import _systemd_unit
+
+    with pytest.raises(ValueError, match="runtime_max_sec must be positive"):
+        _systemd_unit(
+            description="invalid",
+            repo_root=tmp_path,
+            runtime_root=tmp_path,
+            exec_args=["/bin/true"],
+            runtime_max_sec=0,
+        )
+
+
+def test_render_launchd_runtime_status_uses_bounded_journal_summary(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    content = files["launchd/com.options-monitor.runtime-status.plist"]["content"]
+    assert str(repo / "om") in content
+    assert "status" in content
+    assert "--journal-summary" in content
+    assert str(repo / "om-agent") not in content
 
 
 def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None:
@@ -766,6 +812,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     build_timer = files["systemd/options-monitor-strategy-lab-build.timer"]["content"]
     sample_service = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
     sample_timer = files["systemd/options-monitor-strategy-lab-sample.timer"]["content"]
+    assert "RuntimeMaxSec=600" in sample_service
     settle_service = files["systemd/options-monitor-strategy-lab-settle.service"]["content"]
     settle_timer = files["systemd/options-monitor-strategy-lab-settle.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
