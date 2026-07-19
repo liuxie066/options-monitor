@@ -459,6 +459,10 @@ def main(argv: list[str] | None = None) -> int:
             audit_helper=audit_helper,
             vpy=vpy,
             complete_tick_idempotency_fn=complete_tick_idempotency,
+            markets_to_run=markets_to_run,
+            scheduler_markets=scheduler_markets,
+            scheduler_decision=scheduler_decision,
+            ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
         )
     )
 
