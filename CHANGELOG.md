@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.415 - 2026-07-19
+
+### Changed
+- Switched generated Runtime Status services to a bounded journal summary while preserving the full human and structured diagnostic surfaces.
+- Added a ten-minute systemd runtime limit to the observed stuck auto-close and Strategy Lab sample one-shot services without changing long-running listeners or tick timeouts.
+
+### Fixed
+- Prevented Runtime Status timers from amplifying large JSON envelopes into tens of thousands of journal lines.
+- Bounded journal summaries to 20 lines and 16 KiB even when runtime metadata, warnings, or errors contain long, multiline, or non-ASCII text.
+
 ## 1.2.414 - 2026-07-18
 
 ### Changed
