@@ -779,6 +779,21 @@ def validate_config(cfg: dict):
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
+        daily_brief = notifications.get('daily_brief')
+        if daily_brief is not None:
+            if not isinstance(daily_brief, dict):
+                die('notifications.daily_brief must be an object')
+            if 'enabled' in daily_brief and not isinstance(daily_brief.get('enabled'), bool):
+                die('notifications.daily_brief.enabled must be a boolean')
+            for key in ('max_actions_per_priority', 'max_candidates_per_strategy', 'max_rejection_reasons'):
+                if key not in daily_brief:
+                    continue
+                value = daily_brief.get(key)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    die(f'notifications.daily_brief.{key} must be an integer')
+                if value < 1 or value > 20:
+                    die(f'notifications.daily_brief.{key} must be between 1 and 20')
+
         has_routing = any(notifications.get(k) for k in ('provider', 'channel', 'transport_channel', 'target'))
         if has_routing:
             raw_provider = str(notifications.get('provider') or '').strip().lower()
