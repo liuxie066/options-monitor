@@ -30,7 +30,11 @@ from src.application.trades.state import (
 )
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
-from src.application.trades.push_listener import OpenDTradePushListener, TradeIntakeAuthRequired
+from src.application.trades.push_listener import (
+    OpenDTradePushListener,
+    TradeIntakeAuthRequired,
+    TradeIntakeStartCancelled,
+)
 from src.application.trades.receipt import send_trade_intake_receipt
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
@@ -625,7 +629,7 @@ def _run_listener_source_loop(
     while not stop.is_set():
         try:
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
-            listener.start()
+            listener.start(cancel_event=stop)
             _log(f"[OK] auto trade intake listener started source={source.get('id')} {host}:{port}")
             _write_listener_status(status_path, status_state, status="listening", stage="listener_started", restart_count=restart_count)
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
@@ -692,6 +696,16 @@ def _run_listener_source_loop(
             stop.set()
             listener.close()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
+            return 0
+        except TradeIntakeStartCancelled:
+            listener.close()
+            _write_listener_status(
+                status_path,
+                status_state,
+                status="stopped",
+                stage="start_cancelled",
+                restart_count=restart_count,
+            )
             return 0
         except TradeIntakeAuthRequired as exc:
             listener.close()
