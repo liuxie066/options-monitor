@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 from src.application.trades import auto_intake
@@ -184,3 +185,44 @@ def test_source_loop_treats_start_cancellation_as_clean_stop(tmp_path: Path, mon
     status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
     assert status["status"] == "stopped"
     assert status["stage"] == "start_cancelled"
+
+
+def test_multi_source_crash_stops_sibling_and_returns_failure() -> None:
+    sibling_stopped = threading.Event()
+
+    def _runner(source: dict, stop_event: threading.Event) -> int:
+        if source["id"] == "crash":
+            raise RuntimeError("boom")
+        assert stop_event.wait(2), "crashed source did not stop sibling source"
+        sibling_stopped.set()
+        return 0
+
+    rc = auto_intake._coordinate_listener_sources(
+        [{"id": "crash"}, {"id": "sibling"}],
+        run_source=_runner,
+    )
+
+    assert rc == 1
+    assert sibling_stopped.is_set()
+
+
+def test_multi_source_shutdown_is_bounded_when_sibling_ignores_stop() -> None:
+    release_sibling = threading.Event()
+
+    def _runner(source: dict, _stop_event: threading.Event) -> int:
+        if source["id"] == "failed":
+            return 1
+        release_sibling.wait(2)
+        return 0
+
+    started_at = time.monotonic()
+    rc = auto_intake._coordinate_listener_sources(
+        [{"id": "failed"}, {"id": "stuck"}],
+        run_source=_runner,
+        shutdown_timeout_sec=0.05,
+    )
+    elapsed = time.monotonic() - started_at
+    release_sibling.set()
+
+    assert rc == 1
+    assert elapsed < 0.5
