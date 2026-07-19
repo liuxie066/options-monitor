@@ -164,6 +164,31 @@ def test_diff_new_p1_candidate_is_material_but_p2_observe_is_not() -> None:
     assert diff_daily_decision_briefs(empty, p2)["material"] is False
 
 
+@pytest.mark.parametrize("prior_state", ["blocked", "observe", "invalidated"])
+def test_diff_marks_existing_high_priority_action_becoming_active_as_material(prior_state: str) -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    previous = _brief(revision=0, actions=[_action(priority="P0", state=prior_state)])
+    current = _brief(revision=1, actions=[_action(priority="P0", state="active")])
+
+    diff = diff_daily_decision_briefs(previous, current)
+
+    assert diff["material"] is True
+    assert "action_added" in {item["change_type"] for item in diff["changes"]}
+
+
+def test_diff_marks_existing_p2_action_crossing_into_active_p1_as_material() -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    previous = _brief(revision=0, actions=[_action(priority="P2", state="active")])
+    current = _brief(revision=1, actions=[_action(priority="P1", state="active")])
+
+    diff = diff_daily_decision_briefs(previous, current)
+
+    assert diff["material"] is True
+    assert "action_added" in {item["change_type"] for item in diff["changes"]}
+
+
 def test_diff_capacity_uses_whole_contracts_not_cash_noise() -> None:
     from domain.domain.daily_decision_brief import diff_daily_decision_briefs
 

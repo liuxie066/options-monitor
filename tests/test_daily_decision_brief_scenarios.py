@@ -191,6 +191,25 @@ def test_main_action_invalidation_is_material() -> None:
     assert "action_invalidated" in {item["change_type"] for item in diff["changes"]}
 
 
+def test_stable_high_priority_action_recovery_is_material(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+
+    blocked = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-action-blocked", actions=[_action(priority="P0", state="blocked")]),
+    )
+    _confirm(tmp_path, blocked)
+
+    recovered = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-action-active", actions=[_action(priority="P0", state="active")]),
+    )
+
+    assert recovered["delivery_kind"] == "delta"
+    assert recovered["diff"]["material"] is True
+    assert "action_added" in {item["change_type"] for item in recovered["diff"]["changes"]}
+
+
 def test_blocked_to_recovery_is_material() -> None:
     from domain.domain.daily_decision_brief import diff_daily_decision_briefs
 
