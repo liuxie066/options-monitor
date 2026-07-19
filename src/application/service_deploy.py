@@ -698,7 +698,6 @@ def render_service_bundle(
         opend_service_plans = [_legacy_opend_service_plan(root=opend_root_path, executable=opend_executable_value)]
 
     om = str(repo / "om")
-    om_agent = str(repo / "om-agent")
     lock_root = runtime / "locks"
     log_root = runtime / "logs"
     runtime_data_config = runtime / "portfolio.runtime.json"
@@ -936,12 +935,11 @@ def render_service_bundle(
         status_service = "options-monitor-runtime-status.service"
         status_timer = "options-monitor-runtime-status.timer"
         status_args = [
-            om_agent,
-            "run",
-            "--tool",
-            "runtime_status",
-            "--input-json",
-            _json_arg({"profile_path": str(runtime / "service.profile.json")}),
+            om,
+            "status",
+            "--profile-path",
+            str(runtime / "service.profile.json"),
+            "--journal-summary",
         ]
         add(
             f"systemd/{status_service}",
@@ -1377,12 +1375,11 @@ def render_service_bundle(
 
         status_label = "com.options-monitor.runtime-status"
         status_args = [
-            om_agent,
-            "run",
-            "--tool",
-            "runtime_status",
-            "--input-json",
-            _json_arg({"profile_path": str(runtime / "service.profile.json")}),
+            om,
+            "status",
+            "--profile-path",
+            str(runtime / "service.profile.json"),
+            "--journal-summary",
         ]
         add(
             f"launchd/{status_label}.plist",
