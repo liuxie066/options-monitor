@@ -4,6 +4,17 @@ import importlib
 import sys
 from typing import Any, Callable
 
+from src.infrastructure.opend_watchdog import classify_watchdog_result
+
+
+class TradeIntakeAuthRequired(RuntimeError):
+    def __init__(self, *, error_code: str, message: str, detail: str = "") -> None:
+        self.error_code = str(error_code)
+        self.message = str(message)
+        self.detail = str(detail)
+        suffix = f": {self.detail}" if self.detail else ""
+        super().__init__(f"{self.error_code} {self.message}{suffix}")
+
 
 class OpenDTradePushListener:
     def __init__(
@@ -68,6 +79,29 @@ class OpenDTradePushListener:
         self._ctx, self._handler = self._build_default_context()
         self._ctx.set_handler(self._handler)
         self._ctx.start()
+
+    def check_health(self) -> None:
+        if self._ctx is None:
+            raise RuntimeError("trade context is not started")
+        try:
+            ret, data = self._ctx.get_global_state()
+        except Exception as exc:
+            detail = f"get_global_state failed: {type(exc).__name__}: {exc}"
+            error_code, message = classify_watchdog_result(None, detail)
+        else:
+            if ret == 0 and isinstance(data, dict):
+                ready = data.get("program_status_type") in (None, "", "READY")
+                trade_logined = bool(data.get("trd_logined", True))
+                if ready and trade_logined:
+                    return
+                detail = f"OpenD trade context not ready: {data}"
+                error_code, message = classify_watchdog_result(data, detail)
+            else:
+                detail = f"get_global_state ret={ret} data={data}"
+                error_code, message = classify_watchdog_result(None, detail)
+        if error_code == "OPEND_NEEDS_PHONE_VERIFY":
+            raise TradeIntakeAuthRequired(error_code=error_code, message=message, detail=detail)
+        raise RuntimeError(f"{error_code} {message}: {detail}")
 
     def close(self) -> None:
         if self._ctx is not None:
