@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import importlib
+import logging
+import queue
 import sys
+import threading
 from typing import Any, Callable
 
 from src.infrastructure.opend_watchdog import classify_watchdog_result
+
+
+class TradeIntakeStartCancelled(RuntimeError):
+    pass
 
 
 class TradeIntakeAuthRequired(RuntimeError):
@@ -75,10 +82,60 @@ class OpenDTradePushListener:
             raise RuntimeError(f"failed to initialize OpenSecTradeContext: {last_error}")
         return ctx, DealHandler(self.on_deal)
 
-    def start(self) -> None:
-        self._ctx, self._handler = self._build_default_context()
-        self._ctx.set_handler(self._handler)
-        self._ctx.start()
+    def start(self, *, cancel_event: threading.Event | None = None) -> None:
+        results: queue.Queue[tuple[str, Any, Any]] = queue.Queue(maxsize=1)
+        auth_required = threading.Event()
+        auth_evidence: dict[str, str] = {}
+
+        class _TradeContextInitLogHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                detail = record.getMessage()
+                if "init connect fail" not in detail or "OpenSecTradeContext" not in detail:
+                    return
+                error_code, message = classify_watchdog_result(None, detail)
+                if error_code == "OPEND_NEEDS_PHONE_VERIFY":
+                    auth_evidence.update(error_code=error_code, message=message, detail=detail)
+                    auth_required.set()
+
+        def _construct() -> None:
+            try:
+                ctx, handler = self._build_default_context()
+            except Exception as exc:
+                results.put(("error", exc, None))
+            else:
+                results.put(("ok", ctx, handler))
+
+        sdk_logger = logging.getLogger("FTConsoleLog")
+        log_handler = _TradeContextInitLogHandler()
+        sdk_logger.addHandler(log_handler)
+        worker = threading.Thread(
+            target=_construct,
+            name=f"trade-context-init-{self.host}-{self.port}",
+            daemon=True,
+        )
+        try:
+            worker.start()
+            while True:
+                if auth_required.is_set():
+                    raise TradeIntakeAuthRequired(
+                        error_code=auth_evidence["error_code"],
+                        message=auth_evidence["message"],
+                        detail=auth_evidence["detail"],
+                    )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TradeIntakeStartCancelled("trade context initialization cancelled")
+                try:
+                    result, value, handler = results.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if result == "error":
+                    raise value
+                self._ctx, self._handler = value, handler
+                self._ctx.set_handler(self._handler)
+                self._ctx.start()
+                return
+        finally:
+            sdk_logger.removeHandler(log_handler)
 
     def check_health(self) -> None:
         if self._ctx is None:
