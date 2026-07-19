@@ -813,3 +813,40 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 ## 风险提示
 
 本工具只做监控、筛选、报告和提醒，不构成投资建议。任何下单前都应自行复核价格、流动性、保证金、仓位暴露和事件风险。
+
+## Daily Decision Brief（v1.3.0，默认关闭）
+
+Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不是自动交易或订单系统。启用后，单市场交易日的首个成功 scheduled scan 通常在开盘后 10 分钟生成完整日报（例如美股 09:40 市场时间）；如果该轮发生进程级失败，现有 10 分钟 timer 会在后续 eligible slot 重试，10:00 是下一条明确恢复点而不是 09:45 SLA。
+
+```json
+{
+  "notifications": {
+    "daily_brief": {
+      "enabled": false,
+      "max_actions_per_priority": 5,
+      "max_candidates_per_strategy": 3,
+      "max_rejection_reasons": 5
+    }
+  }
+}
+```
+
+- 默认 `enabled=false`；Draft PR、release 或远端升级都不会自动开启生产日报，生产启用与 canary 必须另行授权。
+- 首次成功送达为完整日报；后续 scheduled scan 只在 P0/P1、行动失效、blocked/recovered 或整手容量等 material change 时发送增量。
+- 休市不会伪造新 LIVE 日报。已有日报超过 `valid_until_utc` 后，只读入口将其标记为 `planning_only`，可用于复盘、次日计划和风险检查。
+- `--no-send`、quiet hours、发送失败或本地确认失败都不会推进 delivery pointer。
+- 多市场同轮运行会分别保存 US/HK 结构化 artifact，但当前版本 fail-closed：不发送组合消息，也不推进任一市场 pointer。
+
+只读 CLI：
+
+```bash
+./om daily-brief latest --account lx --market US
+./om daily-brief day --account lx --market US --date 2026-07-19
+./om daily-brief day --account lx --market US --date 2026-07-19 --revision 0 --json
+```
+
+只读 Agent Tool：
+
+```bash
+./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
+```

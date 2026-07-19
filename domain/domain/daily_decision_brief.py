@@ -1,0 +1,539 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Mapping
+
+
+DAILY_DECISION_BRIEF_SCHEMA_VERSION = "daily_decision_brief.v1"
+DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION = "daily_decision_brief_diff.v1"
+
+ACTIONABILITIES = frozenset({"live_actionable", "planning_only", "blocked"})
+ACTION_PRIORITIES = ("P0", "P1", "P2")
+ACTION_STATES = frozenset({"active", "invalidated", "blocked", "observe"})
+
+_STABLE_ACTION_ID_FIELDS = (
+    "action_type",
+    "strategy_family",
+    "account",
+    "symbol",
+    "option_type",
+    "side",
+    "expiration",
+    "strike",
+    "contract_symbol",
+    "position_lot_id",
+    "strategy_group_id",
+    "leg_role",
+)
+
+
+def build_daily_brief_id(*, market: Any, market_trading_date: Any, account: Any) -> str:
+    identity = {
+        "market": _upper(market),
+        "market_trading_date": str(market_trading_date or "").strip(),
+        "account": _lower(account),
+    }
+    if not all(identity.values()):
+        raise ValueError("market, market_trading_date, and account are required")
+    return "daily-brief-" + _digest(identity)[:24]
+
+
+def build_daily_brief_action_id(action: Mapping[str, Any]) -> str:
+    identity = {
+        field: _normalize_action_identity_value(field, action.get(field))
+        for field in _STABLE_ACTION_ID_FIELDS
+    }
+    if not identity["action_type"]:
+        raise ValueError("action_type is required for daily brief action identity")
+    if not identity["account"]:
+        raise ValueError("account is required for daily brief action identity")
+    return "action-" + _digest(identity)[:24]
+
+
+def normalize_daily_brief_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    src = dict(action or {})
+    priority = str(src.get("priority") or "P2").strip().upper()
+    if priority not in ACTION_PRIORITIES:
+        raise ValueError(f"unsupported daily brief action priority: {priority}")
+    state = str(src.get("state") or "active").strip().lower()
+    if state not in ACTION_STATES:
+        raise ValueError(f"unsupported daily brief action state: {state}")
+
+    out = dict(src)
+    out["priority"] = priority
+    out["state"] = state
+    out["action_type"] = _lower(src.get("action_type"))
+    out["strategy_family"] = _lower(src.get("strategy_family"))
+    out["account"] = _lower(src.get("account"))
+    out["symbol"] = _upper(src.get("symbol"))
+    out["option_type"] = _lower(src.get("option_type"))
+    out["side"] = _lower(src.get("side"))
+    out["expiration"] = str(src.get("expiration") or "").strip()
+    out["strike"] = _canonical_number(src.get("strike"))
+    out["contract_symbol"] = _upper(src.get("contract_symbol"))
+    out["position_lot_id"] = str(src.get("position_lot_id") or "").strip()
+    out["strategy_group_id"] = str(src.get("strategy_group_id") or "").strip()
+    out["leg_role"] = _lower(src.get("leg_role"))
+    out["action_id"] = build_daily_brief_action_id(out)
+    return out
+
+
+def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]:
+    src = dict(payload or {})
+    schema_version = str(src.get("schema_version") or DAILY_DECISION_BRIEF_SCHEMA_VERSION).strip()
+    if schema_version != DAILY_DECISION_BRIEF_SCHEMA_VERSION:
+        raise ValueError(f"unsupported daily brief schema version: {schema_version}")
+
+    market = _upper(src.get("market"))
+    market_date = str(src.get("market_trading_date") or "").strip()
+    account = _lower(src.get("account"))
+    revision = _nonnegative_int(src.get("revision"), field="revision")
+    actionability = str(src.get("actionability") or "blocked").strip().lower()
+    if actionability not in ACTIONABILITIES:
+        raise ValueError(f"unsupported daily brief actionability: {actionability}")
+
+    normalized_actions = [
+        normalize_daily_brief_action(item)
+        for item in _mapping_list(src.get("actions"), field="actions")
+    ]
+    action_ids: set[str] = set()
+    for action in normalized_actions:
+        action_id = str(action["action_id"])
+        if action_id in action_ids:
+            raise ValueError(f"duplicate daily brief action_id: {action_id}")
+        action_ids.add(action_id)
+
+    out = dict(src)
+    out.update(
+        {
+            "schema_version": schema_version,
+            "brief_id": build_daily_brief_id(
+                market=market,
+                market_trading_date=market_date,
+                account=account,
+            ),
+            "market": market,
+            "market_trading_date": market_date,
+            "account": account,
+            "revision": revision,
+            "run_id": str(src.get("run_id") or "").strip(),
+            "generated_at_utc": _iso_or_empty(src.get("generated_at_utc")),
+            "data_as_of_utc": _iso_or_empty(src.get("data_as_of_utc")),
+            "valid_until_utc": _iso_or_empty(src.get("valid_until_utc")),
+            "status": str(src.get("status") or "unknown").strip().lower(),
+            "actionability": actionability,
+            "strategy_summary": str(src.get("strategy_summary") or "").strip(),
+            "actions": normalized_actions,
+            "positions": _mapping_list(src.get("positions"), field="positions"),
+            "capacity": _mapping(src.get("capacity"), field="capacity"),
+            "candidates": _mapping(src.get("candidates"), field="candidates"),
+            "rejections": _mapping(src.get("rejections"), field="rejections"),
+            "events": _mapping_list(src.get("events"), field="events"),
+            "data_gaps": _mapping_list(src.get("data_gaps"), field="data_gaps"),
+            "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
+        }
+    )
+    return out
+
+
+def effective_daily_brief_actionability(
+    brief: Mapping[str, Any],
+    *,
+    now_utc: datetime | None = None,
+) -> str:
+    actionability = str(brief.get("actionability") or "blocked").strip().lower()
+    if actionability not in ACTIONABILITIES:
+        return "blocked"
+    if actionability == "blocked":
+        return "blocked"
+    if actionability == "planning_only":
+        return "planning_only"
+
+    valid_until = _parse_datetime(brief.get("valid_until_utc"))
+    if valid_until is None:
+        return "planning_only"
+    effective_now = now_utc or datetime.now(timezone.utc)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=timezone.utc)
+    if effective_now.astimezone(timezone.utc) >= valid_until.astimezone(timezone.utc):
+        return "planning_only"
+    return "live_actionable"
+
+
+def diff_daily_decision_briefs(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    prev = normalize_daily_decision_brief(previous)
+    cur = normalize_daily_decision_brief(current)
+    _ensure_same_brief_identity(prev, cur)
+
+    changes: list[dict[str, Any]] = []
+    prev_actionability = str(prev["actionability"])
+    cur_actionability = str(cur["actionability"])
+    if prev_actionability != cur_actionability:
+        if cur_actionability == "blocked":
+            changes.append(_change("blocked", priority="P0", material=True, before=prev_actionability, after=cur_actionability))
+        elif prev_actionability == "blocked":
+            changes.append(_change("recovered", priority="P0", material=True, before=prev_actionability, after=cur_actionability))
+        elif _has_active_high_priority_actions(prev) or _has_active_high_priority_actions(cur):
+            changes.append(
+                _change(
+                    "actionability_changed",
+                    priority="P1",
+                    material=True,
+                    before=prev_actionability,
+                    after=cur_actionability,
+                )
+            )
+
+    prev_actions = {str(item["action_id"]): item for item in prev["actions"]}
+    cur_actions = {str(item["action_id"]): item for item in cur["actions"]}
+
+    for action_id, action in sorted(cur_actions.items()):
+        prior = prev_actions.get(action_id)
+        if prior is None:
+            if action["priority"] in {"P0", "P1"} and action["state"] == "active":
+                changes.append(
+                    _change(
+                        "p0_added" if action["priority"] == "P0" else "action_added",
+                        priority=action["priority"],
+                        material=True,
+                        action=_action_change_view(action),
+                    )
+                )
+            continue
+        upgraded_to_p0 = prior["priority"] != "P0" and action["priority"] == "P0"
+        if upgraded_to_p0:
+            changes.append(
+                _change(
+                    "priority_upgraded_to_p0",
+                    priority="P0",
+                    material=True,
+                    before=prior["priority"],
+                    after=action["priority"],
+                    action=_action_change_view(action),
+                )
+            )
+        prior_was_active_high_priority = (
+            prior["priority"] in {"P0", "P1"} and prior["state"] == "active"
+        )
+        current_is_active_high_priority = (
+            action["priority"] in {"P0", "P1"} and action["state"] == "active"
+        )
+        if (
+            current_is_active_high_priority
+            and not prior_was_active_high_priority
+            and not upgraded_to_p0
+        ):
+            changes.append(
+                _change(
+                    "action_added",
+                    priority=action["priority"],
+                    material=True,
+                    action=_action_change_view(action),
+                )
+            )
+        priority_rank = {"P0": 0, "P1": 1, "P2": 2}
+        if (
+            prior["priority"] in {"P0", "P1"}
+            and priority_rank[action["priority"]] > priority_rank[prior["priority"]]
+        ):
+            changes.append(
+                _change(
+                    "priority_downgraded",
+                    priority=prior["priority"],
+                    material=True,
+                    before=prior["priority"],
+                    after=action["priority"],
+                    action=_action_change_view(action),
+                )
+            )
+        if prior["state"] == "active" and action["state"] != "active" and prior["priority"] in {"P0", "P1"}:
+            changes.append(
+                _change(
+                    "action_invalidated",
+                    priority=prior["priority"],
+                    material=True,
+                    before=prior["state"],
+                    after=action["state"],
+                    action=_action_change_view(action),
+                )
+            )
+
+    for action_id, action in sorted(prev_actions.items()):
+        if action_id in cur_actions:
+            continue
+        if action["priority"] in {"P0", "P1"} and action["state"] == "active":
+            changes.append(
+                _change(
+                    "action_invalidated",
+                    priority=action["priority"],
+                    material=True,
+                    before="active",
+                    after="missing",
+                    action=_action_change_view(action),
+                )
+            )
+
+    for capacity_kind in ("sell_put", "covered_call"):
+        before = _capacity_contracts(prev.get("capacity"), capacity_kind)
+        after = _capacity_contracts(cur.get("capacity"), capacity_kind)
+        if before is not None and after is not None and before != after:
+            changes.append(
+                _change(
+                    "capacity_changed",
+                    priority="P1",
+                    material=True,
+                    capacity_kind=capacity_kind,
+                    before=before,
+                    after=after,
+                )
+            )
+
+    changes.sort(key=_change_sort_key)
+    material = any(bool(item.get("material")) for item in changes)
+    canonical_changes = [_canonical_change(item) for item in changes]
+    return {
+        "schema_version": DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION,
+        "brief_id": cur["brief_id"],
+        "market": cur["market"],
+        "market_trading_date": cur["market_trading_date"],
+        "account": cur["account"],
+        "from_revision": prev["revision"],
+        "to_revision": cur["revision"],
+        "material": material,
+        "changes": changes,
+        "material_diff_digest": _digest(canonical_changes),
+    }
+
+
+def daily_brief_digest(brief: Mapping[str, Any]) -> str:
+    normalized = normalize_daily_decision_brief(brief)
+    payload = {
+        key: value
+        for key, value in normalized.items()
+        if key not in {"generated_at_utc", "data_as_of_utc", "run_id"}
+    }
+    return _digest(payload)
+
+
+def _ensure_same_brief_identity(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
+    prev_identity = (previous.get("market"), previous.get("market_trading_date"), previous.get("account"))
+    cur_identity = (current.get("market"), current.get("market_trading_date"), current.get("account"))
+    if prev_identity != cur_identity:
+        raise ValueError(f"daily brief identity mismatch: {prev_identity!r} != {cur_identity!r}")
+
+
+def _has_active_high_priority_actions(brief: Mapping[str, Any]) -> bool:
+    return any(
+        item.get("priority") in {"P0", "P1"} and item.get("state") == "active"
+        for item in brief.get("actions") or []
+        if isinstance(item, Mapping)
+    )
+
+
+def _capacity_contracts(capacity: Any, kind: str) -> int | None:
+    if not isinstance(capacity, Mapping):
+        return None
+    item = capacity.get(kind)
+    if not isinstance(item, Mapping):
+        return None
+    raw = item.get("contracts_available")
+    if raw is None:
+        return None
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _action_change_view(action: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: action.get(key)
+        for key in (
+            "action_id",
+            "priority",
+            "state",
+            "action_type",
+            "strategy_family",
+            "symbol",
+            "contract_symbol",
+            "position_lot_id",
+            "strategy_group_id",
+            "title",
+            "reason",
+        )
+        if action.get(key) not in (None, "")
+    }
+
+
+def _change(change_type: str, *, priority: str, material: bool, **fields: Any) -> dict[str, Any]:
+    return {"change_type": change_type, "priority": priority, "material": bool(material), **fields}
+
+
+def _canonical_change(change: Mapping[str, Any]) -> dict[str, Any]:
+    out = {
+        key: value
+        for key, value in change.items()
+        if key not in {"action", "to_revision", "generated_at_utc", "data_as_of_utc"}
+    }
+    action = change.get("action")
+    if isinstance(action, Mapping):
+        out["action"] = {
+            key: action.get(key)
+            for key in (
+                "action_id",
+                "priority",
+                "state",
+                "action_type",
+                "strategy_family",
+                "symbol",
+                "contract_symbol",
+                "position_lot_id",
+                "strategy_group_id",
+            )
+            if action.get(key) not in (None, "")
+        }
+    return out
+
+
+def _change_sort_key(change: Mapping[str, Any]) -> tuple[int, str, str]:
+    priority = str(change.get("priority") or "P2")
+    priority_rank = {"P0": 0, "P1": 1, "P2": 2}.get(priority, 3)
+    action = change.get("action") if isinstance(change.get("action"), Mapping) else {}
+    return priority_rank, str(change.get("change_type") or ""), str(action.get("action_id") or "")
+
+
+def _normalize_action_identity_value(field: str, value: Any) -> str:
+    if field in {"account", "action_type", "strategy_family", "option_type", "side", "leg_role"}:
+        return _lower(value)
+    if field in {"symbol", "contract_symbol"}:
+        return _upper(value)
+    if field == "strike":
+        return _canonical_number(value)
+    return str(value or "").strip()
+
+
+def _canonical_number(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return str(value or "").strip()
+    if not number.is_finite():
+        return ""
+    normalized = number.normalize()
+    if normalized == normalized.to_integral():
+        return format(normalized, "f").split(".", 1)[0]
+    return format(normalized, "f")
+
+
+def _nonnegative_int(value: Any, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a non-negative integer")
+    try:
+        out = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} must be a non-negative integer") from exc
+    if out < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return out
+
+
+def _mapping(value: Any, *, field: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field} must be an object")
+    return dict(value)
+
+
+def _mapping_list(value: Any, *, field: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"{field} items must be objects")
+        out.append(dict(item))
+    return out
+
+
+def _iso_or_empty(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = _parse_datetime(text)
+    if parsed is None:
+        raise ValueError(f"invalid ISO datetime: {text}")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _digest(value: Any) -> str:
+    raw = json.dumps(
+        _json_safe(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Decimal):
+        return _canonical_number(value)
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _lower(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _upper(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+__all__ = [
+    "ACTIONABILITIES",
+    "ACTION_PRIORITIES",
+    "ACTION_STATES",
+    "DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION",
+    "DAILY_DECISION_BRIEF_SCHEMA_VERSION",
+    "build_daily_brief_action_id",
+    "build_daily_brief_id",
+    "daily_brief_digest",
+    "diff_daily_decision_briefs",
+    "effective_daily_brief_actionability",
+    "normalize_daily_brief_action",
+    "normalize_daily_decision_brief",
+]
