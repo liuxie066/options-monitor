@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.417 - 2026-07-19
+
+### Fixed
+- Detected OpenD phone-verification failures while the Futu trade-context constructor is still synchronously reconnecting, allowing trade-intake to reach its stable auth-required exit instead of remaining trapped inside SDK construction.
+- Made multi-source shutdown cancel blocked sibling trade-context construction without entering the ordinary reconnect loop.
+
 ## 1.2.416 - 2026-07-19
 
 ### Changed
