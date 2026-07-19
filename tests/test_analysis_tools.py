@@ -209,6 +209,8 @@ def test_analysis_catalog_exposes_p1_semantic_views() -> None:
 
     assert data["views"]["open_option_exposure"]["row_grain"] == "account + symbol + option_type + side + strike + expiration"
     assert data["views"]["expiration_risk_buckets"]["row_grain"] == "account + expiration_bucket + currency"
+    assert data["views"]["open_option_exposure"]["empty_result_meaning"] == "valid_current_negative_evidence"
+    assert data["views"]["expiration_risk_buckets"]["empty_result_meaning"] == "valid_current_negative_evidence"
     assert data["views"]["symbol_income_attribution"]["row_grain"] == "month + account + symbol + component + currency"
     assert data["views"]["strategy_config_by_symbol_account"]["row_grain"] == "symbol + account + strategy_family"
 
@@ -357,6 +359,7 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
     assert warnings == ["Deprecated monthly-income aliases are migration-only and project fields from option_performance_report."]
     assert calls == ["monthly", "monthly", "positions"]
     assert data["query"]["mode"] == "views"
+    assert data["query"]["filters"] == {"months": ["2026-06"]}
     assert data["preflight"]["warnings"] == warnings
     assert data["views_used"] == ["account_monthly_performance", "open_option_exposure"]
     legacy_rows = data["view_datasets"]["account_monthly_performance"]["rows"]
@@ -365,9 +368,76 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
     assert legacy_rows[0]["account"] == "lx"
     assert legacy_rows[0]["net_income_cny"] == 1.0
     assert legacy_rows[0]["return_basis"] == "deprecated_alias_no_generic_return"
+    exposure_dataset = data["view_datasets"]["open_option_exposure"]
+    assert exposure_dataset["row_count"] == 1
+    assert exposure_dataset["rows"][0]["symbol"] == "NVDA"
+    assert exposure_dataset["empty_result_meaning"] == "valid_current_negative_evidence"
     assert data["evidence"]["coverage"]["views"] == ["account_monthly_performance", "open_option_exposure"]
     assert meta["requested_views"] == ["account_monthly_performance", "open_option_exposure"]
     assert meta["materialized_views"] == ["account_monthly_performance", "open_option_exposure"]
+
+
+def test_analysis_query_views_mode_filters_trade_events_by_trade_month(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_positions_tool(payload, *_args, **_kwargs):
+        calls.append(str(payload.get("action")))
+        return {
+            "rows": [
+                {
+                    "account": "lx",
+                    "symbol": "PLTR",
+                    "trade_time_beijing": "2026-04-26 15:33:43 北京时间",
+                },
+                {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "trade_time_beijing": "2026-06-03 09:30:00 北京时间",
+                },
+                {
+                    "account": "lx",
+                    "symbol": "TSLA",
+                    "trade_time_ms": 1780245000000,
+                },
+            ]
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
+
+    data, warnings, meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {"views": ["trade_events"], "month": "2026-06", "limit": 10},
+    )
+
+    assert warnings == []
+    assert calls == ["events"]
+    assert data["query"]["filters"] == {"months": ["2026-06"]}
+    assert [row["symbol"] for row in data["view_datasets"]["trade_events"]["rows"]] == ["NVDA", "TSLA"]
+    assert data["view_datasets"]["trade_events"]["empty_result_meaning"] == "valid_requested_period_negative_evidence"
+    assert meta["requested_views"] == ["trade_events"]
+    assert meta["materialized_views"] == ["trade_events"]
+
+
+def test_analysis_query_trade_events_empty_meaning_requires_month_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_positions_tool(payload, *_args, **_kwargs):
+        assert payload.get("action") == "events"
+        return {"rows": []}, [], {}
+
+    monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
+
+    data, warnings, meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {"views": ["trade_events"], "limit": 10},
+    )
+
+    assert warnings == []
+    assert data["row_count"] == 0
+    assert data["query"] == {"mode": "views", "views": ["trade_events"], "limit": 10}
+    assert "empty_result_meaning" not in data["view_datasets"]["trade_events"]
+    assert meta["requested_views"] == ["trade_events"]
+    assert meta["materialized_views"] == ["trade_events"]
 
 
 def test_analysis_query_primary_option_performance_views_keep_namespaces_separate(monkeypatch: pytest.MonkeyPatch) -> None:
