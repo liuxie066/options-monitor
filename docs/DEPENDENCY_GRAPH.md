@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 719 (`src`: 400, `domain`: 61, `scripts`: 7, `tests`: 251)
-- Internal import edges: 4010 total, 1891 production/script edges excluding tests
+- Python files scanned: 720 (`src`: 400, `domain`: 61, `scripts`: 7, `tests`: 252)
+- Internal import edges: 4015 total, 1892 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|290| domain
   application -->|2| domain_services
-  application -->|104| infrastructure
+  application -->|105| infrastructure
   application -->|34| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -43,7 +43,7 @@ flowchart LR
   scripts -->|7| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1461| application
+  tests -->|1465| application
   tests -->|332| domain
   tests -->|2| domain_services
   tests -->|106| infrastructure
@@ -58,7 +58,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 290 |
 | interfaces | application | 121 |
-| application | infrastructure | 104 |
+| application | infrastructure | 105 |
 | application | storage | 34 |
 | scripts | application | 7 |
 | domain_services | domain | 5 |
@@ -73,7 +73,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1461 |
+| tests | application | 1465 |
 | tests | domain | 332 |
 | tests | interfaces | 174 |
 | tests | infrastructure | 106 |
@@ -114,11 +114,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain.ledger | 6 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.trades | src.application.ledger | 6 |
+| src.application.trades | src.infrastructure | 6 |
 | domain.domain.ledger | domain.domain | 6 |
 | scripts | src.application | 6 |
 | src.application.positions | src.application.ledger | 5 |
 | src.application.setup | src.application | 5 |
-| src.application.trades | src.infrastructure | 5 |
 | src.application.trades | domain.domain.ledger | 5 |
 | src.interfaces | src.application.ledger | 5 |
 | domain.services | domain.domain | 5 |
