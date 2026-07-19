@@ -89,6 +89,10 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "OnUnitActiveSec=10min" not in tick_timer
     assert "OnBootSec=2min" not in tick_timer
     assert str(repo / "om") + " run trade-intake" in intake
+    runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
+    assert str(repo / "om") + " status --profile-path " + str(runtime / "service.profile.json") in runtime_status
+    assert "--journal-summary" in runtime_status
+    assert str(repo / "om-agent") not in runtime_status
     assert "Restart=always" in intake
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
@@ -104,6 +108,28 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
+
+
+
+def test_render_launchd_runtime_status_uses_bounded_journal_summary(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    content = files["launchd/com.options-monitor.runtime-status.plist"]["content"]
+    assert str(repo / "om") in content
+    assert "status" in content
+    assert "--journal-summary" in content
+    assert str(repo / "om-agent") not in content
 
 
 def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None:

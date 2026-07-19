@@ -11,7 +11,11 @@ from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.healthcheck import run_healthcheck
 from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
-from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
+from src.application.runtime_status_cli import (
+    format_runtime_status_journal_summary,
+    format_runtime_status_summary,
+    runtime_status_payload_from_args,
+)
 from src.application.support_bundle import support_bundle_response
 from src.application.tool_execution import execute_tool
 
@@ -91,7 +95,13 @@ def add_runtime_observability_commands(subparsers: Any) -> None:
     status.add_argument("--runs-root", default=None)
     status.add_argument("--max-run-age-minutes", type=int, default=None)
     status.add_argument("--max-notification-chars", type=int, default=None)
-    status.add_argument("--json", action="store_true", help="print raw runtime_status JSON envelope")
+    status_output = status.add_mutually_exclusive_group()
+    status_output.add_argument("--json", action="store_true", help="print raw runtime_status JSON envelope")
+    status_output.add_argument(
+        "--journal-summary",
+        action="store_true",
+        help="print a bounded summary suitable for service journals",
+    )
 
     runs = subparsers.add_parser("runs", help="list runtime run snapshots")
     runs.add_argument("--runs-root", default=None)
@@ -142,6 +152,7 @@ def handle_observability_command(
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]] = execute_tool,
     runtime_status_payload_from_args_fn: Callable[[argparse.Namespace], dict[str, Any]] = runtime_status_payload_from_args,
     format_runtime_status_summary_fn: Callable[[dict[str, Any]], str] = format_runtime_status_summary,
+    format_runtime_status_journal_summary_fn: Callable[[dict[str, Any]], str] = format_runtime_status_journal_summary,
     collect_runtime_runs_fn: Callable[..., dict[str, Any]] = collect_runtime_runs,
     format_runtime_runs_fn: Callable[[dict[str, Any]], str] = format_runtime_runs,
     collect_runtime_logs_fn: Callable[..., dict[str, Any]] = collect_runtime_logs,
@@ -176,7 +187,10 @@ def handle_observability_command(
         out = execute_tool_fn("runtime_status", runtime_status_payload_from_args_fn(args))
         if args.json:
             return _print(out)
-        sys.stdout.write(format_runtime_status_summary_fn(out))
+        if args.journal_summary:
+            sys.stdout.write(format_runtime_status_journal_summary_fn(out))
+        else:
+            sys.stdout.write(format_runtime_status_summary_fn(out))
         return 0 if out.get("ok", True) else 2
 
     if args.command == "runs":
