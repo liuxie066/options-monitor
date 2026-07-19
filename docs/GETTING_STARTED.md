@@ -197,3 +197,5 @@ om service render \
 ```
 
 `service render` 只生成文件和安装命令，不会自动 install、enable 或 start。确认后再按输出的命令安装和启用。
+
+生成的 Runtime Status 服务使用 `om status --journal-summary`，journal 输出被限制为最多 20 行且不超过 16 KiB；完整结构化诊断仍通过 `om-agent` 的 `runtime_status` 工具读取。systemd 下，`auto-close-*` 和显式启用的 `strategy-lab-sample` one-shot 带有 `RuntimeMaxSec=600`，用于终止 OpenD 异常时的无限挂起；tick、Runtime Status、projection verify 和长期 listener 不继承该限制。render 本身不会把这些变更应用到生产系统。
