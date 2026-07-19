@@ -7,7 +7,7 @@
 
 ## Finding closure
 
-- PR-1 fixed: health observation is explicitly once per second and independent from the 60-second heartbeat/backfill cadence.
+- PR-1 fixed: health observation is immediate after start and then every five seconds and independent from the 60-second heartbeat/backfill cadence.
 - PR-2 fixed: multi-source coordination uses a result queue and observes completion before blocking joins.
 - PR-3 fixed: retry delay resets only after a healthy trade-context observation.
 - PR-4 fixed: state/error classifier inputs and preserved code/message are explicit.
