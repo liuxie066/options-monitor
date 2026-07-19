@@ -4100,11 +4100,11 @@ def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
 
 
 def test_cli_run_trade_intake_delegates_to_application(monkeypatch) -> None:
-    import src.application.trades.auto_intake as auto_intake
+    import src.application.trades.process_supervisor as process_supervisor
     from src.interfaces.cli.main import main
 
     calls: list[list[str]] = []
-    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+    monkeypatch.setattr(process_supervisor, "run_trade_intake_process", lambda argv: calls.append(list(argv)) or 0)
 
     rc = main([
         "run",
@@ -4121,11 +4121,11 @@ def test_cli_run_trade_intake_delegates_to_application(monkeypatch) -> None:
 
 
 def test_cli_run_trade_intake_delegates_explicit_host_port(monkeypatch) -> None:
-    import src.application.trades.auto_intake as auto_intake
+    import src.application.trades.process_supervisor as process_supervisor
     from src.interfaces.cli.main import main
 
     calls: list[list[str]] = []
-    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+    monkeypatch.setattr(process_supervisor, "run_trade_intake_process", lambda argv: calls.append(list(argv)) or 0)
 
     rc = main([
         "run",
@@ -4144,11 +4144,11 @@ def test_cli_run_trade_intake_delegates_explicit_host_port(monkeypatch) -> None:
 
 
 def test_cli_run_trade_intake_delegates_reconcile_state_flags(monkeypatch) -> None:
-    import src.application.trades.auto_intake as auto_intake
+    import src.application.trades.process_supervisor as process_supervisor
     from src.interfaces.cli.main import main
 
     calls: list[list[str]] = []
-    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+    monkeypatch.setattr(process_supervisor, "run_trade_intake_process", lambda argv: calls.append(list(argv)) or 0)
 
     rc = main([
         "run",
@@ -4175,12 +4175,12 @@ def test_cli_run_trade_intake_delegates_reconcile_state_flags(monkeypatch) -> No
 
 
 def test_cli_run_trade_intake_delegates_runtime_root(monkeypatch, tmp_path: Path) -> None:
-    import src.application.trades.auto_intake as auto_intake
+    import src.application.trades.process_supervisor as process_supervisor
     from src.interfaces.cli.main import main
 
     runtime_root = tmp_path / "runtime"
     calls: list[list[str]] = []
-    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+    monkeypatch.setattr(process_supervisor, "run_trade_intake_process", lambda argv: calls.append(list(argv)) or 0)
 
     rc = main([
         "run",
