@@ -61,7 +61,7 @@ Owned files:
 Changes:
 
 - Define/export stable exit code `78` at the trade-intake application boundary.
-- Poll listener health once per second, independently of the 60-second heartbeat/backfill status cadence.
+- Poll listener health immediately after start and then every five seconds, independently of the 60-second heartbeat/backfill status cadence.
 - Catch terminal auth separately, close the context, write blocked status, and return `78` without sleeping/retrying.
 - Apply capped exponential backoff only to retryable exceptions and reset only after the first healthy trade-context observation.
 - Wrap multi-source thread targets with a result queue; the coordinator observes completions while threads are alive, sets the shared stop event immediately on `78`, then joins and returns `78`.
