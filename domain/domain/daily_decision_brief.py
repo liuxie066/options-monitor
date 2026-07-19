@@ -207,7 +207,8 @@ def diff_daily_decision_briefs(
                     )
                 )
             continue
-        if prior["priority"] != "P0" and action["priority"] == "P0":
+        upgraded_to_p0 = prior["priority"] != "P0" and action["priority"] == "P0"
+        if upgraded_to_p0:
             changes.append(
                 _change(
                     "priority_upgraded_to_p0",
@@ -215,6 +216,25 @@ def diff_daily_decision_briefs(
                     material=True,
                     before=prior["priority"],
                     after=action["priority"],
+                    action=_action_change_view(action),
+                )
+            )
+        prior_was_active_high_priority = (
+            prior["priority"] in {"P0", "P1"} and prior["state"] == "active"
+        )
+        current_is_active_high_priority = (
+            action["priority"] in {"P0", "P1"} and action["state"] == "active"
+        )
+        if (
+            current_is_active_high_priority
+            and not prior_was_active_high_priority
+            and not upgraded_to_p0
+        ):
+            changes.append(
+                _change(
+                    "action_added",
+                    priority=action["priority"],
+                    material=True,
                     action=_action_change_view(action),
                 )
             )
