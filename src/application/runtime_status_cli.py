@@ -84,6 +84,64 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+
+def format_runtime_status_journal_summary(envelope: dict[str, Any], *, max_bytes: int = 16 * 1024) -> str:
+    """Format a bounded status summary suitable for service journals."""
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    data = _dict(envelope.get("data"))
+    summary = _dict(data.get("summary"))
+    freshness = _dict(data.get("freshness"))
+    config = _dict(data.get("config"))
+    latest_run = _dict(data.get("latest_run_selection"))
+    notification = _dict(data.get("notification_diagnosis"))
+    ledger = _dict(data.get("ledger_store"))
+    trade = _dict(data.get("trade_intake"))
+    service = _dict(data.get("service_upgrade"))
+    service_drift = _dict(data.get("service_drift"))
+    warnings = [*_list(envelope.get("warnings")), *_list(ledger.get("warnings"))]
+
+    lines = [
+        "options-monitor status",
+        _overall_line(envelope=envelope, summary=summary, freshness=freshness, warnings=warnings),
+        _config_line(config),
+        _run_line("latest", latest_run, summary.get("latest_status")),
+        _freshness_line(freshness),
+        _notification_line(notification),
+        _ledger_line(summary=summary, ledger=ledger),
+        _trade_intake_line(trade),
+        _service_line(service),
+        _service_drift_line(service_drift),
+    ]
+    error = _dict(envelope.get("error"))
+    if error:
+        lines.append(_single_line(_error_line(error), limit=1000))
+    if warnings:
+        lines.append(f"warnings: count={len(warnings)} first={_single_line(warnings[0], limit=1000)}")
+    return _bounded_utf8("\n".join(lines).rstrip() + "\n", max_bytes=max_bytes)
+
+
+def _single_line(value: Any, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _bounded_utf8(text: str, *, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    suffix = "...\n".encode("utf-8")
+    budget = max(0, max_bytes - len(suffix))
+    clipped = raw[:budget]
+    while clipped:
+        try:
+            return clipped.decode("utf-8").rstrip() + suffix.decode("utf-8")
+        except UnicodeDecodeError:
+            clipped = clipped[:-1]
+    return suffix[:max_bytes].decode("utf-8", errors="ignore")
+
 def _overall_line(
     *,
     envelope: dict[str, Any],
