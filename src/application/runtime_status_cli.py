@@ -118,7 +118,8 @@ def format_runtime_status_journal_summary(envelope: dict[str, Any], *, max_bytes
         lines.append(_single_line(_error_line(error), limit=1000))
     if warnings:
         lines.append(f"warnings: count={len(warnings)} first={_single_line(warnings[0], limit=1000)}")
-    return _bounded_utf8("\n".join(lines).rstrip() + "\n", max_bytes=max_bytes)
+    bounded_lines = [_single_line(line, limit=2000) for line in lines[:20]]
+    return _bounded_utf8("\n".join(bounded_lines).rstrip() + "\n", max_bytes=max_bytes)
 
 
 def _single_line(value: Any, *, limit: int) -> str:

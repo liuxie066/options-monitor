@@ -52,7 +52,11 @@ def test_format_runtime_status_journal_summary_is_bounded_for_large_unicode_warn
             "ok": False,
             "data": {
                 "summary": {"ok": False, "warning_count": 100},
-                "config": {"config_key": "us", "accounts": ["lx", "sy"]},
+                "config": {
+                    "config_key": "us\nextra",
+                    "config_path": "/tmp/config\ninjected-line",
+                    "accounts": ["lx", "sy"],
+                },
                 "ledger_store": {"warnings": ["账本警告\n第二行" * 500]},
             },
             "error": {"code": "FAILED", "message": "错误" * 10000},
@@ -64,6 +68,7 @@ def test_format_runtime_status_journal_summary_is_bounded_for_large_unicode_warn
     assert len(out.encode("utf-8")) <= 16 * 1024
     assert "warnings: count=101" in out
     assert "\n第二行" not in out
+    assert "\ninjected-line" not in out
 
 
 def test_format_runtime_status_journal_summary_keeps_default_summary_unbounded() -> None:
