@@ -77,6 +77,15 @@ _EXPORTS: dict[str, str] = {
     'SchemaValidationError': '.intermediate_objects',
     'SnapshotDTO': '.intermediate_objects',
     'build_failure_audit_fields': '.engine',
+    'DAILY_DECISION_BRIEF_SCHEMA_VERSION': '.daily_decision_brief',
+    'DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION': '.daily_decision_brief',
+    'build_daily_brief_action_id': '.daily_decision_brief',
+    'build_daily_brief_id': '.daily_decision_brief',
+    'daily_brief_digest': '.daily_decision_brief',
+    'diff_daily_decision_briefs': '.daily_decision_brief',
+    'effective_daily_brief_actionability': '.daily_decision_brief',
+    'normalize_daily_brief_action': '.daily_decision_brief',
+    'normalize_daily_decision_brief': '.daily_decision_brief',
 }
 
 _MODULE_EXPORTS = {
@@ -106,6 +115,7 @@ _MODULE_EXPORTS = {
     'engine',
     'fetch_source',
     'close_advice',
+    'daily_decision_brief',
 }
 
 __all__ = [*_EXPORTS.keys(), *_MODULE_EXPORTS]

@@ -241,3 +241,42 @@ def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_fa
     assert [e["action"] for e in audit_events] == ["send_start", "send_fail", "send_start", "send_done"]
     assert [e["account"] for e in audit_events if e["action"] == "send_start"] == ["lx", "sy"]
     assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "error", "start", "ok"]
+
+
+def test_execute_per_account_delivery_uses_account_specific_logical_overrides(fake_runlog_factory) -> None:
+    mod = importlib.import_module("src.application.scheduled_notification")
+    adapter = importlib.import_module("src.application.notification_delivery_adapter")
+    seen: dict[str, str] = {}
+
+    def _send_fn(*, message: str, idempotency_key: str, **_kwargs):
+        seen[message] = idempotency_key
+        return SimpleNamespace(returncode=0, stdout=f'{{"message_id":"{message}"}}', stderr="")
+
+    keys = {
+        "lx": "daily-brief:US:2026-07-19:lx:full:" + "a" * 64,
+        "sy": "daily-brief:US:2026-07-19:sy:full:" + "b" * 64,
+    }
+    out = mod.execute_per_account_delivery(
+        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
+        run_id="run-overrides",
+        runlog=fake_runlog_factory([]),
+        audit_fn=lambda *_args, **_kwargs: None,
+        safe_data_fn=lambda payload: payload,
+        send_fn=_send_fn,
+        normalize_fn=lambda *, send_result: {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "returncode": 0,
+            "message_id": send_result.stdout,
+        },
+        failure_fields_builder=lambda **_kwargs: {},
+        base="/tmp/base",
+        idempotency_keys_by_account=keys,
+    )
+
+    assert out.sent_accounts == ["lx", "sy"]
+    assert seen == {
+        "msg-lx": adapter.build_notification_transport_key(keys["lx"]),
+        "msg-sy": adapter.build_notification_transport_key(keys["sy"]),
+    }

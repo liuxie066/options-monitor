@@ -8,6 +8,7 @@ from src.application.agent_tools import (
     candidate,
     close_advice,
     config,
+    daily_brief,
     diagnostics,
     materialization,
     notification_perception,
@@ -23,6 +24,7 @@ AgentToolEntry = AgentTool
 
 AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     diagnostics,
+    daily_brief,
     runtime,
     config,
     analysis,

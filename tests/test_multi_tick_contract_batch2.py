@@ -337,3 +337,75 @@ def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> N
     assert audit_events[0]["extra"]["idempotency_key"] == send_calls[0]["idempotency_key"]
     assert audit_events[-1]["extra"]["retry_attempt_count"] == 1
     assert audit_events[-1]["extra"]["ambiguous_send"] is True
+
+
+def test_multi_tick_notify_without_override_preserves_legacy_transport_key() -> None:
+    helper = importlib.import_module("src.application.scheduled_notification")
+    adapter = importlib.import_module("src.application.notification_delivery_adapter")
+    seen: list[str] = []
+
+    def _send(**kwargs):
+        seen.append(str(kwargs["idempotency_key"]))
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"m-1"}', stderr="")
+
+    result = helper.send_account_message_with_retry(
+        base=Path("/tmp/options-monitor-test"),
+        channel="wechat_clawbot",
+        target="user:test",
+        account="lx",
+        message="hello",
+        run_id="run-legacy",
+        runlog=_FakeRunLogger(),
+        audit_fn=lambda *_args, **_kwargs: None,
+        send_fn=_send,
+        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
+    )
+
+    expected = adapter.build_notification_idempotency_key(
+        run_id="run-legacy",
+        account="lx",
+        target="user:test",
+        message="hello",
+    )
+    assert result["ok"] is True
+    assert seen == [expected]
+    assert result["idempotency_key"] == expected
+
+
+def test_multi_tick_notify_compacts_logical_override_and_reuses_it_for_retries() -> None:
+    helper = importlib.import_module("src.application.scheduled_notification")
+    adapter = importlib.import_module("src.application.notification_delivery_adapter")
+    logical_key = "daily-brief:US:2026-07-19:lx:full:" + "a" * 64
+    seen: list[str] = []
+
+    def _send(**kwargs):
+        seen.append(str(kwargs["idempotency_key"]))
+        if len(seen) == 1:
+            return SimpleNamespace(returncode=2, stdout="", stderr="retry")
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"m-2"}', stderr="")
+
+    result = helper.send_account_message_with_retry(
+        base=Path("/tmp/options-monitor-test"),
+        channel="wechat_clawbot",
+        target="user:test",
+        account="lx",
+        message="daily brief",
+        run_id="run-brief",
+        runlog=_FakeRunLogger(),
+        audit_fn=lambda *_args, **_kwargs: None,
+        send_fn=_send,
+        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
+        idempotency_key_override=logical_key,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    expected = adapter.build_notification_transport_key(logical_key)
+    assert result["ok"] is True
+    assert seen == [expected, expected]
+    assert result["idempotency_key"] == expected
+    assert expected.startswith("om-")
+    assert len(expected) == 35

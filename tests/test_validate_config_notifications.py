@@ -569,3 +569,53 @@ def test_validate_config_rejects_retired_feishu_callback_keys() -> None:
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "Feishu inbound uses long-connection Bot env settings" in str(exc)
+
+
+def test_validate_config_accepts_default_off_daily_brief() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {
+        "daily_brief": {
+            "enabled": False,
+            "max_actions_per_priority": 5,
+            "max_candidates_per_strategy": 3,
+            "max_rejection_reasons": 5,
+        }
+    }
+
+    mod.validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_daily_brief_contract() -> None:
+    import src.application.config_validator as mod
+
+    for daily_brief, expected in (
+        (True, "notifications.daily_brief must be an object"),
+        ({"enabled": "yes"}, "notifications.daily_brief.enabled must be a boolean"),
+        ({"max_actions_per_priority": 0}, "must be between 1 and 20"),
+        ({"max_candidates_per_strategy": 21}, "must be between 1 and 20"),
+        ({"max_rejection_reasons": 1.5}, "must be an integer"),
+    ):
+        cfg = _base_cfg()
+        cfg["notifications"] = {"daily_brief": daily_brief}
+        try:
+            mod.validate_config(cfg)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert expected in str(exc)
+
+
+def test_daily_brief_defaults_and_examples_remain_disabled() -> None:
+    import json
+    from pathlib import Path
+
+    from src.application.config_defaults import DEFAULT_CONFIG
+
+    root = Path(__file__).resolve().parents[1]
+    example = json.loads((root / "configs" / "examples" / "user.common.example.json").read_text())
+    system = json.loads((root / "configs" / "system.json").read_text())
+
+    assert DEFAULT_CONFIG["defaults"]["notifications"]["daily_brief"]["enabled"] is False
+    assert example["notifications"]["daily_brief"]["enabled"] is False
+    assert system["defaults"]["notifications"]["daily_brief"]["enabled"] is False

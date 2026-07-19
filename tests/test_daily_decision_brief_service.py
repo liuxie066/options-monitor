@@ -1,0 +1,377 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+
+from src.application.multi_tick.misc import AccountResult
+
+
+def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path:
+    path = base / "output_runs" / run_id / "accounts" / account
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _config(*, timezone_name: str = "America/New_York") -> dict:
+    return {
+        "schedule": {
+            "timezone": timezone_name,
+            "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        },
+        "notifications": {"daily_brief": {"max_candidates_per_strategy": 3}},
+    }
+
+
+def _result(*, ran_scan: bool = True, reason: str = "ok") -> AccountResult:
+    return AccountResult("lx", ran_scan, True, reason, "legacy markdown must not be parsed")
+
+
+def _assemble(
+    base: Path,
+    *,
+    market: str = "US",
+    result: AccountResult | None = None,
+    pipeline_succeeded: bool = True,
+    config: dict | None = None,
+):
+    from src.application.daily_decision_brief_service import assemble_daily_decision_brief
+
+    return assemble_daily_decision_brief(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        market=market,
+        scheduler_decision={"in_run_window": True},
+        account_result=result or _result(),
+        pipeline_succeeded=pipeline_succeeded,
+        config=config or _config(timezone_name="Asia/Hong_Kong" if market == "HK" else "America/New_York"),
+        now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+    )
+
+
+def _put_row(
+    *,
+    symbol: str = "NVDA",
+    contract: str = "NVDA260821P00100000",
+    annualized: float = 0.2,
+    priority: str | None = None,
+) -> dict:
+    row = {
+        "symbol": symbol,
+        "option_type": "put",
+        "contract_symbol": contract,
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "spot": 120,
+        "dte": 35,
+        "delta": -0.2,
+        "annualized_net_return_on_cash_basis": annualized,
+        "net_income": 200,
+        "spread_ratio": 0.1,
+        "open_interest": 500,
+        "volume": 20,
+        "cash_required_cny": 10_000,
+        "cash_free_cny": 25_000,
+    }
+    if priority is not None:
+        row["tier"] = priority
+    return row
+
+
+def _call_row(*, symbol: str = "NVDA", contract: str = "NVDA260821C00140000", annualized: float = 0.1) -> dict:
+    return {
+        "symbol": symbol,
+        "option_type": "call",
+        "contract_symbol": contract,
+        "expiration": "2026-08-21",
+        "strike": 140,
+        "spot": 120,
+        "dte": 35,
+        "delta": 0.2,
+        "annualized_net_premium_return": annualized,
+        "net_income": 100,
+        "spread_ratio": 0.1,
+        "open_interest": 500,
+        "volume": 20,
+        "shares_total": 350,
+        "shares_locked": 100,
+        "shares_available_for_cover": 250,
+        "multiplier": 100,
+        "call_covered_contracts_available": 2,
+    }
+
+
+def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            _put_row(contract="NVDA_LOW", annualized=0.10),
+            _put_row(contract="NVDA_HIGH", annualized=0.25),
+            _put_row(contract="NVDA_HIGH", annualized=0.25),
+        ]
+    ).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    pd.DataFrame([_call_row()]).to_csv(account_dir / "nvda_sell_call_candidates.csv", index=False)
+    (account_dir / "symbols_notification.txt").write_text("P0 fake action from markdown", encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert [item["contract_symbol"] for item in brief["candidates"]["sell_put"]] == ["NVDA_HIGH", "NVDA_LOW"]
+    assert brief["capacity"]["sell_put"]["contracts_available"] == 2
+    assert brief["capacity"]["covered_call"]["contracts_available"] == 2
+    assert len([item for item in brief["actions"] if item["strategy_family"] == "sell_put"]) == 2
+    assert all("fake" not in item.get("reason", "") for item in brief["actions"])
+
+
+def test_candidate_priority_reuses_tier_without_promoting_rank_one(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            _put_row(contract="NVDA_DEFAULT", annualized=0.30),
+            _put_row(contract="NVDA_STRONG", annualized=0.20, priority="strong"),
+        ]
+    ).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+
+    brief = _assemble(tmp_path)
+    priorities = {item["contract_symbol"]: item["priority"] for item in brief["actions"] if item["action_type"] == "open_candidate"}
+
+    assert priorities["NVDA_DEFAULT"] == "P1"
+    assert priorities["NVDA_STRONG"] == "P0"
+
+
+def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "position_lot_id": "lot-put",
+                "strategy_group_id": "group-1",
+                "leg_role": "funding_put",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "tier": "strong",
+                "tier_label": "强提醒",
+                "reason": "收益已锁定",
+                "close_action": "close_put_keep_call",
+                "position_side": "short",
+            }
+        ]
+    ).to_csv(account_dir / "close_advice.csv", index=False)
+
+    brief = _assemble(tmp_path)
+    action = next(item for item in brief["actions"] if item["action_type"] == "close_position")
+
+    assert action["priority"] == "P0"
+    assert action["position_lot_id"] == "lot-put"
+    assert action["strategy_group_id"] == "group-1"
+    assert action["leg_role"] == "funding_put"
+    assert action["close_action"] == "close_put_keep_call"
+    assert brief["positions"][0]["position_lot_id"] == "lot-put"
+
+
+def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "pair-b",
+                "put_contract_symbol": "NVDA_P95",
+                "call_contract_symbol": "NVDA_C130",
+                "put_expiration": "2026-08-21",
+                "call_expiration": "2026-09-18",
+                "put_strike": 95,
+                "call_strike": 130,
+                "annualized_net_credit_yield": 0.08,
+            },
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "pair-a",
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C125",
+                "put_expiration": "2026-08-21",
+                "call_expiration": "2026-09-18",
+                "put_strike": 100,
+                "call_strike": 125,
+                "annualized_net_credit_yield": 0.20,
+            },
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "pair-b",
+                "put_contract_symbol": "NVDA_P95",
+                "call_contract_symbol": "NVDA_C130",
+                "put_expiration": "2026-08-21",
+                "call_expiration": "2026-09-18",
+                "put_strike": 95,
+                "call_strike": 130,
+                "annualized_net_credit_yield": 0.50,
+            },
+        ]
+    ).to_csv(account_dir / "nvda_combo_yield_candidates.csv", index=False)
+
+    brief = _assemble(tmp_path)
+    combos = brief["candidates"]["combo_yield"]
+
+    assert [item["strategy_group_id"] for item in combos] == ["pair-b", "pair-a"]
+    assert combos[0]["put_leg_role"] == "funding_put"
+    assert combos[0]["call_leg_role"] == "participation_call"
+    combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
+    assert [item["strategy_group_id"] for item in combo_actions] == ["pair-b", "pair-a"]
+
+
+def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "aaa_sell_put_candidates_labeled.csv").write_text('symbol,contract_symbol\n"broken', encoding="utf-8")
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv", index=False
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert any(item["contract_symbol"] == "PDD_VALID" for item in brief["actions"])
+    assert any(item["reason"] == "csv_unavailable" for item in brief["data_gaps"])
+
+
+def test_header_only_and_empty_csv_are_readable_empty_decisions(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    (account_dir / "close_advice.csv").write_text("", encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["candidates"]["sell_put"] == []
+    assert not any(item["action_type"] == "resolve_data_blocker" for item in brief["actions"])
+
+
+def test_all_structured_sources_unavailable_blocks_account(tmp_path: Path) -> None:
+    _account_dir(tmp_path)
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    blocker = brief["actions"][0]
+    assert blocker["priority"] == "P0"
+    assert blocker["state"] == "blocked"
+    assert "all_structured_decision_sources_unavailable" in blocker["reason"]
+
+
+def test_pipeline_failure_blocks_even_when_ran_scan_and_candidate_artifact_exist(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+
+    brief = _assemble(
+        tmp_path,
+        result=_result(ran_scan=True, reason="pipeline failed"),
+        pipeline_succeeded=False,
+    )
+
+    assert brief["actionability"] == "blocked"
+    assert "pipeline failed" in brief["actions"][0]["reason"]
+
+
+def test_missing_capacity_suppresses_only_affected_candidate_and_blocks_when_all_requirements_missing(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    row = _put_row()
+    row.pop("cash_required_cny")
+    row.pop("cash_free_cny")
+    pd.DataFrame([row]).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+
+    brief = _assemble(tmp_path)
+
+    assert brief["candidates"]["sell_put"][0]["contract_symbol"] == row["contract_symbol"]
+    assert not any(item.get("contract_symbol") == row["contract_symbol"] for item in brief["actions"])
+    assert brief["actionability"] == "blocked"
+    assert any(item["reason"] == "cash_capacity_unavailable" for item in brief["data_gaps"])
+
+
+def test_market_partition_excludes_other_market_rows_and_uses_market_date(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            _put_row(symbol="NVDA", contract="US_NVDA"),
+            _put_row(symbol="0700.HK", contract="HK_0700"),
+        ]
+    ).to_csv(account_dir / "mixed_sell_put_candidates_labeled.csv", index=False)
+
+    us = _assemble(tmp_path, market="US")
+    hk = _assemble(tmp_path, market="HK")
+
+    assert [item["contract_symbol"] for item in us["candidates"]["sell_put"]] == ["US_NVDA"]
+    assert [item["contract_symbol"] for item in hk["candidates"]["sell_put"]] == ["HK_0700"]
+    assert us["market_trading_date"] == "2026-07-17"
+    assert hk["market_trading_date"] == "2026-07-17"
+    assert us["valid_until_utc"] != hk["valid_until_utc"]
+
+
+def test_prefetch_symbol_failure_is_a_local_gap_not_account_blocker(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv", index=False
+    )
+    state_dir = account_dir / "state"
+    state_dir.mkdir()
+    (state_dir / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:00+00:00",
+                "summary": {"errors": 1},
+                "symbols": {"NVDA": {"status": "error", "reason": "quote unavailable"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert any(item.get("symbol") == "NVDA" for item in brief["data_gaps"])
+    assert any(item["contract_symbol"] == "PDD_VALID" for item in brief["actions"])
+
+
+def test_rejection_summary_is_market_qualified(tmp_path: Path) -> None:
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "0700_sell_put_candidates_labeled.csv", index=False
+    )
+    append_candidate_filter_trace_rows(
+        account_dir / "candidate_filter_trace.jsonl",
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="lx",
+                symbol="NVDA",
+                function="sell_put",
+                status="rejected",
+                stage="risk",
+                rule="risk_spread",
+            ),
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="lx",
+                symbol="0700.HK",
+                function="sell_put",
+                status="rejected",
+                stage="risk",
+                rule="risk_volume",
+            ),
+        ],
+    )
+
+    brief = _assemble(tmp_path, market="HK")
+
+    assert brief["rejections"]["total_rejected"] == 1
+    assert brief["rejections"]["top_categories"][0]["sample_symbols"] == ["0700.HK"]
