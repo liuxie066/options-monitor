@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.416 - 2026-07-19
+
+### Changed
+- Added auth-aware lifecycle handling for the long-running trade-intake listener while preserving bounded automatic recovery for ordinary OpenD disconnects.
+- Added a public troubleshooting path for trade-intake authentication stops and manual recovery after OpenD phone verification.
+
+### Fixed
+- Stopped trade-intake from endlessly reconnecting and flooding logs when OpenD requires phone verification by exiting with stable status 78.
+- Prevented systemd from restarting trade-intake on the auth-required exit while retaining `Restart=always` for retryable failures.
+
 ## 1.2.415 - 2026-07-19
 
 ### Changed
