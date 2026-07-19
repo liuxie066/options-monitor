@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.419 - 2026-07-19
+
+### Fixed
+- Stopped normal tick workspace preparation from silently deleting `output_runs` older than seven days, keeping retention under the explicit audited cleanup workflow.
+- Made multi-source trade-intake fail closed when any listener source terminates or crashes, with bounded sibling shutdown so the supervisor can recover instead of leaving an account silently unmonitored.
+
 ## 1.2.418 - 2026-07-19
 
 ### Fixed
