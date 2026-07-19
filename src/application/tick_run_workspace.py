@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import re
-import shutil
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,8 +22,6 @@ def prepare_tick_run_workspace(
     run_id: str,
     default_account: str,
 ) -> TickRunWorkspace:
-    _cleanup_old_run_dirs(base)
-
     accounts_root = (base / "output_accounts").resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
     ensure_account_output_dir(accounts_root / default_account)
@@ -49,23 +44,3 @@ def prepare_tick_run_workspace(
         run_dir=run_dir,
         shared_required=required_dir,
     )
-
-
-def _cleanup_old_run_dirs(base: Path) -> None:
-    try:
-        runs_root = (base / "output_runs").resolve()
-        runs_root.mkdir(parents=True, exist_ok=True)
-        cutoff = time.time() - 7 * 86400
-        pattern = re.compile(r"^\d{8}T\d{6}$")
-        for path in runs_root.iterdir():
-            try:
-                if not path.is_dir():
-                    continue
-                if not pattern.match(path.name):
-                    continue
-                if path.stat().st_mtime < cutoff:
-                    shutil.rmtree(path, ignore_errors=True)
-            except Exception:
-                pass
-    except Exception:
-        pass
