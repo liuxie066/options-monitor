@@ -414,3 +414,61 @@ def test_prepared_audit_hashes_exact_message_with_resolved_limits(monkeypatch, t
     )
     assert audit_event["extra"]["message_sha256"] == prepared["message_sha256"]
     assert "message" not in audit_event["extra"]
+
+
+def test_scheduled_notification_renders_batch_and_localized_data_time(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    bundle = _request(
+        tmp_path,
+        run_id="run-scheduled-context",
+        config={
+            **_config(),
+            "schedule": {"timezone": "America/New_York"},
+        },
+    )
+    bundle.request = replace(
+        bundle.request,
+        scheduler_decision={
+            "in_run_window": True,
+            "scheduled_target_market": "2026-07-19T10:00:00-04:00",
+        },
+        trigger_kind="scheduled",
+    )
+
+    prepared = mod._prepare_daily_brief_notification(bundle.request)
+    message = prepared.prepared_messages.messages_by_account["lx"]
+
+    assert "> 今日首次 · 10:00 批次" in message
+    assert "数据截至：美东 09:39 / 北京 21:39" in message
+    assert "2026-07-19T" not in message
+    lifecycle = prepared.lifecycles_by_account["lx"]
+    assert "scheduled_target_market" not in lifecycle["brief"]
+    assert "scheduled_target_market" not in lifecycle["diff"]
+    assert "10:00:00-04:00" not in lifecycle["delivery_key"]
+
+
+def test_force_notification_says_manual_and_ignores_scheduler_batch(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    bundle = _request(tmp_path, run_id="run-force-context")
+    bundle.request = replace(
+        bundle.request,
+        scheduler_decision={
+            "in_run_window": True,
+            "scheduled_target_market": "2026-07-19T10:00:00-04:00",
+        },
+        trigger_kind="force",
+    )
+
+    prepared = mod._prepare_daily_brief_notification(bundle.request)
+    message = prepared.prepared_messages.messages_by_account["lx"]
+
+    assert "> 手动触发" in message
+    assert "10:00 批次" not in message

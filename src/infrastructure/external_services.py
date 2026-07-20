@@ -47,6 +47,7 @@ def run_scan_scheduler_cli(
     state_dir: Path | None = None,
     mark_scanned: bool = False,
     mark_notified: bool = False,
+    force: bool = False,
     capture_output: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
     cmd = [
@@ -71,6 +72,8 @@ def run_scan_scheduler_cli(
         cmd.append('--mark-scanned')
     if mark_notified:
         cmd.append('--mark-notified')
+    if force:
+        cmd.append('--force')
     return run_command(cmd, cwd=base, capture_output=capture_output, text=True)
 
 
