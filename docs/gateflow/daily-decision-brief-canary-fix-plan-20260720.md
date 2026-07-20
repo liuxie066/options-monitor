@@ -134,6 +134,8 @@ The production-shaped conflict fixture contains:
 - raw rows: the same rows plus a higher-ranked P450 contract that was not accepted;
 - expected result: only P430/P440 may appear in Sell Put candidates/actions and P450 must be absent from the whole brief and rendered message.
 
+This P430/P440/P450 assertion is a deterministic fixture oracle only. It must not be reused as a live-production Canary oracle because live labeling membership can change with market data, capacity, and underwriting inputs.
+
 ## 6. Runtime-root ownership and exact file scope
 
 The existing resolver is authoritative:
@@ -531,14 +533,40 @@ If `delivery_kind=none` because the exact semantic brief was already delivered, 
 
 ### 12.5 Content criteria
 
-For the production-shaped HK evidence:
+> **Amended 2026-07-20**: live Canary acceptance uses exact-run artifact identity sets. Named P430/P440/P450 contracts remain deterministic fixture cases only and are not live-market acceptance constants. See `docs/gateflow/daily-decision-brief-canary-fix-acceptance-amendment-20260720.md`.
 
-- accepted labeled 0700 P430/P440 rows may appear according to canonical ranking and display limits;
-- rejected/raw-only P450 must not appear anywhere in production brief JSON, CLI Markdown, Agent Tool Markdown, or the reproduced prepared notification message whose hash matches `message_sha256`;
+For each exact `run_id` and account, construct these sets from the immutable run-scoped account directory:
+
+- `L`: normalized non-empty `contract_symbol` identities from canonical `*_sell_put_candidates_labeled.csv` artifacts;
+- `R`: normalized non-empty `contract_symbol` identities from matching raw `*_sell_put_candidates.csv` artifacts;
+- `U = R - L`: raw-only identities for that exact run and account;
+- `C`: normalized `contract_symbol` identities in `candidates.sell_put`;
+- `A`: normalized `contract_symbol` identities in Sell Put actions where `action_type=open_candidate`. Close/observe/blocked position actions are not candidate-derived and are outside `A`.
+
+Identity normalization is trim plus uppercase on non-empty `contract_symbol`. A Sell Put candidate or open-candidate action with an empty identity cannot satisfy membership and is a Canary failure. Build `L` as an identity-to-core-fields map using symbol normalized through the existing `domain.domain.symbol_identity.canonical_symbol()`, ISO expiration, and numeric strike normalized through decimal value equality. Exact duplicates may deduplicate; conflicting labeled core fields for one identity fail closed. Candidate/action core fields must match the unique labeled row. Numeric formatting such as `450` versus `450.0` must compare equal. Sets must never be unioned across accounts, runs, or mutable `current` paths.
+
+Raw reads used to construct `R` and `U` are audit-only after run outputs are frozen. Raw rows must never enter Daily Brief assembly, ranking, candidate/action/event builders, or renderer inputs; audit helpers must remain outside the normal `daily_decision_brief_service.py` candidate-loading path.
+
+The production Canary passes the Sell Put authority check only if all of the following hold:
+
+```text
+C subset-of L
+A subset-of L
+(C union A) intersect U = empty
+```
+
+Additionally:
+
+- every Sell Put candidate and Sell Put `open_candidate` action reports a source path ending in `_sell_put_candidates_labeled.csv`;
+- every identity in `U` is absent from `candidates.sell_put`, Sell Put `open_candidate` actions, candidate-derived events carrying a contract identity, and their rendered recommendation sections; explicitly labeled rejection/provenance diagnostics may mention rejected identities without making them actionable;
+- a missing raw counterpart does not invalidate a valid labeled artifact; `R` and `U` may therefore be empty;
+- the re-evaluation consumes a sorted SHA-256 manifest of every raw/labeled, four-surface, prepared/diff/renderer, and safety input; missing files or manifest drift fail closed;
 - no candidate lacking required capacity may appear as an active action;
 - candidate evidence is visibly identified as non-action evidence;
 - if partial/missing evidence remains, `status=degraded` and the relevant `data_gaps` are visible while reliable active actions remain usable;
 - summary active-action count equals the number of `actions[state=active]`.
+
+The P430/P440/P450 conflict remains required in the fixed test fixture from sections 5.2 and 10; fixture assertions prove the known raw-only counterexample, while live Canary assertions prove exact-run set membership without assuming which strikes are labeled that day.
 
 ### 12.6 Safety criteria
 
@@ -564,7 +592,9 @@ Any mismatch is a stop condition. Do not authorize real sending on a partial pas
 
 Stop implementation or rollout if:
 
-- any raw-only contract appears in candidates/actions/events/rendered message;
+- any exact-run identity in `U = R - L` appears in candidates, candidate-derived actions/events, or rendered recommendation sections;
+- one labeled identity maps to conflicting core fields, or candidate/action core fields disagree with the unique labeled row;
+- raw audit rows enter the normal runtime candidate/ranking/render path, or re-evaluation inputs do not match their sorted SHA-256 manifest;
 - a valid empty labeled artifact causes raw fallback;
 - CLI or Agent Tool still reads release-local shadow state when `OM_RUNTIME_ROOT` is set;
 - one read surface points to a different revision;
