@@ -13,6 +13,7 @@ from src.application.daily_decision_brief_repository import (
     read_daily_decision_brief,
     read_latest_daily_decision_brief,
 )
+from src.application.runtime_paths import resolve_runtime_root
 
 
 _OUTPUT_CONTRACT: dict[str, Any] = {
@@ -189,9 +190,11 @@ def _validate_daily_brief_input(payload: dict[str, Any]) -> None:
 def _daily_brief_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     revision_value = payload.get("revision")
     revision = None if revision_value is None else int(revision_value)
+    repo_root = repo_base()
+    runtime_root = resolve_runtime_root(repo_root=repo_root).runtime_root
     try:
         data = read_daily_brief_view(
-            base=repo_base(),
+            base=runtime_root,
             account=str(payload.get("account") or ""),
             market=str(payload.get("market") or "US"),
             market_trading_date=(str(payload.get("date") or "").strip() or None),
