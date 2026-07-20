@@ -506,13 +506,18 @@ Smallest remaining actions, with blockers called out.
 
 ## Daily Decision Brief read model
 
-`daily_decision_brief.v1` is the canonical account+market+trading-date decision read model. It is advisory-only: never interpret an action as an order, execution authorization, or permission to mutate config, positions, Feishu, broker state, or notification routing.
+`daily_decision_brief.v1` is the canonical account+market+trading-date decision read model. It is advisory-only: opening opportunities are candidates, not orders, execution authorization, or permission to mutate config, positions, Feishu, broker state, or notification routing.
 
-- Scheduled source: the existing market scheduler. The first normal US opportunity is start+10 (09:40 market time); a process-level failure relies on later eligible timer slots, with 10:00 as the next explicit recovery point rather than a guaranteed 09:45 retry.
-- Delivery: first confirmed single-market brief is full; later notifications are material deltas against the last confirmed revision.
+- Scheduled source: keep the existing market scheduler and `run_points`. The first normal US opportunity is 09:40 market time, followed by the existing eligible hourly targets. A process-level failure relies on later eligible timer slots; 10:00 is the next explicit recovery point rather than a guaranteed 09:45 retry.
+- Trigger context: scheduled decisions carry an optional structured market-time target for display. Catch-up retains the original target. Manual/force rendering uses explicit trigger context and displays `手动触发`; it does not infer a batch from scheduler reason text.
+- Time display: scheduled batch and actual data-as-of are separate transient renderer inputs. They do not enter the persisted brief schema, digest, diff, delivery identity, or confirmation pointer.
+- Delivery envelope: the first confirmed single-market brief is full. Later scans still compare a material delta against the last confirmed revision internally, but a user-visible material update contains a change banner plus the complete current compact snapshot. No material change remains silent and resolves before provider route selection.
+- User projection: render only allowlisted human fields. Use readable contracts such as `TCOM · Sell Put · 08-21 $40 Put`; hide internal IDs, broker codes, raw enums, raw ISO timestamps, revision metadata, and rejection dumps from Markdown while preserving them in the structured audit model.
+- Strategy attribution: candidate and position attribution are independent. An empty `candidates.combo_yield` means no new Combo Yield candidate; it must not erase existing position attribution such as `组合增强（Put 侧/Call 侧）`. Renderer code must consume structured strategy/status fields rather than parse `strategy_group_id` or raw `leg_role`.
+- Capacity: candidate capacity is contract-scoped. Sell Put alternatives share account cash, so quantities shown for different candidates must never be summed.
 - Closed market: do not create a fake LIVE run. Read the latest local brief for planning/replay; once `valid_until_utc` expires, the read surface reports effective `planning_only`.
-- Safety: `notifications.daily_brief.enabled` defaults to `false`. Production enablement, notification canary, release and remote upgrade require separate operator authorization.
-- Multi-market: state/artifacts are market-qualified, but combined outbound is intentionally fail-closed in v1.3.0.
+- Safety: `notifications.daily_brief.enabled` defaults to `false`. This projection change adds no config migration. Production enablement, notification canary, release and remote upgrade require separate operator authorization.
+- Multi-market: state/artifacts are market-qualified, but combined outbound remains intentionally fail-closed.
 
 Read surfaces:
 
