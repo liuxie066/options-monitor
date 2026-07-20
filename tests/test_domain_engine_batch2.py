@@ -159,3 +159,18 @@ def test_resolve_scheduler_decision_centralizes_legacy_alias_reads() -> None:
     assert view.should_run_scan is True
     assert view.is_notify_window_open is False
     assert view.reason == 'compat-alias'
+
+
+def test_scheduler_decision_normalizer_preserves_structured_target() -> None:
+    from domain.domain.engine import build_scheduler_decision_dto
+
+    out = build_scheduler_decision_dto(
+        {
+            'should_run_scan': True,
+            'is_notify_window_open': True,
+            'reason': 'due',
+            'scheduled_target_market': '2026-07-20T10:00:00-04:00',
+        }
+    )
+
+    assert out['scheduled_target_market'] == '2026-07-20T10:00:00-04:00'

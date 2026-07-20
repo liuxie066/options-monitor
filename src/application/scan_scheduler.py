@@ -25,6 +25,7 @@ class SchedulerDecision:
     run_window_start_beijing: str
     run_window_end_beijing: str
     schedule_key: str
+    scheduled_target_market: str | None
 
 
 STATE_DEFAULT = {
@@ -501,6 +502,9 @@ def decide(
         run_window_start_beijing=start_dt_market.astimezone(bj_tz).isoformat(),
         run_window_end_beijing=end_dt_market.astimezone(bj_tz).isoformat(),
         schedule_key=str(schedule_key),
+        scheduled_target_market=(
+            due_target.isoformat() if due_target is not None and not force else None
+        ),
     )
 
 
