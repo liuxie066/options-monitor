@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
@@ -3024,6 +3025,73 @@ markets:
     current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
     item = next(row for row in current_us["symbols"] if row["symbol"] == "FUTU")
     assert item["sell_put"]["max_strike"] == 90.0
+
+
+def test_inbound_symbol_setting_writes_yaml_combo_yield_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    _enable_inbound_symbol_write(monkeypatch)
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  hk:
+    accounts: [lx]
+    symbols: [3690.HK]
+    overrides:
+      3690.HK:
+        sell_put:
+          enabled: true
+        covered_call:
+          enabled: true
+        combo_yield:
+          enabled: false
+""",
+        encoding="utf-8",
+    )
+    hk_cfg_path = tmp_path / "config.hk.json"
+    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="hk", config_path=config_yaml, output_config_path=hk_cfg_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/symbol edit 3690.HK combo_yield.enabled=true",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_combo_yield",
+            config_path=str(hk_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["yaml_symbol_set"]["combo_yield_enabled"] is True
+    assert "markets.hk.overrides.3690.HK.combo_yield.enabled" in preview["data"]["response_text"]
+    assert "enabled: false" in config_yaml.read_text(encoding="utf-8")
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_combo_yield_confirm",
+            config_path=str(hk_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    doc = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    assert doc["markets"]["hk"]["overrides"]["3690.HK"]["combo_yield"]["enabled"] is True
+    current_hk = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    item = next(row for row in current_hk["symbols"] if row["symbol"] == "3690.HK")
+    assert item["combo_yield"]["enabled"] is True
 
 
 def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
