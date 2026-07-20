@@ -493,6 +493,139 @@ def test_renderer_honors_section_limits() -> None:
     assert "C7 08-21 $107 Put：按当前现金最多 1 手" not in message
 
 
+def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["positions"] = []
+    brief["candidates"] = {
+        "sell_put": [
+            _candidate(
+                rank=i + 1,
+                symbol=f"C{i}",
+                option_type="put",
+                expiration="2026-08-21",
+                strike=100 + i,
+                capacity=i + 1,
+            )
+            for i in range(4)
+        ],
+        "covered_call": [],
+        "combo_yield": [],
+    }
+    diff = {
+        "changes": [
+            {
+                "change_type": "candidate_added",
+                "action": {
+                    "action_type": "open_candidate",
+                    "strategy_family": "sell_put",
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-08-21",
+                    "strike": strike,
+                },
+            }
+            for symbol, strike in (("C2", 102), ("C3", 103))
+        ]
+    }
+
+    message = render_delta_brief(
+        brief,
+        diff,
+        limits={"max_candidates_per_strategy": 1},
+    )
+
+    assert "C2 · Sell Put · 08-21 $102 Put（备选 3）" in message
+    assert "C3 · Sell Put · 08-21 $103 Put（备选 4）" in message
+    assert "C0 · Sell Put" not in message
+    assert "Sell Put 另有 2 个候选未展开" in message
+    assert "C2 08-21 $102 Put：按当前现金最多 3 手" in message
+    assert "C3 08-21 $103 Put：按当前现金最多 4 手" in message
+    assert "C0 08-21 $100 Put：按当前现金最多 1 手" not in message
+
+
+def test_invalidated_candidate_banner_keeps_removed_contract_identifiable() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["positions"] = []
+    brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
+    diff = {
+        "changes": [
+            {
+                "change_type": "candidate_invalidated",
+                "action": {
+                    "action_type": "open_candidate",
+                    "strategy_family": "sell_put",
+                    "symbol": "TCOM",
+                    "option_type": "put",
+                    "expiration": "2026-08-21",
+                    "strike": 40,
+                    "contract_symbol": "US.TCOM260821P40000",
+                },
+            }
+        ]
+    }
+
+    message = render_delta_brief(brief, diff)
+
+    assert "较上一轮：TCOM 08-21 $40 Put 候选已失效。" in message
+    assert "US.TCOM260821P40000" not in message
+
+
+def test_material_position_uses_exact_lot_before_same_contract_siblings() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
+    brief["positions"] = [
+        {
+            "symbol": "PDD",
+            "strategy_family": "combo_yield",
+            "leg_role": "funding_put",
+            "expiration": "2026-08-21",
+            "strike": 95,
+            "option_type": "put",
+            "contract_symbol": "US.PDD260821P95000",
+            "position_lot_id": f"lot-{i}",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "close_action": action,
+        }
+        for i, action in enumerate(("hold", "hold", "close_put_keep_call"))
+    ]
+    diff = {
+        "changes": [
+            {
+                "change_type": "action_added",
+                "action": {
+                    "action_type": "close_position",
+                    "strategy_family": "combo_yield",
+                    "symbol": "PDD",
+                    "option_type": "put",
+                    "expiration": "2026-08-21",
+                    "strike": 95,
+                    "contract_symbol": "US.PDD260821P95000",
+                    "position_lot_id": "lot-2",
+                    "leg_role": "funding_put",
+                },
+            }
+        ]
+    }
+
+    view_message = render_delta_brief(
+        brief,
+        diff,
+        limits={"max_actions_per_priority": 1},
+    )
+
+    assert "PDD · 组合增强（Put 侧） · 08-21 $95 Put：建议平掉 Put，保留 Call" in view_message
+    assert "继续观察" not in view_message
+    assert "另有 2 个持仓未展开" in view_message
+    assert "lot-2" not in view_message
+
+
 def test_renderer_honors_total_length_bound() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
