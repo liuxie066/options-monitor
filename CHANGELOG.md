@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.3.2 - 2026-07-20
+
+### Fixed
+- Made labeled Sell Put artifacts the only Daily Decision Brief candidate authority, with explicit fail-closed semantics for missing, malformed, partial, and invalid-empty labeled artifacts.
+- Prevented rejected or raw-only Sell Put contracts from re-entering Daily Brief ranking, actions, events, summaries, or rendered Markdown.
+- Unified Daily Brief CLI and Agent Tool reads on the effective `OM_RUNTIME_ROOT`, avoiding stale repo-local shadow revisions in production.
+- Distinguished active actions, non-action candidate evidence, and data quality in rendered briefs, and added exact prepared-message digest and render-limit evidence for no-send Canary verification.
+
 ## 1.3.1 - 2026-07-20
 
 ### Added

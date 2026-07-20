@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 738 (`src`: 407, `domain`: 62, `scripts`: 7, `tests`: 262)
-- Internal import edges: 4159 total, 1924 production/script edges excluding tests
+- Internal import edges: 4169 total, 1926 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -38,16 +38,16 @@ flowchart LR
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|2| domain
-  interfaces -->|123| application
+  interfaces -->|124| application
   interfaces -->|2| domain
   scripts -->|7| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1549| application
+  tests -->|1555| application
   tests -->|352| domain
   tests -->|2| domain_services
   tests -->|106| infrastructure
-  tests -->|180| interfaces
+  tests -->|182| interfaces
   tests -->|10| scripts
   tests -->|18| storage
 ```
@@ -57,7 +57,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 297 |
-| interfaces | application | 123 |
+| interfaces | application | 124 |
 | application | infrastructure | 105 |
 | application | storage | 39 |
 | scripts | application | 7 |
@@ -73,9 +73,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1549 |
+| tests | application | 1555 |
 | tests | domain | 352 |
-| tests | interfaces | 180 |
+| tests | interfaces | 182 |
 | tests | infrastructure | 106 |
 | tests | storage | 18 |
 | tests | scripts | 10 |
@@ -88,7 +88,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 162 |
-| src.interfaces | src.application | 101 |
+| src.interfaces | src.application | 102 |
 | src.application | src.infrastructure | 73 |
 | src.application | domain.storage | 30 |
 | src.application.ledger | domain.domain.ledger | 28 |
