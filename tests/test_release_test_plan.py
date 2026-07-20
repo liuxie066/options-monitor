@@ -26,8 +26,8 @@ def test_release_test_plan_maps_event_and_service_changes() -> None:
     assert "git diff --check" in plan["commands"]
     assert "./.venv/bin/python -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py" in plan["commands"]
     assert (
-        "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_version_check.py tests/test_install_script.py "
-        "tests/test_release_test_plan.py"
+        "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_version_recommendation.py "
+        "tests/test_version_check.py tests/test_install_script.py tests/test_release_test_plan.py"
     ) in plan["commands"]
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in plan["commands"]
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"event_source", "service_release"}
@@ -208,3 +208,16 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
     assert pytest_commands == [
         "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py"
     ]
+
+
+def test_release_version_recommendation_maps_to_release_focused_tests() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(
+        changed_files=["src/application/release_version_recommendation.py"],
+        mode="standard",
+    )
+
+    rules = {rule["name"] for rule in plan["matched_rules"]}
+    assert {"service_release", "dependency_graph"} <= rules
+    assert any("tests/test_release_version_recommendation.py" in command for command in plan["commands"])

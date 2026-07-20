@@ -4178,3 +4178,50 @@ def test_preview_notification_is_read_only() -> None:
     assert out["ok"] is True
     assert "### Put" in out["data"]["notification_text"]
     assert "🟢 Put NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]
+
+
+def test_version_update_auto_apply_requires_preview_fields(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+
+    out = run_tool("version_update", {"bump": "auto", "apply": True, "confirm": True})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "recommendation_digest" in out["error"]["message"]
+    assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_version_update_auto_preview_adapts_warnings_and_contract(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tools.runtime as runtime_tools
+    from src.application.tool_execution import execute_tool as run_tool
+
+    (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
+
+    def _preview(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["bump"] == "auto"
+        assert kwargs["remote_name"] == "origin"
+        return {
+            "schema_version": "release_version_recommendation.v1",
+            "status": "recommended",
+            "mode": "dry_run",
+            "review_flags": ["COMPATIBILITY_SENSITIVE_PATH_CHANGED"],
+            "recommendation": {"bump": "minor", "target_version": "1.1.0"},
+            "recommendation_digest": "sha256:" + "a" * 64,
+            "write": {"changed": False, "already_at_target": False},
+        }
+
+    monkeypatch.setattr(runtime_tools, "update_local_version", _preview)
+    out = run_tool("version_update", {"bump": "auto", "apply": False})
+
+    assert out["ok"] is True
+    assert out["data"]["status"] == "recommended"
+    assert out["warnings"] == [
+        "compatibility-sensitive files changed; confirm Unreleased impact classification",
+        "recommendation only; confirm before writing VERSION",
+    ]
+    assert out["meta"]["remote_name"] == "origin"

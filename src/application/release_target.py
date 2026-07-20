@@ -11,6 +11,11 @@ from typing import Any, Callable
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+STABLE_TAG_REF_RE = re.compile(
+    r"^refs/tags/v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?P<peeled>\^\{\})?$"
+)
+OBJECT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+BUMP_KINDS = {"major", "minor", "patch"}
 
 
 @dataclass(frozen=True)
@@ -19,6 +24,14 @@ class SemVer:
     minor: int
     patch: int
     prerelease: tuple[tuple[int, Any], ...]
+
+
+@dataclass(frozen=True)
+class RemoteStableTagIdentity:
+    version: str
+    tag: str
+    remote_tag_object_sha: str
+    remote_commit_sha: str
 
 
 def checked_at(now_fn: Callable[[], datetime] | None = None) -> str:
@@ -59,6 +72,54 @@ def compare_versions(left: str, right: str) -> int:
     if len(a.prerelease) == len(b.prerelease):
         return 0
     return -1 if len(a.prerelease) < len(b.prerelease) else 1
+
+
+def bump_version(current_version: str, bump: str = "patch") -> str:
+    parsed = parse_version(current_version)
+    kind = str(bump or "patch").strip().lower()
+    if kind not in BUMP_KINDS:
+        raise ValueError(f"bump must be one of: {', '.join(sorted(BUMP_KINDS))}")
+    if kind == "major":
+        return f"{parsed.major + 1}.0.0"
+    if kind == "minor":
+        return f"{parsed.major}.{parsed.minor + 1}.0"
+    return f"{parsed.major}.{parsed.minor}.{parsed.patch + 1}"
+
+
+def parse_remote_stable_tag_identities(stdout: str) -> list[RemoteStableTagIdentity]:
+    raw_by_version: dict[str, str] = {}
+    peeled_by_version: dict[str, str] = {}
+    for raw_line in stdout.splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        match = STABLE_TAG_REF_RE.match(ref)
+        if not match:
+            continue
+        if not OBJECT_SHA_RE.match(sha):
+            raise ValueError(f"invalid object id for stable tag ref: {ref}")
+        version = f"{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+        target = peeled_by_version if match.group("peeled") else raw_by_version
+        prior = target.get(version)
+        if prior is not None and prior.lower() != sha.lower():
+            raise ValueError(f"conflicting stable tag ref: {ref}")
+        target[version] = sha.lower()
+
+    orphaned = sorted(set(peeled_by_version) - set(raw_by_version), key=cmp_to_key(compare_versions))
+    if orphaned:
+        raise ValueError(f"orphan peeled stable tag ref: v{orphaned[0]}")
+
+    identities = [
+        RemoteStableTagIdentity(
+            version=version,
+            tag=f"v{version}",
+            remote_tag_object_sha=raw_sha,
+            remote_commit_sha=peeled_by_version.get(version, raw_sha),
+        )
+        for version, raw_sha in raw_by_version.items()
+    ]
+    return sorted(identities, key=cmp_to_key(lambda left, right: compare_versions(left.version, right.version)))
 
 
 def parse_release_tags(stdout: str) -> list[tuple[str, str]]:
@@ -375,12 +436,18 @@ def _run(
 
 
 __all__ = [
+    "BUMP_KINDS",
+    "OBJECT_SHA_RE",
+    "STABLE_TAG_REF_RE",
     "TAG_RE",
     "VERSION_RE",
+    "RemoteStableTagIdentity",
     "SemVer",
+    "bump_version",
     "checked_at",
     "compare_versions",
     "parse_release_tags",
+    "parse_remote_stable_tag_identities",
     "parse_version",
     "resolve_upgrade_target",
     "select_latest_release",

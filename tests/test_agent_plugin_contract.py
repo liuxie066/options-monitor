@@ -622,3 +622,16 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert "--dry-run" in payload["launcher"]["add_account_command"]
     assert payload["config"]["service_profile_name"] == "service.profile.json"
     assert "openclaw_profile_names" not in payload["config"]
+
+
+def test_version_update_auto_contract_is_discoverable() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+
+    tool = get_tool_definition("version_update")
+    assert tool is not None
+    assert tool.requires == ("local_repo", "git_remote")
+    assert tool.safe_default_input == {"bump": "patch", "apply": False}
+    assert tool.input_json_schema()["properties"]["bump"]["enum"] == ["major", "minor", "patch", "auto"]
+    assert tool.output_contract["payload_dependent"] is True
+    assert tool.resolve_output_contract({"bump": "patch"})["schema_version"] == "version_update.output.v1"
+    assert tool.resolve_output_contract({"bump": "auto"})["schema_version"] == "release_version_recommendation.v1"

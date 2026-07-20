@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -10,6 +11,7 @@ from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
+from src.application.release_target import VERSION_RE
 from src.application.version_check import update_local_version
 
 
@@ -30,6 +32,57 @@ _VERSION_CHECK_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
     "freshness_fields": ["checked_at"],
     "missing_data_fields": ["latest_version", "release_tag", "error"],
+}
+
+
+_VERSION_UPDATE_MANUAL_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "version_update.output.v1",
+    "source_label": "local VERSION",
+    "result_shape": "scalar",
+    "fact_fields": [
+        "mode",
+        "current_version",
+        "target_version",
+        "changed",
+        "would_change",
+        "version_path",
+        "message",
+    ],
+    "missing_data_fields": [],
+}
+
+_VERSION_UPDATE_AUTO_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "release_version_recommendation.v1",
+    "source_label": "CHANGELOG.md Unreleased, local git evidence, and remote stable tags",
+    "result_shape": "release_version_recommendation",
+    "status_values": ["recommended", "blocked", "needs_input", "stale", "applied", "already_at_target"],
+    "fact_fields": [
+        "status",
+        "reason_code",
+        "base.version",
+        "base.tag",
+        "base.remote_name",
+        "workspace.head",
+        "workspace.changed_files",
+        "recommendation.bump",
+        "recommendation.target_version",
+        "evidence",
+        "review_flags",
+        "recommendation_digest",
+        "write.changed",
+        "write.already_at_target",
+    ],
+    "freshness_fields": ["recommendation_digest", "base.remote_commit_sha", "workspace.head"],
+    "missing_data_fields": ["reason_code", "recommendation_digest"],
+}
+
+_VERSION_UPDATE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "version_update.output.v2",
+    "payload_dependent": True,
+    "variants": {
+        "manual": _VERSION_UPDATE_MANUAL_OUTPUT_CONTRACT,
+        "auto": _VERSION_UPDATE_AUTO_OUTPUT_CONTRACT,
+    },
 }
 
 
@@ -103,6 +156,40 @@ def _version_update_write_requested(payload: dict[str, Any]) -> bool:
     return bool(payload.get("apply", False))
 
 
+def _version_update_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("bump") or "").strip().lower() == "auto":
+        return _VERSION_UPDATE_AUTO_OUTPUT_CONTRACT
+    return _VERSION_UPDATE_MANUAL_OUTPUT_CONTRACT
+
+
+def _validate_version_update_input(payload: dict[str, Any]) -> None:
+    bump = str(payload.get("bump") or "").strip().lower()
+    target = str(payload.get("target_version") or "").strip()
+    if bump and target:
+        raise AgentToolError(code="INPUT_ERROR", message="provide either target_version or bump, not both")
+    if bump != "auto":
+        return
+    if target:
+        raise AgentToolError(code="INPUT_ERROR", message="target_version cannot be combined with bump=auto")
+    if not bool(payload.get("apply", False)):
+        return
+    required = ("recommendation_digest", "expected_base_version", "expected_target_version")
+    missing = [name for name in required if not str(payload.get(name) or "").strip()]
+    if missing:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"bump=auto apply requires: {', '.join(missing)}",
+            hint="Run bump=auto with apply=false first, show the recommendation, then reuse its digest/base/target after confirmation.",
+        )
+    digest = str(payload.get("recommendation_digest") or "").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise AgentToolError(code="INPUT_ERROR", message="recommendation_digest must be sha256:<64 lowercase hex chars>")
+    for name in ("expected_base_version", "expected_target_version"):
+        value = str(payload.get(name) or "").strip()
+        if not VERSION_RE.fullmatch(value):
+            raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be a valid semver value")
+
+
 def _runtime_runs_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
@@ -166,16 +253,28 @@ VERSION_CHECK_TOOL = build_agent_tool(
 
 VERSION_UPDATE_TOOL = build_agent_tool(
     name="version_update",
-    description="Preview or update local VERSION. Does not create git tags, commit, push, or run release workflows.",
-    requires=("local_repo",),
+    description=(
+        "Preview or update local VERSION. bump=auto recommends major|minor|patch from CHANGELOG.md Unreleased "
+        "and remote stable tags; remote access is used only in auto mode. Does not create git tags, commit, push, "
+        "or run release workflows."
+    ),
+    requires=("local_repo", "git_remote"),
     capabilities=("version_update", "local_write", "release_metadata"),
     side_effects=("writes_VERSION",),
     input_schema={
         "target_version": "optional explicit semver target such as 1.2.3",
-        "bump": "optional major|minor|patch; defaults to patch when no version is provided",
+        "bump": {
+            "type": "string",
+            "enum": ["major", "minor", "patch", "auto"],
+            "description": "optional bump kind; defaults to patch; auto reads remote tags and CHANGELOG.md Unreleased",
+        },
+        "remote_name": "optional git remote name for bump=auto; defaults to origin",
+        "recommendation_digest": "required for apply=true with bump=auto; sha256 freshness digest from preview",
+        "expected_base_version": "required semver base for apply=true with bump=auto",
+        "expected_target_version": "required semver target for apply=true with bump=auto",
         "apply": "optional bool; default false previews only",
         "confirm": "required true when apply=true",
-        "allow_downgrade": "optional bool; default false rejects lower target versions",
+        "allow_downgrade": "optional bool; default false rejects lower manual target versions",
     },
     handler=_version_update_tool,
     read_only=False,
@@ -183,8 +282,12 @@ VERSION_UPDATE_TOOL = build_agent_tool(
     requires_confirm=True,
     safe_default_input={"bump": "patch", "apply": False},
     write_request_predicate=_version_update_write_requested,
+    input_validator=_validate_version_update_input,
+    output_contract=_VERSION_UPDATE_OUTPUT_CONTRACT,
+    output_contract_resolver=_version_update_output_contract,
     examples=(
         {"input": {"bump": "patch", "apply": False}},
+        {"input": {"bump": "auto", "apply": False, "remote_name": "origin"}},
         {"input": {"target_version": "1.2.3", "apply": True, "confirm": True}},
     ),
 )
