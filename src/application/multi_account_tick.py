@@ -87,6 +87,13 @@ def current_run_id() -> str | None:
     return _CURRENT_RUN_ID
 
 
+def _resolve_daily_brief_trigger_kind(*, force_mode: bool, trigger_context: dict[str, Any]) -> str:
+    if force_mode:
+        return 'force'
+    source = str(trigger_context.get('source') or '').strip().lower()
+    return 'scheduled' if source in {'cron', 'scheduler'} else 'manual'
+
+
 def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[str, dict[str, Any]]) -> bool:
     if bool(should_run_global):
         return True
@@ -178,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeConfigFreshnessError as exc:
             raise SystemExit(str(exc)) from exc
     trigger_context = build_trigger_context()
+    trigger_kind = _resolve_daily_brief_trigger_kind(
+        force_mode=force_mode,
+        trigger_context=trigger_context,
+    )
     if args.accounts is None:
         args.accounts = accounts_from_config(base_cfg)
     else:
@@ -463,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler_markets=scheduler_markets,
             scheduler_decision=scheduler_decision,
             ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
+            trigger_kind=trigger_kind,
         )
     )
 
