@@ -747,6 +747,7 @@ def _candidate_view(
             "call_expiration": _text(row.get("call_expiration") or row.get("expiration")),
             "put_strike": _number(row.get("put_strike")),
             "call_strike": _number(row.get("call_strike")),
+            "priority": _priority_from_row(row, default="P1"),
             "metrics": _candidate_metrics(row, rank=rank),
             "source": _source_view(row),
         }
@@ -814,12 +815,19 @@ def _position_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "option_type",
         "expiration",
         "strike",
+        "contract_symbol",
         "tier",
         "tier_label",
         "reason",
         "close_action",
+        "evaluation_status",
+        "quote_status",
     )
-    return {field: _json_safe(row.get(field)) for field in fields}
+    out = {field: _json_safe(row.get(field)) for field in fields}
+    out["strategy_family"] = _text(
+        row.get("strategy_family") or row.get("strategy") or "close_advice"
+    ).lower()
+    return out
 
 
 def _blocked_action(account: str, market: str, blockers: list[str]) -> dict[str, Any]:
