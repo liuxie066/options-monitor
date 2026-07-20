@@ -171,6 +171,10 @@ def version_update_tool(
             bump=bump,
             apply=apply_mode,
             allow_downgrade=allow_downgrade,
+            remote_name=_optional_text(payload.get("remote_name")) or "origin",
+            recommendation_digest=_optional_text(payload.get("recommendation_digest")),
+            expected_base_version=_optional_text(payload.get("expected_base_version")),
+            expected_target_version=_optional_text(payload.get("expected_target_version")),
         )
     except ValueError as exc:
         raise AgentToolError(
@@ -180,11 +184,29 @@ def version_update_tool(
         ) from exc
 
     data = dict(result)
-    data["version_path"] = mask_path(data.get("version_path"))
+    version_path = data.get("version_path")
+    write = data.get("write")
+    if isinstance(write, dict) and write.get("version_path"):
+        write = dict(write)
+        write["version_path"] = mask_path(write.get("version_path"))
+        data["write"] = write
+        version_path = write["version_path"]
+    elif version_path:
+        data["version_path"] = mask_path(version_path)
+        version_path = data["version_path"]
+
     warnings: list[str] = []
-    if not apply_mode and bool(data.get("would_change")):
+    if str(bump or "").lower() == "auto":
+        from src.application.release_version_recommendation import recommendation_warnings
+
+        warnings.extend(recommendation_warnings(data))
+    elif not apply_mode and bool(data.get("would_change")):
         warnings.append("dry-run only; pass apply=true to write VERSION")
-    return data, warnings, {"repo_base": mask_path(repo_base()), "version_path": data["version_path"]}
+    return data, warnings, {
+        "repo_base": mask_path(repo_base()),
+        "version_path": version_path,
+        "remote_name": _optional_text(payload.get("remote_name")) or "origin" if str(bump or "").lower() == "auto" else None,
+    }
 
 
 def config_validate_tool(

@@ -360,15 +360,40 @@ om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
 
 用途：
 - 预览或更新本地 `VERSION`
+- `bump=auto` 根据远端最高稳定 tag 和 `CHANGELOG.md / ## Unreleased` 推荐 `major|minor|patch`
 - 默认 dry-run；写入需要 `apply=true`、`confirm=true` 和 `OM_AGENT_ENABLE_WRITE_TOOLS=true`
 - 不创建 git tag、不 commit、不 push、不运行发布流程
 
-示例：
+手动示例：
 
 ```bash
 om-agent run --tool version_update --input-json '{"bump":"patch"}'
 OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool version_update --input-json '{"target_version":"1.2.3","apply":true,"confirm":true}'
 ```
+
+自动建议先 preview：
+
+```bash
+om-agent run --tool version_update --input-json '{"bump":"auto","apply":false,"remote_name":"origin"}'
+```
+
+只有用户确认采用后，才能把 preview 返回的字段带回 apply：
+
+```json
+{
+  "bump": "auto",
+  "apply": true,
+  "confirm": true,
+  "remote_name": "origin",
+  "recommendation_digest": "sha256:<preview digest>",
+  "expected_base_version": "1.3.0",
+  "expected_target_version": "1.4.0"
+}
+```
+
+自动路径可能返回 `recommended|needs_input|blocked|stale|applied|already_at_target`。
+`recommended` 只是建议；`stale` 表示 preview 后证据变化；`already_at_target` 是无写入恢复结果，
+只证明当前 `VERSION` 已达到目标。remote 只由 `bump=auto` 使用，手动模式仍可离线执行。
 
 `apply=true` 是本地写入动作，还需要 `confirm=true` 和
 `OM_AGENT_ENABLE_WRITE_TOOLS=true`。固定频率任务只应使用 dry-run 预览或版本检查。
