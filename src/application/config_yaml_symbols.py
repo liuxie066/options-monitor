@@ -32,6 +32,7 @@ def set_yaml_symbol_config(
     covered_call_min_strike: float | None = None,
     sell_put_enabled: bool | None = None,
     sell_put_max_strike: float | None = None,
+    combo_yield_enabled: bool | None = None,
     rebuild_runtime_root: str | Path | None = None,
     apply: bool = False,
     backup: bool = True,
@@ -41,11 +42,12 @@ def set_yaml_symbol_config(
         and covered_call_min_strike is None
         and sell_put_enabled is None
         and sell_put_max_strike is None
+        and combo_yield_enabled is None
     ):
         raise AgentToolError(
             code="INPUT_ERROR",
             message="at least one symbol setting is required",
-            hint="Pass --covered-call-enabled, --covered-call-min-strike, --sell-put-enabled, or --sell-put-max-strike.",
+            hint="Pass --covered-call-enabled, --covered-call-min-strike, --sell-put-enabled, --sell-put-max-strike, or --combo-yield-enabled.",
         )
     config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
     market_key = normalize_config_market(market)
@@ -58,6 +60,7 @@ def set_yaml_symbol_config(
         covered_call_min_strike=covered_call_min_strike,
         sell_put_enabled=sell_put_enabled,
         sell_put_max_strike=sell_put_max_strike,
+        combo_yield_enabled=combo_yield_enabled,
     )
     validation = _validate_doc(repo_root=repo_root, config_doc=after_doc, markets=_markets_in_doc(after_doc))
     backup_path = None
@@ -100,6 +103,7 @@ def _mutate_symbol_config(
     covered_call_min_strike: float | None,
     sell_put_enabled: bool | None,
     sell_put_max_strike: float | None,
+    combo_yield_enabled: bool | None,
 ) -> dict[str, Any]:
     market_doc = _market_doc(config_doc, market=market)
     calibration = require_calibrated_symbol(symbol, config=config_doc, error_factory=_input_error)
@@ -155,6 +159,15 @@ def _mutate_symbol_config(
         if sell_put.get("max_strike") != sell_put_max_strike:
             sell_put["max_strike"] = sell_put_max_strike
             changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.sell_put.max_strike")
+
+    if combo_yield_enabled is not None:
+        combo_yield = override.get("combo_yield")
+        if not isinstance(combo_yield, dict):
+            combo_yield = {}
+            override["combo_yield"] = combo_yield
+        if combo_yield.get("enabled") is not bool(combo_yield_enabled):
+            combo_yield["enabled"] = bool(combo_yield_enabled)
+            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.combo_yield.enabled")
 
     call_key = _covered_call_authoring_key(override)
     if call_enabled_effective is not None or covered_call_min_strike is not None:
