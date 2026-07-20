@@ -94,6 +94,7 @@ def add_config_commands(subparsers: Any) -> None:
     symbol_set.add_argument("--covered-call-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--covered-call-min-strike", type=float, default=None)
     symbol_set.add_argument("--sell-put-enabled", type=_parse_bool_value, default=None)
+    symbol_set.add_argument("--combo-yield-enabled", type=_parse_bool_value, default=None)
     symbol_set.add_argument("--rebuild-runtime-root", default=None)
     symbol_set.add_argument("--apply", action="store_true")
     symbol_set.add_argument("--no-backup", action="store_true")
@@ -327,6 +328,7 @@ def handle_config_command(
                 covered_call_enabled=args.covered_call_enabled,
                 covered_call_min_strike=args.covered_call_min_strike,
                 sell_put_enabled=args.sell_put_enabled,
+                combo_yield_enabled=args.combo_yield_enabled,
                 rebuild_runtime_root=args.rebuild_runtime_root,
                 apply=bool(args.apply),
                 backup=not bool(args.no_backup),

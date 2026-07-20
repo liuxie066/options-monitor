@@ -404,6 +404,38 @@ def test_yaml_symbol_set_updates_sell_put_max_strike_as_dry_run(tmp_path: Path) 
     assert config_path.read_text(encoding="utf-8") == before
 
 
+def test_yaml_symbol_set_updates_combo_yield_enabled_as_dry_run(tmp_path: Path) -> None:
+    doc = yaml.safe_load(_minimal_yaml())
+    doc["markets"]["hk"]["symbols"].append("3690.HK")
+    doc["markets"]["hk"]["overrides"] = {
+        "3690.HK": {
+            "sell_put": {"enabled": True},
+            "covered_call": {"enabled": True},
+            "combo_yield": {"enabled": False},
+        }
+    }
+    config_path = _write_yaml(tmp_path / "config.yaml", yaml.safe_dump(doc, sort_keys=False))
+    before = config_path.read_text(encoding="utf-8")
+
+    out = set_yaml_symbol_config(
+        repo_root=REPO_ROOT,
+        market="hk",
+        symbol="3690.HK",
+        config_path=config_path,
+        combo_yield_enabled=True,
+        apply=False,
+    )
+
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert out["summary"]["changed_paths"] == ["markets.hk.overrides.3690.HK.combo_yield.enabled"]
+    assert out["summary"]["entry"]["combo_yield"]["enabled"] is True
+    assert out["summary"]["entry"]["sell_put"]["enabled"] is True
+    assert out["summary"]["entry"]["covered_call"]["enabled"] is True
+    assert out["validation"]["hk"]["ok"] is True
+    assert config_path.read_text(encoding="utf-8") == before
+
+
 def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
     runtime_root = tmp_path / "runtime"
