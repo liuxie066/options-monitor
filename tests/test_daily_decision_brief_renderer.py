@@ -3,21 +3,56 @@ from __future__ import annotations
 from copy import deepcopy
 
 
+def _candidate(
+    *,
+    rank: int,
+    symbol: str,
+    option_type: str,
+    expiration: str,
+    strike: float,
+    capacity: int | None = None,
+) -> dict:
+    row = {
+        "rank": rank,
+        "symbol": symbol,
+        "option_type": option_type,
+        "contract_symbol": f"US.{symbol}260821{option_type[:1].upper()}INTERNAL",
+        "expiration": expiration,
+        "strike": strike,
+        "priority": "P1",
+        "metrics": {
+            "mid": 5.25,
+            "annualized_net_return_on_cash_basis": 0.181,
+            "annualized_net_premium_return": 0.126,
+            "delta": -0.24 if option_type == "put" else 0.22,
+            "dte": 32,
+            "net_income": 480,
+        },
+        "source": {"path": "/private/internal/candidates.csv"},
+    }
+    if capacity is not None:
+        row["capacity"] = {
+            "contracts_available": capacity,
+            "reason": "cash_supported",
+        }
+    return row
+
+
 def _brief() -> dict:
     return {
         "schema_version": "daily_decision_brief.v1",
-        "brief_id": "US:2026-07-19:lx",
+        "brief_id": "US:2026-07-20:lx",
         "market": "US",
-        "market_trading_date": "2026-07-19",
+        "market_trading_date": "2026-07-20",
         "account": "lx",
         "revision": 3,
-        "run_id": "run-render",
-        "generated_at_utc": "2026-07-19T13:40:00+00:00",
-        "data_as_of_utc": "2026-07-19T13:39:00+00:00",
-        "valid_until_utc": "2026-07-19T20:00:00+00:00",
+        "run_id": "run-render-secret",
+        "generated_at_utc": "2026-07-20T14:04:00+00:00",
+        "data_as_of_utc": "2026-07-20T14:03:00+00:00",
+        "valid_until_utc": "2026-07-20T20:00:00+00:00",
         "status": "ready",
         "actionability": "live_actionable",
-        "strategy_summary": "优先处理 P0 平仓，再评估新增敞口。",
+        "strategy_summary": "internal strategy summary",
         "actions": [
             {
                 "action_id": "close-1",
@@ -27,211 +62,459 @@ def _brief() -> dict:
                 "strategy_family": "combo_yield",
                 "account": "lx",
                 "symbol": "NVDA",
-                "contract_symbol": "NVDA260821P00100000",
-                "title": "平掉融资 Put，保留 Call",
-                "reason": "收益已锁定",
-                "position_lot_id": "lot-put",
-                "strategy_group_id": "group-1",
+                "contract_symbol": "US.NVDA260821P100000",
+                "position_lot_id": "lot-put-secret",
+                "strategy_group_id": "combo-secret",
                 "leg_role": "funding_put",
-            },
-            {
-                "action_id": "open-1",
-                "priority": "P1",
-                "state": "active",
-                "action_type": "open_candidate",
-                "strategy_family": "sell_put",
-                "account": "lx",
-                "symbol": "MSFT",
-                "contract_symbol": "MSFT260821P00400000",
-                "title": "评估 Sell Put",
-                "reason": "收益/风险通过筛选",
-            },
-            {
-                "action_id": "observe-1",
-                "priority": "P2",
-                "state": "observe",
-                "action_type": "observe",
-                "strategy_family": "covered_call",
-                "account": "lx",
-                "symbol": "AAPL",
-                "title": "继续观察",
-            },
+                "reason": "internal reason",
+            }
         ],
         "positions": [
             {
                 "symbol": "NVDA",
-                "contract_symbol": "NVDA260821P00100000",
-                "close_action": "close_put_keep_call",
-                "position_lot_id": "lot-put",
-                "strategy_group_id": "group-1",
+                "strategy_family": "combo_yield",
                 "leg_role": "funding_put",
-            }
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "option_type": "put",
+                "contract_symbol": "US.NVDA260821P100000",
+                "close_action": "close_put_keep_call",
+                "evaluation_status": "evaluable",
+                "quote_status": "priced",
+                "position_lot_id": "lot-put-secret",
+                "strategy_group_id": "combo-secret",
+            },
+            {
+                "symbol": "PDD",
+                "strategy_family": "combo_yield",
+                "leg_role": "funding_put",
+                "contract_symbol": "US.PDD260821P95000",
+                "close_action": "not_evaluable",
+                "evaluation_status": "not_evaluable",
+                "quote_status": "coverage_missing",
+                "position_lot_id": "lot-pdd-secret",
+                "strategy_group_id": "combo-pdd-secret",
+            },
+            {
+                "symbol": "FUTU",
+                "strategy_family": "sell_put",
+                "close_action": "not_evaluable",
+                "evaluation_status": "not_evaluable",
+                "quote_status": "quote_unusable",
+                "position_lot_id": "lot-futu-secret",
+            },
         ],
         "capacity": {
-            "sell_put": {"contracts_available": 2, "reason": "按整手资金约束"},
-            "covered_call": {"contracts_available": 1},
+            "sell_put": {"contracts_available": 999, "reason": "cash_supported"},
         },
         "candidates": {
             "sell_put": [
-                {"rank": 1, "symbol": "MSFT", "contract_symbol": "MSFT-P1", "priority": "P1"},
-                {"rank": 2, "symbol": "NVDA", "contract_symbol": "NVDA-P2", "priority": "P1"},
+                _candidate(
+                    rank=1,
+                    symbol="MSFT",
+                    option_type="put",
+                    expiration="2026-08-21",
+                    strike=400,
+                    capacity=2,
+                ),
+                _candidate(
+                    rank=2,
+                    symbol="NVDA",
+                    option_type="put",
+                    expiration="2026-08-21",
+                    strike=100,
+                    capacity=5,
+                ),
             ],
             "covered_call": [
-                {"rank": 1, "symbol": "AAPL", "contract_symbol": "AAPL-C1", "priority": "P2"}
+                _candidate(
+                    rank=1,
+                    symbol="AAPL",
+                    option_type="call",
+                    expiration="2026-08-21",
+                    strike=250,
+                    capacity=1,
+                )
             ],
             "combo_yield": [
                 {
                     "rank": 1,
                     "symbol": "TSLA",
-                    "put_contract_symbol": "TSLA-P1",
-                    "call_contract_symbol": "TSLA-C1",
                     "priority": "P1",
+                    "put_contract_symbol": "US.TSLA260821P300000",
+                    "call_contract_symbol": "US.TSLA260918C400000",
+                    "put_expiration": "2026-08-21",
+                    "put_strike": 300,
+                    "call_expiration": "2026-09-18",
+                    "call_strike": 400,
+                    "metrics": {"annualized_net_credit_yield": 0.154, "net_income": 620},
+                    "strategy_group_id": "combo-candidate-secret",
                 }
             ],
         },
         "rejections": {
             "top_categories": [
-                {"category": "spread_too_wide", "count": 4, "sample_symbols": ["AMD", "META"]}
+                {"category": "spread_too_wide", "count": 806, "sample_symbols": ["GOOGL"]}
             ]
         },
-        "events": [{"event_type": "earnings_window", "symbol": "NVDA", "reason": "临近财报"}],
-        "data_gaps": [{"scope": "covered_call", "symbol": "AAPL", "reason": "缺少 IV"}],
-        "source_artifacts": [],
+        "events": [{"event_type": "earnings_window", "symbol": "NVDA"}],
+        "data_gaps": [{"scope": "position", "symbol": "PDD", "reason": "coverage_missing"}],
+        "source_artifacts": ["/private/internal/run.json"],
     }
 
 
-def test_full_renderer_includes_decision_sections_and_close_identity() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
+def _scheduled_context() -> dict:
+    return {
+        "trigger_kind": "scheduled",
+        "scheduled_target_market": "10:00",
+        "market_timezone": "America/New_York",
+        "user_timezone": "Asia/Shanghai",
+        "user_timezone_label": "北京",
+    }
 
-    message = render_full_brief(_brief())
 
-    assert message.startswith("# 每日决策简报")
-    for section in (
-        "## P0 有效行动",
-        "## P1 有效行动",
-        "## 非执行状态（观察 / 阻塞 / 失效）",
-        "## 已有仓位 / Close Advice",
-        "## 行动容量",
-        "## Sell Put 候选证据（非行动）",
-        "## Covered Call 候选证据（非行动）",
-        "## Combo Yield 候选证据（非行动）",
-        "## 主要拒绝原因",
-        "## 事件",
-        "## 数据缺口",
+def _assert_no_internal_leak(value: object) -> None:
+    text = str(value)
+    for forbidden in (
+        "position_lot_id",
+        "lot-put-secret",
+        "strategy_group_id",
+        "combo-secret",
+        "leg_role",
+        "revision",
+        "run-render-secret",
+        "LIVE",
+        "READY",
+        "BLOCKED",
+        "PLANNING",
+        "2026-07-20T",
+        "US.MSFT",
+        "US.NVDA",
+        "US.PDD",
+        "spread_too_wide",
+        "806",
+        "/private/internal",
     ):
-        assert section in message
-    assert "position_lot_id=lot-put" in message
-    assert "strategy_group_id=group-1" in message
-    assert "leg_role=funding_put" in message
-    assert "可执行（LIVE）" in message
-    assert "数据质量：就绪（READY）" in message
-    assert "## P2 有效行动" not in message
-    assert "[观察] 继续观察" in message
+        assert forbidden not in text
 
 
-def test_blocked_renderer_is_explicit_and_does_not_render_candidates() -> None:
+def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view,
+        render_daily_brief_lifecycle,
+    )
+
+    brief = _brief()
+    lifecycle = {"brief": brief, "diff": {}, "delivery_kind": "full"}
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="full",
+        context=_scheduled_context(),
+    )
+    message = render_daily_brief_lifecycle(lifecycle, context=_scheduled_context())
+
+    assert message.startswith("# OM · lx · 美股")
+    assert "> 今日首次 · 10:00 批次" in message
+    assert "数据截至：美东 10:03 / 北京 22:03" in message
+    assert "## 候选" in message
+    assert "## 持仓" in message
+    assert "## 资金" in message
+    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in message
+    assert "NVDA · Sell Put · 08-21 $100 Put（备选 2）" in message
+    assert "AAPL · Covered Call · 08-21 $250 Call（首选）" in message
+    assert "TSLA · 组合增强（首选）" in message
+    assert "Put：08-21 $300 Put" in message
+    assert "Call：09-18 $400 Call" in message
+    assert "PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）" in message
+    assert "FUTU · Sell Put：暂无法评估（价格不可用）" in message
+    assert "MSFT 08-21 $400 Put：按当前现金最多 2 手" in message
+    assert "NVDA 08-21 $100 Put：按当前现金最多 5 手" in message
+    assert "备选方案共享同一现金额度，数量不可相加" in message
+    _assert_no_internal_leak(message)
+    _assert_no_internal_leak(view)
+
+
+def test_combo_position_attribution_is_independent_from_new_combo_candidates() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["candidates"]["combo_yield"] = []
+    message = render_full_brief(brief)
+
+    assert "TSLA · 组合增强" not in message
+    assert "PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）" in message
+    assert "combo-pdd-secret" not in message
+    assert "funding_put" not in message
+
+
+def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
+    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
 
     brief = _brief()
     brief["actionability"] = "blocked"
     brief["status"] = "blocked"
-    brief["actions"] = [
-        {
-            "priority": "P0",
-            "state": "blocked",
-            "action_type": "data_blocked",
-            "account": "lx",
-            "title": "关键数据阻塞",
-            "reason": "pipeline_failed",
-        }
-    ]
+    message = render_daily_brief_lifecycle(
+        {"brief": brief, "diff": {"changes": [{"change_type": "blocked"}]}, "delivery_kind": "full"},
+        context=_scheduled_context(),
+    )
 
-    message = render_full_brief(brief)
-
-    assert message.startswith("# 每日决策简报 · 当前阻塞")
-    assert "## 阻塞原因" in message
-    assert "等待下一轮 scheduled scan" in message
-    assert "## Sell Put 候选证据（非行动）" not in message
-    assert "阻塞（BLOCKED）" in message
+    assert message.startswith("# OM · lx · 美股")
+    assert "> 数据异常 · 10:00 批次" in message
+    assert "本轮行情覆盖不足，暂时无法形成可靠决策。" in message
+    assert "系统将在后续批次自动重新评估。" in message
+    assert "## 候选" not in message
+    assert "## 持仓" not in message
+    assert "MSFT" not in message
+    _assert_no_internal_leak(message)
 
 
-def test_delta_and_recovery_render_only_material_change_summary() -> None:
+def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> None:
     from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
 
     brief = _brief()
-    diff = {
-        "from_revision": 2,
-        "to_revision": 3,
-        "changes": [
-            {
-                "change_type": "action_invalidated",
-                "priority": "P0",
-                "action": {
-                    "symbol": "NVDA",
-                    "contract_symbol": "NVDA-P",
-                    "position_lot_id": "lot-put",
-                    "strategy_group_id": "group-1",
-                    "leg_role": "funding_put",
-                },
-            }
-        ],
-    }
     delta = render_daily_brief_lifecycle(
-        {"brief": brief, "diff": diff, "delivery_kind": "delta"}
+        {
+            "brief": brief,
+            "delivery_kind": "delta",
+            "diff": {
+                "changes": [
+                    {
+                        "change_type": "candidate_added",
+                        "action": {
+                            "action_type": "open_candidate",
+                            "strategy_family": "sell_put",
+                            "symbol": "MSFT",
+                            "expiration": "2026-08-21",
+                            "strike": 400,
+                            "option_type": "put",
+                            "position_lot_id": "secret-in-diff",
+                        },
+                    },
+                    {
+                        "change_type": "candidate_capacity_changed",
+                        "before": 1,
+                        "after": 2,
+                        "action": {
+                            "action_type": "open_candidate",
+                            "strategy_family": "sell_put",
+                            "symbol": "MSFT",
+                            "expiration": "2026-08-21",
+                            "strike": 400,
+                            "option_type": "put",
+                        },
+                    },
+                ]
+            },
+        },
+        context=_scheduled_context(),
     )
-    assert delta.startswith("# 日内决策增量")
-    assert "原行动已失效" in delta
-    assert "position_lot_id=lot-put" in delta
-    assert "strategy_group_id=group-1" in delta
-    assert "leg_role=funding_put" in delta
-    assert "## Sell Put 候选证据（非行动）" not in delta
+    assert "> 盘中更新 · 10:00 批次" in delta
+    assert "较上一轮：新增 1 个 Sell Put 候选" in delta
+    assert "MSFT 08-21 $400 Put 条件容量 1 → 2 手" in delta
+    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in delta
+    assert "secret-in-diff" not in delta
 
-    recovery_diff = {
-        "from_revision": 3,
-        "to_revision": 4,
-        "changes": [{"change_type": "recovered", "priority": "P0"}],
-    }
     recovery = render_daily_brief_lifecycle(
-        {"brief": brief, "diff": recovery_diff, "delivery_kind": "delta"}
+        {
+            "brief": brief,
+            "delivery_kind": "delta",
+            "diff": {"changes": [{"change_type": "recovered"}]},
+        },
+        context=_scheduled_context(),
     )
-    assert recovery.startswith("# 日内决策恢复")
-    assert "日报已恢复" in recovery
+    assert "> 数据已恢复 · 10:00 批次" in recovery
+    assert "数据已恢复，以下为当前结果。" in recovery
+    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in recovery
 
 
-def test_renderer_honors_section_limits_and_total_length_bound() -> None:
+def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() -> None:
+    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
+
+    message = render_daily_brief_lifecycle(
+        {
+            "brief": _brief(),
+            "delivery_kind": "delta",
+            "diff": {
+                "changes": [
+                    {
+                        "change_type": "action_added",
+                        "action": {
+                            "action_type": "open_candidate",
+                            "strategy_family": "sell_put",
+                            "symbol": "MSFT",
+                        },
+                    },
+                    {
+                        "change_type": "blocked",
+                        "action": {
+                            "action_type": "resolve_data_blocker",
+                            "symbol": "ACCOUNT",
+                        },
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "新增 1 个 Sell Put 候选" in message
+    assert "持仓建议已变化" not in message
+
+
+def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     brief = _brief()
-    brief["actions"] = [
+    brief["positions"] = [
+        {"symbol": "A", "strategy_family": "sell_put", "quote_status": "coverage_missing"},
+        {"symbol": "B", "strategy_family": "sell_put", "quote_status": "unavailable"},
+        {"symbol": "C", "strategy_family": "sell_put", "quote_status": "future_state"},
         {
-            "priority": "P0",
-            "state": "active",
-            "action_type": "open_candidate",
-            "account": "lx",
-            "symbol": f"S{i}",
-            "title": "X" * 2_000,
-            "reason": "Y" * 2_000,
-        }
-        for i in range(30)
+            "symbol": "D",
+            "strategy_family": "sell_put",
+            "quote_status": "priced",
+            "evaluation_status": "evaluable",
+            "close_action": "hold",
+        },
     ]
-    brief["candidates"]["sell_put"] = [
-        {"rank": i + 1, "symbol": f"C{i}", "contract_symbol": f"CONTRACT-{i}"}
+    message = render_full_brief(brief)
+
+    assert "A · Sell Put：暂无法评估（行情覆盖不足）" in message
+    assert "B · Sell Put：暂无法评估（价格不可用）" in message
+    assert "C · Sell Put：暂无法评估（数据暂不可用）" in message
+    assert "D · Sell Put：继续观察" in message
+    assert "future_state" not in message
+
+
+def test_malformed_fields_and_unknown_enums_do_not_echo_raw_values() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["market"] = "FUTURE_MARKET"
+    brief["status"] = "FUTURE_STATE"
+    brief["actionability"] = "FUTURE_ACTIONABILITY"
+    brief["data_as_of_utc"] = "RAW_BAD_TIME"
+    brief["candidates"] = {
+        "sell_put": [
+            {
+                "rank": 1,
+                "symbol": "TCOM",
+                "option_type": "FUTURE_OPTION",
+                "expiration": "RAW_BAD_EXPIRY",
+                "strike": "RAW_BAD_STRIKE",
+                "contract_symbol": "US.TCOM260821P40000",
+            }
+        ],
+        "covered_call": [],
+        "combo_yield": [],
+    }
+    message = render_full_brief(brief)
+
+    assert message.startswith("# OM · lx · 市场")
+    assert "数据截至：数据时间未知" in message
+    assert "TCOM · Sell Put · 合约信息不完整（首选）" in message
+    for raw in (
+        "FUTURE_MARKET",
+        "FUTURE_STATE",
+        "FUTURE_ACTIONABILITY",
+        "RAW_BAD_TIME",
+        "RAW_BAD_EXPIRY",
+        "RAW_BAD_STRIKE",
+        "US.TCOM260821P40000",
+    ):
+        assert raw not in message
+
+
+def test_manual_trigger_omits_scheduled_batch_and_planning_is_plain_language() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["actionability"] = "planning_only"
+    message = render_full_brief(
+        brief,
+        context={
+            **_scheduled_context(),
+            "trigger_kind": "force",
+        },
+    )
+
+    assert "> 手动触发" in message
+    assert "10:00 批次" not in message
+    assert "当前已不在可执行时段，仅供规划参考。" in message
+    assert "PLANNING" not in message
+
+
+def test_renderer_honors_section_limits() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "symbol": f"P{i}",
+            "strategy_family": "sell_put",
+            "quote_status": "priced",
+            "evaluation_status": "evaluable",
+            "close_action": "hold",
+        }
         for i in range(8)
     ]
+    brief["candidates"] = {
+        "sell_put": [
+            _candidate(
+                rank=i + 1,
+                symbol=f"C{i}",
+                option_type="put",
+                expiration="2026-08-21",
+                strike=100 + i,
+                capacity=1,
+            )
+            for i in range(20)
+        ],
+        "covered_call": [],
+        "combo_yield": [],
+    }
 
     message = render_full_brief(
         brief,
         limits={
             "max_actions_per_priority": 2,
-            "max_candidates_per_strategy": 1,
-            "max_rejection_reasons": 1,
+            "max_candidates_per_strategy": 7,
+            "max_rejection_reasons": 999,
         },
     )
 
-    assert message.count("[有效]") == 2
-    assert "另有 28 条已按展示上限省略" in message
-    assert "#2 `C1`" not in message
+    assert "P0 · Sell Put" in message
+    assert "P1 · Sell Put" in message
+    assert "P2 · Sell Put" not in message
+    assert "另有 6 个持仓未展开" in message
+    assert "C6 · Sell Put" in message
+    assert "C7 · Sell Put" not in message
+    assert "Sell Put 另有 13 个候选未展开" in message
+    assert "C6 08-21 $106 Put：按当前现金最多 1 手" in message
+    assert "C7 08-21 $107 Put：按当前现金最多 1 手" not in message
+
+
+def test_renderer_honors_total_length_bound() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["candidates"]["sell_put"] = [
+        _candidate(
+            rank=i + 1,
+            symbol=(f"C{i}" + "X" * 2_000),
+            option_type="put",
+            expiration="2026-08-21",
+            strike=100 + i,
+            capacity=1,
+        )
+        for i in range(20)
+    ]
+    message = render_full_brief(
+        brief,
+        limits={"max_candidates_per_strategy": 20},
+    )
+
     assert len(message) <= 12_000
+    assert "消息已按总长度上限截断" in message
 
 
 def test_no_delivery_kind_renders_empty_message() -> None:
@@ -240,26 +523,17 @@ def test_no_delivery_kind_renders_empty_message() -> None:
     assert render_daily_brief_lifecycle({"brief": deepcopy(_brief()), "delivery_kind": "none"}) == ""
 
 
-def test_renderer_exposes_unknown_data_quality_and_shared_limit_normalization() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_full_brief,
-        resolve_daily_brief_render_limits,
-    )
+def test_render_limit_normalization_remains_bounded() -> None:
+    from src.application.daily_decision_brief_renderer import resolve_daily_brief_render_limits
 
-    brief = _brief()
-    brief["status"] = "future_state"
-    limits = resolve_daily_brief_render_limits(
+    assert resolve_daily_brief_render_limits(
         {
             "max_actions_per_priority": 0,
             "max_candidates_per_strategy": "7",
             "max_rejection_reasons": 999,
         }
-    )
-    message = render_full_brief(brief, limits=limits)
-
-    assert limits == {
+    ) == {
         "max_actions_per_priority": 1,
         "max_candidates_per_strategy": 7,
         "max_rejection_reasons": 20,
     }
-    assert "数据质量：未知（FUTURE_STATE）" in message
