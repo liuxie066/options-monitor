@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00") -> dict:
+def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run-tool") -> dict:
     return {
         "market": "US",
         "market_trading_date": "2026-07-19",
         "account": "lx",
         "revision": 999,
-        "run_id": "run-tool",
+        "run_id": run_id,
         "generated_at_utc": "2026-07-19T13:40:00+00:00",
         "data_as_of_utc": "2026-07-19T13:39:00+00:00",
         "valid_until_utc": valid_until,
@@ -87,6 +87,8 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
 
     prepare_daily_decision_brief(base=tmp_path, brief=_brief(valid_until="2026-07-20T20:00:00+00:00"))
     monkeypatch.setattr(mod, "repo_base", lambda: tmp_path)
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
 
     data, warnings, meta = mod.DAILY_DECISION_BRIEF_READ_TOOL.call({"account": "lx", "market": "US"})
 
@@ -166,3 +168,35 @@ def test_agent_tool_masks_state_invalid_source_path(monkeypatch, tmp_path: Path)
     assert data["source"]["state_path"] == ".../daily_decision_brief.US.current.json"
     assert str(tmp_path) not in str(data)
     assert "error" not in data
+
+
+def test_agent_tool_reads_env_runtime_root_then_repo_fallback(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tools.daily_brief as mod
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+
+    repo_root = tmp_path / "repo"
+    runtime_root = tmp_path / "runtime"
+    prepare_daily_decision_brief(base=repo_root, brief=_brief(run_id="repo-r0"))
+    prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r0"))
+    runtime_r1 = prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r1"))
+    monkeypatch.setattr(mod, "repo_base", lambda: repo_root)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    payload = {
+        "account": "lx",
+        "market": "US",
+        "date": "2026-07-19",
+        "revision": runtime_r1["brief"]["revision"],
+    }
+    runtime_data, runtime_warnings, _runtime_meta = mod.DAILY_DECISION_BRIEF_READ_TOOL.call(payload)
+    assert runtime_data["brief"]["revision"] == 1
+    assert runtime_data["brief"]["run_id"] == "runtime-r1"
+    assert runtime_warnings == []
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT")
+    payload["revision"] = 0
+    repo_data, repo_warnings, _repo_meta = mod.DAILY_DECISION_BRIEF_READ_TOOL.call(payload)
+    assert repo_data["brief"]["revision"] == 0
+    assert repo_data["brief"]["run_id"] == "repo-r0"
+    assert repo_warnings == []
