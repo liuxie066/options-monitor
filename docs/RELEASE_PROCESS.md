@@ -10,6 +10,58 @@
 
 `VERSION` 是版本真源。
 
+### 自动版本建议规则
+
+发布意图写在 `CHANGELOG.md` 的唯一 `## Unreleased` 区段中。自动分类只接受以下三级标题和单行 bullet：
+
+```markdown
+## Unreleased
+
+### Breaking Changes
+- 删除或不兼容地改变公开契约。
+
+### Added
+- 增加向后兼容的新能力。
+
+### Changed
+- 调整已有行为但保持兼容。
+
+### Fixed
+- 修复缺陷。
+```
+
+推荐优先级：
+
+- `Breaking Changes` 非空：`major`；
+- 否则 `Added` 非空：`minor`；
+- 否则只有 `Changed` / `Fixed`：`patch`；
+- `Unreleased` 为空或包含未知标题、普通段落、嵌套列表等无法归类内容：返回 `needs_input`，不猜版本。
+
+先只读预览：
+
+```bash
+./om-agent run --tool version_update --input-json '{"bump":"auto","apply":false,"remote_name":"origin"}'
+```
+
+工具会基于指定 remote 的最高稳定 tag、当前 Git 工作区和 `Unreleased` 返回建议版本与
+`recommendation_digest`。确认建议后，原样带回 preview 的 base、target 和 digest：
+
+```bash
+OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-json '{
+  "bump":"auto",
+  "apply":true,
+  "confirm":true,
+  "remote_name":"origin",
+  "recommendation_digest":"sha256:<preview digest>",
+  "expected_base_version":"1.3.0",
+  "expected_target_version":"1.4.0"
+}'
+```
+
+apply 会重新计算证据；发生变化时返回 `stale` 且不写入。成功时只更新 `VERSION`，不会修改
+Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产。手动
+`bump=patch|minor|major` 与 `target_version` 流程保持可用。
+
 ---
 
 ## 发布前检查

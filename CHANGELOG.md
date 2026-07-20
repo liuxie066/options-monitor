@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.3.1 - 2026-07-20
+
+### Added
+- Added advisory automatic `major|minor|patch` release-version recommendations from standardized Unreleased intent and the remote stable-tag baseline, with explicit preview confirmation, freshness validation, and VERSION-only apply semantics.
+
 ## 1.3.0 - 2026-07-19
 
 ### Added

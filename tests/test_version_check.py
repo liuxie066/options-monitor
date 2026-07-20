@@ -166,3 +166,103 @@ def test_check_version_update_reports_missing_tags(tmp_path: Path) -> None:
     assert out["ok"] is False
     assert out["error"] == "no valid release tags found on remote"
     assert out["message"] == "未找到可用发布版本"
+
+
+def _auto_recommendation(*, digest: str = "sha256:" + "a" * 64, target: str = "1.1.0") -> dict[str, object]:
+    return {
+        "schema_version": "release_version_recommendation.v1",
+        "status": "recommended",
+        "mode": "dry_run",
+        "reason_code": None,
+        "message": "recommended minor version bump",
+        "base": {"version": "1.0.0", "tag": "v1.0.0"},
+        "workspace": {"head": "abc", "changed_files": ["CHANGELOG.md"]},
+        "recommendation": {
+            "bump": "minor",
+            "target_version": target,
+            "classification_basis": "changelog_unreleased",
+            "declaration_status": "complete",
+            "manual_review_required": True,
+        },
+        "evidence": {"added": ["Feature"]},
+        "review_flags": [],
+        "recommendation_digest": digest,
+        "write": {"changed": False, "already_at_target": False},
+    }
+
+
+def test_update_local_version_auto_preview_is_read_only(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+    calls: list[tuple[Path, str]] = []
+
+    def _recommend(*, base_dir: Path, remote_name: str):
+        calls.append((base_dir, remote_name))
+        return _auto_recommendation()
+
+    out = update_local_version(base_dir=base, bump="auto", remote_name="upstream", recommendation_fn=_recommend)
+
+    assert out["status"] == "recommended"
+    assert calls == [(base.resolve(), "upstream")]
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_update_local_version_auto_apply_recomputes_and_writes_only_version(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+    (base / "CHANGELOG.md").write_text("unchanged\n", encoding="utf-8")
+    digest = "sha256:" + "a" * 64
+
+    out = update_local_version(
+        base_dir=base,
+        bump="auto",
+        apply=True,
+        remote_name="origin",
+        recommendation_digest=digest,
+        expected_base_version="1.0.0",
+        expected_target_version="1.1.0",
+        recommendation_fn=lambda **_kwargs: _auto_recommendation(digest=digest),
+    )
+
+    assert out["status"] == "applied"
+    assert out["write"]["changed"] is True
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
+    assert (base / "CHANGELOG.md").read_text(encoding="utf-8") == "unchanged\n"
+
+
+def test_update_local_version_auto_apply_rejects_stale_digest(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+
+    out = update_local_version(
+        base_dir=base,
+        bump="auto",
+        apply=True,
+        recommendation_digest="sha256:" + "a" * 64,
+        expected_base_version="1.0.0",
+        expected_target_version="1.1.0",
+        recommendation_fn=lambda **_kwargs: _auto_recommendation(digest="sha256:" + "b" * 64),
+    )
+
+    assert out["status"] == "stale"
+    assert out["reason_code"] == "RECOMMENDATION_STALE"
+    assert out["write"]["changed"] is False
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_update_local_version_auto_retry_at_target_is_noop_without_remote(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.1.0")
+
+    def _unexpected(**_kwargs):
+        raise AssertionError("already_at_target must not query remote")
+
+    out = update_local_version(
+        base_dir=base,
+        bump="auto",
+        apply=True,
+        recommendation_digest="sha256:" + "a" * 64,
+        expected_base_version="1.0.0",
+        expected_target_version="1.1.0",
+        recommendation_fn=_unexpected,
+    )
+
+    assert out["status"] == "already_at_target"
+    assert out["write"]["changed"] is False
+    assert out["write"]["already_at_target"] is True
