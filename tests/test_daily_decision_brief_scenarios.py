@@ -323,7 +323,7 @@ def test_post_close_read_is_effectively_planning_only(tmp_path: Path) -> None:
     assert view["brief"]["actionability"] == "live_actionable"
     assert view["effective_actionability"] == "planning_only"
     assert view["freshness"]["effective_actionability"] == "planning_only"
-    assert "仅规划（PLANNING）" in view["rendered_markdown"]
+    assert "当前已不在可执行时段，仅供规划参考。" in view["rendered_markdown"]
 
 
 def test_all_day_no_run_does_not_create_fake_live_brief(tmp_path: Path) -> None:
