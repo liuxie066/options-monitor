@@ -196,17 +196,105 @@ def diff_daily_decision_briefs(
 
     for action_id, action in sorted(cur_actions.items()):
         prior = prev_actions.get(action_id)
+        opening_candidate = _is_opening_candidate_action(action)
         if prior is None:
             if action["priority"] in {"P0", "P1"} and action["state"] == "active":
                 changes.append(
                     _change(
-                        "p0_added" if action["priority"] == "P0" else "action_added",
+                        "candidate_added"
+                        if opening_candidate
+                        else ("p0_added" if action["priority"] == "P0" else "action_added"),
                         priority=action["priority"],
                         material=True,
                         action=_action_change_view(action),
                     )
                 )
             continue
+
+        prior_was_active_high_priority = (
+            prior["priority"] in {"P0", "P1"} and prior["state"] == "active"
+        )
+        current_is_active_high_priority = (
+            action["priority"] in {"P0", "P1"} and action["state"] == "active"
+        )
+        priority_rank = {"P0": 0, "P1": 1, "P2": 2}
+
+        if opening_candidate:
+            if current_is_active_high_priority and not prior_was_active_high_priority:
+                changes.append(
+                    _change(
+                        "candidate_added",
+                        priority=action["priority"],
+                        material=True,
+                        action=_action_change_view(action),
+                    )
+                )
+            elif prior_was_active_high_priority and not current_is_active_high_priority:
+                if action["state"] == "active":
+                    changes.append(
+                        _change(
+                            "candidate_priority_downgraded",
+                            priority=prior["priority"],
+                            material=True,
+                            before=prior["priority"],
+                            after=action["priority"],
+                            action=_action_change_view(action),
+                        )
+                    )
+                else:
+                    changes.append(
+                        _change(
+                            "candidate_invalidated",
+                            priority=prior["priority"],
+                            material=True,
+                            before=prior["state"],
+                            after=action["state"],
+                            action=_action_change_view(action),
+                        )
+                    )
+            elif prior_was_active_high_priority and current_is_active_high_priority:
+                if prior["priority"] != "P0" and action["priority"] == "P0":
+                    changes.append(
+                        _change(
+                            "candidate_priority_upgraded_to_p0",
+                            priority="P0",
+                            material=True,
+                            before=prior["priority"],
+                            after=action["priority"],
+                            action=_action_change_view(action),
+                        )
+                    )
+                elif priority_rank[action["priority"]] > priority_rank[prior["priority"]]:
+                    changes.append(
+                        _change(
+                            "candidate_priority_downgraded",
+                            priority=prior["priority"],
+                            material=True,
+                            before=prior["priority"],
+                            after=action["priority"],
+                            action=_action_change_view(action),
+                        )
+                    )
+                else:
+                    before_capacity = _candidate_capacity_contracts(prior)
+                    after_capacity = _candidate_capacity_contracts(action)
+                    if (
+                        before_capacity is not None
+                        and after_capacity is not None
+                        and before_capacity != after_capacity
+                    ):
+                        changes.append(
+                            _change(
+                                "candidate_capacity_changed",
+                                priority=action["priority"],
+                                material=True,
+                                before=before_capacity,
+                                after=after_capacity,
+                                action=_action_change_view(action),
+                            )
+                        )
+            continue
+
         upgraded_to_p0 = prior["priority"] != "P0" and action["priority"] == "P0"
         if upgraded_to_p0:
             changes.append(
@@ -219,12 +307,6 @@ def diff_daily_decision_briefs(
                     action=_action_change_view(action),
                 )
             )
-        prior_was_active_high_priority = (
-            prior["priority"] in {"P0", "P1"} and prior["state"] == "active"
-        )
-        current_is_active_high_priority = (
-            action["priority"] in {"P0", "P1"} and action["state"] == "active"
-        )
         if (
             current_is_active_high_priority
             and not prior_was_active_high_priority
@@ -238,7 +320,6 @@ def diff_daily_decision_briefs(
                     action=_action_change_view(action),
                 )
             )
-        priority_rank = {"P0": 0, "P1": 1, "P2": 2}
         if (
             prior["priority"] in {"P0", "P1"}
             and priority_rank[action["priority"]] > priority_rank[prior["priority"]]
@@ -253,7 +334,11 @@ def diff_daily_decision_briefs(
                     action=_action_change_view(action),
                 )
             )
-        if prior["state"] == "active" and action["state"] != "active" and prior["priority"] in {"P0", "P1"}:
+        if (
+            prior["state"] == "active"
+            and action["state"] != "active"
+            and prior["priority"] in {"P0", "P1"}
+        ):
             changes.append(
                 _change(
                     "action_invalidated",
@@ -271,27 +356,14 @@ def diff_daily_decision_briefs(
         if action["priority"] in {"P0", "P1"} and action["state"] == "active":
             changes.append(
                 _change(
-                    "action_invalidated",
+                    "candidate_invalidated"
+                    if _is_opening_candidate_action(action)
+                    else "action_invalidated",
                     priority=action["priority"],
                     material=True,
                     before="active",
                     after="missing",
                     action=_action_change_view(action),
-                )
-            )
-
-    for capacity_kind in ("sell_put", "covered_call"):
-        before = _capacity_contracts(prev.get("capacity"), capacity_kind)
-        after = _capacity_contracts(cur.get("capacity"), capacity_kind)
-        if before is not None and after is not None and before != after:
-            changes.append(
-                _change(
-                    "capacity_changed",
-                    priority="P1",
-                    material=True,
-                    capacity_kind=capacity_kind,
-                    before=before,
-                    after=after,
                 )
             )
 
@@ -337,13 +409,21 @@ def _has_active_high_priority_actions(brief: Mapping[str, Any]) -> bool:
     )
 
 
-def _capacity_contracts(capacity: Any, kind: str) -> int | None:
+def _is_opening_candidate_action(action: Mapping[str, Any]) -> bool:
+    return str(action.get("action_type") or "").strip().lower() in {
+        "open_candidate",
+        "open_combo_yield",
+    }
+
+
+def _candidate_capacity_contracts(action: Mapping[str, Any]) -> int | None:
+    metrics = action.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return None
+    capacity = metrics.get("capacity")
     if not isinstance(capacity, Mapping):
         return None
-    item = capacity.get(kind)
-    if not isinstance(item, Mapping):
-        return None
-    raw = item.get("contracts_available")
+    raw = capacity.get("contracts_available")
     if raw is None:
         return None
     try:
@@ -362,9 +442,13 @@ def _action_change_view(action: Mapping[str, Any]) -> dict[str, Any]:
             "action_type",
             "strategy_family",
             "symbol",
+            "option_type",
+            "expiration",
+            "strike",
             "contract_symbol",
             "position_lot_id",
             "strategy_group_id",
+            "leg_role",
             "title",
             "reason",
         )
@@ -393,9 +477,13 @@ def _canonical_change(change: Mapping[str, Any]) -> dict[str, Any]:
                 "action_type",
                 "strategy_family",
                 "symbol",
+                "option_type",
+                "expiration",
+                "strike",
                 "contract_symbol",
                 "position_lot_id",
                 "strategy_group_id",
+                "leg_role",
             )
             if action.get(key) not in (None, "")
         }
