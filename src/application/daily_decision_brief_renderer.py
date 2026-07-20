@@ -15,6 +15,11 @@ _ACTIONABILITY_LABELS = {
     "planning_only": "仅规划（PLANNING）",
     "blocked": "阻塞（BLOCKED）",
 }
+_STATUS_LABELS = {
+    "ready": "就绪（READY）",
+    "degraded": "降级（DEGRADED）",
+    "blocked": "阻塞（BLOCKED）",
+}
 _STATE_LABELS = {
     "active": "有效",
     "observe": "观察",
@@ -55,7 +60,7 @@ def render_full_brief(
     if str(brief.get("actionability") or "").strip().lower() == "blocked":
         return render_blocked_brief(brief, limits=limits)
 
-    cfg = _limits(limits)
+    cfg = resolve_daily_brief_render_limits(limits)
     budget = _RenderBudget()
     lines = _header(brief, title="每日决策简报")
     summary = str(brief.get("strategy_summary") or "").strip()
@@ -63,15 +68,24 @@ def render_full_brief(
         lines.extend(["", f"> {summary}"])
 
     actions = [item for item in brief.get("actions") or [] if isinstance(item, Mapping)]
+    active_actions = [item for item in actions if str(item.get("state") or "").strip().lower() == "active"]
     for priority in ("P0", "P1", "P2"):
-        priority_rows = [item for item in actions if str(item.get("priority") or "").upper() == priority]
+        priority_rows = [
+            item for item in active_actions if str(item.get("priority") or "").upper() == priority
+        ]
         if not priority_rows:
             continue
-        lines.extend(["", f"## {priority} 行动"])
+        lines.extend(["", f"## {priority} 有效行动"])
         selected = budget.take(priority_rows, cfg["max_actions_per_priority"])
         lines.extend(_action_line(item) for item in selected)
         _append_omitted(lines, len(priority_rows) - len(selected))
 
+    _append_non_active_actions(
+        lines,
+        actions,
+        budget=budget,
+        limit=cfg["max_actions_per_priority"],
+    )
     _append_positions(lines, brief, budget=budget, limit=cfg["max_actions_per_priority"])
     _append_capacity(lines, brief, budget=budget)
     _append_candidates(lines, brief, budget=budget, limit=cfg["max_candidates_per_strategy"])
@@ -86,7 +100,7 @@ def render_blocked_brief(
     *,
     limits: Mapping[str, Any] | None = None,
 ) -> str:
-    cfg = _limits(limits)
+    cfg = resolve_daily_brief_render_limits(limits)
     budget = _RenderBudget()
     lines = _header(brief, title="每日决策简报 · 当前阻塞")
     lines.extend(["", "## 阻塞原因"])
@@ -121,7 +135,7 @@ def render_delta_brief(
     *,
     limits: Mapping[str, Any] | None = None,
 ) -> str:
-    cfg = _limits(limits)
+    cfg = resolve_daily_brief_render_limits(limits)
     budget = _RenderBudget()
     lines = _header(brief, title="日内决策增量")
     lines.append(
@@ -180,8 +194,29 @@ def _header(brief: Mapping[str, Any], *, title: str) -> list[str]:
     return [
         f"# {title}",
         f"- 账号：`{account}` | 市场：`{market}` | 交易日：`{market_date}` | revision：`{revision}`",
-        f"- 状态：{_actionability_label(brief)} | 数据截至：`{data_as_of}` | 有效至：`{valid_until}`",
+        f"- 状态：{_actionability_label(brief)} | 数据质量：{_status_label(brief)} "
+        f"| 数据截至：`{data_as_of}` | 有效至：`{valid_until}`",
     ]
+
+
+def _append_non_active_actions(
+    lines: list[str],
+    actions: list[Mapping[str, Any]],
+    *,
+    budget: _RenderBudget,
+    limit: int,
+) -> None:
+    rows = [
+        item
+        for item in actions
+        if str(item.get("state") or "").strip().lower() in {"observe", "blocked", "invalidated"}
+    ]
+    if not rows:
+        return
+    lines.extend(["", "## 非执行状态（观察 / 阻塞 / 失效）"])
+    selected = budget.take(rows, limit)
+    lines.extend(_action_line(item) for item in selected)
+    _append_omitted(lines, len(rows) - len(selected))
 
 
 def _append_positions(
@@ -235,7 +270,7 @@ def _append_candidates(
         rows = [item for item in candidates.get(family) or [] if isinstance(item, Mapping)]
         if not rows:
             continue
-        lines.extend(["", f"## {labels[family]} 候选"])
+        lines.extend(["", f"## {labels[family]} 候选证据（非行动）"])
         selected = budget.take(rows, limit)
         for item in selected:
             symbol = _first(item, "symbol", default="未知标的")
@@ -368,10 +403,15 @@ def _identity_suffix(item: Mapping[str, Any]) -> str:
 
 def _actionability_label(brief: Mapping[str, Any]) -> str:
     value = str(brief.get("actionability") or "blocked").strip().lower()
-    return _ACTIONABILITY_LABELS.get(value, value)
+    return _ACTIONABILITY_LABELS.get(value, f"未知（{value.upper()}）")
 
 
-def _limits(value: Mapping[str, Any] | None) -> dict[str, int]:
+def _status_label(brief: Mapping[str, Any]) -> str:
+    value = str(brief.get("status") or "missing").strip().lower()
+    return _STATUS_LABELS.get(value, f"未知（{value.upper()}）")
+
+
+def resolve_daily_brief_render_limits(value: Mapping[str, Any] | None) -> dict[str, int]:
     src = value if isinstance(value, Mapping) else {}
     return {
         "max_actions_per_priority": _positive_int(src.get("max_actions_per_priority"), _DEFAULT_MAX_ACTIONS),
@@ -416,6 +456,7 @@ def _bounded_markdown(lines: list[str]) -> str:
 
 
 __all__ = [
+    "resolve_daily_brief_render_limits",
     "render_blocked_brief",
     "render_daily_brief_lifecycle",
     "render_delta_brief",
