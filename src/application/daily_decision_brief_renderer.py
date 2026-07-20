@@ -79,7 +79,11 @@ def build_daily_brief_user_view(
     scheduled_batch = _scheduled_batch_label(ctx, market=market)
     phase_line = phase + (f" · {scheduled_batch} 批次" if scheduled_batch else "")
 
-    candidate_views, candidate_omissions = _candidate_views(brief, limits=cfg)
+    candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
+        brief,
+        diff=normalized_diff,
+        limits=cfg,
+    )
     position_views, position_omitted = _position_views(brief, diff=normalized_diff, limits=cfg)
     view = {
         "account": account,
@@ -95,7 +99,7 @@ def build_daily_brief_user_view(
         "candidate_omissions": candidate_omissions,
         "positions": position_views,
         "position_omitted": position_omitted,
-        "capacity": _capacity_views(brief, limits=cfg),
+        "capacity": _capacity_views(brief, selected_rows=selected_candidate_rows),
     }
     return view
 
@@ -237,17 +241,27 @@ def _render_user_view(view: Mapping[str, Any]) -> str:
     return _bounded_markdown(lines)
 
 
-def _candidate_views(brief: Mapping[str, Any], *, limits: Mapping[str, int]) -> tuple[list[dict[str, Any]], list[str]]:
+def _candidate_views(
+    brief: Mapping[str, Any],
+    *,
+    diff: Mapping[str, Any],
+    limits: Mapping[str, int],
+) -> tuple[list[dict[str, Any]], list[str], dict[str, list[Mapping[str, Any]]]]:
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
+    changed_keys = _changed_candidate_keys(diff)
     budget = _RenderBudget()
     out: list[dict[str, Any]] = []
     omissions: list[str] = []
+    selected_by_family: dict[str, list[Mapping[str, Any]]] = {}
     limit = limits["max_candidates_per_strategy"]
     market = _upper(brief.get("market"))
     for family in ("sell_put", "covered_call", "combo_yield"):
         rows = [item for item in source.get(family) or [] if isinstance(item, Mapping)]
-        selected = budget.take(rows, limit)
+        changed_rows = [row for row in rows if _candidate_row_keys(family, row) & changed_keys]
+        unchanged_rows = [row for row in rows if row not in changed_rows]
+        selected = budget.take([*changed_rows, *unchanged_rows], max(limit, len(changed_rows)))
+        selected_by_family[family] = selected
         omitted = len(rows) - len(selected)
         if omitted > 0:
             omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个候选未展开")
@@ -292,7 +306,7 @@ def _candidate_views(brief: Mapping[str, Any], *, limits: Mapping[str, int]) -> 
                     "legs": [],
                 }
             )
-    return out, omissions
+    return out, omissions, selected_by_family
 
 
 def _candidate_metric_details(
@@ -341,9 +355,13 @@ def _position_views(
     limits: Mapping[str, int],
 ) -> tuple[list[dict[str, str]], int]:
     positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
-    changed_symbols = _changed_position_symbols(diff)
-    positions.sort(key=lambda item: 0 if _upper(item.get("symbol")) in changed_symbols else 1)
-    selected = _RenderBudget().take(positions, limits["max_actions_per_priority"])
+    changed_keys = _changed_position_keys(diff)
+    changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
+    unchanged_positions = [row for row in positions if row not in changed_positions]
+    selected = _RenderBudget().take(
+        [*changed_positions, *unchanged_positions],
+        max(limits["max_actions_per_priority"], len(changed_positions)),
+    )
     omitted = len(positions) - len(selected)
     market = _upper(brief.get("market"))
     out: list[dict[str, str]] = []
@@ -408,14 +426,17 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     return "暂无法评估（数据暂不可用）"
 
 
-def _capacity_views(brief: Mapping[str, Any], *, limits: Mapping[str, int]) -> list[str]:
+def _capacity_views(
+    brief: Mapping[str, Any],
+    *,
+    selected_rows: Mapping[str, list[Mapping[str, Any]]],
+) -> list[str]:
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     market = _upper(brief.get("market"))
     out: list[str] = []
-    candidate_limit = limits["max_candidates_per_strategy"]
     all_sell_put_rows = [item for item in source.get("sell_put") or [] if isinstance(item, Mapping)]
-    sell_put_rows = all_sell_put_rows[:candidate_limit]
+    sell_put_rows = list(selected_rows.get("sell_put") or [])
     for row in sell_put_rows:
         contracts = _capacity_contracts(row)
         if contracts is None:
@@ -431,9 +452,7 @@ def _capacity_views(brief: Mapping[str, Any], *, limits: Mapping[str, int]) -> l
     if len(all_sell_put_rows) > 1 and out:
         out.append("备选方案共享同一现金额度，数量不可相加")
 
-    covered_call_rows = [item for item in source.get("covered_call") or [] if isinstance(item, Mapping)][
-        :candidate_limit
-    ]
+    covered_call_rows = list(selected_rows.get("covered_call") or [])
     for row in covered_call_rows:
         contracts = _capacity_contracts(row)
         if contracts is None:
@@ -457,6 +476,122 @@ def _capacity_contracts(candidate: Mapping[str, Any]) -> int | None:
     return max(0, int(value)) if value is not None else None
 
 
+def _changed_candidate_keys(diff: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    out: set[tuple[str, ...]] = set()
+    for change in diff.get("changes") or []:
+        if not isinstance(change, Mapping):
+            continue
+        action = change.get("action") if isinstance(change.get("action"), Mapping) else {}
+        if _lower(action.get("action_type")) not in {"open_candidate", "open_combo_yield"}:
+            continue
+        out.update(_candidate_action_keys(action))
+    return out
+
+
+def _candidate_action_keys(action: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    family = _lower(action.get("strategy_family"))
+    option_type = _lower(action.get("option_type"))
+    if family == "combo_yield":
+        option_type = "put"
+    return _contract_identity_keys(
+        family=family,
+        symbol=action.get("symbol"),
+        expiration=action.get("expiration"),
+        strike=action.get("strike"),
+        option_type=option_type,
+        contract_symbol=action.get("contract_symbol"),
+    )
+
+
+def _candidate_row_keys(family: str, row: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    combo = family == "combo_yield"
+    return _contract_identity_keys(
+        family=family,
+        symbol=row.get("symbol"),
+        expiration=row.get("put_expiration") if combo else row.get("expiration"),
+        strike=row.get("put_strike") if combo else row.get("strike"),
+        option_type="put" if combo else row.get("option_type"),
+        contract_symbol=(row.get("put_contract_symbol") if combo else row.get("contract_symbol")),
+    )
+
+
+def _changed_position_keys(diff: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    out: set[tuple[str, ...]] = set()
+    for change in diff.get("changes") or []:
+        if not isinstance(change, Mapping):
+            continue
+        action = change.get("action") if isinstance(change.get("action"), Mapping) else {}
+        if _lower(action.get("action_type")) != "close_position":
+            continue
+        out.update(_position_action_keys(action))
+    return out
+
+
+def _position_action_keys(action: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    lot_id = str(action.get("position_lot_id") or "").strip()
+    if lot_id:
+        return {("lot", lot_id)}
+    return _contract_identity_keys(
+        family=_lower(action.get("strategy_family")),
+        symbol=action.get("symbol"),
+        expiration=action.get("expiration"),
+        strike=action.get("strike"),
+        option_type=action.get("option_type"),
+        contract_symbol=action.get("contract_symbol"),
+    )
+
+
+def _position_row_keys(row: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    keys = _contract_identity_keys(
+        family=_lower(row.get("strategy_family")),
+        symbol=row.get("symbol"),
+        expiration=row.get("expiration"),
+        strike=row.get("strike"),
+        option_type=row.get("option_type"),
+        contract_symbol=row.get("contract_symbol"),
+    )
+    lot_id = str(row.get("position_lot_id") or "").strip()
+    if lot_id:
+        keys.add(("lot", lot_id))
+    return keys
+
+
+def _contract_identity_keys(
+    *,
+    family: str,
+    symbol: Any,
+    expiration: Any,
+    strike: Any,
+    option_type: Any,
+    contract_symbol: Any,
+) -> set[tuple[str, ...]]:
+    keys: set[tuple[str, ...]] = set()
+    normalized_symbol = _upper(symbol)
+    normalized_expiration = str(expiration or "").strip()[:10]
+    normalized_strike = _canonical_decimal_text(strike)
+    normalized_option = _lower(option_type)
+    if family and normalized_symbol and normalized_expiration and normalized_strike and normalized_option:
+        keys.add(
+            (
+                "structured",
+                family,
+                normalized_symbol,
+                normalized_expiration,
+                normalized_strike,
+                normalized_option,
+            )
+        )
+    normalized_contract = _upper(contract_symbol)
+    if family and normalized_contract:
+        keys.add(("contract", family, normalized_contract))
+    return keys
+
+
+def _canonical_decimal_text(value: Any) -> str:
+    number = _decimal(value)
+    return _decimal_text(number) if number is not None else ""
+
+
 def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     changes = [item for item in diff.get("changes") or [] if isinstance(item, Mapping)]
     if any(_lower(item.get("change_type")) == "recovered" for item in changes):
@@ -464,6 +599,7 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
 
     summaries: list[str] = []
     grouped: dict[tuple[str, str], int] = {}
+    invalidated_candidate_labels: list[str] = []
     position_symbols: list[str] = []
     capacity_changes: list[str] = []
     generic_state_change = False
@@ -473,8 +609,15 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
         family = _lower(action.get("strategy_family"))
         action_type = _lower(action.get("action_type"))
         candidate_action = action_type in {"open_candidate", "open_combo_yield"}
-        if change_type in {"candidate_added", "candidate_invalidated"}:
+        if change_type == "candidate_added":
             grouped[(change_type, family)] = grouped.get((change_type, family), 0) + 1
+        elif change_type == "candidate_invalidated":
+            label = _change_contract_label(action, market=market)
+            if label:
+                if label not in invalidated_candidate_labels:
+                    invalidated_candidate_labels.append(label)
+            else:
+                grouped[(change_type, family)] = grouped.get((change_type, family), 0) + 1
         elif change_type in {
             "candidate_priority_upgraded_to_p0",
             "candidate_priority_downgraded",
@@ -510,6 +653,11 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
             summaries.append(f"较上一轮：{count} 个 {strategy} 候选已失效")
         else:
             summaries.append(f"较上一轮：{count} 个 {strategy} 候选优先级已变化")
+    if invalidated_candidate_labels:
+        shown = "、".join(invalidated_candidate_labels[:2])
+        extra = len(invalidated_candidate_labels) - 2
+        suffix = f" 等 {len(invalidated_candidate_labels)} 个候选已失效" if extra > 0 else " 候选已失效"
+        summaries.append(f"较上一轮：{shown}{suffix}")
     if position_symbols:
         shown = "、".join(position_symbols[:2])
         extra = len(position_symbols) - 2
