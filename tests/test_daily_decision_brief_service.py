@@ -401,6 +401,12 @@ def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
         "0700_P440",
     }
     assert "0700_P450_RAW_ONLY" not in json.dumps(brief, sort_keys=True)
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    assert "0700_P450_RAW_ONLY" not in render_full_brief(brief)
+    assert "有效行动 2 条" in brief["strategy_summary"]
+    assert "候选证据：Sell Put 2，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
+    assert "数据缺口" in brief["strategy_summary"]
     assert not any(item["path"].endswith("_sell_put_candidates.csv") for item in brief["source_artifacts"])
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +27,10 @@ from src.application.cron_runtime import (
     build_notify_summary,
     mark_accounts_notified,
 )
-from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
+from src.application.daily_decision_brief_renderer import (
+    render_daily_brief_lifecycle,
+    resolve_daily_brief_render_limits,
+)
 from src.application.daily_decision_brief_repository import (
     confirm_daily_decision_brief_delivery,
     prepare_daily_decision_brief,
@@ -608,7 +612,7 @@ def _prepare_daily_brief_notification(
     lifecycles_by_account: dict[str, dict[str, Any]] = {}
     delivery_keys_by_account: dict[str, str] = {}
     messages_by_account: dict[str, str] = {}
-    daily_limits = _daily_brief_limits(request.base_cfg)
+    daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
     lifecycle_audit: list[dict[str, Any]] = []
 
     for result in request.results:
@@ -629,31 +633,32 @@ def _prepare_daily_brief_notification(
             pipeline_succeeded=account in ran_pipeline_accounts,
             config=request.base_cfg,
         )
-        account_lifecycles: dict[str, dict[str, Any]] = {}
         for market in markets:
             brief = briefs.get(market)
             if brief is None:
                 raise ValueError(f"daily brief assembler did not return market {market} for {account}")
             lifecycle = prepare_daily_decision_brief(base=request.base, brief=brief)
-            account_lifecycles[market] = lifecycle
-            lifecycle_audit.append(
-                {
-                    "account": account,
-                    "market": market,
-                    "market_trading_date": lifecycle["brief"]["market_trading_date"],
-                    "revision": lifecycle["brief"]["revision"],
-                    "delivery_kind": lifecycle["delivery_kind"],
-                    "material_diff_digest": lifecycle["diff"].get("material_diff_digest"),
-                }
-            )
-
-        if len(markets) == 1:
-            lifecycle = account_lifecycles[markets[0]]
-            message = render_daily_brief_lifecycle(lifecycle, limits=daily_limits)
-            if message:
-                messages_by_account[account] = message
-                delivery_keys_by_account[account] = str(lifecycle["delivery_key"])
-                lifecycles_by_account[account] = lifecycle
+            audit_item = {
+                "account": account,
+                "market": market,
+                "market_trading_date": lifecycle["brief"]["market_trading_date"],
+                "revision": lifecycle["brief"]["revision"],
+                "brief_id": lifecycle["brief"].get("brief_id"),
+                "delivery_kind": lifecycle["delivery_kind"],
+                "material_diff_digest": lifecycle["diff"].get("material_diff_digest"),
+                "message_sha256": None,
+                "message_chars": None,
+                "render_limits": dict(daily_limits),
+            }
+            if len(markets) == 1:
+                message = render_daily_brief_lifecycle(lifecycle, limits=daily_limits)
+                if message:
+                    audit_item["message_sha256"] = hashlib.sha256(message.encode("utf-8")).hexdigest()
+                    audit_item["message_chars"] = len(message)
+                    messages_by_account[account] = message
+                    delivery_keys_by_account[account] = str(lifecycle["delivery_key"])
+                    lifecycles_by_account[account] = lifecycle
+            lifecycle_audit.append(audit_item)
 
     multi_market = len(markets) != 1
     if multi_market:

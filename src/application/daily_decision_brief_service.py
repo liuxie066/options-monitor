@@ -233,11 +233,14 @@ def assemble_daily_decision_brief(
     generated_at = effective_now.isoformat()
     data_as_of = _latest_as_of(metrics, prefetch, fallback=effective_now).isoformat()
     events = _candidate_events([*selected_puts, *selected_calls, *selected_combos])
+    deduped_actions = _dedupe_actions(actions)
+    deduped_data_gaps = _dedupe_gaps(data_gaps)
     strategy_summary = _strategy_summary(
         actionability=actionability,
         blockers=blockers,
-        actions=actions,
+        actions=deduped_actions,
         candidates=candidate_payloads,
+        data_gaps=deduped_data_gaps,
     )
 
     return normalize_daily_decision_brief(
@@ -253,13 +256,13 @@ def assemble_daily_decision_brief(
             "status": status,
             "actionability": actionability,
             "strategy_summary": strategy_summary,
-            "actions": _dedupe_actions(actions),
+            "actions": deduped_actions,
             "positions": positions,
             "capacity": capacity,
             "candidates": candidate_payloads,
             "rejections": _json_safe(rejections),
             "events": events,
-            "data_gaps": _dedupe_gaps(data_gaps),
+            "data_gaps": deduped_data_gaps,
             "source_artifacts": _dedupe_source_artifacts(source_artifacts),
         }
     )
@@ -1075,14 +1078,18 @@ def _strategy_summary(
     blockers: list[str],
     actions: list[dict[str, Any]],
     candidates: Mapping[str, list[dict[str, Any]]],
+    data_gaps: list[dict[str, Any]],
 ) -> str:
     if actionability == "blocked":
         return "日报阻塞：" + "；".join(blockers)
     active = sum(1 for item in actions if item.get("state") == "active")
-    return (
-        f"可执行行动 {active} 条；Sell Put {len(candidates['sell_put'])}，"
-        f"Covered Call {len(candidates['covered_call'])}，Combo Yield {len(candidates['combo_yield'])}。"
+    summary = (
+        f"有效行动 {active} 条；候选证据：Sell Put {len(candidates['sell_put'])}，"
+        f"Covered Call {len(candidates['covered_call'])}，Combo Yield {len(candidates['combo_yield'])}"
     )
+    if data_gaps:
+        summary += f"；数据缺口 {len(data_gaps)} 条"
+    return summary + "。"
 
 
 def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
