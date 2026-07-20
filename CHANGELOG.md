@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.3.3 - 2026-07-20
+
+### Added
+- Added preview-and-confirm Assistant and CLI support for per-symbol `combo_yield.enabled` YAML authoring, including validation, backup, and runtime-config rebuild.
+
 ## 1.3.2 - 2026-07-20
 
 ### Fixed
