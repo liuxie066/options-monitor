@@ -3,7 +3,7 @@
 - **Work unit**: `daily-decision-brief-canary-correction`
 - **Date**: 2026-07-20
 - **Branch**: `ops/hk-daily-brief-canary-closeout`
-- **Status**: **PR review fix in progress; final closeout not yet re-entered**
+- **Status**: **draft-PR-pass; final closeout pass under amended identity-set Canary standard**
 - **Code/release work**: merged and released
 - **Stable source-identity and no-send safety checks**: pass
 - **Amended Canary acceptance**: pass
@@ -221,18 +221,20 @@ Named P430/P440/P450 assertions remain only in deterministic fixtures.
 - Accepted plan amendment: complete; final plan re-review `pass`.
 - Current v1.3.3 no-send technical/safety evidence: pass.
 - Amended exact-run identity-set re-evaluation: pass.
-- Draft PR: `#100`, open against `main`, mergeable.
-- Pre-review PR checks: `agent-plugin`, `guardrails`, and all CodeQL checks passed.
-- PR review artifact: `docs/reviews/pr-100-review-20260720-143616.md`.
-- PR review finding `PR100-1`: accepted; this edit removes the premature final-closeout claim.
-- Current Gateflow gate: **fix -> PR re-review**.
-- Gateflow final closeout: **not yet re-entered**.
+- Draft PR: `#100`, open against `main`, mergeable, and still Draft.
+- Initial PR review: `docs/reviews/pr-100-review-20260720-143616.md` (`fail`; one accepted process finding).
+- PR re-review: `docs/reviews/pr-100-review-20260720-144233.md` (`pass`; `PR100-1` fixed).
+- Accepted PR-review checkpoint: `54bf750c16dd1f724190f52db1dcc8d7298dd7e0`.
+- Final checkpoint push: local and `origin/ops/hk-daily-brief-canary-closeout` matched at `54bf750c16dd1f724190f52db1dcc8d7298dd7e0` before this closeout-only commit.
+- Checkpoint checks: `agent-plugin`, `guardrails`, `CodeQL`, `Analyze (python)`, and `Analyze (actions)` passed.
+- `draft-PR-pass`: **pass**.
+- Gateflow final closeout: **pass**.
 - Production Daily Brief config: remains default-off.
 - Real sending: **not authorized by this amendment**.
+- Merge / Ready for review: **not authorized and not performed**.
 
-Next entry point:
+Product follow-up choices:
 
-1. re-review `PR100-1`;
-2. commit and push the accepted PR-review checkpoint;
-3. verify final PR checks and record `draft-PR-pass`;
-4. only then re-enter final closeout and expose the product follow-up choices.
+1. explicitly authorize moving PR #100 out of Draft and/or merging it;
+2. separately authorize one real HK Daily Brief send under the existing delivery state machine; or
+3. open the deferred event-rendering work unit.
