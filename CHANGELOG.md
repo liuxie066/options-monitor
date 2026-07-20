@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.3.4 - 2026-07-20
+
+### Changed
+- Replaced volatile live-contract HK Daily Brief Canary assertions with exact-run, per-account labeled-identity membership and raw-only disjointness acceptance, while keeping named contract checks confined to deterministic fixtures.
+- Recorded the production no-send Canary closeout, immutable evidence-manifest verification, adversarial plan/PR review results, and the explicit boundary that real provider sending remains separately authorized.
+
 ## 1.3.3 - 2026-07-20
 
 ### Added
