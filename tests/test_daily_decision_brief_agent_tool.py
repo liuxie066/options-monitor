@@ -57,7 +57,7 @@ def test_read_view_supports_latest_day_revision_and_effective_planning_only(tmp_
 
     assert latest["available"] is True
     assert latest["effective_actionability"] == "planning_only"
-    assert "仅规划（PLANNING）" in latest["rendered_markdown"]
+    assert "当前已不在可执行时段，仅供规划参考。" in latest["rendered_markdown"]
     assert by_day["brief"]["revision"] == exact["brief"]["revision"] == 0
     assert latest["brief"]["actionability"] == "live_actionable"
 

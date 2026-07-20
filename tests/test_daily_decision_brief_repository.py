@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 
-def _action(*, account: str = "lx", symbol: str = "NVDA", priority: str = "P1", mid: float = 1.0) -> dict:
+def _action(
+    *,
+    account: str = "lx",
+    symbol: str = "NVDA",
+    priority: str = "P1",
+    mid: float = 1.0,
+    contracts_available: int | None = 1,
+) -> dict:
     return {
         "priority": priority,
         "state": "active",
@@ -21,7 +28,14 @@ def _action(*, account: str = "lx", symbol: str = "NVDA", priority: str = "P1", 
         "expiration": "2026-08-21",
         "strike": 100,
         "contract_symbol": f"{symbol}260821P00100000",
-        "metrics": {"mid": mid},
+        "metrics": {
+            "mid": mid,
+            **(
+                {"capacity": {"contracts_available": contracts_available}}
+                if contracts_available is not None
+                else {}
+            ),
+        },
     }
 
 
@@ -273,17 +287,26 @@ def test_delta_is_computed_against_last_delivered_not_previous_revision(tmp_path
     assert changed["last_delivered_revision"] == 0
     assert changed["diff"]["from_revision"] == 0
     assert changed["diff"]["to_revision"] == 2
-    assert "priority_upgraded_to_p0" in {item["change_type"] for item in changed["diff"]["changes"]}
+    assert "candidate_priority_upgraded_to_p0" in {item["change_type"] for item in changed["diff"]["changes"]}
 
 
 def test_failed_delta_does_not_advance_pointer_and_is_not_lost(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import prepare_daily_decision_brief, read_daily_decision_brief_delivery
 
-    delivered = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-0", put_contracts=1))
+    delivered = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-0", put_contracts=1, actions=[_action(contracts_available=1)]),
+    )
     _confirm(tmp_path, delivered)
 
-    failed = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-1", put_contracts=2))
-    retry = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-2", put_contracts=2))
+    failed = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-1", put_contracts=2, actions=[_action(contracts_available=2)]),
+    )
+    retry = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-2", put_contracts=2, actions=[_action(contracts_available=2)]),
+    )
 
     assert failed["delivery_kind"] == retry["delivery_kind"] == "delta"
     assert failed["delivery_key"] == retry["delivery_key"]
@@ -295,9 +318,15 @@ def test_failed_delta_does_not_advance_pointer_and_is_not_lost(tmp_path: Path) -
 def test_stale_delivery_completion_cannot_regress_pointer(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import confirm_daily_decision_brief_delivery, prepare_daily_decision_brief
 
-    first = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-0", put_contracts=1))
+    first = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-0", put_contracts=1, actions=[_action(contracts_available=1)]),
+    )
     _confirm(tmp_path, first)
-    second = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="run-1", put_contracts=2))
+    second = prepare_daily_decision_brief(
+        base=tmp_path,
+        brief=_brief(run_id="run-1", put_contracts=2, actions=[_action(contracts_available=2)]),
+    )
     _confirm(tmp_path, second)
 
     stale = confirm_daily_decision_brief_delivery(

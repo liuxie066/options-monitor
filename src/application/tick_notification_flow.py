@@ -85,6 +85,7 @@ class TickNotificationRequest:
     scheduler_markets: tuple[str, ...] | list[str] = ()
     scheduler_decision: dict[str, Any] | None = None
     ran_pipeline_accounts: tuple[str, ...] | list[str] = ()
+    trigger_kind: str = "scheduled"
 
 
 @dataclass(frozen=True)
@@ -651,7 +652,12 @@ def _prepare_daily_brief_notification(
                 "render_limits": dict(daily_limits),
             }
             if len(markets) == 1:
-                message = render_daily_brief_lifecycle(lifecycle, limits=daily_limits)
+                render_context = _daily_brief_render_context(request)
+                message = render_daily_brief_lifecycle(
+                    lifecycle,
+                    limits=daily_limits,
+                    context=render_context,
+                )
                 if message:
                     audit_item["message_sha256"] = hashlib.sha256(message.encode("utf-8")).hexdigest()
                     audit_item["message_chars"] = len(message)
@@ -693,6 +699,23 @@ def _prepare_daily_brief_notification(
         markets=markets,
         multi_market_delivery_skipped=multi_market,
     )
+
+
+def _daily_brief_render_context(request: TickNotificationRequest) -> dict[str, Any]:
+    schedule = request.base_cfg.get("schedule") if isinstance(request.base_cfg, dict) else {}
+    schedule_map = schedule if isinstance(schedule, dict) else {}
+    scheduler = request.scheduler_decision if isinstance(request.scheduler_decision, dict) else {}
+    user_timezone = getattr(request.bj_tz, "key", None) or str(request.bj_tz)
+    trigger_kind = str(request.trigger_kind or "scheduled").strip().lower()
+    return {
+        "trigger_kind": trigger_kind,
+        "scheduled_target_market": (
+            scheduler.get("scheduled_target_market") if trigger_kind == "scheduled" else None
+        ),
+        "market_timezone": str(schedule_map.get("timezone") or "").strip(),
+        "user_timezone": str(user_timezone or "Asia/Shanghai"),
+        "user_timezone_label": "北京",
+    }
 
 
 def _record_daily_brief_multi_market_skip(

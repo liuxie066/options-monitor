@@ -205,3 +205,116 @@ def test_scan_scheduler_us_beijing_before_2am_gate_handles_dst() -> None:
         account='lx',
     )
     assert winter_cutoff.should_run_scan is False
+
+
+def _us_schedule_with_beijing_cutoff() -> dict:
+    return {
+        'enabled': True,
+        'timezone': 'America/New_York',
+        'cron_interval_min': 10,
+        'run_window': {'start': '09:30', 'end': '16:00', 'breaks': []},
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
+        'gates': [
+            {
+                'type': 'before',
+                'timezone': 'Asia/Shanghai',
+                'time': '02:00',
+                'day_offset_from_window_start': 1,
+            }
+        ],
+        'beijing_timezone': 'Asia/Shanghai',
+    }
+
+
+def test_us_summer_schedule_keeps_0940_then_hourly_targets_and_structured_batch() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = _us_schedule_with_beijing_cutoff()
+    state = {'last_run_utc_by_account': {}}
+    allowed = {
+        '09:40': datetime(2026, 7, 20, 13, 40, tzinfo=timezone.utc),
+        '10:00': datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        '11:00': datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc),
+        '12:00': datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
+        '13:00': datetime(2026, 7, 20, 17, 0, tzinfo=timezone.utc),
+    }
+
+    for label, now_utc in allowed.items():
+        decision = decide(cfg, state, now_utc, account='lx', schedule_key='schedule')
+        assert decision.should_run_scan is True
+        assert decision.scheduled_target_market is not None
+        target = datetime.fromisoformat(decision.scheduled_target_market)
+        assert target.strftime('%H:%M') == label
+
+    cutoff = decide(
+        cfg,
+        state,
+        datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc),
+        account='lx',
+        schedule_key='schedule',
+    )
+    assert cutoff.should_run_scan is False
+    assert cutoff.scheduled_target_market is None
+
+
+def test_us_winter_schedule_keeps_0940_then_hourly_until_beijing_cutoff() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = _us_schedule_with_beijing_cutoff()
+    state = {'last_run_utc_by_account': {}}
+    allowed = {
+        '09:40': datetime(2026, 1, 5, 14, 40, tzinfo=timezone.utc),
+        '10:00': datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc),
+        '11:00': datetime(2026, 1, 5, 16, 0, tzinfo=timezone.utc),
+        '12:00': datetime(2026, 1, 5, 17, 0, tzinfo=timezone.utc),
+    }
+
+    for label, now_utc in allowed.items():
+        decision = decide(cfg, state, now_utc, account='lx', schedule_key='schedule')
+        assert decision.should_run_scan is True
+        assert decision.scheduled_target_market is not None
+        target = datetime.fromisoformat(decision.scheduled_target_market)
+        assert target.strftime('%H:%M') == label
+
+    cutoff = decide(
+        cfg,
+        state,
+        datetime(2026, 1, 5, 18, 0, tzinfo=timezone.utc),
+        account='lx',
+        schedule_key='schedule',
+    )
+    assert cutoff.should_run_scan is False
+    assert cutoff.scheduled_target_market is None
+
+
+def test_scheduler_catchup_keeps_original_batch_and_force_has_no_batch() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = _us_schedule_with_beijing_cutoff()
+    state = {'last_run_utc_by_account': {}}
+    catchup = decide(
+        cfg,
+        state,
+        datetime(2026, 7, 20, 14, 8, tzinfo=timezone.utc),  # 10:08 EDT catches 10:00
+        account='lx',
+        schedule_key='schedule',
+    )
+    assert catchup.should_run_scan is True
+    assert catchup.scheduled_target_market is not None
+    target = datetime.fromisoformat(catchup.scheduled_target_market)
+    assert target.strftime('%H:%M') == '10:00'
+
+    forced = decide(
+        cfg,
+        state,
+        datetime(2026, 7, 20, 14, 8, tzinfo=timezone.utc),
+        account='lx',
+        schedule_key='schedule',
+        force=True,
+    )
+    assert forced.should_run_scan is True
+    assert forced.scheduled_target_market is None

@@ -79,6 +79,7 @@ def normalize_scheduler_decision_payload(raw: dict[str, Any] | Any) -> dict[str,
         "run_window_start_beijing",
         "run_window_end_beijing",
         "schedule_key",
+        "scheduled_target_market",
         "should_notify",
     ):
         if key in src:

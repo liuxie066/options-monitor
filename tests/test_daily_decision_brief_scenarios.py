@@ -13,6 +13,7 @@ def _action(
     priority: str = "P1",
     state: str = "active",
     mid: float = 1.0,
+    contracts_available: int | None = 1,
 ) -> dict:
     return {
         "priority": priority,
@@ -28,7 +29,14 @@ def _action(
         "contract_symbol": f"{symbol}260515P00100000",
         "title": f"评估 {symbol} Sell Put",
         "reason": "收益/风险通过筛选",
-        "metrics": {"mid": mid},
+        "metrics": {
+            "mid": mid,
+            **(
+                {"capacity": {"contracts_available": contracts_available}}
+                if contracts_available is not None
+                else {}
+            ),
+        },
     }
 
 
@@ -170,9 +178,9 @@ def test_new_and_upgraded_p0_are_material() -> None:
     upgraded_diff = diff_daily_decision_briefs(prior_p1, upgraded_p0)
 
     assert new_diff["material"] is True
-    assert "p0_added" in {item["change_type"] for item in new_diff["changes"]}
+    assert "candidate_added" in {item["change_type"] for item in new_diff["changes"]}
     assert upgraded_diff["material"] is True
-    assert "priority_upgraded_to_p0" in {item["change_type"] for item in upgraded_diff["changes"]}
+    assert "candidate_priority_upgraded_to_p0" in {item["change_type"] for item in upgraded_diff["changes"]}
 
 
 def test_main_action_invalidation_is_material() -> None:
@@ -188,7 +196,7 @@ def test_main_action_invalidation_is_material() -> None:
     diff = diff_daily_decision_briefs(active, invalid)
 
     assert diff["material"] is True
-    assert "action_invalidated" in {item["change_type"] for item in diff["changes"]}
+    assert "candidate_invalidated" in {item["change_type"] for item in diff["changes"]}
 
 
 def test_stable_high_priority_action_recovery_is_material(tmp_path: Path) -> None:
@@ -207,7 +215,7 @@ def test_stable_high_priority_action_recovery_is_material(tmp_path: Path) -> Non
 
     assert recovered["delivery_kind"] == "delta"
     assert recovered["diff"]["material"] is True
-    assert "action_added" in {item["change_type"] for item in recovered["diff"]["changes"]}
+    assert "candidate_added" in {item["change_type"] for item in recovered["diff"]["changes"]}
 
 
 def test_blocked_to_recovery_is_material() -> None:
@@ -236,16 +244,34 @@ def test_blocked_to_recovery_is_material() -> None:
 def test_capacity_changes_only_on_whole_contract_boundary() -> None:
     from domain.domain.daily_decision_brief import diff_daily_decision_briefs
 
-    baseline = _brief(run_id="run-0", revision=0, contracts=1, available_cash=10_000.0)
-    cash_noise = _brief(run_id="run-1", revision=1, contracts=1, available_cash=10_499.0)
-    whole_contract = _brief(run_id="run-2", revision=1, contracts=2, available_cash=20_000.0)
+    baseline = _brief(
+        run_id="run-0",
+        revision=0,
+        actions=[_action(contracts_available=1)],
+        contracts=1,
+        available_cash=10_000.0,
+    )
+    cash_noise = _brief(
+        run_id="run-1",
+        revision=1,
+        actions=[_action(contracts_available=1)],
+        contracts=1,
+        available_cash=10_499.0,
+    )
+    whole_contract = _brief(
+        run_id="run-2",
+        revision=1,
+        actions=[_action(contracts_available=2)],
+        contracts=2,
+        available_cash=20_000.0,
+    )
 
     noise_diff = diff_daily_decision_briefs(baseline, cash_noise)
     contract_diff = diff_daily_decision_briefs(baseline, whole_contract)
 
     assert noise_diff["material"] is False
     assert contract_diff["material"] is True
-    assert "capacity_changed" in {item["change_type"] for item in contract_diff["changes"]}
+    assert "candidate_capacity_changed" in {item["change_type"] for item in contract_diff["changes"]}
 
 
 def test_failed_delta_is_retained_against_last_delivered_revision(tmp_path: Path) -> None:
@@ -272,7 +298,7 @@ def test_failed_delta_is_retained_against_last_delivered_revision(tmp_path: Path
     assert retry_latest["last_delivered_revision"] == 0
     assert retry_latest["diff"]["from_revision"] == 0
     assert retry_latest["delivery_kind"] == "delta"
-    assert "priority_upgraded_to_p0" in {item["change_type"] for item in retry_latest["diff"]["changes"]}
+    assert "candidate_priority_upgraded_to_p0" in {item["change_type"] for item in retry_latest["diff"]["changes"]}
 
 
 def test_post_close_read_is_effectively_planning_only(tmp_path: Path) -> None:
@@ -297,7 +323,7 @@ def test_post_close_read_is_effectively_planning_only(tmp_path: Path) -> None:
     assert view["brief"]["actionability"] == "live_actionable"
     assert view["effective_actionability"] == "planning_only"
     assert view["freshness"]["effective_actionability"] == "planning_only"
-    assert "仅规划（PLANNING）" in view["rendered_markdown"]
+    assert "当前已不在可执行时段，仅供规划参考。" in view["rendered_markdown"]
 
 
 def test_all_day_no_run_does_not_create_fake_live_brief(tmp_path: Path) -> None:
