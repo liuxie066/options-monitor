@@ -3,10 +3,11 @@
 - **Work unit**: `daily-decision-brief-canary-correction`
 - **Date**: 2026-07-20
 - **Branch**: `ops/hk-daily-brief-canary-closeout`
-- **Status**: **blocked at real-send authorization gate**
+- **Status**: **final closeout pass under amended identity-set Canary standard**
 - **Code/release work**: merged and released
 - **Stable source-identity and no-send safety checks**: pass
-- **Accepted plan's literal P450 content check**: fail
+- **Amended Canary acceptance**: pass
+- **Real provider sending**: pending separate explicit user authorization
 
 ## 1. What changed
 
@@ -79,7 +80,10 @@ For both accounts, canonical revision JSON equaled the run-scoped brief, CLI and
 - Run ID: `20260720T053303Z-595bab`
 - Market time: 2026-07-20 13:33 Asia/Hong_Kong
 - Execution: `--no-send`, without `--force`
-- Audit report SHA-256: `7ade79f428df5ccde3bed86bc3191b2ed317d7e83371bc6024dba9c8e817eed4`
+- Original audit report SHA-256: `7ade79f428df5ccde3bed86bc3191b2ed317d7e83371bc6024dba9c8e817eed4`
+- Amended acceptance standard: `daily_brief_canary_identity_acceptance.v1`
+- Evidence manifest: `48` files; SHA-256 `7d85fd515f617adf23c1e504123839b5bf1afb02dbe994e5196d9d447bce3307`
+- Derived amended-acceptance report SHA-256: `1e621427fee47f127336eebec76af5a417142eb7ea20bb858acaa68a770150b6`
 
 ### lx
 
@@ -137,7 +141,7 @@ The stable identity-based authority check passes for both accounts.
 - Raw-only contracts: `55`
 - Raw-only contracts present in candidates/actions: `0`
 
-All Sell Put candidate and open-candidate action sources end in `_sell_put_candidates_labeled.csv`; no candidate identity falls outside the labeled identity set.
+All Sell Put candidate and open-candidate action sources end in `_sell_put_candidates_labeled.csv`; no candidate identity falls outside the labeled identity set. Under the amended standard, both accounts had `L=15`, `R=70`, `U=55`, `C=3`, and `A=3`; `(C union A) intersect U` was empty. No labeled identity conflict, malformed labeled identity, candidate/action core-field mismatch, event leakage, or rendered recommendation leakage was found.
 
 ## 8. Safety result
 
@@ -167,49 +171,61 @@ Additional evidence:
 
 No real provider delivery was attempted or confirmed.
 
-## 9. Blocking mismatch: hard-coded P450 criterion
+## 9. Resolved plan/data mismatch
 
-The accepted plan's live-content examples state:
+The original live-content bullets treated P430/P440/P450 fixture membership as if it were stable production data. The v1.3.3 run correctly labeled P430, P440, and P450, proving that the literal live P450 exclusion was not a valid authority oracle.
 
-- P430/P440 may appear if accepted and labeled;
-- rejected/raw-only P450 must not appear.
+The CEO approved a narrow amendment:
 
-That literal condition is not true for either production Canary. In the v1.3.3 run, P430, P440, and P450 were all present in the canonical labeled artifact. P450 therefore appeared through the correct labeled source and was not a raw fallback. The identity-based invariant passes, but the literal `P450 absent` assertion fails.
+- live Canary uses exact-run/account identity sets `L`, `R`, `U`, `C`, and `A`;
+- `C subset-of L`;
+- `A subset-of L`;
+- `(C union A) intersect U = empty`;
+- conflicting labeled core fields, empty identities, cross-run/account mixing, manifest drift, or raw rows entering normal runtime fail closed;
+- P430/P440/P450 remain unchanged in deterministic fixtures.
 
-This is a plan/data assumption mismatch, not evidence of raw-only leakage. Nevertheless, section 12.6 of the accepted plan says any mismatch is a stop condition. The real-send gate therefore remains blocked rather than silently rewriting the acceptance rule after execution.
+Planreview initially returned `fail` with four findings: duplicate/conflicting identity semantics, whole-brief diagnostic false positives, missing audit-only raw ownership, and incomplete evidence manifests. All four were fixed. Final re-review returned `pass`.
+
+The immutable v1.3.3 evidence was then re-evaluated without a new market scan. The original audit remained unchanged, a 48-file sorted SHA-256 manifest was frozen, and the derived amended-acceptance report passed for both accounts.
 
 ## 10. Findings and remaining risks
 
 | Finding | Status | Owner / next decision |
 |---|---|---|
 | Canonical labeled-only Sell Put authority | Pass | Product/runtime |
+| Exact-run identity membership and raw-only disjointness | Pass | Operations |
+| Conflicting/malformed labeled identity detection | Pass | Operations |
 | CLI/Agent `OM_RUNTIME_ROOT` convergence | Pass | Runtime |
 | Four-surface exact-revision identity | Pass | Runtime |
 | Prepared renderer integrity | Pass | Notification |
-| No-send and pointer safety | Pass | Operations |
+| No-send and delivery-pointer safety | Pass | Operations |
 | Scheduler notified pointer unchanged | Pass | Operations |
-| Literal P450 absence criterion | **Fail / blocker** | Product decision |
+| P430/P440/P450 fixed fixture | Preserved | Tests |
+| Live hard-coded P450 assertion | Superseded by approved amendment | Product |
 | Event rendering | Deferred by approved scope | Follow-up work unit |
-| Real provider behavior | Not exercised | Requires separate authorization after blocker resolution |
+| Real provider behavior | Not exercised | Requires separate explicit authorization |
 
-## 11. Recommended resolution
+## 11. Applied acceptance standard
 
-Prefer revising the live Canary content criterion from hard-coded strikes to the stable source-identity rule:
+The accepted live Canary rule is:
 
-> Every Sell Put candidate/open-candidate action must be a member of the exact run's canonical labeled identity set, and must be disjoint from that run's raw-only identity set.
+> Every Sell Put candidate and Sell Put `open_candidate` action must belong to the exact run/account canonical labeled identity map, must match its unique labeled core fields, and must be disjoint from the exact run/account raw-only identity set.
 
-Keep named P430/P440/P450 cases in deterministic fixtures, where artifact membership is frozen and reproducible. Do not use volatile live market membership as the primary production acceptance oracle.
+Raw reads are audit-only after the run is frozen and may not feed normal Daily Brief assembly, ranking, candidate/action/event builders, or renderer inputs. Explicit rejection/provenance diagnostics may retain rejected evidence without making it actionable.
 
-If the CEO instead intends P450 to be rejected as a business-policy requirement regardless of labeling, this is a separate strategy/label-policy defect and requires root-cause investigation before another Canary.
+Named P430/P440/P450 assertions remain only in deterministic fixtures.
 
 ## 12. Gate decision and next entry point
 
 - Code/release implementation: complete.
+- Accepted plan amendment: complete; final plan re-review `pass`.
 - Current v1.3.3 no-send technical/safety evidence: pass.
-- Gateflow final closeout: **blocked**, because the accepted literal content criterion does not pass.
-- Real sending: **not authorized**.
+- Amended exact-run identity-set re-evaluation: pass.
+- Gateflow final closeout: **pass**.
+- Production Daily Brief config: remains default-off.
+- Real sending: **not authorized by this amendment**.
 
-Next entry point requires one explicit product decision:
+Next entry points:
 
-1. approve a narrow plan amendment replacing the volatile P450 live assertion with the identity-based acceptance rule, followed by final plan review and closeout re-evaluation; or
-2. preserve the P450 requirement and open a new investigation into why P450 is labeled/active.
+1. if desired, separately authorize one real HK Daily Brief send under the existing delivery state machine; or
+2. open the deferred event-rendering work unit.
