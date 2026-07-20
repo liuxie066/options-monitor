@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -229,8 +230,13 @@ def test_no_send_persists_full_artifact_without_advancing_pointer(monkeypatch, t
     bundle = _request(tmp_path, run_id="run-no-send", no_send=True)
 
     assert mod.run_tick_notification_flow(bundle.request) == 0
-    assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
+    latest = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")
+    assert latest["available"] is True
     assert read_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US")["available"] is False
+    prepared = bundle.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert prepared["brief_id"] == latest["brief"]["brief_id"]
+    assert prepared["message_chars"] > 0
+    assert len(prepared["message_sha256"]) == 64
 
 
 def test_quiet_hours_does_not_advance_pointer_or_select_provider(monkeypatch, tmp_path: Path) -> None:
@@ -285,7 +291,15 @@ def test_no_material_daily_brief_finishes_before_delivery_route_resolution(monke
     second = _request(tmp_path, run_id="run-same")
 
     assert mod.run_tick_notification_flow(second.request) == 0
-    assert second.request.tick_metrics["daily_brief"]["prepared"][0]["delivery_kind"] == "none"
+    prepared = second.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert prepared["delivery_kind"] == "none"
+    assert prepared["message_sha256"] is None
+    assert prepared["message_chars"] is None
+    assert prepared["render_limits"] == {
+        "max_actions_per_priority": 5,
+        "max_candidates_per_strategy": 3,
+        "max_rejection_reasons": 5,
+    }
     assert second.completions == [{"status": "completed", "message": "no_account_notification"}]
 
 
@@ -365,3 +379,38 @@ def test_provider_success_but_local_confirmation_failure_is_not_marked_sent(monk
     assert bundle.request.audit_helper.failures == [
         ("DAILY_BRIEF_CONFIRM_FAILED", "confirm_daily_decision_brief_delivery")
     ]
+
+
+def test_prepared_audit_hashes_exact_message_with_resolved_limits(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    config = _config()
+    config["notifications"]["daily_brief"].update(
+        {
+            "max_actions_per_priority": "2",
+            "max_candidates_per_strategy": 0,
+            "max_rejection_reasons": 99,
+        }
+    )
+    bundle = _request(tmp_path, run_id="run-audit", no_send=True, config=config)
+
+    preparation = mod._prepare_daily_brief_notification(bundle.request)
+    message = preparation.prepared_messages.messages_by_account["lx"]
+    prepared = bundle.request.tick_metrics["daily_brief"]["prepared"][0]
+
+    assert prepared["brief_id"] == preparation.lifecycles_by_account["lx"]["brief"]["brief_id"]
+    assert prepared["message_sha256"] == hashlib.sha256(message.encode("utf-8")).hexdigest()
+    assert prepared["message_chars"] == len(message)
+    assert prepared["render_limits"] == {
+        "max_actions_per_priority": 2,
+        "max_candidates_per_strategy": 1,
+        "max_rejection_reasons": 20,
+    }
+    audit_event = next(
+        item
+        for item in bundle.request.audit_helper.events
+        if item["event_type"] == "daily_brief" and item["action"] == "prepared"
+    )
+    assert audit_event["extra"]["message_sha256"] == prepared["message_sha256"]
+    assert "message" not in audit_event["extra"]
