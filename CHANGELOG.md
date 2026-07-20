@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.3.5 - 2026-07-20
+
+### Changed
+- Replaced system-shaped Daily Decision Brief Markdown with a compact allowlisted user projection using readable option contracts, localized market/Beijing times, separate scheduled-batch context, and self-contained material-update snapshots.
+- Reframed opening opportunities as candidates, with candidate-scoped capacity, shared-cash warnings for Sell Put alternatives, and explicit scheduled versus manual/force presentation while preserving the existing US 09:40 plus hourly cadence.
+- Renamed candidate material-change events around candidate lifecycle semantics while preserving stable canonical action identities and delivery confirmation behavior.
+
+### Fixed
+- Preserved existing Combo Yield position attribution when no new Combo Yield candidate exists, without parsing or exposing internal strategy-group or leg identifiers.
+- Removed internal IDs, broker contract codes, raw enums, ISO timestamps, revision metadata, and rejection diagnostics from user-facing Daily Decision Brief Markdown while retaining structured audit evidence.
+
 ## 1.3.4 - 2026-07-20
 
 ### Changed
