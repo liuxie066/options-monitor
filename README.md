@@ -374,7 +374,7 @@ Tool Gateway：
 ```bash
 ./om config symbol set --config-yaml config.yaml --market hk --symbol 09898 \
   --covered-call-enabled true --covered-call-min-strike 85 --sell-put-enabled false \
-  --apply --rebuild-runtime-root .
+  --combo-yield-enabled true --apply --rebuild-runtime-root .
 ```
 
 `symbols` CLI operates on an explicit generated runtime snapshot. Normal config authoring should still happen in `config.yaml`, followed by `om config build --source yaml`.

@@ -187,12 +187,12 @@ om setup check --no-local-env-file
 om config init --output config.yaml --runtime-output-dir .
 om config validate --source yaml --market us
 om config build --source yaml --market us --output config.us.json
-om config symbol set --config-yaml config.yaml --market hk --symbol 09898 --covered-call-enabled true --covered-call-min-strike 85 --sell-put-enabled false
+om config symbol set --config-yaml config.yaml --market hk --symbol 09898 --covered-call-enabled true --covered-call-min-strike 85 --sell-put-enabled false --combo-yield-enabled true
 ```
 
 `config init` 默认写 `config.yaml` 并生成 `config.us.json` / `config.hk.json`；`--dry-run` 只预览 YAML，`--force` 才覆盖已有 starter/runtime 文件。
 `config build` / `config explain` 读取 YAML authoring config。
-`config symbol set` 默认 dry-run；`--apply` 写入 `config.yaml` 并生成备份，`--rebuild-runtime-root <dir>` 可在同一步重建 `config.us.json` / `config.hk.json` / `resolved/config.assistant.json`。
+`config symbol set` 支持 Covered Call、Sell Put 与 `combo_yield.enabled` 的标的级覆盖，默认 dry-run；`--apply` 写入 `config.yaml` 并生成备份，`--rebuild-runtime-root <dir>` 可在同一步重建 `config.us.json` / `config.hk.json` / `resolved/config.assistant.json`。
 
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 
