@@ -113,3 +113,49 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
         "scan_scheduler_account",
         "scan_scheduler_account",
     ]
+
+
+def test_run_scheduler_flow_passes_force_to_global_and_account_decisions() -> None:
+    from domain.domain import SnapshotDTO
+    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
+    from src.application.multi_tick_scheduler import run_scheduler_flow
+
+    global_calls: list[dict[str, Any]] = []
+    account_calls: list[dict[str, Any]] = []
+    payload = {
+        'should_run_scan': True,
+        'is_notify_window_open': True,
+        'reason': 'force',
+        'scheduled_target_market': None,
+    }
+
+    def fake_scheduler_cli(**kwargs):
+        global_calls.append(dict(kwargs))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr='')
+
+    def fake_account_scheduler_payload(**kwargs):
+        account_calls.append(dict(kwargs))
+        return payload
+
+    run_scheduler_flow(
+        vpy=Path('/repo/.venv/bin/python'),
+        base=Path('/repo'),
+        cfg_path=Path('/repo/config.us.json'),
+        base_cfg={},
+        state_path=Path('/repo/output_shared/state/scheduler_state.json'),
+        scheduler_schedule_key='schedule',
+        accounts=['lx'],
+        force_mode=True,
+        smoke=False,
+        snapshot_cls=SnapshotDTO,
+        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+        account_view_cls=AccountSchedulerDecisionView,
+        run_scan_scheduler_cli=fake_scheduler_cli,
+        build_failure_audit_fields=lambda **_kwargs: {},
+        audit_fn=lambda *_args, **_kwargs: None,
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
+        build_scheduler_decision_payload_fn=fake_account_scheduler_payload,
+    )
+
+    assert global_calls[0]['force'] is True
+    assert account_calls[0]['force'] is True

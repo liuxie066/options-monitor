@@ -15,6 +15,7 @@ def _action(
     contract_symbol: str = "NVDA260821P00100000",
     rank: int = 1,
     annualized_return: float = 0.20,
+    contracts_available: int | None = 1,
 ) -> dict:
     return {
         "priority": priority,
@@ -30,7 +31,15 @@ def _action(
         "contract_symbol": contract_symbol,
         "title": "Sell Put candidate",
         "reason": "passed canonical filter",
-        "metrics": {"rank": rank, "annualized_return": annualized_return},
+        "metrics": {
+            "rank": rank,
+            "annualized_return": annualized_return,
+            **(
+                {"capacity": {"contracts_available": contracts_available}}
+                if contracts_available is not None
+                else {}
+            ),
+        },
     }
 
 
@@ -128,7 +137,7 @@ def test_diff_marks_blocked_and_recovered_as_material() -> None:
     blocked = _brief(revision=1, actionability="blocked", actions=[])
     blocked_change = diff_daily_decision_briefs(ready, blocked)
     assert blocked_change["material"] is True
-    assert {item["change_type"] for item in blocked_change["changes"]} >= {"blocked", "action_invalidated"}
+    assert {item["change_type"] for item in blocked_change["changes"]} >= {"blocked", "candidate_invalidated"}
 
     recovered = _brief(revision=2, actions=[_action()])
     recovery_change = diff_daily_decision_briefs(blocked, recovered)
@@ -141,16 +150,16 @@ def test_diff_marks_p0_add_upgrade_and_high_priority_invalidation() -> None:
 
     empty = _brief(revision=0)
     p0 = _brief(revision=1, actions=[_action(priority="P0")])
-    assert "p0_added" in {item["change_type"] for item in diff_daily_decision_briefs(empty, p0)["changes"]}
+    assert "candidate_added" in {item["change_type"] for item in diff_daily_decision_briefs(empty, p0)["changes"]}
 
     p1 = _brief(revision=0, actions=[_action(priority="P1")])
     upgraded = _brief(revision=1, actions=[_action(priority="P0")])
-    assert "priority_upgraded_to_p0" in {
+    assert "candidate_priority_upgraded_to_p0" in {
         item["change_type"] for item in diff_daily_decision_briefs(p1, upgraded)["changes"]
     }
 
     invalid = _brief(revision=1, actions=[_action(priority="P1", state="invalidated")])
-    assert "action_invalidated" in {item["change_type"] for item in diff_daily_decision_briefs(p1, invalid)["changes"]}
+    assert "candidate_invalidated" in {item["change_type"] for item in diff_daily_decision_briefs(p1, invalid)["changes"]}
 
 
 def test_diff_new_p1_candidate_is_material_but_p2_observe_is_not() -> None:
@@ -174,7 +183,7 @@ def test_diff_marks_existing_high_priority_action_becoming_active_as_material(pr
     diff = diff_daily_decision_briefs(previous, current)
 
     assert diff["material"] is True
-    assert "action_added" in {item["change_type"] for item in diff["changes"]}
+    assert "candidate_added" in {item["change_type"] for item in diff["changes"]}
 
 
 def test_diff_marks_existing_p2_action_crossing_into_active_p1_as_material() -> None:
@@ -186,24 +195,31 @@ def test_diff_marks_existing_p2_action_crossing_into_active_p1_as_material() -> 
     diff = diff_daily_decision_briefs(previous, current)
 
     assert diff["material"] is True
-    assert "action_added" in {item["change_type"] for item in diff["changes"]}
+    assert "candidate_added" in {item["change_type"] for item in diff["changes"]}
 
 
-def test_diff_capacity_uses_whole_contracts_not_cash_noise() -> None:
+def test_diff_capacity_uses_candidate_whole_contracts_not_top_level_cash_noise() -> None:
     from domain.domain.daily_decision_brief import diff_daily_decision_briefs
 
-    first = _brief(revision=0, put_contracts=1, call_contracts=2)
-    cash_only = _brief(revision=1, put_contracts=1, call_contracts=2)
-    cash_only["capacity"]["sell_put"]["cash_free"] = 20500.0
-    assert diff_daily_decision_briefs(first, cash_only)["material"] is False
+    first = _brief(revision=0, actions=[_action(contracts_available=1)])
+    top_level_noise = _brief(
+        revision=1,
+        actions=[_action(contracts_available=1)],
+        put_contracts=9,
+        call_contracts=7,
+    )
+    top_level_noise["capacity"]["sell_put"]["cash_free"] = 20500.0
+    assert diff_daily_decision_briefs(first, top_level_noise)["material"] is False
 
-    changed = _brief(revision=2, put_contracts=2, call_contracts=1)
+    changed = _brief(revision=2, actions=[_action(contracts_available=2)])
     diff = diff_daily_decision_briefs(first, changed)
     assert diff["material"] is True
-    assert [item["capacity_kind"] for item in diff["changes"] if item["change_type"] == "capacity_changed"] == [
-        "sell_put",
-        "covered_call",
-    ]
+    capacity_change = next(
+        item for item in diff["changes"] if item["change_type"] == "candidate_capacity_changed"
+    )
+    assert (capacity_change["before"], capacity_change["after"]) == (1, 2)
+    assert capacity_change["action"]["expiration"] == "2026-08-21"
+    assert capacity_change["action"]["strike"] == "100"
 
 
 def test_diff_ignores_same_action_price_rank_and_return_changes() -> None:
@@ -243,8 +259,41 @@ def test_diff_marks_high_priority_downgrade_as_material() -> None:
     p1 = _brief(revision=1, actions=[_action(priority="P1")])
     p2 = _brief(revision=2, actions=[_action(priority="P2")])
 
-    assert "priority_downgraded" in {item["change_type"] for item in diff_daily_decision_briefs(p0, p1)["changes"]}
-    assert "priority_downgraded" in {item["change_type"] for item in diff_daily_decision_briefs(p1, p2)["changes"]}
+    assert "candidate_priority_downgraded" in {item["change_type"] for item in diff_daily_decision_briefs(p0, p1)["changes"]}
+    assert "candidate_priority_downgraded" in {item["change_type"] for item in diff_daily_decision_briefs(p1, p2)["changes"]}
+
+
+def test_candidate_transition_emits_one_semantic_change_before_capacity() -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    previous = _brief(
+        revision=0,
+        actions=[_action(priority="P1", state="active", contracts_available=2)],
+    )
+    blocked = _brief(
+        revision=1,
+        actions=[_action(priority="P0", state="blocked", contracts_available=1)],
+    )
+
+    diff = diff_daily_decision_briefs(previous, blocked)
+
+    assert [item["change_type"] for item in diff["changes"]] == ["candidate_invalidated"]
+
+
+def test_true_close_actions_keep_action_vocabulary() -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    close = _action(priority="P0", action_type="close_position")
+    added = diff_daily_decision_briefs(_brief(revision=0), _brief(revision=1, actions=[close]))
+    assert "p0_added" in {item["change_type"] for item in added["changes"]}
+
+    invalid = deepcopy(close)
+    invalid["state"] = "observe"
+    removed = diff_daily_decision_briefs(
+        _brief(revision=1, actions=[close]),
+        _brief(revision=2, actions=[invalid]),
+    )
+    assert "action_invalidated" in {item["change_type"] for item in removed["changes"]}
 
 
 def test_material_diff_digest_ignores_title_and_reason_copy_changes() -> None:

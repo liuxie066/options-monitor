@@ -390,3 +390,29 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, t
 
     assert rc == 0
     assert not (runtime_root / "output_runs").exists()
+
+
+def test_daily_brief_trigger_kind_distinguishes_schedule_manual_and_force() -> None:
+    import src.application.multi_account_tick as mod
+
+    assert (
+        mod._resolve_daily_brief_trigger_kind(
+            force_mode=False,
+            trigger_context={'source': 'cron'},
+        )
+        == 'scheduled'
+    )
+    assert (
+        mod._resolve_daily_brief_trigger_kind(
+            force_mode=False,
+            trigger_context={},
+        )
+        == 'manual'
+    )
+    assert (
+        mod._resolve_daily_brief_trigger_kind(
+            force_mode=True,
+            trigger_context={'source': 'cron'},
+        )
+        == 'force'
+    )

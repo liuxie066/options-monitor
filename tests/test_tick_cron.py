@@ -200,3 +200,26 @@ def test_run_tick_cron_allow_stale_config_forwards_emergency_override(tmp_path) 
 
     assert rc == 0
     assert calls[0]["command"][-1] == "--allow-stale-config"
+
+
+def test_scan_scheduler_external_adapter_forwards_force_flag(monkeypatch, tmp_path) -> None:
+    from pathlib import Path
+
+    import src.infrastructure.external_services as mod
+
+    calls = []
+    monkeypatch.setattr(
+        mod,
+        'run_command',
+        lambda cmd, **kwargs: calls.append((cmd, kwargs)) or type('Result', (), {'returncode': 0})(),
+    )
+
+    mod.run_scan_scheduler_cli(
+        vpy=Path('python3'),
+        base=tmp_path,
+        config=tmp_path / 'config.us.json',
+        state=tmp_path / 'state.json',
+        force=True,
+    )
+
+    assert '--force' in calls[0][0]

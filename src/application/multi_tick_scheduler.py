@@ -183,6 +183,7 @@ def run_scheduler_flow(
         state=state_path,
         jsonl=True,
         schedule_key=str(scheduler_schedule_key),
+        force=bool(force_mode),
         capture_output=True,
     )
     scheduler_tool_dto = normalize_subprocess_adapter_payload(
@@ -251,6 +252,7 @@ def run_scheduler_flow(
                 state=state_path,
                 schedule_key=str(scheduler_schedule_key),
                 account=str(acct0),
+                force=bool(force_mode),
                 base_dir=base,
             )
             account_stdout = json.dumps(account_payload, ensure_ascii=False)
