@@ -61,14 +61,9 @@ def assemble_daily_decision_brief(
         default=_DEFAULT_MAX_CANDIDATES,
     )
 
-    put_rows, put_available = _load_candidate_family(
+    put_rows, put_available = _load_sell_put_candidates(
         run_account_dir=run_account_dir,
         market=market_norm,
-        family="sell_put",
-        paths_to_try=[
-            *sorted(run_account_dir.glob("*_sell_put_candidates_labeled.csv")),
-            *sorted(run_account_dir.glob("*_sell_put_candidates.csv")),
-        ],
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
@@ -238,11 +233,14 @@ def assemble_daily_decision_brief(
     generated_at = effective_now.isoformat()
     data_as_of = _latest_as_of(metrics, prefetch, fallback=effective_now).isoformat()
     events = _candidate_events([*selected_puts, *selected_calls, *selected_combos])
+    deduped_actions = _dedupe_actions(actions)
+    deduped_data_gaps = _dedupe_gaps(data_gaps)
     strategy_summary = _strategy_summary(
         actionability=actionability,
         blockers=blockers,
-        actions=actions,
+        actions=deduped_actions,
         candidates=candidate_payloads,
+        data_gaps=deduped_data_gaps,
     )
 
     return normalize_daily_decision_brief(
@@ -258,13 +256,13 @@ def assemble_daily_decision_brief(
             "status": status,
             "actionability": actionability,
             "strategy_summary": strategy_summary,
-            "actions": _dedupe_actions(actions),
+            "actions": deduped_actions,
             "positions": positions,
             "capacity": capacity,
             "candidates": candidate_payloads,
             "rejections": _json_safe(rejections),
             "events": events,
-            "data_gaps": _dedupe_gaps(data_gaps),
+            "data_gaps": deduped_data_gaps,
             "source_artifacts": _dedupe_source_artifacts(source_artifacts),
         }
     )
@@ -301,6 +299,53 @@ def assemble_daily_decision_briefs(
     return out
 
 
+def _load_sell_put_candidates(
+    *,
+    run_account_dir: Path,
+    market: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    labeled_suffix = "_sell_put_candidates_labeled.csv"
+    raw_suffix = "_sell_put_candidates.csv"
+    labeled_paths = sorted(run_account_dir.glob(f"*{labeled_suffix}"))
+    raw_paths = sorted(run_account_dir.glob(f"*{raw_suffix}"))
+
+    if not labeled_paths and not raw_paths:
+        data_gaps.append(
+            {"scope": "strategy", "strategy_family": "sell_put", "reason": "source_artifact_missing"}
+        )
+        return [], False
+
+    labeled_keys = {path.name[: -len(labeled_suffix)] for path in labeled_paths}
+    for raw_path in raw_paths:
+        artifact_key = raw_path.name[: -len(raw_suffix)]
+        if artifact_key in labeled_keys:
+            continue
+        data_gaps.append(
+            {
+                "scope": "source",
+                "strategy_family": "sell_put",
+                "artifact_key": artifact_key,
+                "path": _source_path(run_account_dir, raw_path),
+                "reason": "canonical_labeled_artifact_missing",
+            }
+        )
+
+    if not labeled_paths:
+        return [], False
+
+    return _load_candidate_family(
+        run_account_dir=run_account_dir,
+        market=market,
+        family="sell_put",
+        paths_to_try=labeled_paths,
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        validate_empty_schema=True,
+    )
+
+
 def _load_candidate_family(
     *,
     run_account_dir: Path,
@@ -309,6 +354,7 @@ def _load_candidate_family(
     paths_to_try: list[Path],
     source_artifacts: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
+    validate_empty_schema: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     rows: list[dict[str, Any]] = []
     available = False
@@ -319,7 +365,18 @@ def _load_candidate_family(
     for path in paths_to_try:
         try:
             frame = pd.read_csv(path)
-        except pd.errors.EmptyDataError:
+        except pd.errors.EmptyDataError as exc:
+            if validate_empty_schema and not _is_controlled_empty_candidate_artifact(path):
+                data_gaps.append(
+                    {
+                        "scope": "source",
+                        "strategy_family": family,
+                        "path": _source_path(run_account_dir, path),
+                        "reason": "csv_unavailable",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                continue
             available = True
             source_artifacts.append(
                 {
@@ -337,6 +394,17 @@ def _load_candidate_family(
                     "path": _source_path(run_account_dir, path),
                     "reason": "csv_unavailable",
                     "error_type": type(exc).__name__,
+                }
+            )
+            continue
+        if validate_empty_schema and frame.empty and not _has_minimum_candidate_columns(frame):
+            data_gaps.append(
+                {
+                    "scope": "source",
+                    "strategy_family": family,
+                    "path": _source_path(run_account_dir, path),
+                    "reason": "csv_unavailable",
+                    "error_type": "SchemaError",
                 }
             )
             continue
@@ -370,6 +438,23 @@ def _load_candidate_family(
         )
         rows.extend(market_rows)
     return rows, available
+
+
+def _is_controlled_empty_candidate_artifact(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size > 2:
+            return False
+        with path.open("rb") as handle:
+            content = handle.read(2)
+    except OSError:
+        return False
+    return content in {b"\n", b"\r\n"}
+
+
+def _has_minimum_candidate_columns(frame: pd.DataFrame) -> bool:
+    columns = {str(column).strip() for column in frame.columns}
+    return "symbol" in columns and bool(columns.intersection({"contract_symbol", "code"}))
 
 
 def _load_close_advice(
@@ -993,14 +1078,18 @@ def _strategy_summary(
     blockers: list[str],
     actions: list[dict[str, Any]],
     candidates: Mapping[str, list[dict[str, Any]]],
+    data_gaps: list[dict[str, Any]],
 ) -> str:
     if actionability == "blocked":
         return "日报阻塞：" + "；".join(blockers)
     active = sum(1 for item in actions if item.get("state") == "active")
-    return (
-        f"可执行行动 {active} 条；Sell Put {len(candidates['sell_put'])}，"
-        f"Covered Call {len(candidates['covered_call'])}，Combo Yield {len(candidates['combo_yield'])}。"
+    summary = (
+        f"有效行动 {active} 条；候选证据：Sell Put {len(candidates['sell_put'])}，"
+        f"Covered Call {len(candidates['covered_call'])}，Combo Yield {len(candidates['combo_yield'])}"
     )
+    if data_gaps:
+        summary += f"；数据缺口 {len(data_gaps)} 条"
+    return summary + "。"
 
 
 def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

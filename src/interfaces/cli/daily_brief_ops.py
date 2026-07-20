@@ -8,6 +8,7 @@ from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.daily_brief import read_daily_brief_view
+from src.application.runtime_paths import resolve_runtime_root
 
 
 def add_daily_brief_commands(subparsers: argparse._SubParsersAction) -> None:
@@ -48,9 +49,11 @@ def handle_daily_brief_command(
     if revision is not None and revision < 0:
         raise AgentToolError(code="INPUT_ERROR", message="revision must be non-negative")
 
+    repo_root = repo_base_fn()
+    runtime_root = resolve_runtime_root(repo_root=repo_root).runtime_root
     try:
         data = read_daily_brief_view(
-            base=repo_base_fn(),
+            base=runtime_root,
             account=args.account,
             market=args.market,
             market_trading_date=market_trading_date,
