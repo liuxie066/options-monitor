@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-19
+
+### Added
+- Added the canonical `daily_decision_brief.v1` account, market, and trading-date read model with deterministic action identity, priorities, actionability, and material-delta semantics.
+- Added immutable Daily Brief revisions, current and run-scoped envelopes, last-confirmed delivery pointers, bounded Chinese Markdown rendering, and pure-read CLI and Agent Tool surfaces.
+
+### Changed
+- Integrated the default-off Daily Brief into the existing scheduled notification path: the first confirmed single-market brief is sent in full, while later eligible scans send only material changes against the last successfully delivered revision.
+- Exposed expired live briefs as planning-only, preserved closed-market no-run behavior, and failed closed for unsupported multi-market outbound delivery.
+
+### Fixed
+- Recovered revision allocation after interrupted multi-file publication by advancing beyond all existing same-day immutable revisions without deleting history.
+- Treated stable actions returning from blocked, observe, or invalidated state into active P0/P1 as material changes while avoiding duplicate priority-upgrade events.
+
 ## 1.2.420 - 2026-07-19
 
 ### Fixed
