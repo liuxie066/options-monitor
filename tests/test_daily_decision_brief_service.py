@@ -375,3 +375,149 @@ def test_rejection_summary_is_market_qualified(tmp_path: Path) -> None:
 
     assert brief["rejections"]["total_rejected"] == 1
     assert brief["rejections"]["top_categories"][0]["sample_symbols"] == ["0700.HK"]
+
+
+def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    labeled_rows = [
+        _put_row(symbol="0700.HK", contract="0700_P430", annualized=0.18),
+        _put_row(symbol="0700.HK", contract="0700_P440", annualized=0.20),
+    ]
+    raw_rows = [
+        *labeled_rows,
+        _put_row(symbol="0700.HK", contract="0700_P450_RAW_ONLY", annualized=0.99),
+    ]
+    pd.DataFrame(labeled_rows).to_csv(account_dir / "0700_sell_put_candidates_labeled.csv", index=False)
+    pd.DataFrame(raw_rows).to_csv(account_dir / "0700_sell_put_candidates.csv", index=False)
+
+    brief = _assemble(tmp_path, market="HK")
+
+    assert {item["contract_symbol"] for item in brief["candidates"]["sell_put"]} == {
+        "0700_P430",
+        "0700_P440",
+    }
+    assert {item["contract_symbol"] for item in brief["actions"] if item.get("contract_symbol")} == {
+        "0700_P430",
+        "0700_P440",
+    }
+    assert "0700_P450_RAW_ONLY" not in json.dumps(brief, sort_keys=True)
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    assert "0700_P450_RAW_ONLY" not in render_full_brief(brief)
+    assert "有效行动 2 条" in brief["strategy_summary"]
+    assert "候选证据：Sell Put 2，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
+    assert "数据缺口" in brief["strategy_summary"]
+    assert not any(item["path"].endswith("_sell_put_candidates.csv") for item in brief["source_artifacts"])
+
+
+def test_sell_put_controlled_newline_is_authoritative_empty(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_bytes(b"\n")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["candidates"]["sell_put"] == []
+    assert not any(
+        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_controlled_crlf_is_authoritative_empty(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_bytes(b"\r\n")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["candidates"]["sell_put"] == []
+    assert not any(
+        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_header_only_requires_minimum_schema(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text("symbol,annualized\n", encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert any(
+        item["strategy_family"] == "sell_put"
+        and item["reason"] == "csv_unavailable"
+        and item["error_type"] == "SchemaError"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_zero_byte_is_malformed_not_empty(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_bytes(b"")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert any(
+        item["strategy_family"] == "sell_put"
+        and item["reason"] == "csv_unavailable"
+        and item["error_type"] == "EmptyDataError"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_unrecognized_whitespace_is_malformed_not_empty(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_bytes(b"  ")
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert any(
+        item["strategy_family"] == "sell_put"
+        and item["reason"] == "csv_unavailable"
+        and item["error_type"] == "EmptyDataError"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_raw_only_artifact_reports_canonical_missing_without_fallback(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(contract="RAW_ONLY")]).to_csv(
+        account_dir / "nvda_sell_put_candidates.csv", index=False
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert brief["candidates"]["sell_put"] == []
+    assert "RAW_ONLY" not in json.dumps(brief, sort_keys=True)
+    assert any(
+        item["strategy_family"] == "sell_put"
+        and item["artifact_key"] == "nvda"
+        and item["reason"] == "canonical_labeled_artifact_missing"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_sell_put_failure_preserves_covered_call_action_and_degrades_status(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        'symbol,contract_symbol\n"broken', encoding="utf-8"
+    )
+    pd.DataFrame([_call_row(contract="NVDA_CALL_VALID")]).to_csv(
+        account_dir / "nvda_sell_call_candidates.csv", index=False
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["status"] == "degraded"
+    assert brief["candidates"]["sell_put"] == []
+    assert any(item.get("contract_symbol") == "NVDA_CALL_VALID" for item in brief["actions"])
+    assert any(
+        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        for item in brief["data_gaps"]
+    )

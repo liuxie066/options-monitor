@@ -5,6 +5,30 @@ from argparse import Namespace
 from pathlib import Path
 
 
+def _brief(*, run_id: str) -> dict:
+    return {
+        "market": "US",
+        "market_trading_date": "2026-07-19",
+        "account": "lx",
+        "revision": 999,
+        "run_id": run_id,
+        "generated_at_utc": "2026-07-19T13:40:00+00:00",
+        "data_as_of_utc": "2026-07-19T13:39:00+00:00",
+        "valid_until_utc": "2026-07-20T20:00:00+00:00",
+        "status": "ready",
+        "actionability": "live_actionable",
+        "strategy_summary": run_id,
+        "actions": [],
+        "positions": [],
+        "capacity": {},
+        "candidates": {"sell_put": [], "covered_call": [], "combo_yield": []},
+        "rejections": {},
+        "events": [],
+        "data_gaps": [],
+        "source_artifacts": [],
+    }
+
+
 def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     from src.interfaces.cli.main import parse_args
 
@@ -103,3 +127,37 @@ def test_daily_brief_main_renders_input_errors_without_traceback(capsys) -> None
     assert payload["error"]["code"] == "INPUT_ERROR"
     assert "revision must be non-negative" in payload["error"]["message"]
     assert captured.err == ""
+
+
+def test_daily_brief_cli_reads_env_runtime_root_then_repo_fallback(monkeypatch, capsys, tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+    from src.interfaces.cli import daily_brief_ops
+
+    repo_root = tmp_path / "repo"
+    runtime_root = tmp_path / "runtime"
+    prepare_daily_decision_brief(base=repo_root, brief=_brief(run_id="repo-r0"))
+    prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r0"))
+    runtime_r1 = prepare_daily_decision_brief(base=runtime_root, brief=_brief(run_id="runtime-r1"))
+
+    args = Namespace(
+        daily_brief_command="day",
+        account="lx",
+        market="US",
+        market_trading_date="2026-07-19",
+        revision=runtime_r1["brief"]["revision"],
+        json=True,
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    assert daily_brief_ops.handle_daily_brief_command(args, repo_base_fn=lambda: repo_root) == 0
+    runtime_payload = json.loads(capsys.readouterr().out)
+    assert runtime_payload["brief"]["revision"] == 1
+    assert runtime_payload["brief"]["run_id"] == "runtime-r1"
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT")
+    args.revision = 0
+    assert daily_brief_ops.handle_daily_brief_command(args, repo_base_fn=lambda: repo_root) == 0
+    repo_payload = json.loads(capsys.readouterr().out)
+    assert repo_payload["brief"]["revision"] == 0
+    assert repo_payload["brief"]["run_id"] == "repo-r0"
