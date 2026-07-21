@@ -298,6 +298,81 @@ def _text_file_info(path: Path, *, base: Path, max_chars: int) -> dict[str, Any]
     return out
 
 
+def _compatibility_notification_info(path: Path, *, base: Path, max_chars: int) -> dict[str, Any]:
+    return {
+        "artifact_kind": "compatibility_notification_bundle",
+        "primary_renderer": "compact",
+        "may_include": ["candidate_reject_summary", "close_advice"],
+        "authority": "compatibility_only",
+        "delivery_evidence": False,
+        **_text_file_info(path, base=base, max_chars=max_chars),
+    }
+
+
+def _deprecated_notification_alias(payload: dict[str, Any]) -> dict[str, Any]:
+    return {**payload, "deprecated_field": True}
+
+
+def _compatibility_notification_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    canonical = payload.get("compatibility_notification")
+    if isinstance(canonical, dict):
+        return canonical
+    legacy = payload.get("notification")
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def _notification_authority_payload() -> dict[str, Any]:
+    return {
+        "ordinary_scheduled_renderer": "daily_brief",
+        "compatibility_artifact": {
+            "field": "compatibility_notification",
+            "artifact_kind": "compatibility_notification_bundle",
+            "primary_renderer": "compact",
+            "authority": "compatibility_only",
+            "delivery_evidence": False,
+        },
+        "legacy_renderer": {
+            "renderer": "legacy",
+            "status": "deprecated",
+            "removal_phase": "phase_c",
+        },
+        "legacy_aliases": {
+            "shared.notification": {
+                "replacement": "shared.compatibility_notification",
+                "removal_phase": "phase_c",
+            },
+            "accounts.*.notification": {
+                "replacement": "accounts.*.compatibility_notification",
+                "removal_phase": "phase_c",
+            },
+            "latest_run.accounts.*.notification": {
+                "replacement": "latest_run.accounts.*.compatibility_notification",
+                "removal_phase": "phase_c",
+            },
+            "latest_scanned_run.accounts.*.notification": {
+                "replacement": "latest_scanned_run.accounts.*.compatibility_notification",
+                "removal_phase": "phase_c",
+            },
+            "account_summary.accounts.*.notification_exists": {
+                "replacement": "account_summary.accounts.*.compatibility_notification_exists",
+                "removal_phase": "phase_c",
+            },
+            "account_summary.accounts.*.notification_mtime_utc": {
+                "replacement": "account_summary.accounts.*.compatibility_notification_mtime_utc",
+                "removal_phase": "phase_c",
+            },
+            "account_summary.accounts_with_notification": {
+                "replacement": "account_summary.accounts_with_compatibility_notification",
+                "removal_phase": "phase_c",
+            },
+            "analysis.runtime_tick_status.notification_exists": {
+                "replacement": "analysis.runtime_tick_status.compatibility_notification_exists",
+                "removal_phase": "phase_c",
+            },
+        },
+    }
+
+
 def _path_pointer_file_info(path: Path, *, base: Path) -> dict[str, Any]:
     out = _text_file_info(path, base=base, max_chars=1000)
     if "text" not in out:
@@ -1079,22 +1154,28 @@ def _account_summary(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         last_run_raw = item.get("last_run")
-        notification_raw = item.get("notification")
         last_run: dict[str, Any] = last_run_raw if isinstance(last_run_raw, dict) else {}
-        notification: dict[str, Any] = notification_raw if isinstance(notification_raw, dict) else {}
+        compatibility_notification = _compatibility_notification_from_payload(item)
         last_run_json_raw = last_run.get("json")
         last_run_json: dict[str, Any] = last_run_json_raw if isinstance(last_run_json_raw, dict) else {}
+        exists = bool(compatibility_notification.get("exists"))
+        mtime_utc = compatibility_notification.get("mtime_utc")
         rows[str(account)] = {
             "last_run_exists": bool(last_run.get("exists")),
-            "notification_exists": bool(notification.get("exists")),
+            "compatibility_notification_exists": exists,
+            "notification_exists": exists,
             "last_status": last_run_json.get("status") or last_run_json.get("last_status"),
             "last_run_mtime_utc": last_run.get("mtime_utc"),
-            "notification_mtime_utc": notification.get("mtime_utc"),
+            "compatibility_notification_mtime_utc": mtime_utc,
+            "notification_mtime_utc": mtime_utc,
         }
     return {
         "accounts": rows,
         "account_count": len(rows),
         "accounts_with_last_run": sum(1 for item in rows.values() if item.get("last_run_exists")),
+        "accounts_with_compatibility_notification": sum(
+            1 for item in rows.values() if item.get("compatibility_notification_exists")
+        ),
         "accounts_with_notification": sum(1 for item in rows.values() if item.get("notification_exists")),
     }
 
@@ -1416,6 +1497,11 @@ def _run_payload(
     run_accounts: dict[str, Any] = {}
     for account in accounts:
         run_account_root = run_dir / "accounts" / account
+        compatibility_notification = _compatibility_notification_info(
+            run_account_root / "symbols_notification.txt",
+            base=base,
+            max_chars=max_notification_chars,
+        )
         expired_position_maintenance = _json_file_info(
             run_account_root / "state" / "expired_position_maintenance.json",
             base=base,
@@ -1429,11 +1515,8 @@ def _run_payload(
             ),
             "expired_position_maintenance": expired_position_maintenance,
             "auto_close_receipt": _auto_close_receipt_summary(expired_position_maintenance.get("json")),
-            "notification": _text_file_info(
-                run_account_root / "symbols_notification.txt",
-                base=base,
-                max_chars=max_notification_chars,
-            ),
+            "compatibility_notification": compatibility_notification,
+            "notification": _deprecated_notification_alias(compatibility_notification),
             "required_data_prefetch": _json_file_info(
                 run_account_root / "state" / "required_data_prefetch_summary.json",
                 base=base,
@@ -1730,36 +1813,6 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
-def _latest_run_expects_static_notification(latest_run_payload: dict[str, Any] | None) -> bool:
-    if latest_run_payload is None:
-        return True
-    if not _run_payload_has_scan(latest_run_payload):
-        return False
-    tick_metrics = _json_payload(_nested(latest_run_payload, "state", "tick_metrics"))
-    scheduler = _dict(tick_metrics.get("scheduler_decision"))
-    if scheduler.get("should_run_scan") is False:
-        return False
-    if scheduler.get("should_notify") is False:
-        return False
-    if scheduler.get("is_notify_window_open") is False:
-        return False
-    if tick_metrics.get("no_send") is True:
-        return False
-    return True
-
-
-def _run_payload_account_notification_exists(run_payload: dict[str, Any] | None) -> bool:
-    if not isinstance(run_payload, dict):
-        return False
-    accounts = _dict(run_payload.get("accounts"))
-    for item in accounts.values():
-        payload = _dict(item)
-        notification = _dict(payload.get("notification"))
-        if notification.get("exists"):
-            return True
-    return False
-
-
 def _latest_run_auto_close_failures(latest_run_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(latest_run_payload, dict):
         return []
@@ -1939,7 +1992,7 @@ def runtime_status_tool(
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
-    notification = _text_file_info(
+    compatibility_notification = _compatibility_notification_info(
         report_dir / "symbols_notification.txt",
         base=base,
         max_chars=max_notification_chars,
@@ -2067,6 +2120,11 @@ def runtime_status_tool(
     account_status: dict[str, Any] = {}
     for account in accounts:
         account_root = (accounts_root / account).resolve()
+        account_compatibility_notification = _compatibility_notification_info(
+            account_root / "reports" / "symbols_notification.txt",
+            base=base,
+            max_chars=max_notification_chars,
+        )
         account_status[account] = {
             "last_run": _json_file_info(
                 account_root / "state" / "last_run.json",
@@ -2078,11 +2136,8 @@ def runtime_status_tool(
                 base=base,
                 read_json_object_or_empty=read_json_object_or_empty,
             ),
-            "notification": _text_file_info(
-                account_root / "reports" / "symbols_notification.txt",
-                base=base,
-                max_chars=max_notification_chars,
-            ),
+            "compatibility_notification": account_compatibility_notification,
+            "notification": _deprecated_notification_alias(account_compatibility_notification),
         }
 
     pointer_path = shared_state_dir / "last_run_dir.txt"
@@ -2131,13 +2186,6 @@ def runtime_status_tool(
         warnings.append(f"Requested runtime run not found: {source}={value}.")
     if not shared_last_run.get("exists"):
         warnings.append("No last_run.json found under output_shared/state.")
-    if (
-        _latest_run_expects_static_notification(latest_run_payload)
-        and not notification.get("exists")
-        and not any(item["notification"].get("exists") for item in account_status.values())
-        and not _run_payload_account_notification_exists(latest_run_payload)
-    ):
-        warnings.append("No symbols_notification.txt found for latest scanned run or legacy report paths.")
     auto_close_failures = _latest_run_auto_close_failures(latest_run_payload)
     if auto_close_failures:
         for item in auto_close_failures:
@@ -2246,6 +2294,7 @@ def runtime_status_tool(
             "config_key": payload.get("config_key"),
         },
         "config_authority": config_authority,
+        "notification_authority": _notification_authority_payload(),
         "paths": {
             "report_dir": _relative_path(report_dir, base=base),
             "state_dir": _relative_path(state_dir, base=base),
@@ -2257,7 +2306,8 @@ def runtime_status_tool(
         "shared": {
             "last_run": shared_last_run,
             "last_run_dir": _path_pointer_file_info(pointer_path, base=base),
-            "notification": notification,
+            "compatibility_notification": compatibility_notification,
+            "notification": _deprecated_notification_alias(compatibility_notification),
         },
         "trade_intake": trade_intake,
         "option_positions_context": {

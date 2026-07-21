@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1007,14 +1008,24 @@ def build_notification(
     exchange_rate_info: dict | None = None,
     *,
     account_label: str = '当前账户',
-    render_style: str = 'legacy',
+    render_style: str = 'compact',
 ) -> str:
+    renderer = str(render_style).strip().lower()
+    if renderer not in {'compact', 'legacy'}:
+        raise ValueError("render_style must be one of: compact, legacy")
+    if renderer == 'legacy':
+        warnings.warn(
+            "Legacy Tick renderer is deprecated and compatibility-only; use compact preview or scheduled Daily Brief delivery.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     high_lines = extract_section(alerts_text, '## 高优先级')
     medium_lines = extract_section(alerts_text, '## 中优先级')
     low_lines = extract_section(alerts_text, '## 低优先级')
 
     lines: list[str] = []
-    use_compact = render_style == 'compact'
+    use_compact = renderer == 'compact'
     groups = _select_notification_groups(high_lines, medium_lines, low_lines)
     if any(groups.values()):
 

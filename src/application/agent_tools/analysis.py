@@ -394,6 +394,7 @@ RUNTIME_TICK_STATUS_FIELDS: tuple[str, ...] = (
     "freshness_age_seconds",
     "notification_status",
     "notification_reason",
+    "compatibility_notification_exists",
     "notification_exists",
     "scheduler_should_run_scan",
     "scheduler_should_notify",
@@ -1098,6 +1099,12 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "freshness": "runtime_snapshot",
         "recommended_filters": ("market", "account", "freshness_status", "latest_status", "notification_status"),
         "safe_join_keys": ("account",),
+        "deprecated_fields": {
+            "notification_exists": {
+                "replacement": "compatibility_notification_exists",
+                "removal_phase": "phase_c",
+            }
+        },
     },
     "quote_freshness": {
         "description": "quote freshness rows derived from existing quote status surfaces",
@@ -3016,7 +3023,13 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
     rows: list[dict[str, Any]] = []
     for account in accounts:
         account_payload = account_status.get(account) if isinstance(account_status.get(account), dict) else {}
-        notification = account_payload.get("notification") if isinstance(account_payload.get("notification"), dict) else {}
+        compatibility_notification = account_payload.get("compatibility_notification")
+        if not isinstance(compatibility_notification, dict):
+            compatibility_notification = account_payload.get("notification")
+        compatibility_notification = compatibility_notification if isinstance(compatibility_notification, dict) else {}
+        compatibility_notification_exists = (
+            bool(compatibility_notification.get("exists")) if compatibility_notification else None
+        )
         rows.append(
             {
                 "market": market,
@@ -3027,7 +3040,8 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
                 "freshness_age_seconds": freshness.get("age_seconds"),
                 "notification_status": notification_diagnosis.get("status"),
                 "notification_reason": notification_diagnosis.get("reason"),
-                "notification_exists": bool(notification.get("exists")) if notification else None,
+                "compatibility_notification_exists": compatibility_notification_exists,
+                "notification_exists": compatibility_notification_exists,
                 "scheduler_should_run_scan": notification_diagnosis.get("scheduler_should_run_scan"),
                 "scheduler_should_notify": notification_diagnosis.get("scheduler_should_notify"),
                 "scheduler_reason": notification_diagnosis.get("scheduler_reason"),
@@ -4076,7 +4090,6 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
         for code in _jsonish_list(row.get("warning_codes"))
     }
     notification_statuses = _row_status_values(rows, "notification_status")
-    notification_values = {row.get("notification_exists") for row in rows if isinstance(row, dict)}
     conflict_reasons = _runtime_status_conflict_reasons(rows)
     scheduler_reason = _runtime_first_text(rows, "skip_reason", "scheduler_reason")
     notification_reason = _runtime_first_text(rows, "notification_reason", "final_reason")
@@ -4097,7 +4110,7 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
         severity = "warning"
     elif warning_codes & {"no_candidates", "empty_candidates", "candidate_empty"}:
         status = "observed_no_candidates"
-    elif False in notification_values or notification_statuses & {
+    elif notification_statuses & {
         "missing",
         "notification_route_missing",
         "no_notification_content",

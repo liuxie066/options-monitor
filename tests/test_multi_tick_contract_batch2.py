@@ -15,17 +15,16 @@ class _FakeRunLogger:
         self.events.append(rec)
 
 
-def test_multi_tick_account_messages_snapshot_contract_guard_present() -> None:
+def test_multi_tick_scheduled_renderer_authority_is_daily_brief_only() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
-    audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
-    assert 'snapshot_name": "account_messages"' in helper_src
-    assert "prepare_multi_account_notification(" in notification_flow_src
-    assert "prepare_per_account_messages(" in helper_src
-    assert "snapshot_account_messages(" in helper_src
-    assert 'stage="account_messages_snapshot"' in audit_src or 'stage="account_messages_snapshot"' in notification_flow_src
-    assert "account_messages must be a dict" in helper_src
+    assert "_prepare_daily_brief_notification(request)" in notification_flow_src
+    assert "prepare_multi_account_notification(" not in notification_flow_src
+    assert "prepare_per_account_messages(" not in helper_src
+    assert "snapshot_account_messages(" not in helper_src
+    assert "build_account_message_compact" not in notification_flow_src
+    assert "build_account_message" not in notification_flow_src
 
 
 def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path() -> None:

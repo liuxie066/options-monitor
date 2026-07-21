@@ -416,3 +416,132 @@ def test_daily_brief_trigger_kind_distinguishes_schedule_manual_and_force() -> N
         )
         == 'force'
     )
+
+
+def test_duplicate_unsupported_tick_failure_returns_nonzero_without_rerun(monkeypatch, tmp_path) -> None:
+    import json
+
+    from src.application import multi_account_tick as mod
+
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
+                "accounts": ["lx"],
+                "symbols": [],
+                "schedule": {"enabled": True},
+                "portfolio": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime_root = tmp_path / "runtime"
+    events: list[dict] = []
+
+    class _RunLogger:
+        def __init__(self, _base):
+            self.run_id = "run-duplicate"
+
+        def safe_event(self, step, status, **kwargs):
+            events.append({"step": step, "status": status, **kwargs})
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(
+        mod.state_repo,
+        "claim_idempotency_record",
+        lambda *args, **kwargs: {
+            "claimed": False,
+            "record": {
+                "status": "unsupported_failed",
+                "error_code": "daily_brief_multi_market_delivery_unsupported",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_tick_guard_flow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("terminal duplicate must not rerun")),
+    )
+
+    assert mod.main(["--config", str(cfg), "--accounts", "lx", "--market-config", "all"]) == 2
+    assert any(
+        event.get("step") == "run_end"
+        and event.get("status") == "error"
+        and event.get("error_code") == "daily_brief_multi_market_delivery_unsupported"
+        for event in events
+    )
+
+
+def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatch, tmp_path) -> None:
+    import json
+
+    import pytest
+
+    from src.application import multi_account_tick as mod
+
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
+                "accounts": ["lx"],
+                "symbols": [],
+                "schedule": {"enabled": True},
+                "portfolio": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[dict] = []
+
+    class _RunLogger:
+        def __init__(self, _base):
+            self.run_id = "run-terminal-write-failure"
+
+        def safe_event(self, step, status, **kwargs):
+            events.append({"step": step, "status": status, **kwargs})
+
+    def _guard(request):
+        request.complete_tick_idempotency_fn(
+            status="unsupported_failed",
+            message="daily_brief_multi_market_delivery_unsupported",
+            ok=False,
+            error_code="daily_brief_multi_market_delivery_unsupported",
+        )
+        raise AssertionError("terminal completion failure must escape")
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    monkeypatch.setattr(mod, "_complete_tick_idempotency", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(mod, "run_tick_guard_flow", _guard)
+
+    with pytest.raises(OSError, match="disk full"):
+        mod.main(["--config", str(cfg), "--accounts", "lx"])
+
+    assert any(
+        event.get("step") == "idempotency"
+        and event.get("status") == "error"
+        and event.get("error_code") == "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
+        for event in events
+    )

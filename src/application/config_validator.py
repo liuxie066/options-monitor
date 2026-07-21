@@ -785,6 +785,12 @@ def validate_config(cfg: dict):
                 die('notifications.daily_brief must be an object')
             if 'enabled' in daily_brief and not isinstance(daily_brief.get('enabled'), bool):
                 die('notifications.daily_brief.enabled must be a boolean')
+            if 'enabled' in daily_brief:
+                warn(
+                    'NOTIFICATIONS_DAILY_BRIEF_ENABLED_DEPRECATED: '
+                    'notifications.daily_brief.enabled is deprecated and ignored; '
+                    'scheduled ordinary notifications always use daily_brief'
+                )
             for key in ('max_actions_per_priority', 'max_candidates_per_strategy', 'max_rejection_reasons'):
                 if key not in daily_brief:
                     continue
@@ -793,6 +799,19 @@ def validate_config(cfg: dict):
                     die(f'notifications.daily_brief.{key} must be an integer')
                 if value < 1 or value > 20:
                     die(f'notifications.daily_brief.{key} must be between 1 and 20')
+
+        if 'render_style' in notifications:
+            render_style = notifications.get('render_style')
+            if not isinstance(render_style, str):
+                die('notifications.render_style must be one of: compact, legacy')
+            normalized_render_style = render_style.strip().lower()
+            if normalized_render_style not in {'compact', 'legacy'}:
+                die('notifications.render_style must be one of: compact, legacy')
+            warn(
+                'NOTIFICATIONS_RENDER_STYLE_DEPRECATED: '
+                f'notifications.render_style={normalized_render_style} is deprecated and ignored; '
+                'scheduled ordinary notifications always use daily_brief'
+            )
 
         has_routing = any(notifications.get(k) for k in ('provider', 'channel', 'transport_channel', 'target'))
         if has_routing:
