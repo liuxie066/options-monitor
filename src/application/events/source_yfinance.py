@@ -40,6 +40,10 @@ def to_date_str(value: Any) -> str | None:
 
 
 def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
+    return list(fetch_symbol_event_evidence_yfinance(symbol)["events"])
+
+
+def fetch_symbol_event_evidence_yfinance(symbol: str) -> dict[str, Any]:
     import yfinance as yf
 
     ticker = yf.Ticker(symbol)
@@ -47,6 +51,8 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     source_ok_count = 0
     source_errors: list[str] = []
+    earnings_errors: list[str] = []
+    calendar_error = ""
 
     def _add(event_type: str, raw_value: Any) -> None:
         ds = to_date_str(raw_value)
@@ -56,7 +62,7 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
         if key in seen:
             return
         seen.add(key)
-        events.append({"type": event_type, "date": ds})
+        events.append({"type": event_type, "date": ds, "source": "yfinance"})
 
     try:
         edf = ticker.get_earnings_dates(limit=8)
@@ -65,7 +71,9 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
                 _add("earnings", idx)
         source_ok_count += 1
     except Exception as exc:
-        source_errors.append(f"earnings_dates:{type(exc).__name__}:{exc}")
+        error = f"earnings_dates:{type(exc).__name__}:{exc}"
+        source_errors.append(error)
+        earnings_errors.append(error)
 
     try:
         cal = ticker.calendar
@@ -81,7 +89,9 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
                     _add("earnings" if key == "Earnings Date" else "ex_dividend", row)
         source_ok_count += 1
     except Exception as exc:
-        source_errors.append(f"calendar:{type(exc).__name__}:{exc}")
+        calendar_error = f"calendar:{type(exc).__name__}:{exc}"
+        source_errors.append(calendar_error)
+        earnings_errors.append(calendar_error)
 
     try:
         div = ticker.get_dividends()
@@ -102,4 +112,18 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict[str, Any]]:
         raise EventSourceError(message, error_code=classify_event_source_error(message))
 
     events.sort(key=lambda x: (x.get("date") or "", x.get("type") or ""))
-    return events
+    coverage = {
+        "earnings": {
+            "status": "complete" if not earnings_errors else "partial",
+            "error": "; ".join(earnings_errors),
+        },
+        "ex_dividend": {
+            "status": "complete" if not calendar_error else "partial",
+            "error": calendar_error,
+        },
+        "split": {
+            "status": "unsupported",
+            "error": "yfinance event source does not provide forward split coverage",
+        },
+    }
+    return {"events": events, "coverage": coverage}

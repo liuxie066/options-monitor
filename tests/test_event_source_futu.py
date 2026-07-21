@@ -40,7 +40,10 @@ class FakeFutuEventGateway:
 
 
 def test_fetch_symbol_events_futu_normalizes_earnings_dividends_and_splits() -> None:
-    from src.application.events.source_futu import fetch_symbol_events_futu
+    from src.application.events.source_futu import (
+        fetch_symbol_event_evidence_futu,
+        fetch_symbol_events_futu,
+    )
 
     gateway = FakeFutuEventGateway()
     events = fetch_symbol_events_futu("NVDA", gateway=gateway, close_gateway=False)
@@ -54,6 +57,41 @@ def test_fetch_symbol_events_futu_normalizes_earnings_dividends_and_splits() -> 
     assert all(item["source"] == "futu" for item in events)
     assert gateway.closed is False
     assert gateway.split_calls == [{"next_key": None, "num": 50}, {"next_key": "page-2", "num": 50}]
+
+    evidence = fetch_symbol_event_evidence_futu(
+        "NVDA",
+        gateway=FakeFutuEventGateway(),
+        close_gateway=False,
+    )
+    assert evidence["events"] == events
+    assert evidence["coverage"] == {
+        "earnings": {"status": "complete", "error": ""},
+        "ex_dividend": {"status": "complete", "error": ""},
+        "split": {"status": "complete", "error": ""},
+    }
+
+
+def test_fetch_symbol_event_evidence_futu_preserves_partial_coverage() -> None:
+    from src.application.events.source_futu import fetch_symbol_event_evidence_futu
+
+    class PartialGateway(FakeFutuEventGateway):
+        def get_corporate_actions_stock_splits(self, code: str, *, next_key=None, num=None):
+            raise RuntimeError(f"split source unavailable for {code}")
+
+    evidence = fetch_symbol_event_evidence_futu(
+        "NVDA",
+        gateway=PartialGateway(),
+        close_gateway=False,
+    )
+
+    assert [(item["type"], item["date"]) for item in evidence["events"]] == [
+        ("earnings", "2026-06-01"),
+        ("ex_dividend", "2026-06-05"),
+    ]
+    assert evidence["coverage"]["earnings"]["status"] == "complete"
+    assert evidence["coverage"]["ex_dividend"]["status"] == "complete"
+    assert evidence["coverage"]["split"]["status"] == "partial"
+    assert "split source unavailable" in evidence["coverage"]["split"]["error"]
 
 
 def test_fetch_symbol_events_futu_reports_old_sdk_capability_gap() -> None:

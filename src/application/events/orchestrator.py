@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.symbol_identity import canonical_symbol
-from src.application.events.source_futu import fetch_symbol_events_futu
-from src.application.events.source_yfinance import fetch_symbol_events_yfinance
+from src.application.events.source_futu import fetch_symbol_event_evidence_futu
+from src.application.events.source_yfinance import fetch_symbol_event_evidence_yfinance
 from src.application.events.store import EventFetchResult, EventStore
 
 
-EventFetcher = Callable[[str], list[dict[str, Any]]]
+EventFetcher = Callable[[str], Any]
 DEFAULT_EVENT_SOURCE_PROVIDER = "futu"
 
 
@@ -132,6 +132,7 @@ def resolve_symbol_events(
         "selected_provider": "",
         "provider_chain": chain,
         "events": [],
+        "coverage": {},
         "source_status": "error",
         "source_error": _join_source_errors(source_results),
         "error_code": _dominant_error_code(source_results),
@@ -197,12 +198,12 @@ def provider_chain_for_symbol(symbol: str, *, policy: dict[str, Any]) -> list[st
 def build_event_fetcher(provider: str, cfg: dict[str, Any]) -> EventFetcher:
     provider_name = normalize_event_source_provider(provider)
     if provider_name == "yfinance":
-        return fetch_symbol_events_yfinance
+        return fetch_symbol_event_evidence_yfinance
     if provider_name == "futu":
         futu_cfg = event_source_futu_cfg(cfg)
         host = str(futu_cfg.get("host") or "127.0.0.1")
         port = _positive_int(futu_cfg.get("port"), 11111)
-        return lambda symbol: fetch_symbol_events_futu(symbol, host=host, port=port)
+        return lambda symbol: fetch_symbol_event_evidence_futu(symbol, host=host, port=port)
     raise ValueError(f"unsupported event source provider: {provider}")
 
 
@@ -275,6 +276,7 @@ def _resolved_item(
         "selected_provider": selected_provider,
         "provider_chain": provider_chain,
         "events": list(selected_result.events),
+        "coverage": dict(selected_result.coverage),
         "source_status": source_status,
         "source_error": selected_result.source_error,
         "error_code": selected_result.error_code,
