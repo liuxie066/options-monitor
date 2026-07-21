@@ -25,6 +25,31 @@ def fetch_symbol_events_futu(
 ) -> list[dict[str, Any]]:
     """Fetch event-risk dates through Futu OpenD F10 corporate-action APIs."""
 
+    return list(
+        fetch_symbol_event_evidence_futu(
+            symbol,
+            gateway=gateway,
+            host=host,
+            port=port,
+            close_gateway=close_gateway,
+            split_pages=split_pages,
+            split_page_size=split_page_size,
+        )["events"]
+    )
+
+
+def fetch_symbol_event_evidence_futu(
+    symbol: str,
+    *,
+    gateway: FutuGateway | Any | None = None,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    close_gateway: bool | None = None,
+    split_pages: int = 3,
+    split_page_size: int = 50,
+) -> dict[str, Any]:
+    """Fetch events plus per-category coverage for authoritative absence checks."""
+
     underlier = normalize_underlier(symbol)
     code = underlier.code
     owned_gateway = gateway is None
@@ -34,6 +59,7 @@ def fetch_symbol_events_futu(
     seen: set[tuple[str, str]] = set()
     source_ok_count = 0
     source_errors: list[str] = []
+    coverage: dict[str, dict[str, str]] = {}
 
     def add_event(event_type: str, value: Any, *, raw: dict[str, Any] | None = None) -> None:
         ds = futu_date_str(value)
@@ -57,16 +83,22 @@ def fetch_symbol_events_futu(
                 raw=row,
             )
         source_ok_count += 1
+        coverage["earnings"] = {"status": "complete", "error": ""}
     except Exception as exc:
-        source_errors.append(f"earnings_price_history:{type(exc).__name__}:{exc}")
+        error = f"earnings_price_history:{type(exc).__name__}:{exc}"
+        source_errors.append(error)
+        coverage["earnings"] = {"status": "partial", "error": error}
 
     try:
         payload = gw.get_corporate_actions_dividends(code)
         for row in _rows_from_payload(payload, "dividend_list"):
             add_event("ex_dividend", _first_value(row, "ex_date", "ex_date_str"), raw=row)
         source_ok_count += 1
+        coverage["ex_dividend"] = {"status": "complete", "error": ""}
     except Exception as exc:
-        source_errors.append(f"dividends:{type(exc).__name__}:{exc}")
+        error = f"dividends:{type(exc).__name__}:{exc}"
+        source_errors.append(error)
+        coverage["ex_dividend"] = {"status": "partial", "error": error}
 
     try:
         for row in _fetch_split_rows(gw, code=code, max_pages=split_pages, page_size=split_page_size):
@@ -76,8 +108,11 @@ def fetch_symbol_events_futu(
                 raw=row,
             )
         source_ok_count += 1
+        coverage["split"] = {"status": "complete", "error": ""}
     except Exception as exc:
-        source_errors.append(f"stock_splits:{type(exc).__name__}:{exc}")
+        error = f"stock_splits:{type(exc).__name__}:{exc}"
+        source_errors.append(error)
+        coverage["split"] = {"status": "partial", "error": error}
     finally:
         if should_close:
             try:
@@ -90,7 +125,7 @@ def fetch_symbol_events_futu(
         raise EventSourceError(message, error_code=classify_futu_event_error(message))
 
     events.sort(key=lambda x: (x.get("date") or "", x.get("type") or ""))
-    return events
+    return {"events": events, "coverage": coverage}
 
 
 def classify_futu_event_error(value: Any) -> str:
