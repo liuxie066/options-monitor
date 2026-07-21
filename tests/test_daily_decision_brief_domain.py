@@ -16,6 +16,7 @@ def _action(
     rank: int = 1,
     annualized_return: float = 0.20,
     contracts_available: int | None = 1,
+    event_risk: dict | None = None,
 ) -> dict:
     return {
         "priority": priority,
@@ -40,6 +41,42 @@ def _action(
                 else {}
             ),
         },
+        **({"event_risk": event_risk} if event_risk is not None else {}),
+    }
+
+
+def _event_risk(state: str, *, date: str | None = None, chain: str = "event-chain-futu") -> dict:
+    event = (
+        {
+            "event_id": "event-q2",
+            "event_series_id": "event-series-earnings",
+            "event_type": "earnings",
+            "event_date": date,
+            "occurrence_anchor": "2026|Q2",
+            "anchored": True,
+        }
+        if date
+        else None
+    )
+    return {
+        "user_state": state,
+        "reason_code": state,
+        "reliable": state != "unknown",
+        "evidence_chain_id": chain,
+        "nearest_event": event,
+        "events": [event] if event else [],
+        "expiration_relations": (
+            {
+                "contract": {
+                    "expiration": "2026-08-21",
+                    "relation": "before_expiration",
+                    "days_before_expiration": 16,
+                }
+            }
+            if event
+            else {}
+        ),
+        "in_attention_window": bool(event),
     }
 
 
@@ -321,3 +358,47 @@ def test_daily_brief_digest_handles_non_finite_nested_values_deterministically()
     with_none["capacity"]["sell_put"]["cash_free"] = None
 
     assert daily_brief_digest(with_nan) == daily_brief_digest(with_none)
+
+
+def test_diff_emits_candidate_bound_event_material_changes() -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    previous = _brief(
+        revision=0,
+        actions=[_action(event_risk=_event_risk("confirmed_none"))],
+    )
+    current = _brief(
+        revision=1,
+        actions=[_action(event_risk=_event_risk("confirmed_event", date="2026-08-05"))],
+    )
+    previous["market_trading_date"] = current["market_trading_date"] = "2026-07-21"
+
+    diff = diff_daily_decision_briefs(previous, current)
+    change = next(item for item in diff["changes"] if item["change_type"] == "candidate_event_added")
+
+    assert diff["material"] is True
+    assert change["action"]["contract_symbol"] == "NVDA260821P00100000"
+    assert change["after_event_risk"]["nearest_event"]["event_date"] == "2026-08-05"
+
+
+def test_diff_ignores_event_changes_for_never_important_candidate() -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+
+    previous_action = _action(
+        priority="P2",
+        state="observe",
+        event_risk=_event_risk("confirmed_none"),
+    )
+    current_action = _action(
+        priority="P2",
+        state="observe",
+        event_risk=_event_risk("confirmed_event", date="2026-08-05"),
+    )
+    previous = _brief(revision=0, actions=[previous_action])
+    current = _brief(revision=1, actions=[current_action])
+    previous["market_trading_date"] = current["market_trading_date"] = "2026-07-21"
+
+    diff = diff_daily_decision_briefs(previous, current)
+
+    assert diff["material"] is False
+    assert not any(item["change_type"].startswith("candidate_event_") for item in diff["changes"])

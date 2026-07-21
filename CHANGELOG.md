@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-07-21
+
+### Added
+- Added candidate-bound event risk projections to Daily Decision Briefs, including the nearest important event, evidence reliability, calendar-day distance, attention-window membership, and relation to Sell Put or Combo Yield expirations.
+- Added material candidate event transitions for event addition, date change, entry before expiration, evidence degradation, evidence recovery, and same-chain confirmed removal through the existing last-confirmed delivery lifecycle.
+
+### Changed
+- Made the current run-level `state/event_snapshot.json` the sole Daily Brief event authority; candidate CSV event compatibility fields no longer participate as fallback evidence.
+- Rendered every displayed candidate with one decision-oriented event state: confirmed event, confirmed no important event in the contract window, or temporarily unable to confirm.
+
+### Fixed
+- Prevented missing, malformed, stale, partial, conflicting, unsupported, or empty fallback evidence from being presented as confirmed event absence.
+- Prevented provider degradation and freshness-only metadata changes from being announced as event removal or other material candidate changes.
+
 ## 1.3.7 - 2026-07-21
 
 ### Fixed

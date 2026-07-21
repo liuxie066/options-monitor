@@ -772,3 +772,169 @@ def test_render_limit_normalization_remains_bounded() -> None:
         "max_candidates_per_strategy": 7,
         "max_rejection_reasons": 20,
     }
+
+
+def _render_event_risk(
+    state: str,
+    *,
+    date: str | None = None,
+    relation: str = "before_expiration",
+) -> dict:
+    event = (
+        {
+            "event_id": "event-q2",
+            "event_series_id": "event-series-earnings",
+            "event_type": "earnings",
+            "event_date": date,
+            "anchored": True,
+        }
+        if date
+        else None
+    )
+    return {
+        "user_state": state,
+        "reason_code": "internal_raw_reason_must_not_render",
+        "reliable": state != "unknown",
+        "evidence_chain_id": "internal-event-chain",
+        "nearest_event": event,
+        "events": [event] if event else [],
+        "expiration_relations": (
+            {
+                "contract": {
+                    "expiration": "2026-08-21",
+                    "relation": relation,
+                    "days_before_expiration": 16,
+                }
+            }
+            if event
+            else {}
+        ),
+        "in_attention_window": relation in {"before_expiration", "on_expiration"} if event else False,
+    }
+
+
+def test_candidate_event_lines_render_decision_semantics_without_raw_enums() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["market_trading_date"] = "2026-07-21"
+    brief["candidates"]["sell_put"][0]["event_risk"] = _render_event_risk(
+        "confirmed_event", date="2026-08-05"
+    )
+    brief["candidates"]["sell_put"][1]["event_risk"] = _render_event_risk("unknown")
+    brief["candidates"]["covered_call"][0]["event_risk"] = _render_event_risk("confirmed_none")
+
+    message = render_full_brief(brief)
+
+    assert "预计 8 月 5 日发布财报，早于当前 Put 到期日；执行前需要重新确认事件窗口和报价。" in message
+    assert "近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。" in message
+    assert "已确认当前期权到期前没有近期重要事件；执行前仍需复核报价。" in message
+    assert "internal_raw_reason_must_not_render" not in message
+    assert "internal-event-chain" not in message
+
+
+def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    brief = _brief()
+    brief["market_trading_date"] = "2026-07-21"
+    brief["candidates"]["sell_put"][1]["event_risk"] = _render_event_risk(
+        "confirmed_event", date="2026-08-05"
+    )
+    before = _render_event_risk("confirmed_event", date="2026-08-25", relation="after_expiration")
+    after = _render_event_risk("confirmed_event", date="2026-08-05")
+    action = {
+        "action_id": "action-nvda-put",
+        "action_type": "open_candidate",
+        "strategy_family": "sell_put",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "contract_symbol": "NVDA260821P00100000",
+    }
+
+    message = render_delta_brief(
+        brief,
+        {
+            "changes": [
+                {
+                    "change_type": "candidate_event_date_changed",
+                    "action": action,
+                    "before_event_risk": before,
+                    "after_event_risk": after,
+                },
+                {
+                    "change_type": "candidate_event_entered_expiry_window",
+                    "action": action,
+                    "before_event_risk": before,
+                    "after_event_risk": after,
+                },
+            ]
+        },
+    )
+
+    assert "较上一轮：NVDA 08-21 $100 Put 财报日期调整至 8 月 5 日，现在早于当前 Put 到期日。" in message
+    assert message.count("进入当前合约关注窗口") == 0
+    assert "NVDA · Sell Put · 08-21 $100 Put（备选 2）" in message
+
+
+def test_event_evidence_degradation_summary_does_not_claim_event_removal() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    action = {
+        "action_id": "action-nvda-put",
+        "action_type": "open_candidate",
+        "strategy_family": "sell_put",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+    }
+    message = render_delta_brief(
+        _brief(),
+        {
+            "changes": [
+                {
+                    "change_type": "candidate_event_evidence_degraded",
+                    "action": action,
+                    "before_event_risk": _render_event_risk("confirmed_event", date="2026-08-05"),
+                    "after_event_risk": _render_event_risk("unknown"),
+                }
+            ]
+        },
+    )
+
+    assert "近期事件数据变得不完整，当前无法确认没有重要事件" in message
+    assert "确认移除" not in message
+
+
+def test_data_recovery_keeps_candidate_event_change_summary() -> None:
+    from src.application.daily_decision_brief_renderer import render_delta_brief
+
+    action = {
+        "action_id": "action-nvda-put",
+        "action_type": "open_candidate",
+        "strategy_family": "sell_put",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+    }
+    message = render_delta_brief(
+        _brief(),
+        {
+            "changes": [
+                {"change_type": "recovered"},
+                {
+                    "change_type": "candidate_event_evidence_recovered",
+                    "action": action,
+                    "before_event_risk": _render_event_risk("unknown"),
+                    "after_event_risk": _render_event_risk("confirmed_event", date="2026-08-05"),
+                },
+            ]
+        },
+    )
+
+    assert "数据已恢复，以下为当前结果" in message
+    assert "事件证据已恢复，现预计 8 月 5 日发布财报" in message

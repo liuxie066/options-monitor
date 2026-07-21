@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.events.source_yfinance import EventSourceError, classify_event_source_error
@@ -16,6 +16,7 @@ class EventFetchResult:
     provider: str
     symbol: str
     events: list[dict[str, Any]]
+    coverage: dict[str, dict[str, str]]
     source_status: str
     source_error: str = ""
     error_code: str = ""
@@ -30,6 +31,7 @@ class EventFetchResult:
             "provider": self.provider,
             "symbol": self.symbol,
             "events": list(self.events),
+            "coverage": dict(self.coverage),
             "source_status": self.source_status,
             "source_error": self.source_error,
             "error_code": self.error_code,
@@ -81,7 +83,7 @@ class EventStore:
         self,
         symbol: str,
         *,
-        fetcher: Callable[[str], list[dict[str, Any]]],
+        fetcher: Callable[[str], Any],
         now: datetime | None = None,
         force_refresh: bool = False,
     ) -> EventFetchResult:
@@ -107,7 +109,7 @@ class EventStore:
             return self._blocked_result(sym, entry, blocked_until=active_block, provider_state=provider_state, now=now_dt)
 
         try:
-            events = _clean_events(fetcher(sym))
+            events, coverage = _normalize_fetch_payload(fetcher(sym))
         except Exception as exc:
             error_code = _error_code(exc)
             source_error = _error_text(exc)
@@ -155,6 +157,7 @@ class EventStore:
                 provider=self.provider,
                 symbol=sym,
                 events=[],
+                coverage={},
                 source_status="error",
                 source_error=source_error,
                 error_code=error_code,
@@ -169,6 +172,7 @@ class EventStore:
             "symbol": sym,
             "source_status": "ok",
             "events": events,
+            "coverage": coverage,
             "fetched_at": fetched_at,
             "last_success_at": fetched_at,
         }
@@ -178,6 +182,7 @@ class EventStore:
             provider=self.provider,
             symbol=sym,
             events=events,
+            coverage=coverage,
             source_status="ok",
             fetched_at=fetched_at,
             last_success_at=fetched_at,
@@ -210,6 +215,7 @@ class EventStore:
             provider=str(entry.get("provider") or self.provider),
             symbol=symbol,
             events=_clean_events(entry.get("events")),
+            coverage=_clean_coverage(entry.get("coverage")),
             source_status=source_status,
             source_error=source_error,
             error_code=error_code,
@@ -245,6 +251,7 @@ class EventStore:
             provider=self.provider,
             symbol=symbol,
             events=[],
+            coverage={},
             source_status="error",
             source_error=source_error,
             error_code=error_code,
@@ -279,6 +286,33 @@ def _clean_events(events: Any) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         return []
     return [dict(x) for x in events if isinstance(x, dict)]
+
+
+def _clean_coverage(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for raw_type, raw_item in value.items():
+        event_type = str(raw_type or "").strip().lower()
+        if not event_type or not isinstance(raw_item, Mapping):
+            continue
+        status = str(raw_item.get("status") or "unknown").strip().lower()
+        if status not in {"complete", "partial", "unsupported", "unknown"}:
+            status = "unknown"
+        out[event_type] = {
+            "status": status,
+            "error": str(raw_item.get("error") or "").strip(),
+        }
+    return out
+
+
+def _normalize_fetch_payload(value: Any) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
+    if isinstance(value, Mapping):
+        raw_events = value.get("events")
+        if not isinstance(raw_events, list) or any(not isinstance(item, Mapping) for item in raw_events):
+            raise ValueError("structured event evidence must contain an events list of objects")
+        return [dict(item) for item in raw_events], _clean_coverage(value.get("coverage"))
+    return _clean_events(value), {}
 
 
 def _has_stale_success(entry: dict[str, Any], now_dt: datetime, stale_ttl_seconds: int) -> bool:
