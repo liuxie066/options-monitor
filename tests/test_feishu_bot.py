@@ -365,3 +365,184 @@ def test_send_post_message_enforces_exact_final_request_boundary(
 
     assert len(token_calls) == 1
     assert len(http_calls) == 1
+
+
+def test_real_notification_renderers_are_embedded_unchanged_in_single_md_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+    from src.application.positions.maintenance_receipt import build_auto_close_receipt_message
+    from src.application.scheduled_notification import build_notify_failure_summary_message
+    from src.application.trades.receipt import build_trade_intake_receipt_message
+
+    daily_brief = render_full_brief(
+        {
+            "market": "US",
+            "account": "lx",
+            "actionability": "live_actionable",
+            "data_as_of_utc": "2026-07-21T14:03:00+00:00",
+            "candidates": {
+                "sell_put": [
+                    {
+                        "rank": 1,
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "expiration": "2026-08-21",
+                        "strike": 100,
+                        "priority": "P1",
+                        "metrics": {
+                            "mid": 5.25,
+                            "annualized_net_return_on_cash_basis": 0.181,
+                            "delta": -0.24,
+                            "dte": 32,
+                            "net_income": 480,
+                        },
+                        "capacity": {"contracts_available": 1, "reason": "cash_supported"},
+                    }
+                ],
+                "covered_call": [],
+                "combo_yield": [],
+            },
+            "positions": [
+                {
+                    "symbol": "NVDA",
+                    "strategy_family": "sell_put",
+                    "expiration": "2026-08-21",
+                    "strike": 100,
+                    "option_type": "put",
+                    "close_action": "close",
+                    "evaluation_status": "evaluable",
+                    "quote_status": "priced",
+                    "metrics": {
+                        "close_mid": 0.52,
+                        "realized_if_close": 474.5,
+                        "remaining_annualized_return": 0.042,
+                    },
+                }
+            ],
+            "capacity": {"sell_put": {"contracts_available": 1, "reason": "cash_supported"}},
+        }
+    )
+    compact_tick = build_account_message_compact(
+        AccountResult(
+            account="lx",
+            ran_scan=True,
+            should_notify=True,
+            decision_reason="dense",
+            notification_text=(
+                "### Sell Put\n"
+                "🟢 Sell Put NVDA 100P @ 08-21 | 🎯建议挂单 5.25\n"
+                "- 权利金 5.25USD · 年化 18.1% · 32天\n\n"
+                "### [lx] 平仓建议 (1)\n"
+                "- NVDA Put 2026-08-21 100P · 建议平仓\n"
+                "- 待补数据:\n"
+                "- PDD Put 2026-08-21 95P · 无法评估 | 当前未取得可用价格\n"
+            ),
+        ),
+        now_bj="2026-07-21 22:03:00",
+        cash_footer_lines=["💰 现金 USD", "LX 持有 $10,000 | 可用 $2,000"],
+    )
+    trade_receipt = build_trade_intake_receipt_message(
+        deal=None,
+        result={
+            "status": "unresolved",
+            "reason": "ambiguous_assigned_stock_sale",
+            "deal_id": "deal-1",
+            "account": "lx",
+            "action": "close",
+            "diagnostics": {
+                "candidates": [
+                    {
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "stock_lot_id": "lot-1",
+                    }
+                ]
+            },
+        },
+        payload={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration_ymd": "2026-08-21",
+            "strike": 100,
+            "qty": 1,
+            "price": 5.25,
+            "side": "sell",
+        },
+    )
+    maintenance_receipt = build_auto_close_receipt_message(
+        dry_run=False,
+        result={
+            "mode": "applied",
+            "account": "lx",
+            "broker": "富途",
+            "grace_days": 2,
+            "applied_closed": 1,
+            "candidates_should_close": 2,
+            "as_of_utc": "2026-07-21T14:03:00+00:00",
+            "applied": [
+                {"record_id": "rec_1", "position_id": "pos_1", "expiration_ymd": "2026-07-18"}
+            ],
+            "errors": ["rec_2 pos_2: sqlite locked"],
+        },
+    )
+    failure_recovery = build_notify_failure_summary_message(
+        run_id="run-1",
+        sent_accounts=["sy"],
+        notify_failures=[
+            {
+                "account": "lx",
+                "error_code": "FEISHU_POST_TOO_LARGE",
+                "attempts": 1,
+                "delivery_confirmed": False,
+                "message_id": None,
+            }
+        ],
+    )
+    messages = {
+        "daily-brief": daily_brief,
+        "compact-tick": compact_tick,
+        "trade-receipt": trade_receipt,
+        "maintenance-receipt": maintenance_receipt,
+        "failure-recovery": failure_recovery,
+    }
+
+    assert daily_brief.startswith("# OM · lx · 美股\n> ")
+    assert "\n## 候选\n1. " in daily_brief
+    assert "\n   - " in daily_brief
+    assert all(section in compact_tick for section in ("## 候选", "## 持仓", "## 资金"))
+    assert "合约：2026-08-21 100 Put" in trade_receipt
+    assert "候选 lot：" in trade_receipt
+    assert "明细：" in maintenance_receipt and "错误：" in maintenance_receipt
+    assert "FEISHU_POST_TOO_LARGE attempts=1" in failure_recovery
+
+    payloads: list[dict] = []
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda app_id, app_secret, fn: fn("tenant_token"),
+    )
+
+    def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
+        payloads.append(payload)
+        return {"code": 0, "data": {"message_id": f"om_{len(payloads)}"}}
+
+    for name, message in messages.items():
+        feishu_bot.send_post_message(
+            app_id="app_1",
+            app_secret="secret_1",
+            open_id="ou_1",
+            markdown=message,
+            uuid=f"fixture-{name}",
+            http_json_fn=_http_json,
+        )
+
+    assert len(payloads) == len(messages)
+    for payload, expected in zip(payloads, messages.values(), strict=True):
+        content = json.loads(payload["content"])
+        assert content == {"zh_cn": {"content": [[{"tag": "md", "text": expected.strip()}]]}}
+        assert "title" not in content["zh_cn"]
