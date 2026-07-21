@@ -254,18 +254,37 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
     assert bundle.commits == [{"lx": FIXED_TARGET}]
 
 
-def test_no_send_updates_snapshot_and_pending_without_publishing_envelope(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("fixed", "candidate", "expected_pending"),
+    (
+        (False, False, 0),
+        (True, False, 0),
+        (False, True, 1),
+        (True, True, 1),
+    ),
+)
+def test_no_send_four_way_matrix_updates_snapshot_without_publishing_envelope(
+    monkeypatch,
+    tmp_path: Path,
+    fixed: bool,
+    candidate: bool,
+    expected_pending: int,
+) -> None:
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief, read_retryable_daily_decision_brief_delivery
 
-    _patch_assembler(monkeypatch)
-    bundle = _request(tmp_path, run_id="no-send", no_send=True)
+    _patch_assembler(monkeypatch, candidate=candidate)
+    bundle = _request(tmp_path, run_id=f"no-send-{fixed}-{candidate}", fixed=fixed, no_send=True)
     assert mod.run_tick_notification_flow(bundle.request) == 0
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
     retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
     assert retry["envelope"] is None
-    assert retry["state"]["days"][MARKET_DATE]["pending_candidates"]
-    assert bundle.commits == [{"lx": FIXED_TARGET}]
+    day = retry["state"]["days"][MARKET_DATE]
+    assert len(day["pending_candidates"]) == expected_pending
+    assert day["fixed_reports"] == {}
+    assert day["candidate_delivery"] is None
+    assert day["alerted_candidates"] == {}
+    assert bundle.commits == [{"lx": FIXED_TARGET if fixed else HALF_TARGET}]
 
 
 def test_quiet_hours_keeps_durable_fixed_envelope(monkeypatch, tmp_path: Path) -> None:
