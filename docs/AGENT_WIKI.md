@@ -240,7 +240,7 @@ Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, sp
 Tick flow:
 
 ```text
-./om run tick --config <runtime-config.json>
+./om run tick --config <runtime-config.json>  # manual scan; no ordinary Tick auto-send
 -> src.application.multi_account_tick.run_tick
    -> tick_guard_flow
    -> tick_scheduler_context
@@ -250,9 +250,11 @@ Tick flow:
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
       -> optional close advice
       -> per-account metrics and notification text
-   -> tick_notification_flow
+   -> tick_notification_flow  # scheduled only: Daily Decision Brief ordinary delivery
    -> run state and audit writes
 ```
+
+Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle, not evidence that a Daily Brief was prepared or sent.
 
 Entrypoint signature:
 
@@ -523,7 +525,7 @@ Smallest remaining actions, with blockers called out.
 - Strategy attribution: candidate and position attribution are independent. An empty `candidates.combo_yield` means no new Combo Yield candidate; it must not erase existing position attribution such as `组合增强（Put 侧/Call 侧）`. Renderer code must consume structured strategy/status fields rather than parse `strategy_group_id` or raw `leg_role`.
 - Capacity: candidate capacity is contract-scoped. Sell Put alternatives share account cash, so quantities shown for different candidates must never be summed.
 - Closed market: do not create a fake LIVE run. Read the latest local brief for planning/replay; once `valid_until_utc` expires, the read surface reports effective `planning_only`.
-- Safety: `notifications.daily_brief.enabled` defaults to `false`. Event risk changes do not alter candidate identity, action IDs, ranking, labeled-only authority, eligibility, or capacity; they never auto-cancel or auto-trade. This projection adds no config migration, CLI, second lifecycle, receipt, sender, renderer, or scheduler. Production enablement, notification canary, release and remote upgrade require separate operator authorization.
+- Safety: scheduled ordinary notifications use Daily Brief as the sole renderer; the deprecated `notifications.daily_brief.enabled` key is accepted with warning during the compatibility window but has no routing authority. Event risk changes do not alter candidate identity, action IDs, ranking, labeled-only authority, eligibility, or capacity; they never auto-cancel or auto-trade. Production notification canary, release and remote upgrade require separate operator authorization.
 - Multi-market: state/artifacts are market-qualified, but combined outbound remains intentionally fail-closed.
 
 Read surfaces:

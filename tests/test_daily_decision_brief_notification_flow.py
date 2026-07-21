@@ -90,6 +90,7 @@ def _request(
     markets: tuple[str, ...] = ("US",),
     no_send: bool = False,
     config: dict | None = None,
+    trigger_kind: str = "scheduled",
 ) -> SimpleNamespace:
     import src.application.tick_notification_flow as mod
 
@@ -117,6 +118,7 @@ def _request(
             if ran_pipeline_accounts is not None
             else tuple(str(item["account"]) for item in (results or [{"account": "lx"}]))
         ),
+        trigger_kind=trigger_kind,
     )
     return SimpleNamespace(request=request, completions=completions)
 
@@ -134,35 +136,32 @@ def _patch_assembler(monkeypatch) -> None:
     )
 
 
-def test_daily_brief_default_off_preserves_legacy_preparation(monkeypatch, tmp_path: Path) -> None:
+def test_scheduled_daily_brief_ignores_deprecated_enabled_switch(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
 
-    called = {"legacy": 0}
-    monkeypatch.setattr(
-        mod,
-        "_prepare_daily_brief_notification",
-        lambda _request: (_ for _ in ()).throw(AssertionError("daily brief must remain disabled")),
-    )
+    called = {"daily_brief": 0}
 
-    def _legacy(**_kwargs):
-        called["legacy"] += 1
-        return SimpleNamespace(
+    def _daily_brief(_request):
+        called["daily_brief"] += 1
+        return mod.DailyBriefNotificationPreparation(
             prepared_messages=SimpleNamespace(
                 messages_by_account={},
                 threshold_met=False,
                 used_heartbeat=False,
                 heartbeat_accounts=(),
             ),
-            notify_candidates=[],
-            results_count=0,
+            lifecycles_by_account={},
+            delivery_keys_by_account={},
+            markets=("US",),
         )
 
-    monkeypatch.setattr(mod, "prepare_multi_account_notification", _legacy)
+    monkeypatch.setattr(mod, "_prepare_daily_brief_notification", _daily_brief)
     monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **_kwargs: 0)
     bundle = _request(tmp_path, run_id="run-disabled", config=_config(enabled=False))
 
     assert mod.run_tick_notification_flow(bundle.request) == 0
-    assert called == {"legacy": 1}
+    assert called == {"daily_brief": 1}
+    assert not hasattr(mod, "prepare_multi_account_notification")
     assert bundle.completions == [{"status": "completed", "message": "no_account_notification"}]
 
 
@@ -308,22 +307,34 @@ def test_no_material_daily_brief_finishes_before_delivery_route_resolution(monke
     assert second.completions == [{"status": "completed", "message": "no_account_notification"}]
 
 
-def test_multi_market_persists_partitioned_artifacts_but_suppresses_outbound(monkeypatch, tmp_path: Path) -> None:
+def test_multi_market_fails_before_assembler_or_repository_mutation(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
     from domain.storage.repositories import run_repo
-    from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery
 
-    _patch_assembler(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("multi-market must fail before assembly")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prepare_daily_decision_brief",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("multi-market must fail before repository writes")),
+    )
     bundle = _request(tmp_path, run_id="run-us-hk", markets=("US", "HK"))
     preparation = mod._prepare_daily_brief_notification(bundle.request)
 
-    assert preparation.multi_market_delivery_skipped is True
+    assert preparation.multi_market_delivery_unsupported is True
     assert preparation.prepared_messages.messages_by_account == {}
+    assert bundle.request.tick_metrics["daily_brief"] == {
+        "enabled": True,
+        "renderer": "daily_brief",
+        "markets": ["US", "HK"],
+        "prepared": [],
+        "error_code": "daily_brief_multi_market_delivery_unsupported",
+    }
     account_dir = run_repo.get_run_account_state_dir(tmp_path, "run-us-hk", "lx")
-    assert (account_dir / "daily_decision_brief.US.json").exists()
-    assert (account_dir / "daily_decision_brief.HK.json").exists()
-    assert read_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US")["available"] is False
-    assert read_daily_decision_brief_delivery(base=tmp_path, account="lx", market="HK")["available"] is False
+    assert not account_dir.exists()
 
 
 def test_prepare_and_confirmation_are_account_isolated(monkeypatch, tmp_path: Path) -> None:
@@ -586,3 +597,65 @@ def test_force_notification_says_manual_and_ignores_scheduler_batch(monkeypatch,
 
     assert "状态｜手动触发" in message
     assert "10:00 批次" not in message
+
+
+def test_multi_market_flow_records_terminal_failure_and_nonzero_exit(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.multi_tick.misc import AccountResult
+
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("multi-market must fail before assembly")),
+    )
+    bundle = _request(
+        tmp_path,
+        run_id="run-us-hk-terminal",
+        markets=("US", "HK"),
+        results=[AccountResult("lx", True, True, "ok", "legacy poison")],
+        ran_pipeline_accounts=("lx",),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 2
+    assert bundle.completions == [
+        {
+            "status": "unsupported_failed",
+            "message": "daily_brief_multi_market_delivery_unsupported",
+            "ok": False,
+            "error_code": "daily_brief_multi_market_delivery_unsupported",
+        }
+    ]
+    assert bundle.request.tick_metrics["sent"] is False
+    assert bundle.request.tick_metrics["reason"] == "daily_brief_multi_market_delivery_unsupported"
+    assert bundle.request.tick_metrics["error_code"] == "daily_brief_multi_market_delivery_unsupported"
+    assert any(
+        event.get("step") == "run_end"
+        and event.get("status") == "error"
+        and event.get("error_code") == "daily_brief_multi_market_delivery_unsupported"
+        for event in bundle.request.runlog.events
+    )
+
+
+def test_scheduled_message_and_delivery_key_ignore_account_result_notification_text(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.multi_tick.misc import AccountResult
+
+    _patch_assembler(monkeypatch)
+    outputs: list[tuple[str, str]] = []
+    for index, notification_text in enumerate(("", "compact body", "# malicious legacy H1")):
+        base = tmp_path / str(index)
+        bundle = _request(
+            base,
+            run_id="run-poison",
+            results=[AccountResult("lx", True, True, "ok", notification_text)],
+            ran_pipeline_accounts=("lx",),
+        )
+        preparation = mod._prepare_daily_brief_notification(bundle.request)
+        outputs.append(
+            (
+                preparation.prepared_messages.messages_by_account["lx"],
+                preparation.delivery_keys_by_account["lx"],
+            )
+        )
+
+    assert outputs[0] == outputs[1] == outputs[2]
