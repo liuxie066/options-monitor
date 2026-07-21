@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 
 import pandas as pd
 
@@ -17,7 +18,17 @@ def _render_via_alert_engine(summary_row: dict, *, render_style: str = "legacy")
     normalized = normalize_processor_row(summary_row)
     df = pd.DataFrame([normalized])
     alerts = build_alert_text(df)
-    return build_notification("", alerts, account_label="SY", render_style=render_style)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return build_notification("", alerts, account_label="SY", render_style=render_style)
+
+
+def _render_legacy(changes: str, alerts: str, *, account_label: str) -> str:
+    from src.application.notify_symbols import build_notification
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return build_notification(changes, alerts, account_label=account_label, render_style="legacy")
 
 
 def _staggered_combo_summary() -> dict:
@@ -60,7 +71,7 @@ def test_notify_symbols_markdown_put_layout() -> None:
 ## 高优先级
 - [腾讯](0700.HK) | sell_put | 2026-04-29 460P | 年化 17.21% | 净收入 557.00 | DTE 26 | Strike 460 | 中性 | ccy HKD | ask 5.860 | bid 5.580 | mid 5.720 | delta -0.23 | cash_req_cny ¥110,720 | 通过准入后，收益/风险组合较强，值得优先看。
 """
-    out = build_notification("", alerts, account_label="LX")
+    out = _render_legacy("", alerts, account_label="LX")
 
     expected = """Put
 
@@ -94,7 +105,7 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
 ## 高优先级
 - NVDA | sell_put | 2026-06-18 156P | 年化 - | 净收入 524.99 | DTE 76 | Strike nan | nan | ccy USD | ask 5.450 | bid 5.100 | mid 5.275 | delta nan | iv nan | cash_req - | 通过准入后，收益/风险组合较强，值得优先看。
 """
-    out = build_notification("", alerts, account_label="SY")
+    out = _render_legacy("", alerts, account_label="SY")
 
     assert "nan" not in out.lower()
     assert "行权价=156" in out
@@ -117,7 +128,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 
 - NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。
 """
-    out = build_notification(changes, alerts, account_label="SY")
+    out = _render_legacy(changes, alerts, account_label="SY")
 
     assert "**[sy] 英伟达｜Covered Call｜2026-06-18 180C**" in out
     assert "数量=2张(可覆盖)" in out
@@ -134,7 +145,7 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
 ## 高优先级
 - NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 Covered Call 备选。
 """
-    out = build_notification("", alerts, account_label="SY")
+    out = _render_legacy("", alerts, account_label="SY")
 
     assert "nan" not in out.lower()
     assert "行权价=180" in out
@@ -203,7 +214,7 @@ def test_notify_symbols_markdown_put_chain_shows_event_risk() -> None:
     )
 
     alerts = build_alert_text(pd.DataFrame([summary_row]))
-    out = build_notification("", alerts, account_label="SY")
+    out = _render_legacy("", alerts, account_label="SY")
 
     assert "event earnings@2026-06-10" in alerts
     assert "事件｜earnings@2026-06-10" in out
@@ -333,7 +344,7 @@ def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
 ## 高优先级
 - [腾讯](0700.HK) | sell_put | 2026-04-29 460P | 年化 17.21% | 净收入 557.00 | DTE 26 | Strike 460 | 中性 | ccy HKD | mid 5.720 | cash_req_cny ¥110,720 | cash_used_total_cny ¥200,000 | cash_used_sym_cny ¥45,000 | 通过准入后，收益/风险组合较强，值得优先看。
 """
-    out = build_notification("", alerts, account_label="LX")
+    out = _render_legacy("", alerts, account_label="LX")
 
     assert "同标的Sell Put占用=¥45,000" in out
 
@@ -604,7 +615,7 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
     )
     alerts = "# Symbols Alerts\n\n## 高优先级\n" + "\n".join(put_lines + [call_line]) + "\n"
 
-    out = build_notification("", alerts, account_label="LX")
+    out = _render_legacy("", alerts, account_label="LX")
 
     assert out.count("｜卖Put｜") == 5
     assert "PUT5" in out

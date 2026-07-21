@@ -49,60 +49,19 @@ def build_no_candidate_notification_text(
     return '当前没有通过筛选的候选。\n'
 
 
-def build_account_messages(
-    *,
-    notify_candidates: list,
-    now_bj,
-    cash_footer_lines: list[str],
-    cash_footer_for_account_fn: Callable[[list[str], str], list[str]],
-    build_account_message_fn: Callable[..., str],
-) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for r in (notify_candidates or []):
-        msg = build_account_message_fn(
-            r,
-            now_bj=now_bj,
-            cash_footer_lines=cash_footer_for_account_fn(cash_footer_lines, r.account),
-        )
-        if msg:
-            out[str(r.account)] = msg
-    return out
-
-
-def build_no_candidate_account_messages(
-    *,
-    results: list,
-    now_bj,
-    cash_footer_lines: list[str],
-    cash_footer_for_account_fn: Callable[[list[str], str], list[str]],
-) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for r in (results or []):
-        if not (getattr(r, 'ran_scan', False) and getattr(r, 'should_notify', False)):
-            continue
-        acct = str(getattr(r, 'account', '') or '').strip().lower()
-        if not acct:
-            continue
-        out[acct] = build_no_candidate_notification_text(
-            account_label=acct,
-            now_bj=str(now_bj),
-            cash_footer_lines=cash_footer_for_account_fn(cash_footer_lines, acct),
-            include_account_header=True,
-        )
-    return out
-
-
 def build_no_account_notification_payloads(
     *,
     now_utc_fn: Callable[[], str],
     results: list,
     run_dir: str,
+    reason: str = 'no_account_notification',
+    error_code: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     shared_now = now_utc_fn()
     shared_payload = {
         'last_run_utc': shared_now,
         'sent': False,
-        'reason': 'no_account_notification',
+        'reason': reason,
         'accounts': [r.account for r in results],
         'results': [r.__dict__ for r in results],
     }
@@ -111,11 +70,15 @@ def build_no_account_notification_payloads(
         account_payloads[str(r.account)] = {
             'last_run_utc': now_utc_fn(),
             'sent': False,
-            'reason': 'no_account_notification',
+            'reason': reason,
             'account': r.account,
             'result': r.__dict__,
             'run_dir': str(run_dir),
         }
+    if error_code:
+        shared_payload['error_code'] = str(error_code)
+        for payload in account_payloads.values():
+            payload['error_code'] = str(error_code)
     return shared_payload, account_payloads
 
 

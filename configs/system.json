@@ -139,7 +139,6 @@
       "opend_alert_after_consecutive_failures": 3,
       "opend_alert_send_recovery_notice": true,
       "daily_brief": {
-        "enabled": false,
         "max_actions_per_priority": 5,
         "max_candidates_per_strategy": 3,
         "max_rejection_reasons": 5

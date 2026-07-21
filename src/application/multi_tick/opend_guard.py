@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.application.notification_delivery_adapter import normalize_notification_delivery_result, select_notification_delivery_adapter
 from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_shells import render_system_notice
 from src.application.trade_time_format import format_iso_time_beijing
 from src.infrastructure.io_utils import read_json, atomic_write_json as write_json, utc_now
 
@@ -194,13 +195,6 @@ def _send_notification(base: Path, cfg: dict, *, message: str) -> bool:
         return False
 
 
-def _flat_notice_value(value: object, *, limit: int | None = None) -> str:
-    text = str(value or "")
-    if limit is not None:
-        text = text[:limit]
-    return " · ".join(part.strip() for part in text.splitlines() if part.strip())
-
-
 def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False, skip_consecutive_gate: bool = False) -> bool:
     cooldown_sec = 600
     burst_window_sec = 900
@@ -249,16 +243,19 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         return False
 
     now_utc = utc_now()
-    msg = (
-        "# OM · 系统告警 · OpenD\n\n"
-        "状态｜❌ 不可用\n"
-        f"时间｜{format_iso_time_beijing(now_utc) or now_utc}\n"
-        "影响｜本轮行情与交易数据可能不完整\n"
-        f"原因｜{_flat_notice_value(message_text) or '-'}\n"
-        f"诊断｜`{error_code}`"
-    )
+    fields: list[tuple[str, object]] = [
+        ("时间", format_iso_time_beijing(now_utc) or now_utc),
+        ("影响", "本轮行情与交易数据可能不完整"),
+        ("原因", message_text),
+        ("诊断", f"`{error_code}`"),
+    ]
     if detail:
-        msg += f"\n详情｜{_flat_notice_value(detail, limit=1200)}"
+        fields.append(("详情", str(detail)[:1200]))
+    msg = render_system_notice(
+        component="OpenD",
+        status="❌ 不可用",
+        fields=fields,
+    )
 
     sent = _send_notification(base, cfg, message=msg)
     if sent:
@@ -304,11 +301,13 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
         return False
 
     now_utc = utc_now()
-    msg = (
-        "# OM · 系统通知 · OpenD\n\n"
-        "状态｜✅ 已恢复\n"
-        f"时间｜{format_iso_time_beijing(now_utc) or now_utc}\n"
-        "结果｜数据连接已恢复，后续批次将自动重新评估"
+    msg = render_system_notice(
+        component="OpenD",
+        status="✅ 已恢复",
+        fields=(
+            ("时间", format_iso_time_beijing(now_utc) or now_utc),
+            ("结果", "数据连接已恢复，后续批次将自动重新评估"),
+        ),
     )
 
     return _send_notification(base, cfg, message=msg)

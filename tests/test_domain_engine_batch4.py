@@ -272,9 +272,14 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
-    assert 'resolve_multi_tick_engine_entrypoint' in notification_flow_src
-    assert 'build_per_account_delivery_batch(' in notification_flow_src
-    assert 'decision_builder=decide_notification_delivery' in notification_flow_src
+    for entrypoint in (
+        'assemble_daily_decision_briefs(',
+        'prepare_daily_decision_brief(',
+        'render_daily_brief_lifecycle(',
+        'build_per_account_delivery_batch(',
+        'decision_builder=decide_notification_delivery',
+    ):
+        assert entrypoint in notification_flow_src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -297,11 +302,24 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
     assert 'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint' in guard_flow_src
 
     for entrypoint in (
+        'assemble_daily_decision_briefs(',
+        'prepare_daily_decision_brief(',
+        'render_daily_brief_lifecycle(',
         'build_per_account_delivery_batch(',
-        'filter_notify_candidates_fn=engine_filter_notify_candidates',
-        'rank_notify_candidates_fn=rank_notify_candidates',
     ):
         assert entrypoint in notification_flow_src
+
+    for legacy_notification_fragment in (
+        'resolve_multi_tick_engine_entrypoint',
+        'engine_filter_notify_candidates',
+        'rank_notify_candidates',
+        'filter_notify_candidates_fn=',
+        'rank_notify_candidates_fn=',
+        'build_account_message(',
+        'build_account_message_compact(',
+        'prepare_multi_account_notification(',
+    ):
+        assert legacy_notification_fragment not in notification_flow_src
 
     # Guard against legacy business predicates drifting back into main.py.
     for legacy_fragment in (
