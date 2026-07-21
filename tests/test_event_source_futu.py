@@ -94,6 +94,29 @@ def test_fetch_symbol_event_evidence_futu_preserves_partial_coverage() -> None:
     assert "split source unavailable" in evidence["coverage"]["split"]["error"]
 
 
+def test_fetch_symbol_event_evidence_futu_marks_truncated_split_pagination_partial() -> None:
+    from src.application.events.source_futu import fetch_symbol_event_evidence_futu
+
+    class TruncatedGateway(FakeFutuEventGateway):
+        def get_corporate_actions_stock_splits(self, code: str, *, next_key=None, num=None):
+            assert code == "US.NVDA"
+            return {
+                "next_key": f"after-{next_key or 'first'}",
+                "split_list": [{"ex_date_str": "2026-06-10", "rate": "2:1"}],
+            }
+
+    evidence = fetch_symbol_event_evidence_futu(
+        "NVDA",
+        gateway=TruncatedGateway(),
+        close_gateway=False,
+        split_pages=2,
+    )
+
+    assert evidence["coverage"]["split"]["status"] == "partial"
+    assert "pagination incomplete after 2 pages" in evidence["coverage"]["split"]["error"]
+    assert all(item["type"] != "split" for item in evidence["events"])
+
+
 def test_fetch_symbol_events_futu_reports_old_sdk_capability_gap() -> None:
     from src.application.events.source_futu import fetch_symbol_events_futu
     from src.application.events.source_yfinance import EventSourceError
