@@ -165,6 +165,79 @@ def normalize_candidate_event_risk(value: Any) -> dict[str, Any]:
     return out
 
 
+def candidate_event_risk_transitions(
+    previous: Any,
+    current: Any,
+    *,
+    market_trading_date: Any,
+) -> list[dict[str, Any]]:
+    """Return freshness-insensitive material transitions for one stable candidate."""
+
+    prior = normalize_candidate_event_risk(previous)
+    after = normalize_candidate_event_risk(current)
+    prior_state = prior["user_state"]
+    after_state = after["user_state"]
+
+    if prior_state != "unknown" and after_state == "unknown":
+        return [_transition("candidate_event_evidence_degraded", prior, after)]
+    if prior_state == "unknown" and after_state != "unknown":
+        if prior.get("reason_code") == "event_risk_not_observed":
+            return []
+        return [_transition("candidate_event_evidence_recovered", prior, after)]
+    if prior_state == "confirmed_none" and after_state == "confirmed_event":
+        return [_transition("candidate_event_added", prior, after)]
+    if prior_state == "confirmed_event" and after_state == "confirmed_none":
+        if prior.get("evidence_chain_id") and prior.get("evidence_chain_id") == after.get("evidence_chain_id"):
+            return [_transition("candidate_event_removed", prior, after)]
+        return []
+    if prior_state != "confirmed_event" or after_state != "confirmed_event":
+        return []
+
+    prior_event = prior.get("nearest_event")
+    after_event = after.get("nearest_event")
+    if not isinstance(prior_event, Mapping) or not isinstance(after_event, Mapping):
+        return []
+
+    matched = _same_occurrence(
+        prior,
+        after,
+        prior_event=prior_event,
+        after_event=after_event,
+        market_trading_date=market_trading_date,
+    )
+    if not matched:
+        prior_date = _date(prior_event.get("event_date"))
+        market_date = _date(market_trading_date)
+        prior_is_current = _event_id_present(after, prior_event)
+        after_was_known = _event_id_present(prior, after_event)
+        same_chain = bool(prior.get("evidence_chain_id")) and (
+            prior.get("evidence_chain_id") == after.get("evidence_chain_id")
+        )
+        changes: list[dict[str, Any]] = []
+        if (
+            not prior_is_current
+            and same_chain
+            and prior_date is not None
+            and market_date is not None
+            and prior_date >= market_date
+        ):
+            changes.append(_transition("candidate_event_removed", prior, after))
+        if not after_was_known and (
+            prior_event.get("event_series_id") != after_event.get("event_series_id")
+            or (prior_date is not None and market_date is not None and prior_date < market_date)
+            or bool(changes)
+        ):
+            changes.append(_transition("candidate_event_added", prior, after))
+        return changes
+
+    changes: list[dict[str, Any]] = []
+    if prior_event.get("event_date") != after_event.get("event_date"):
+        changes.append(_transition("candidate_event_date_changed", prior, after))
+    if _entered_expiry_window(prior, after):
+        changes.append(_transition("candidate_event_entered_expiry_window", prior, after))
+    return changes
+
+
 def _unknown(
     reason_code: str,
     symbol: str,
@@ -238,8 +311,93 @@ def _events(value: Any, *, symbol: str, as_of: date) -> tuple[list[dict[str, Any
         seen.add(dedupe_key)
         out.append(normalized)
     out.sort(key=lambda item: (item["event_date"], item["event_type"], item["event_id"]))
-    conflict = any(len(dates) > 1 for dates in dates_by_id.values())
+    unanchored_dates: dict[str, set[str]] = {}
+    anchor_kinds: dict[str, set[bool]] = {}
+    for item in out:
+        series_id = item["event_series_id"]
+        anchored = bool(item.get("anchored"))
+        anchor_kinds.setdefault(series_id, set()).add(anchored)
+        if not anchored:
+            unanchored_dates.setdefault(series_id, set()).add(item["event_date"])
+    conflict = (
+        any(len(dates) > 1 for dates in dates_by_id.values())
+        or any(len(dates) > 1 for dates in unanchored_dates.values())
+        or any(len(kinds) > 1 for kinds in anchor_kinds.values())
+    )
     return out, malformed, conflict
+
+
+def _transition(change_type: str, previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "change_type": change_type,
+        "before_event_risk": _risk_change_view(previous),
+        "after_event_risk": _risk_change_view(current),
+    }
+
+
+def _risk_change_view(value: Mapping[str, Any]) -> dict[str, Any]:
+    nearest = value.get("nearest_event") if isinstance(value.get("nearest_event"), Mapping) else None
+    return {
+        "user_state": value.get("user_state"),
+        "reason_code": value.get("reason_code"),
+        "reliable": bool(value.get("reliable")),
+        "evidence_chain_id": value.get("evidence_chain_id"),
+        "nearest_event": dict(nearest) if nearest else None,
+        "expiration_relations": {
+            str(key): dict(item)
+            for key, item in (value.get("expiration_relations") or {}).items()
+            if isinstance(item, Mapping)
+        },
+        "in_attention_window": bool(value.get("in_attention_window")),
+    }
+
+
+def _same_occurrence(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    prior_event: Mapping[str, Any],
+    after_event: Mapping[str, Any],
+    market_trading_date: Any,
+) -> bool:
+    if prior_event.get("event_id") and prior_event.get("event_id") == after_event.get("event_id"):
+        return True
+    if prior_event.get("event_series_id") != after_event.get("event_series_id"):
+        return False
+    if bool(prior_event.get("anchored")) or bool(after_event.get("anchored")):
+        return False
+    series_id = prior_event.get("event_series_id")
+    prior_series = [item for item in previous.get("events") or [] if item.get("event_series_id") == series_id]
+    after_series = [item for item in current.get("events") or [] if item.get("event_series_id") == series_id]
+    prior_date = _date(prior_event.get("event_date"))
+    market_date = _date(market_trading_date)
+    return (
+        len(prior_series) == 1
+        and len(after_series) == 1
+        and prior_date is not None
+        and market_date is not None
+        and prior_date >= market_date
+    )
+
+
+def _entered_expiry_window(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    prior_relations = previous.get("expiration_relations") or {}
+    after_relations = current.get("expiration_relations") or {}
+    for label, after in after_relations.items():
+        if not isinstance(after, Mapping) or after.get("relation") not in {"before_expiration", "on_expiration"}:
+            continue
+        prior = prior_relations.get(label) if isinstance(prior_relations, Mapping) else None
+        if not isinstance(prior, Mapping) or prior.get("relation") not in {"before_expiration", "on_expiration"}:
+            return True
+    return False
+
+
+def _event_id_present(value: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+    event_id = target.get("event_id")
+    return bool(event_id) and any(
+        isinstance(item, Mapping) and item.get("event_id") == event_id
+        for item in value.get("events") or []
+    )
 
 
 def _normalized_event(*, symbol: str, event_type: str, event_date: date, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -342,5 +500,6 @@ __all__ = [
     "EVENT_USER_STATES",
     "IMPORTANT_EVENT_TYPES",
     "build_candidate_event_risk",
+    "candidate_event_risk_transitions",
     "normalize_candidate_event_risk",
 ]
