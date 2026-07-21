@@ -11,6 +11,8 @@ from domain.domain.daily_decision_event_risk import (
     candidate_event_risk_transitions,
     normalize_candidate_event_risk,
 )
+from domain.domain.strategy_vocab import canonical_strategy_id
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 
 
 DAILY_DECISION_BRIEF_SCHEMA_VERSION = "daily_decision_brief.v1"
@@ -19,6 +21,27 @@ DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION = "daily_decision_brief_diff.v1"
 ACTIONABILITIES = frozenset({"live_actionable", "planning_only", "blocked"})
 ACTION_PRIORITIES = ("P0", "P1", "P2")
 ACTION_STATES = frozenset({"active", "invalidated", "blocked", "observe"})
+_CANDIDATE_STRATEGY_FAMILIES = frozenset({"sell_put", "covered_call", "combo_yield"})
+_CANDIDATE_REPRESENTATIVE_FIELDS = (
+    "rank",
+    "symbol",
+    "strategy_family",
+    "option_type",
+    "contract_symbol",
+    "expiration",
+    "strike",
+    "strategy_group_id",
+    "put_contract_symbol",
+    "call_contract_symbol",
+    "put_expiration",
+    "call_expiration",
+    "put_strike",
+    "call_strike",
+    "priority",
+    "metrics",
+    "capacity",
+    "event_risk",
+)
 
 _STABLE_ACTION_ID_FIELDS = (
     "action_type",
@@ -45,6 +68,58 @@ def build_daily_brief_id(*, market: Any, market_trading_date: Any, account: Any)
     if not all(identity.values()):
         raise ValueError("market, market_trading_date, and account are required")
     return "daily-brief-" + _digest(identity)[:24]
+
+
+def build_daily_brief_candidate_identity(
+    *,
+    account: Any,
+    market: Any,
+    symbol: Any,
+    strategy_family: Any,
+) -> str:
+    account_norm = _lower(account)
+    market_norm = _upper(market)
+    symbol_norm = canonical_symbol(symbol)
+    family_norm = canonical_strategy_id(str(strategy_family or ""))
+    if family_norm == "sell_call":
+        family_norm = "covered_call"
+    if not account_norm or ":" in account_norm:
+        raise ValueError("valid account is required for candidate identity")
+    if market_norm not in {"US", "HK", "CN"}:
+        raise ValueError(f"unsupported candidate market: {market_norm}")
+    if not symbol_norm or symbol_market(symbol_norm) != market_norm:
+        raise ValueError(f"candidate symbol does not belong to market {market_norm}: {symbol!r}")
+    if family_norm not in _CANDIDATE_STRATEGY_FAMILIES:
+        raise ValueError(f"unsupported candidate strategy family: {strategy_family!r}")
+    return f"candidate:v1:{account_norm}:{market_norm}:{symbol_norm}:{family_norm}"
+
+
+def decide_daily_brief_notification(
+    *,
+    ran_scan: bool,
+    pipeline_reliable: bool,
+    fixed_due: bool,
+    pending_candidate_identities: list[str] | tuple[str, ...],
+    retryable_envelope_kind: str | None = None,
+) -> dict[str, Any]:
+    """Choose the one allowed Daily Brief delivery action for this tick."""
+
+    retry_kind = str(retryable_envelope_kind or "").strip().lower() or None
+    if not ran_scan:
+        return {
+            "action": "retry_exact" if retry_kind else "none",
+            "reason": "retryable_envelope" if retry_kind else "no_scan_no_retry",
+        }
+    if not pipeline_reliable:
+        return {
+            "action": "fixed_failure" if fixed_due else "none",
+            "reason": "fixed_scan_failed" if fixed_due else "nonfixed_scan_failed",
+        }
+    if fixed_due:
+        return {"action": "fixed_report", "reason": "fixed_report_due"}
+    if pending_candidate_identities:
+        return {"action": "candidate_alert", "reason": "pending_candidates"}
+    return {"action": "none", "reason": "no_pending_candidates"}
 
 
 def build_daily_brief_action_id(action: Mapping[str, Any]) -> str:
@@ -137,13 +212,209 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "actions": normalized_actions,
             "positions": _mapping_list(src.get("positions"), field="positions"),
             "capacity": _mapping(src.get("capacity"), field="capacity"),
+            "funds": _normalize_daily_brief_funds(src.get("funds")),
             "candidates": _normalize_candidate_groups(src.get("candidates")),
+            "candidate_index": _normalize_candidate_index(
+                src.get("candidate_index"),
+                account=account,
+                market=market,
+                actionability=actionability,
+                actions=normalized_actions,
+            ),
             "rejections": _mapping(src.get("rejections"), field="rejections"),
             "events": _mapping_list(src.get("events"), field="events"),
             "data_gaps": _mapping_list(src.get("data_gaps"), field="data_gaps"),
             "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
         }
     )
+    return out
+
+
+def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {
+            "as_of_utc": "",
+            "cash_total_by_currency": {},
+            "option_opening_available_by_currency": {},
+            "available": False,
+            "reason": "not_recorded",
+        }
+    funds = _mapping(value, field="funds")
+    available = bool(funds.get("available"))
+    return {
+        "as_of_utc": _iso_or_empty(funds.get("as_of_utc")),
+        "cash_total_by_currency": _normalize_currency_amounts(
+            funds.get("cash_total_by_currency"),
+            field="funds.cash_total_by_currency",
+        ),
+        "option_opening_available_by_currency": _normalize_currency_amounts(
+            funds.get("option_opening_available_by_currency"),
+            field="funds.option_opening_available_by_currency",
+        ),
+        "available": available,
+        "reason": str(funds.get("reason") or ("ok" if available else "unavailable")).strip(),
+    }
+
+
+def _normalize_currency_amounts(value: Any, *, field: str) -> dict[str, float]:
+    amounts = _mapping(value, field=field)
+    out: dict[str, float] = {}
+    for raw_currency, raw_amount in amounts.items():
+        currency = _upper(raw_currency)
+        if not currency or isinstance(raw_amount, bool):
+            raise ValueError(f"{field} contains an invalid currency or amount")
+        try:
+            amount = float(raw_amount)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{field}.{currency} must be a finite number") from exc
+        if not math.isfinite(amount):
+            raise ValueError(f"{field}.{currency} must be a finite number")
+        out[currency] = amount
+    return {currency: out[currency] for currency in sorted(out)}
+
+
+def _normalize_candidate_index(
+    value: Any,
+    *,
+    account: str,
+    market: str,
+    actionability: str,
+    actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if actionability != "live_actionable":
+        if value not in (None, []):
+            raise ValueError("candidate_index is only valid for live_actionable briefs")
+        return []
+    if value is None:
+        return _derive_candidate_index_from_actions(actions, account=account, market=market)
+    items = _mapping_list(value, field="candidate_index")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        representative = _mapping(item.get("representative"), field="candidate_index.representative")
+        symbol = canonical_symbol(item.get("symbol") or representative.get("symbol"))
+        family = item.get("strategy_family") or representative.get("strategy_family")
+        identity = build_daily_brief_candidate_identity(
+            account=account,
+            market=market,
+            symbol=symbol,
+            strategy_family=family,
+        )
+        supplied_identity = str(item.get("identity") or "").strip()
+        if supplied_identity and supplied_identity != identity:
+            raise ValueError(f"candidate identity mismatch: {supplied_identity!r} != {identity!r}")
+        if identity in seen:
+            raise ValueError(f"duplicate candidate identity: {identity}")
+        seen.add(identity)
+        contract_count = _nonnegative_int(item.get("contract_count"), field="contract_count")
+        if contract_count < 1:
+            raise ValueError("candidate_index contract_count must be positive")
+        family_norm = identity.rsplit(":", 1)[-1]
+        representative_view = _candidate_representative_view(
+            representative,
+            symbol=symbol,
+            strategy_family=family_norm,
+        )
+        _validate_candidate_representative(representative_view, family=family_norm)
+        out.append(
+            {
+                "identity": identity,
+                "symbol": symbol,
+                "strategy_family": family_norm,
+                "representative": representative_view,
+                "contract_count": contract_count,
+            }
+        )
+    return sorted(out, key=lambda item: item["identity"])
+
+
+def _validate_candidate_representative(
+    representative: Mapping[str, Any],
+    *,
+    family: str,
+) -> None:
+    capacity = representative.get("capacity")
+    contracts = capacity.get("contracts_available") if isinstance(capacity, Mapping) else None
+    if contracts is None or _nonnegative_int(contracts, field="contracts_available") < 1:
+        raise ValueError("candidate representative capacity must be at least one contract")
+    if family == "combo_yield":
+        required = (
+            "strategy_group_id",
+            "put_contract_symbol",
+            "call_contract_symbol",
+            "put_expiration",
+            "call_expiration",
+            "put_strike",
+            "call_strike",
+        )
+    else:
+        required = ("contract_symbol", "expiration", "strike")
+    if any(representative.get(field) in (None, "") for field in required):
+        raise ValueError("candidate representative contract fields are incomplete")
+
+
+def _derive_candidate_index_from_actions(
+    actions: list[dict[str, Any]],
+    *,
+    account: str,
+    market: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for action in actions:
+        if action.get("state") != "active" or action.get("action_type") not in {
+            "open_candidate",
+            "open_combo_yield",
+        }:
+            continue
+        contracts = _candidate_capacity_contracts(action)
+        if contracts is None or contracts < 1:
+            continue
+        try:
+            identity = build_daily_brief_candidate_identity(
+                account=account,
+                market=market,
+                symbol=action.get("symbol"),
+                strategy_family=action.get("strategy_family"),
+            )
+        except ValueError:
+            continue
+        item = grouped.get(identity)
+        if item is None:
+            family = identity.rsplit(":", 1)[-1]
+            symbol = canonical_symbol(action.get("symbol"))
+            grouped[identity] = {
+                "identity": identity,
+                "symbol": symbol,
+                "strategy_family": family,
+                "representative": _candidate_representative_view(
+                    action,
+                    symbol=symbol,
+                    strategy_family=family,
+                ),
+                "contract_count": 1,
+            }
+        else:
+            item["contract_count"] += 1
+    return [grouped[identity] for identity in sorted(grouped)]
+
+
+def _candidate_representative_view(
+    value: Mapping[str, Any],
+    *,
+    symbol: str | None,
+    strategy_family: str,
+) -> dict[str, Any]:
+    out = {
+        field: _json_safe(value.get(field))
+        for field in _CANDIDATE_REPRESENTATIVE_FIELDS
+        if value.get(field) is not None
+    }
+    if "capacity" not in out:
+        metrics = out.get("metrics")
+        if isinstance(metrics, Mapping) and isinstance(metrics.get("capacity"), Mapping):
+            out["capacity"] = _json_safe(metrics["capacity"])
+    out["symbol"] = symbol or ""
+    out["strategy_family"] = strategy_family
     return out
 
 
@@ -657,6 +928,8 @@ __all__ = [
     "DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION",
     "DAILY_DECISION_BRIEF_SCHEMA_VERSION",
     "build_daily_brief_action_id",
+    "build_daily_brief_candidate_identity",
+    "decide_daily_brief_notification",
     "build_daily_brief_id",
     "daily_brief_digest",
     "diff_daily_decision_briefs",

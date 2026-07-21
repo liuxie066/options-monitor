@@ -7,9 +7,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, TypeVar
 
-from domain.storage.repositories import run_repo
 from src.application.account_run import AccountRunOutcome, AccountRunRequest, run_one_account
-from src.application.scan_scheduler import mark_scheduler_accounts
 
 
 T = TypeVar("T")
@@ -74,25 +72,6 @@ def run_account_outcomes(
     return [outcomes_by_account[acct] for acct in account_ids]
 
 
-def mark_scanned_accounts(
-    *,
-    base: Path,
-    config: Path,
-    state: Path,
-    state_dir: Path,
-    schedule_key: str,
-    accounts: list[str],
-) -> None:
-    mark_scheduler_accounts(
-        config=config,
-        state=state,
-        state_dir=state_dir,
-        schedule_key=str(schedule_key),
-        accounts=[str(a).strip() for a in accounts if str(a).strip()],
-        mark_scanned=True,
-        base_dir=base,
-    )
-
 
 @dataclass(frozen=True)
 class TickAccountExecutionRequest:
@@ -131,6 +110,7 @@ class TickAccountExecutionOutcome:
     account_metrics: list[dict[str, Any]]
     ran_any_pipeline: bool
     ran_pipeline_accounts: list[str]
+    scheduled_scan_targets_by_account: dict[str, str | None]
     prefetch_done: bool
 
 
@@ -180,6 +160,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     prefetch_done = bool(request.prefetch_done)
     ran_any_pipeline = False
     ran_pipeline_accounts: list[str] = []
+    scheduled_scan_targets_by_account: dict[str, str | None] = {}
     results: list[Any] = []
     account_metrics: list[dict[str, Any]] = []
     for outcome in run_account_outcomes(
@@ -194,28 +175,22 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             or shared_prefetch_state.get("force_done")
         )
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
+        account = str(outcome.result.account)
         if outcome.ran_pipeline:
-            ran_pipeline_accounts.append(str(outcome.result.account))
+            ran_pipeline_accounts.append(account)
+        account_scan_decision = request.scan_decision_by_account.get(account, {})
+        scheduler_decision = account_scan_decision.get("scheduler_decision")
+        if account_scan_decision.get("should_run") is not False and isinstance(scheduler_decision, Mapping):
+            target = str(scheduler_decision.get("scheduled_scan_target_market") or "").strip()
+            scheduled_scan_targets_by_account[account] = target or None
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
-
-    if ran_any_pipeline:
-        try:
-            mark_scanned_accounts(
-                base=request.base,
-                config=request.cfg_path,
-                state=request.state_path,
-                state_dir=run_repo.get_run_state_dir(request.base, request.run_id),
-                schedule_key=str(request.scheduler_schedule_key),
-                accounts=ran_pipeline_accounts,
-            )
-        except Exception:
-            pass
 
     return TickAccountExecutionOutcome(
         results=results,
         account_metrics=account_metrics,
         ran_any_pipeline=ran_any_pipeline,
         ran_pipeline_accounts=ran_pipeline_accounts,
+        scheduled_scan_targets_by_account=scheduled_scan_targets_by_account,
         prefetch_done=prefetch_done,
     )

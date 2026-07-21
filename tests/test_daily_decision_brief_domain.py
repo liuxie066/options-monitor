@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -147,6 +150,124 @@ def test_normalize_brief_builds_stable_ids_and_rejects_invalid_contracts() -> No
     invalid["actionability"] = "trade_now"
     with pytest.raises(ValueError, match="unsupported daily brief actionability"):
         normalize_daily_decision_brief(invalid)
+
+
+
+
+def test_candidate_identity_is_canonical_stable_and_contract_independent() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+
+    first = build_daily_brief_candidate_identity(
+        account="LX", market="hk", symbol="POP", strategy_family="sell_put"
+    )
+    second = build_daily_brief_candidate_identity(
+        account="lx", market="HK", symbol="9992.HK", strategy_family="sell_put"
+    )
+
+    assert first == second == "candidate:v1:lx:HK:9992.HK:sell_put"
+    assert build_daily_brief_candidate_identity(
+        account="lx", market="US", symbol="NVDA", strategy_family="sell_call"
+    ) == "candidate:v1:lx:US:NVDA:covered_call"
+
+
+def test_candidate_identity_is_stable_across_python_hash_seeds() -> None:
+    code = (
+        "from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity as f;"
+        "print(f(account='lx', market='HK', symbol='9992.HK', strategy_family='sell_put'))"
+    )
+    outputs = {
+        subprocess.check_output(
+            [sys.executable, "-c", code],
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).strip()
+        for seed in ("1", "987654")
+    }
+
+    assert outputs == {"candidate:v1:lx:HK:9992.HK:sell_put"}
+
+
+def test_candidate_identity_rejects_cross_market_or_unknown_family() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+
+    with pytest.raises(ValueError, match="does not belong"):
+        build_daily_brief_candidate_identity(
+            account="lx", market="HK", symbol="NVDA", strategy_family="sell_put"
+        )
+    with pytest.raises(ValueError, match="unsupported candidate strategy"):
+        build_daily_brief_candidate_identity(
+            account="lx", market="US", symbol="NVDA", strategy_family="close_advice"
+        )
+
+
+def test_non_live_brief_cannot_expose_alertable_candidate_index() -> None:
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+
+    planning = _brief(
+        revision=0,
+        actionability="planning_only",
+        actions=[_action()],
+    )
+    assert normalize_daily_decision_brief(planning)["candidate_index"] == []
+
+    planning["candidate_index"] = [
+        {
+            "identity": "candidate:v1:lx:US:NVDA:sell_put",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "representative": {
+                "contract_symbol": "NVDA260821P00100000",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "capacity": {"contracts_available": 1},
+            },
+            "contract_count": 1,
+        }
+    ]
+    with pytest.raises(ValueError, match="only valid for live_actionable"):
+        normalize_daily_decision_brief(planning)
+
+
+def test_explicit_candidate_index_rejects_ineligible_representative() -> None:
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+
+    payload = _brief(revision=0)
+    payload["candidate_index"] = [
+        {
+            "identity": "candidate:v1:lx:US:NVDA:sell_put",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "representative": {},
+            "contract_count": 1,
+        }
+    ]
+    with pytest.raises(ValueError, match="capacity must be at least one"):
+        normalize_daily_decision_brief(payload)
+
+    payload["candidate_index"][0]["representative"] = {
+        "contract_symbol": "NVDA260821P00100000",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "capacity": {"contracts_available": 0},
+    }
+    with pytest.raises(ValueError, match="capacity must be at least one"):
+        normalize_daily_decision_brief(payload)
+
+
+def test_old_brief_without_additive_fields_remains_readable() -> None:
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+
+    normalized = normalize_daily_decision_brief(_brief(revision=0, actions=[_action()]))
+
+    assert normalized["funds"] == {
+        "as_of_utc": "",
+        "cash_total_by_currency": {},
+        "option_opening_available_by_currency": {},
+        "available": False,
+        "reason": "not_recorded",
+    }
+    assert normalized["candidate_index"][0]["identity"] == "candidate:v1:lx:US:NVDA:sell_put"
+    assert normalized["candidate_index"][0]["contract_count"] == 1
 
 
 def test_effective_actionability_downgrades_expired_live_brief() -> None:
@@ -402,3 +523,20 @@ def test_diff_ignores_event_changes_for_never_important_candidate() -> None:
 
     assert diff["material"] is False
     assert not any(item["change_type"].startswith("candidate_event_") for item in diff["changes"])
+
+
+def test_daily_brief_notification_decision_matrix() -> None:
+    from domain.domain.daily_decision_brief import decide_daily_brief_notification
+
+    cases = [
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": [], "retryable_envelope_kind": "fixed_report"}, "retry_exact"),
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": []}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": True, "pending_candidate_identities": []}, "fixed_failure"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": True, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "fixed_report"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "candidate_alert"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": []}, "none"),
+    ]
+
+    for inputs, expected in cases:
+        assert decide_daily_brief_notification(**inputs)["action"] == expected

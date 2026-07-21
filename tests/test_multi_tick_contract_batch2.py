@@ -86,8 +86,9 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     assert "notify_failures.append(" in helper_src
     assert '"final_returncode": int(send_result.get("final_returncode") or 0)' in helper_src
     assert "sent_accounts.append(acct)" in helper_src
-    assert "mark_accounts_notified(" in notification_flow_src
-    assert "mark_notified=True" in cron_runtime_src
+    assert "mark_accounts_notified(" not in notification_flow_src
+    assert "_confirm_daily_brief_execution(" in notification_flow_src
+    assert "confirm_daily_decision_brief_delivery_v2(" in notification_flow_src
     assert "NOTIFY_PARTIAL_FAILED" in finalization_src
     assert "build_run_end_payload(" in finalization_src
     assert '"notify_summary": notify_summary' in cron_runtime_src
