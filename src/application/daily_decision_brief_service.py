@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from datetime import datetime, time, timezone
@@ -11,9 +12,10 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+from domain.domain.daily_decision_event_risk import build_candidate_event_risk
 from domain.domain.engine import rank_candidate_rows
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
 from src.application.multi_tick.misc import AccountResult
@@ -101,6 +103,15 @@ def assemble_daily_decision_brief(
     selected_puts = ranked_puts[:max_candidates]
     selected_calls = ranked_calls[:max_candidates]
     selected_combos = combo_rows[:max_candidates]
+    if selected_puts or selected_calls or selected_combos:
+        event_snapshot, event_snapshot_reason = _load_event_snapshot(
+            base=base_path,
+            run_id=run_id_norm,
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+        )
+    else:
+        event_snapshot, event_snapshot_reason = {}, ""
 
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
@@ -116,14 +127,32 @@ def assemble_daily_decision_brief(
     put_capacity_rows: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     for rank, row in enumerate(selected_puts, start=1):
         cap = _sell_put_capacity(row)
+        event_risk = _candidate_event_risk(
+            row,
+            family="sell_put",
+            market_date=market_date,
+            snapshot=event_snapshot,
+            snapshot_reason=event_snapshot_reason,
+        )
         required_context_rows += 1
         if cap is None:
             required_context_missing += 1
             data_gaps.append(_row_gap(row, "sell_put", "cash_capacity_unavailable"))
         put_capacity_rows.append((row, cap))
-        candidate_payloads["sell_put"].append(_candidate_view(row, family="sell_put", rank=rank, capacity=cap))
+        candidate_payloads["sell_put"].append(
+            _candidate_view(row, family="sell_put", rank=rank, capacity=cap, event_risk=event_risk)
+        )
         if cap is not None:
-            actions.append(_candidate_action(row, family="sell_put", account=account_norm, rank=rank, capacity=cap))
+            actions.append(
+                _candidate_action(
+                    row,
+                    family="sell_put",
+                    account=account_norm,
+                    rank=rank,
+                    capacity=cap,
+                    event_risk=event_risk,
+                )
+            )
     if put_capacity_rows:
         first_known = next((item for _row, item in put_capacity_rows if item is not None), None)
         if first_known is not None:
@@ -132,17 +161,37 @@ def assemble_daily_decision_brief(
     call_capacity_rows: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     for rank, row in enumerate(selected_calls, start=1):
         cap = _covered_call_capacity(row)
+        event_risk = _candidate_event_risk(
+            row,
+            family="covered_call",
+            market_date=market_date,
+            snapshot=event_snapshot,
+            snapshot_reason=event_snapshot_reason,
+        )
         required_context_rows += 1
         if cap is None:
             required_context_missing += 1
             data_gaps.append(_row_gap(row, "covered_call", "share_capacity_unavailable"))
         call_capacity_rows.append((row, cap))
         candidate_payloads["covered_call"].append(
-            _candidate_view(row, family="covered_call", rank=rank, capacity=cap)
+            _candidate_view(
+                row,
+                family="covered_call",
+                rank=rank,
+                capacity=cap,
+                event_risk=event_risk,
+            )
         )
         if cap is not None:
             actions.append(
-                _candidate_action(row, family="covered_call", account=account_norm, rank=rank, capacity=cap)
+                _candidate_action(
+                    row,
+                    family="covered_call",
+                    account=account_norm,
+                    rank=rank,
+                    capacity=cap,
+                    event_risk=event_risk,
+                )
             )
     if call_capacity_rows:
         first_known = next((item for _row, item in call_capacity_rows if item is not None), None)
@@ -150,8 +199,25 @@ def assemble_daily_decision_brief(
             capacity["covered_call"] = first_known
 
     for rank, row in enumerate(selected_combos, start=1):
-        candidate_payloads["combo_yield"].append(_candidate_view(row, family="combo_yield", rank=rank))
-        actions.append(_candidate_action(row, family="combo_yield", account=account_norm, rank=rank))
+        event_risk = _candidate_event_risk(
+            row,
+            family="combo_yield",
+            market_date=market_date,
+            snapshot=event_snapshot,
+            snapshot_reason=event_snapshot_reason,
+        )
+        candidate_payloads["combo_yield"].append(
+            _candidate_view(row, family="combo_yield", rank=rank, event_risk=event_risk)
+        )
+        actions.append(
+            _candidate_action(
+                row,
+                family="combo_yield",
+                account=account_norm,
+                rank=rank,
+                event_risk=event_risk,
+            )
+        )
 
     for row in close_rows:
         positions.append(_position_view(row))
@@ -232,8 +298,8 @@ def assemble_daily_decision_brief(
 
     generated_at = effective_now.isoformat()
     data_as_of = _latest_as_of(metrics, prefetch, fallback=effective_now).isoformat()
-    events = _candidate_events([*selected_puts, *selected_calls, *selected_combos])
     deduped_actions = _dedupe_actions(actions)
+    events = _candidate_events(deduped_actions)
     deduped_data_gaps = _dedupe_gaps(data_gaps)
     strategy_summary = _strategy_summary(
         actionability=actionability,
@@ -543,6 +609,76 @@ def _load_json_artifact(
     return _json_safe(raw)
 
 
+def _load_event_snapshot(
+    *,
+    base: Path,
+    run_id: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[dict[str, Mapping[str, Any]], str]:
+    path = paths.run_state_dir(base, run_id) / "event_snapshot.json"
+    display_path = "state/event_snapshot.json"
+    if not path.exists():
+        data_gaps.append(
+            {
+                "scope": "event",
+                "kind": "event_snapshot",
+                "strategy_family": "candidate_event_risk",
+                "reason": "event_snapshot_missing",
+            }
+        )
+        return {}, "event_snapshot_missing"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        data_gaps.append(
+            {
+                "scope": "event",
+                "kind": "event_snapshot",
+                "strategy_family": "candidate_event_risk",
+                "path": display_path,
+                "reason": "event_snapshot_malformed",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return {}, "event_snapshot_malformed"
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != 1 or not isinstance(raw.get("symbols"), Mapping):
+        data_gaps.append(
+            {
+                "scope": "event",
+                "kind": "event_snapshot",
+                "strategy_family": "candidate_event_risk",
+                "path": display_path,
+                "reason": "event_snapshot_malformed",
+            }
+        )
+        return {}, "event_snapshot_malformed"
+
+    symbols: dict[str, Mapping[str, Any]] = {}
+    malformed_symbols = 0
+    for raw_symbol, item in raw["symbols"].items():
+        symbol = canonical_symbol(raw_symbol) or _text(raw_symbol).upper()
+        if not symbol or not isinstance(item, Mapping):
+            malformed_symbols += 1
+            continue
+        symbols[symbol] = item
+    if malformed_symbols:
+        data_gaps.append(
+            {
+                "scope": "event",
+                "kind": "event_snapshot",
+                "strategy_family": "candidate_event_risk",
+                "path": display_path,
+                "reason": "event_snapshot_symbol_items_malformed",
+                "count": malformed_symbols,
+            }
+        )
+    source_artifacts.append(
+        {"kind": "event_snapshot", "path": display_path, "row_count": len(symbols)}
+    )
+    return symbols, ""
+
+
 def _build_market_rejection_summary(
     *,
     trace_path: Path,
@@ -674,6 +810,7 @@ def _candidate_action(
     account: str,
     rank: int,
     capacity: Mapping[str, Any] | None = None,
+    event_risk: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if family == "combo_yield":
         group_id = _text(row.get("strategy_group_id") or row.get("candidate_pair_id"))
@@ -694,6 +831,7 @@ def _candidate_action(
             "title": "Combo Yield 候选",
             "reason": _text(row.get("reason") or "已通过现有组合收益筛选"),
             "metrics": _candidate_metrics(row, rank=rank),
+            "event_risk": dict(event_risk or {}),
             "source": _source_view(row),
         }
         action["metrics"].update(
@@ -723,6 +861,7 @@ def _candidate_action(
         "title": "Sell Put 候选" if family == "sell_put" else "Covered Call 候选",
         "reason": _text(row.get("reason") or (capacity or {}).get("reason") or "已通过现有候选过滤"),
         "metrics": {**_candidate_metrics(row, rank=rank), "capacity": dict(capacity or {})},
+        "event_risk": dict(event_risk or {}),
         "source": _source_view(row),
     }
 
@@ -733,6 +872,7 @@ def _candidate_view(
     family: str,
     rank: int,
     capacity: Mapping[str, Any] | None = None,
+    event_risk: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if family == "combo_yield":
         return {
@@ -749,6 +889,7 @@ def _candidate_view(
             "call_strike": _number(row.get("call_strike")),
             "priority": _priority_from_row(row, default="P1"),
             "metrics": _candidate_metrics(row, rank=rank),
+            "event_risk": dict(event_risk or {}),
             "source": _source_view(row),
         }
     return {
@@ -761,6 +902,7 @@ def _candidate_view(
         "priority": _priority_from_row(row, default="P1"),
         "metrics": _candidate_metrics(row, rank=rank),
         "capacity": dict(capacity or {}),
+        "event_risk": dict(event_risk or {}),
         "source": _source_view(row),
     }
 
@@ -980,26 +1122,61 @@ def _source_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _candidate_events(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
-        event_flag = row.get("event_flag")
-        event_types = _text(row.get("event_types") or row.get("event_type"))
-        event_dates = _text(row.get("event_dates") or row.get("event_date"))
-        if not bool(event_flag) and not event_types and not event_dates:
-            continue
-        item = {
-            "symbol": _text(row.get("symbol")).upper(),
-            "event_types": event_types,
-            "event_dates": event_dates,
-            "source_status": _text(row.get("event_source_status")),
+def _candidate_event_risk(
+    row: Mapping[str, Any],
+    *,
+    family: str,
+    market_date: str,
+    snapshot: Mapping[str, Mapping[str, Any]],
+    snapshot_reason: str,
+) -> dict[str, Any]:
+    symbol = canonical_symbol(row.get("symbol")) or _text(row.get("symbol")).upper()
+    if family == "combo_yield":
+        expirations = {
+            "put": row.get("put_expiration") or row.get("expiration"),
+            "call": row.get("call_expiration") or row.get("expiration"),
         }
-        identity = (item["symbol"], event_types, event_dates)
-        if identity in seen:
+    else:
+        expirations = {"contract": row.get("expiration") or row.get("expiration_ymd")}
+    return build_candidate_event_risk(
+        symbol=symbol,
+        market_trading_date=market_date,
+        expirations=expirations,
+        snapshot_item=snapshot.get(symbol),
+        snapshot_reason=snapshot_reason,
+    )
+
+
+def _candidate_events(actions: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    from domain.domain.daily_decision_brief import build_daily_brief_action_id
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for action in actions:
+        if _text(action.get("action_type")) not in {"open_candidate", "open_combo_yield"}:
             continue
-        seen.add(identity)
-        out.append(item)
+        risk = action.get("event_risk")
+        if not isinstance(risk, Mapping):
+            continue
+        action_id = build_daily_brief_action_id(action)
+        for event in risk.get("events") or []:
+            if not isinstance(event, Mapping):
+                continue
+            event_id = _text(event.get("event_id"))
+            identity = (action_id, event_id)
+            if not event_id or identity in seen:
+                continue
+            seen.add(identity)
+            out.append(
+                {
+                    **dict(event),
+                    "symbol": _text(action.get("symbol")).upper(),
+                    "candidate_action_id": action_id,
+                    "strategy_family": _text(action.get("strategy_family")).lower(),
+                    "contract_symbol": _text(action.get("contract_symbol")).upper(),
+                    "strategy_group_id": _text(action.get("strategy_group_id")),
+                }
+            )
     return out
 
 
