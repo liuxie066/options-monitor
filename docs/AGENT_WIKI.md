@@ -352,7 +352,9 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
 
-Notification text should remain Markdown-friendly and operationally direct. Do not send live notifications unless the user explicitly asks.
+Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with exactly one `zh_cn.content` `md` node and no duplicate `title`, while WeChat ClawBot sends the same string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter.
+
+Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
 
 Notification perception events are compressed system evidence for Assistant
 follow-ups. They record delivery action/reason, accounts, symbol summaries,

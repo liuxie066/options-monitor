@@ -3,6 +3,24 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+def _flat_cash_footer_lines(lines: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for raw in lines or []:
+        text = str(raw or '').strip()
+        if not text or '💰' in text:
+            continue
+        text = text.replace('**', '').removeprefix('- ').strip()
+        if text.startswith('> '):
+            detail = text[2:].strip()
+            out.append(f"数据｜{detail}" if detail.startswith('截至 ') else f"说明｜{detail}")
+            continue
+        text = text.replace('总现金折算 ', '总现金 ')
+        text = text.replace('担保后可用 ', '担保后 ')
+        text = text.replace(' | ', '｜')
+        out.append(f"账户｜{text}")
+    return out
+
+
 def build_no_candidate_notification_text(
     *,
     account_label: str | None = None,
@@ -15,20 +33,20 @@ def build_no_candidate_notification_text(
     if include_account_header and acct:
         lines.extend(
             [
-                f"Options Monitor 账户提醒（{acct}）",
+                f"# OM · 决策简报 · {acct}",
                 '',
+                "状态｜扫描完成",
             ]
         )
         if now_bj:
-            lines.extend([f"北京时间 {now_bj}", ''])
-        lines.extend([f"【账户 {acct}】监控正常触发，本轮无候选。", ''])
-        footer = [str(line) for line in (cash_footer_lines or []) if str(line).strip()]
+            lines.append(f"时间｜{now_bj} 北京时间")
+        lines.extend(["结论｜当前没有通过筛选的候选。", ''])
+        footer = _flat_cash_footer_lines(cash_footer_lines)
         if footer:
-            lines.extend(footer)
-            lines.append('')
+            lines.extend(["## 资金", *footer, ''])
         return '\n'.join(lines).strip() + '\n'
 
-    return '📋 本轮扫描完成，暂无符合条件的候选。\n'
+    return '当前没有通过筛选的候选。\n'
 
 
 def build_account_messages(

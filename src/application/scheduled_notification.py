@@ -434,6 +434,9 @@ def mark_no_candidate_notification_metrics(
 
 
 def _notify_error_code(send_tool_dto: dict[str, Any]) -> str:
+    normalized_error = str(send_tool_dto.get("error_code") or "").strip()
+    if normalized_error:
+        return normalized_error
     return "SEND_UNCONFIRMED" if bool(send_tool_dto.get("command_ok")) else "SEND_FAILED"
 
 
@@ -500,12 +503,15 @@ def build_notify_failure_summary_message(
     notify_failures: list[dict[str, object]],
 ) -> str:
     lines = [
-        "# 多账户通知投递异常",
+        "# OM · 系统告警 · 通知投递",
         "",
-        f"- run_id: `{run_id}`",
-        f"- 已确认账户: {', '.join(sent_accounts) if sent_accounts else '无'}",
-        "- 失败账户:",
+        "状态｜⚠️ 部分失败",
+        f"批次｜`{run_id}`",
+        f"已确认｜{', '.join(sent_accounts) if sent_accounts else '无'}",
+        f"失败｜{len(notify_failures)} 个账户",
     ]
+    if notify_failures:
+        lines.extend(["", "## 失败明细"])
     for failure in notify_failures:
         account = str(failure.get("account") or "").strip() or "unknown"
         error_code = str(failure.get("error_code") or "SEND_FAILED")
@@ -513,8 +519,16 @@ def build_notify_failure_summary_message(
         message_id = failure.get("message_id") or "none"
         confirmed = bool(failure.get("delivery_confirmed"))
         provider_response_code = failure.get("provider_response_code")
-        provider_part = "" if provider_response_code is None else f" provider_response_code={provider_response_code}"
-        lines.append(f"  - {account}: {error_code} attempts={attempts} confirmed={confirmed} message_id={message_id}{provider_part}")
+        parts = [
+            error_code,
+            f"尝试 {attempts} 次",
+            "已确认" if confirmed else "未确认",
+        ]
+        if message_id != "none":
+            parts.append(f"message_id={message_id}")
+        if provider_response_code is not None:
+            parts.append(f"provider_code={provider_response_code}")
+        lines.append(f"{account}｜{' · '.join(parts)}")
     return "\n".join(lines).strip()
 
 
@@ -618,6 +632,11 @@ def send_account_message_with_retry(
                 "retry_attempt_count": int(send_tool_dto.get("retry_attempt_count") or 0),
                 "ambiguous_send": bool(send_tool_dto.get("ambiguous_send")),
                 "duplicate_risk": bool(send_tool_dto.get("duplicate_risk")),
+                "local_error_code": send_tool_dto.get("local_error_code"),
+                "request_body_bytes": send_tool_dto.get("request_body_bytes"),
+                "request_body_budget_bytes": send_tool_dto.get("request_body_budget_bytes"),
+                "normalized_markdown_chars": send_tool_dto.get("normalized_markdown_chars"),
+                "normalized_markdown_sha256": send_tool_dto.get("normalized_markdown_sha256"),
             }
         except subprocess.TimeoutExpired as exc:
             message_id = None
@@ -772,6 +791,11 @@ def send_account_message_with_retry(
         "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
         "ambiguous_send": bool(final.get("ambiguous_send")),
         "duplicate_risk": bool(final.get("duplicate_risk")),
+        "local_error_code": final.get("local_error_code"),
+        "request_body_bytes": final.get("request_body_bytes"),
+        "request_body_budget_bytes": final.get("request_body_budget_bytes"),
+        "normalized_markdown_chars": final.get("normalized_markdown_chars"),
+        "normalized_markdown_sha256": final.get("normalized_markdown_sha256"),
     }
 
 
@@ -855,6 +879,11 @@ def execute_per_account_delivery(
                     "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
                     "ambiguous_send": bool(send_result.get("ambiguous_send")),
                     "duplicate_risk": bool(send_result.get("duplicate_risk")),
+                    "local_error_code": send_result.get("local_error_code"),
+                    "request_body_bytes": send_result.get("request_body_bytes"),
+                    "request_body_budget_bytes": send_result.get("request_body_budget_bytes"),
+                    "normalized_markdown_chars": send_result.get("normalized_markdown_chars"),
+                    "normalized_markdown_sha256": send_result.get("normalized_markdown_sha256"),
                 }
             )
             continue
