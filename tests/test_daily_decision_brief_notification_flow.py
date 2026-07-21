@@ -486,3 +486,58 @@ def test_later_nonfixed_scan_preserves_existing_pending_candidate_envelope(monke
     assert second_envelope["delivery_key"] == first_envelope["delivery_key"]
     assert second_envelope["message_sha256"] == first_envelope["message_sha256"]
     assert second_envelope["revision"] == first_envelope["revision"]
+
+
+def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import copy
+
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
+
+    def assemble(*, run_id, account, markets_to_run, **_kwargs):
+        brief = _brief(run_id=run_id, account=account)
+        if run_id == "candidate-2":
+            action = copy.deepcopy(brief["actions"][-1])
+            action.update(
+                {
+                    "symbol": "AMD",
+                    "contract_symbol": "AMD260821P00100000",
+                }
+            )
+            candidate = copy.deepcopy(brief["candidates"]["sell_put"][-1])
+            candidate.update(
+                {
+                    "symbol": "AMD",
+                    "contract_symbol": "AMD260821P00100000",
+                }
+            )
+            brief["actions"].append(action)
+            brief["candidates"]["sell_put"].append(candidate)
+        return {market: {**brief, "market": market} for market in markets_to_run}
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+
+    first = _request(tmp_path, run_id="candidate-1", fixed=False)
+    second = _request(tmp_path, run_id="candidate-2", fixed=False)
+    assert mod.run_tick_notification_flow(first.request) == 0
+    assert mod.run_tick_notification_flow(second.request) == 0
+
+    assert len(calls) == 2
+    assert "NVDA" in calls[0]["message"]
+    assert "AMD" in calls[1]["message"]
+    assert "NVDA" not in calls[1]["message"]
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert set(day["alerted_candidates"]) == {
+        IDENTITY,
+        "candidate:v1:lx:US:AMD:sell_put",
+    }
+    assert day["pending_candidates"] == {}

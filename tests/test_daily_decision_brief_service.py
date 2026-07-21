@@ -859,3 +859,60 @@ def test_sell_put_failure_preserves_covered_call_action_and_degrades_status(tmp_
         item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
         for item in brief["data_gaps"]
     )
+
+
+def test_strategy_step_failure_trace_blocks_false_normal_empty_result(tmp_path: Path) -> None:
+    from src.application.strategy_scan_failures import append_strategy_scan_failure
+
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_bytes(b"\n")
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="NVDA",
+        strategy_family="sell_put",
+        error=RuntimeError("scanner crashed"),
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert "candidate_strategy_execution_failed" in brief["actions"][0]["reason"]
+    assert any(
+        item["strategy_family"] == "sell_put"
+        and item["reason"] == "strategy_step_failed"
+        and item["error_type"] == "RuntimeError"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_strategy_step_failure_preserves_other_candidates_and_warns_user(tmp_path: Path) -> None:
+    from src.application.strategy_scan_failures import append_strategy_scan_failure
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(contract="STALE_PUT")]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    pd.DataFrame([_call_row(contract="NVDA_CALL_VALID")]).to_csv(
+        account_dir / "nvda_sell_call_candidates.csv",
+        index=False,
+    )
+    append_strategy_scan_failure(
+        report_dir=account_dir,
+        symbol="NVDA",
+        strategy_family="sell_put",
+        error=RuntimeError("scanner crashed"),
+    )
+
+    brief = _assemble(tmp_path)
+    message = render_fixed_report(brief)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["status"] == "degraded"
+    assert any(item.get("contract_symbol") == "NVDA_CALL_VALID" for item in brief["actions"])
+    assert not any(item.get("contract_symbol") == "STALE_PUT" for item in brief["actions"])
+    assert brief["candidates"]["sell_put"] == []
+    assert "Sell Put 扫描异常，本轮结果不完整" in message
+    assert "NVDA_CALL_VALID" not in message
+    assert "Covered Call" in message
