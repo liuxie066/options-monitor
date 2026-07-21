@@ -6,6 +6,8 @@ import json
 
 import pandas as pd
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def _render_via_alert_engine(summary_row: dict, *, render_style: str = "legacy") -> str:
     from domain.domain import normalize_processor_row
@@ -62,17 +64,16 @@ def test_notify_symbols_markdown_put_layout() -> None:
 
     expected = """Put
 
-### [lx] 腾讯 · 卖Put
-- 腾讯 卖Put 2026-04-29 460P
-- 收益: 权利金=5.720 (HKD) | 年化 17.21% | 净收 557
-- 合约: 行权价=460 | 数量=1张(默认) | DTE=26
-- 风控: 风险=中性 | delta=-0.23 | IV=缺失(告警未提供iv)
-- 资金: 保证金占用=¥110,720 (CNY)
-- 操作: 建议挂单=5.720
-- 备注: 通过准入后，收益/风险组合较强，值得优先看。
----
+**[lx] 腾讯｜卖Put｜2026-04-29 460P**
+收益｜权利金=5.720 (HKD) | 年化 17.21% | 净收 557
+合约｜行权价=460 | 数量=1张(默认) | DTE=26
+风控｜风险=中性 | delta=-0.23 | IV=缺失(告警未提供iv)
+资金｜保证金占用=¥110,720 (CNY)
+操作｜建议挂单=5.720
+备注｜通过准入后，收益/风险组合较强，值得优先看。
 """
     assert out == expected
+    assert_mobile_flat_markdown(out, require_title=False)
 
 
 def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
@@ -80,8 +81,9 @@ def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
 
     out = build_notification('', '', account_label='LX')
 
-    assert '📋 本轮扫描完成，暂无符合条件的候选。' in out
+    assert out == '当前没有通过筛选的候选。\n'
     assert '今日无需要主动提醒的内容。' not in out
+    assert_mobile_flat_markdown(out, require_title=False)
 
 
 def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> None:
@@ -117,9 +119,9 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 """
     out = build_notification(changes, alerts, account_label="SY")
 
-    assert "### [sy] 英伟达 · Covered Call" in out
+    assert "**[sy] 英伟达｜Covered Call｜2026-06-18 180C**" in out
     assert "数量=2张(可覆盖)" in out
-    assert "持仓: 总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
+    assert "持仓｜总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
     assert "变化" not in out
     assert "Top pick" not in out
 
@@ -139,7 +141,7 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
     assert "年化 缺失(告警未提供年化)" in out
     assert "delta=缺失(告警未提供delta)" in out
     assert "IV=缺失(告警未提供iv)" in out
-    assert "持仓: 总股数=缺失(告警未提供shares) | 已占用=缺失(告警未提供shares) | 可用=缺失(告警未提供shares) | 可覆盖=缺失(告警未提供cover)张" in out
+    assert "持仓｜总股数=缺失(告警未提供shares) | 已占用=缺失(告警未提供shares) | 可用=缺失(告警未提供shares) | 可覆盖=缺失(告警未提供cover)张" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available() -> None:
@@ -204,7 +206,7 @@ def test_notify_symbols_markdown_put_chain_shows_event_risk() -> None:
     out = build_notification("", alerts, account_label="SY")
 
     assert "event earnings@2026-06-10" in alerts
-    assert "- 事件: earnings@2026-06-10" in out
+    assert "事件｜earnings@2026-06-10" in out
 
 
 def test_notify_symbols_markdown_put_chain_shows_same_symbol_usage_from_summary_fields() -> None:
@@ -253,7 +255,7 @@ def test_notify_symbols_markdown_put_chain_uses_total_cny_cash_guard_for_alert_e
         }
     )
 
-    assert "备注: 所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in out
+    assert "备注｜所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_usd_cash_guard_for_alert_engine() -> None:
@@ -276,7 +278,7 @@ def test_notify_symbols_markdown_put_chain_uses_usd_cash_guard_for_alert_engine(
         }
     )
 
-    assert "备注: 所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in out
+    assert "备注｜所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in out
 
 
 def test_notify_symbols_markdown_put_falls_back_to_usd_margin_when_cny_margin_missing() -> None:
@@ -364,7 +366,7 @@ def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
         }
     )
 
-    assert "组合收益: 推荐Call=2026-06-19 110C" in out
+    assert "组合收益｜推荐Call=2026-06-19 110C" in out
     assert "候选Call=2个" in out
     assert "参考买价=1.500" in out
     assert "净权利金=145.33" in out
@@ -402,7 +404,7 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
     )
 
     assert "Combo Yield" in out
-    assert "### [sy] NVDA · 组合收益" in out
+    assert "**[sy] NVDA｜组合收益｜2026-06-19 95P+110C**" in out
     assert "组合净权利金=145.33" in out
     assert "场景评分=4.58%" in out
     assert "Put=95" in out
@@ -604,11 +606,11 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
 
     out = build_notification("", alerts, account_label="LX")
 
-    assert out.count("· 卖Put") == 5
+    assert out.count("｜卖Put｜") == 5
     assert "PUT5" in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert out.count("· Covered Call") == 1
+    assert out.count("｜Covered Call｜") == 1
 
 
 def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
@@ -640,13 +642,13 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
 def test_notify_symbols_staggered_combo_is_high_priority_and_uses_separate_leg_copy() -> None:
     out = _render_via_alert_engine(_staggered_combo_summary())
 
-    assert "### [sy] NVDA · 组合收益" in out
-    assert "卖 100P | 2026-08-21/35天 | bid=2.35 | 估算净收=228 USD" in out
-    assert "买 120C | 2026-10-16/91天 | ask=2.1 | delta=0.31 | 估算成本=218 USD" in out
+    assert "**[sy] NVDA｜组合收益**" in out
+    assert "Put｜卖 100P · 2026-08-21/35天 · bid=2.35 · 估算净收=228 USD" in out
+    assert "Call｜买 120C · 2026-10-16/91天 · ask=2.1 · delta=0.31 · 估算成本=218 USD" in out
     assert "覆盖率=104.59%" in out
     assert "净现金流=10 USD" in out
-    assert "Put安全边界=18% | 现金=$10,000 | Call晚56天" in out
-    assert "备注:" not in out
+    assert "风险｜Put安全边界=18% · 现金=$10,000 · Call晚56天" in out
+    assert "备注｜" not in out
     assert "资金利用率" not in out
     assert "两腿各1张" not in out
     assert "当前组合收益推荐未通过优先级阈值" not in out
@@ -658,10 +660,10 @@ def test_notify_symbols_staggered_combo_compact_copy_is_concise() -> None:
     out = _render_via_alert_engine(_staggered_combo_summary(), render_style="compact")
 
     assert "🧩 组合·跨期 NVDA 100P+120C" in out
-    assert "Put 卖 100P · 08-21/35天 · bid 2.35 · 估算净收 228 USD" in out
-    assert "Call 买 120C · 10-16/91天 · ask 2.1 · Δ 0.31 · 估算成本 218 USD" in out
-    assert "组合 覆盖 104.59% · 净现金流 10 USD" in out
-    assert "安全边界 18% · 现金 $10,000 · Call晚56天" in out
-    assert "备注:" not in out
+    assert "Put｜卖 100P · 08-21/35天 · bid 2.35 · 估算净收 228 USD" in out
+    assert "Call｜买 120C · 10-16/91天 · ask 2.1 · Δ 0.31 · 估算成本 218 USD" in out
+    assert "组合｜覆盖 104.59% · 净现金流 10 USD" in out
+    assert "风险｜安全边界 18% · 现金 $10,000 · Call晚56天" in out
+    assert "备注｜" not in out
     assert "资金利用率" not in out
     assert "两腿各1张" not in out

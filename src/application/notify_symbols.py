@@ -4,9 +4,8 @@
 This is the same logic as the previous notify_watchlist.py, renamed for clarity.
 
 NOTE (template ownership):
-- This file is the *single source of truth* for notification layout (Put/Covered Call sections, blank lines, bullet lists).
-- For multi-account per-account notifications, src.application.multi_account_tick must treat account notification text as opaque
-  and must NOT reformat individual candidates.
+- This file owns the per-candidate facts and field ordering for Put/Covered Call notification bodies.
+- Final notification shells may normalize headings and flat spacing, but must not reinterpret individual candidate facts.
 """
 
 from __future__ import annotations
@@ -288,20 +287,29 @@ def _build_notification_block(
     extra_detail_line: str = '',
 ) -> str:
     out = [
-        f"### [{account_label}] {symbol_name} · {action_label}",
-        f"- {symbol_name} {action_label} {contract}",
-        income_line,
-        contract_line,
-        risk_line,
-        detail_line,
+        f"**[{account_label}] {symbol_name}｜{action_label}｜{contract}**",
+        _flat_notification_field(income_line),
+        _flat_notification_field(contract_line),
+        _flat_notification_field(risk_line),
+        _flat_notification_field(detail_line),
     ]
     if extra_detail_line:
-        out.append(extra_detail_line)
+        out.extend(_flat_notification_field(line) for line in extra_detail_line.splitlines() if line.strip())
     if suggestion:
-        out.append(f"- 操作: 建议挂单={suggestion}")
-    out.append(f"- 备注: {note}")
-    out.append("---")
+        out.append(f"操作｜建议挂单={suggestion}")
+    out.append(f"备注｜{note}")
     return "\n".join(out)
+
+
+def _flat_notification_field(value: str) -> str:
+    text = str(value or '').strip()
+    if text.startswith('- '):
+        text = text[2:].strip()
+    for separator in (': ', '：'):
+        if separator in text:
+            label, body = text.split(separator, 1)
+            return f"{label}｜{body}"
+    return text
 
 
 def _fmt_date_compact(contract: str) -> str:
@@ -425,7 +433,7 @@ def _build_notification_block_compact(
     if dte_match:
         l2_parts.append(_fmt_dte_compact(dte_match.group(1)))
 
-    l2 = f"- {' · '.join(l2_parts)}" if l2_parts else ''
+    l2 = f"收益｜{' · '.join(l2_parts)}" if l2_parts else ''
 
     l3_parts = []
     risk_match = re.search(r'风险[=:]([^|]+)', risk_line)
@@ -464,7 +472,7 @@ def _build_notification_block_compact(
             else:
                 l3_parts.append(f"担保 {_fmt_money_compact(margin_val)}")
 
-    l3 = f"- {' · '.join(l3_parts)}" if l3_parts else ''
+    l3 = f"风险｜{' · '.join(l3_parts)}" if l3_parts else ''
 
     l4 = ''
     if not is_enhancement and extra_detail_line:
@@ -475,9 +483,9 @@ def _build_notification_block_compact(
             if event_text:
                 l4_parts.append(f"事件 {event_text}")
         if l4_parts:
-            l4 = f"- {' · '.join(l4_parts)}"
+            l4 = f"事件｜{' · '.join(l4_parts)}"
 
-    out_lines = [l1]
+    out_lines = [f"**{l1}**"]
     if l2:
         out_lines.append(l2)
     if l3:
@@ -575,22 +583,21 @@ def _format_staggered_combo_alert(
     if compact:
         return "\n".join(
             [
-                f"🧩 组合·跨期 {parsed.symbol_name} {put_strike}P+{call_strike}C",
-                f"- Put 卖 {put_strike}P · {put_expiration_text}/{put_dte_text}天 · bid {put_bid_text} · 估算净收 {put_net_credit_text}{ccy_tail}",
-                f"- Call 买 {call_strike}C · {call_expiration_text}/{call_dte_text}天 · ask {call_ask_text} · Δ {call_delta_text} · 估算成本 {call_total_cost_text}{ccy_tail}",
-                f"- 组合 覆盖 {coverage_text} · 净现金流 {combo_net_credit_text}{ccy_tail}",
-                f"- 安全边界 {safety_text} · 现金 {cash_required} · Call晚{expiry_gap_text}天",
+                f"**🧩 组合·跨期 {parsed.symbol_name} {put_strike}P+{call_strike}C**",
+                f"Put｜卖 {put_strike}P · {put_expiration_text}/{put_dte_text}天 · bid {put_bid_text} · 估算净收 {put_net_credit_text}{ccy_tail}",
+                f"Call｜买 {call_strike}C · {call_expiration_text}/{call_dte_text}天 · ask {call_ask_text} · Δ {call_delta_text} · 估算成本 {call_total_cost_text}{ccy_tail}",
+                f"组合｜覆盖 {coverage_text} · 净现金流 {combo_net_credit_text}{ccy_tail}",
+                f"风险｜安全边界 {safety_text} · 现金 {cash_required} · Call晚{expiry_gap_text}天",
             ]
         )
 
     return "\n".join(
         [
-            f"### [{account_label}] {parsed.symbol_name} · 组合收益",
-            f"- Put: 卖 {put_strike}P | {put_expiration}/{put_dte_text}天 | bid={put_bid_text} | 估算净收={put_net_credit_text}{ccy_tail}",
-            f"- Call: 买 {call_strike}C | {call_expiration}/{call_dte_text}天 | ask={call_ask_text} | delta={call_delta_text} | 估算成本={call_total_cost_text}{ccy_tail}",
-            f"- 组合: 覆盖率={coverage_text} | 净现金流={combo_net_credit_text}{ccy_tail}",
-            f"- 风控: Put安全边界={safety_text} | 现金={cash_required} | Call晚{expiry_gap_text}天",
-            "---",
+            f"**[{account_label}] {parsed.symbol_name}｜组合收益**",
+            f"Put｜卖 {put_strike}P · {put_expiration}/{put_dte_text}天 · bid={put_bid_text} · 估算净收={put_net_credit_text}{ccy_tail}",
+            f"Call｜买 {call_strike}C · {call_expiration}/{call_dte_text}天 · ask={call_ask_text} · delta={call_delta_text} · 估算成本={call_total_cost_text}{ccy_tail}",
+            f"组合｜覆盖率={coverage_text} · 净现金流={combo_net_credit_text}{ccy_tail}",
+            f"风险｜Put安全边界={safety_text} · 现金={cash_required} · Call晚{expiry_gap_text}天",
         ]
     )
 

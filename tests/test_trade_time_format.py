@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from src.application.parse_option_message import parse_fill_timestamp
-from src.application.trade_time_format import format_trade_time_beijing
+from src.application.trade_time_format import format_iso_time_beijing, format_trade_time_beijing
 
 
 def _ms_utc(year: int, month: int, day: int, hour: int, minute: int, second: int) -> int:
@@ -22,3 +22,10 @@ def test_format_trade_time_beijing_converts_us_source_epoch() -> None:
 
     assert ms == _ms_utc(2026, 4, 26, 19, 30, 0)
     assert format_trade_time_beijing(ms) == "2026-04-27 03:30:00 北京时间"
+
+
+def test_format_iso_time_beijing_converts_utc_and_preserves_invalid_text() -> None:
+    assert format_iso_time_beijing("2026-07-21T08:30:00Z") == "2026-07-21 16:30:00 北京时间"
+    assert format_iso_time_beijing("2026-07-21T08:30:00") == "2026-07-21 16:30:00 北京时间"
+    assert format_iso_time_beijing("unknown") == "unknown"
+    assert format_iso_time_beijing(None) is None
