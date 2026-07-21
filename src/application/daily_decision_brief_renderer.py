@@ -99,6 +99,9 @@ def build_daily_brief_user_view(
     )
     position_views, position_omitted = _position_views(brief, diff=normalized_diff, limits=cfg)
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    strategy_failure_labels = _strategy_failure_labels(brief)
+    if strategy_failure_labels:
+        reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
     view = {
         "account": account,
         "market": market,
@@ -111,6 +114,11 @@ def build_daily_brief_user_view(
         "change_summaries": _change_summaries(normalized_diff, market=market),
         "candidates": candidate_views,
         "candidate_omissions": candidate_omissions,
+        "candidate_empty_summary": (
+            "本轮候选结果不完整，部分策略扫描失败。"
+            if strategy_failure_labels
+            else "本轮暂无符合条件的候选。"
+        ),
         "positions": position_views,
         "position_omitted": position_omitted,
         "funds": _fund_views(brief),
@@ -325,7 +333,7 @@ def _render_user_view(
         candidate_heading = "候选"
     lines.extend(["", f"{section_mark} {candidate_heading}"])
     if not candidates:
-        lines.append("本轮暂无符合条件的候选。")
+        lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
         for index, item in enumerate(candidates, start=1):
             lines.append(f"{index}. {item['title']}")
@@ -593,6 +601,15 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
     if remaining_annualized is not None:
         parts.append(f"剩余年化 {_percent(remaining_annualized)}")
     return [" · ".join(parts)] if parts else []
+
+
+def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:
+    failed = {
+        _lower(item.get("strategy_family"))
+        for item in brief.get("data_gaps") or []
+        if isinstance(item, Mapping) and _lower(item.get("reason")) == "strategy_step_failed"
+    }
+    return [label for family, label in _STRATEGY_LABELS.items() if family in failed]
 
 
 def _capacity_views(

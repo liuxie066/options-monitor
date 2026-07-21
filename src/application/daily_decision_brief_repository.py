@@ -378,6 +378,12 @@ def prepare_daily_decision_brief_delivery(
                 raise DailyDecisionBriefStateError(
                     "candidate delivery identities must be pending for the market date"
                 )
+            if (
+                isinstance(existing, Mapping)
+                and existing.get("status") == "confirmed"
+                and existing.get("delivery_key") != envelope["delivery_key"]
+            ):
+                existing = None
             persisted, prepared = _resolve_prepared_envelope(
                 existing=existing,
                 candidate=envelope,
