@@ -161,6 +161,9 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
                 "reason": "收益已锁定",
                 "close_action": "close_put_keep_call",
                 "position_side": "short",
+                "close_mid": 0.52,
+                "realized_if_close": 474.5,
+                "remaining_annualized_return": 0.042,
             }
         ]
     ).to_csv(account_dir / "close_advice.csv", index=False)
@@ -174,6 +177,11 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
     assert action["leg_role"] == "funding_put"
     assert action["close_action"] == "close_put_keep_call"
     assert brief["positions"][0]["position_lot_id"] == "lot-put"
+    assert brief["positions"][0]["metrics"] == {
+        "close_mid": 0.52,
+        "realized_if_close": 474.5,
+        "remaining_annualized_return": 0.042,
+    }
 
 
 def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: Path) -> None:
