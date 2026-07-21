@@ -105,7 +105,7 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
         "source_artifact_count": 0,
     }
     assert data["source"]["state_path"] == ".../daily_decision_brief.US.current.json"
-    assert data["freshness"]["effective_actionability"] == "live_actionable"
+    assert data["freshness"]["effective_actionability"] == "planning_only"
     assert str(tmp_path) not in str(data)
     assert warnings == []
     assert meta == {

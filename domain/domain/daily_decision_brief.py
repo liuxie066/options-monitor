@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-from domain.domain.daily_decision_event_risk import normalize_candidate_event_risk
+from domain.domain.daily_decision_event_risk import (
+    candidate_event_risk_transitions,
+    normalize_candidate_event_risk,
+)
 
 
 DAILY_DECISION_BRIEF_SCHEMA_VERSION = "daily_decision_brief.v1"
@@ -313,6 +316,22 @@ def diff_daily_decision_briefs(
                                 action=_action_change_view(action),
                             )
                         )
+            if prior_was_active_high_priority or current_is_active_high_priority:
+                for transition in candidate_event_risk_transitions(
+                    prior.get("event_risk"),
+                    action.get("event_risk"),
+                    market_trading_date=cur["market_trading_date"],
+                ):
+                    changes.append(
+                        _change(
+                            str(transition["change_type"]),
+                            priority=action["priority"] if current_is_active_high_priority else prior["priority"],
+                            material=True,
+                            action=_action_change_view(action),
+                            before_event_risk=transition["before_event_risk"],
+                            after_event_risk=transition["after_event_risk"],
+                        )
+                    )
             continue
 
         upgraded_to_p0 = prior["priority"] != "P0" and action["priority"] == "P0"
