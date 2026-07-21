@@ -256,5 +256,43 @@ def test_local_feishu_size_failure_is_audited_and_never_retried() -> None:
             }
         ],
     )
+    assert summary.startswith("# OM · 系统通知 · 通知投递")
+    assert "状态｜❌ 投递失败" in summary
     assert "lx｜FEISHU_POST_TOO_LARGE · 尝试 1 次 · 未确认" in summary
+    assert_mobile_flat_markdown(summary)
+
+
+def test_notify_failure_summary_preserves_partial_multi_account_diagnostics_and_flattens_rows() -> None:
+    from src.application.scheduled_notification import build_notify_failure_summary_message
+
+    summary = build_notify_failure_summary_message(
+        run_id="run-partial",
+        sent_accounts=["lx"],
+        notify_failures=[
+            {
+                "account": "sy",
+                "error_code": "SEND_TIMEOUT\nprovider stalled",
+                "attempts": 2,
+                "delivery_confirmed": False,
+                "message_id": "msg-sy",
+                "provider_response_code": "504\ngateway timeout",
+            },
+            {
+                "account": "ops",
+                "error_code": "SEND_UNCONFIRMED",
+                "attempts": 1,
+                "delivery_confirmed": False,
+            },
+        ],
+    )
+
+    assert summary.startswith("# OM · 系统通知 · 通知投递")
+    assert "状态｜⚠️ 部分失败" in summary
+    assert "已确认｜lx" in summary
+    assert "失败｜2 个账户" in summary
+    assert (
+        "sy｜SEND_TIMEOUT · provider stalled · 尝试 2 次 · 未确认 · message_id=msg-sy · "
+        "provider_code=504 · gateway timeout"
+    ) in summary
+    assert "ops｜SEND_UNCONFIRMED · 尝试 1 次 · 未确认" in summary
     assert_mobile_flat_markdown(summary)

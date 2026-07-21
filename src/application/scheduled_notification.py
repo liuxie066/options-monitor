@@ -21,6 +21,7 @@ from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
 )
+from src.application.notification_shells import render_system_notice
 
 
 @dataclass(frozen=True)
@@ -249,16 +250,7 @@ def build_notify_failure_summary_message(
     sent_accounts: list[str],
     notify_failures: list[dict[str, object]],
 ) -> str:
-    lines = [
-        "# OM · 系统告警 · 通知投递",
-        "",
-        "状态｜⚠️ 部分失败",
-        f"批次｜`{run_id}`",
-        f"已确认｜{', '.join(sent_accounts) if sent_accounts else '无'}",
-        f"失败｜{len(notify_failures)} 个账户",
-    ]
-    if notify_failures:
-        lines.extend(["", "## 失败明细"])
+    failure_rows: list[str] = []
     for failure in notify_failures:
         account = str(failure.get("account") or "").strip() or "unknown"
         error_code = str(failure.get("error_code") or "SEND_FAILED")
@@ -275,8 +267,17 @@ def build_notify_failure_summary_message(
             parts.append(f"message_id={message_id}")
         if provider_response_code is not None:
             parts.append(f"provider_code={provider_response_code}")
-        lines.append(f"{account}｜{' · '.join(parts)}")
-    return "\n".join(lines).strip()
+        failure_rows.append(f"{account}｜{' · '.join(parts)}")
+    return render_system_notice(
+        component="通知投递",
+        status="⚠️ 部分失败" if sent_accounts else "❌ 投递失败",
+        fields=(
+            ("批次", f"`{run_id}`"),
+            ("已确认", ", ".join(sent_accounts) if sent_accounts else "无"),
+            ("失败", f"{len(notify_failures)} 个账户"),
+        ),
+        sections=(("失败明细", failure_rows),),
+    )
 
 
 def send_account_message_with_retry(
