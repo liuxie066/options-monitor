@@ -705,3 +705,109 @@ def test_v2_exact_transition_rejects_mismatched_transport_or_payload(tmp_path: P
         record_daily_decision_brief_delivery_attempt(
             **{**common, "transport_idempotency_key": "om-" + "0" * 32, "message_sha256": "bad"}
         )
+
+
+def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        prepare_daily_decision_brief_delivery,
+        read_daily_decision_brief_delivery_state,
+        read_retryable_daily_decision_brief_delivery,
+        record_daily_decision_brief_candidates,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    first = _persist(tmp_path, run_id="run-1", actions=[_action()])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=first["current_revision"],
+        brief_digest=first["current_brief_digest"],
+        candidate_identities=first["current_candidate_identities"],
+    )
+    first_envelope = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-1",
+        delivery_kind="candidate_alert",
+        source_kind="successful_brief",
+        revision=first["current_revision"],
+        source_digest=first["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+        rendered_message="# 新增候选\nNVDA",
+        render_context={"projection": "candidate_alert"},
+    )["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=first_envelope["delivery_key"],
+        source_digest=first_envelope["source_digest"],
+        message_sha256=first_envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(first_envelope["delivery_key"]),
+    )
+
+    second = _persist(
+        tmp_path,
+        run_id="run-2",
+        actions=[_action(), _action(symbol="AMD")],
+    )
+    recorded = record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=second["current_revision"],
+        brief_digest=second["current_brief_digest"],
+        candidate_identities=second["current_candidate_identities"],
+    )
+    assert recorded["pending_candidate_identities"] == [IDENTITY_AMD]
+
+    prepared = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-2",
+        delivery_kind="candidate_alert",
+        source_kind="successful_brief",
+        revision=second["current_revision"],
+        source_digest=second["current_brief_digest"],
+        candidate_identities=[IDENTITY_AMD],
+        rendered_message="# 新增候选\nAMD",
+        render_context={"projection": "candidate_alert"},
+    )
+    second_envelope = prepared["envelope"]
+    assert prepared["prepared"] is True
+    assert second_envelope["delivery_key"] != first_envelope["delivery_key"]
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert retry["envelope"]["delivery_key"] == second_envelope["delivery_key"]
+    assert retry["envelope"]["candidate_identities"] == [IDENTITY_AMD]
+
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=second_envelope["delivery_key"],
+        source_digest=second_envelope["source_digest"],
+        message_sha256=second_envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(second_envelope["delivery_key"]),
+    )
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert set(day["alerted_candidates"]) == {IDENTITY_NVDA, IDENTITY_AMD}
+    assert day["pending_candidates"] == {}

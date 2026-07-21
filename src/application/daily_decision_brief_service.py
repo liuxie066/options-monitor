@@ -21,6 +21,11 @@ from domain.domain.risk_capacity import compute_sell_call_share_capacity, comput
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
+from src.application.strategy_scan_failures import (
+    ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
+    FAILURE_REASON as STRATEGY_FAILURE_REASON,
+    read_strategy_scan_failures,
+)
 from src.application.multi_tick.misc import AccountResult
 
 
@@ -58,6 +63,8 @@ def assemble_daily_decision_brief(
     valid_until = _valid_until_utc(config_map, market_norm, now_market)
     run_account_dir = paths.run_account_dir(base_path, run_id_norm, account_norm)
     state_dir = paths.run_account_state_dir(base_path, run_id_norm, account_norm)
+    trace_path = run_account_dir / "candidate_filter_trace.jsonl"
+    strategy_failure_path = run_account_dir / STRATEGY_FAILURE_ARTIFACT_NAME
 
     data_gaps: list[dict[str, Any]] = []
     source_artifacts: list[dict[str, Any]] = []
@@ -100,6 +107,21 @@ def assemble_daily_decision_brief(
     call_rows = _dedupe_rows(call_rows, family="covered_call")
     combo_rows = _dedupe_rows(combo_rows, family="combo_yield")
     close_rows = _dedupe_close_rows(close_rows)
+    strategy_failures = _load_strategy_step_failures(
+        failure_path=strategy_failure_path,
+        run_account_dir=run_account_dir,
+        account=account_norm,
+        run_id=run_id_norm,
+        market=market_norm,
+        data_gaps=data_gaps,
+    )
+    failed_families = {item["strategy_family"] for item in strategy_failures}
+    if "sell_put" in failed_families:
+        put_rows, put_available = [], False
+    if "covered_call" in failed_families:
+        call_rows, call_available = [], False
+    if "combo_yield" in failed_families:
+        combo_rows, combo_available = [], False
 
     ranked_puts = rank_candidate_rows(put_rows, mode="put") if put_rows else []
     ranked_calls = rank_candidate_rows(call_rows, mode="call") if call_rows else []
@@ -266,7 +288,6 @@ def assemble_daily_decision_brief(
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
 
-    trace_path = run_account_dir / "candidate_filter_trace.jsonl"
     reject_logs = sorted(run_account_dir.glob("*_reject_log.csv"))
     rejections = _build_market_rejection_summary(
         trace_path=trace_path,
@@ -286,6 +307,14 @@ def assemble_daily_decision_brief(
                 "kind": "candidate_filter_trace",
                 "path": _source_path(run_account_dir, trace_path),
                 "row_count": _count_jsonl_rows(trace_path),
+            }
+        )
+    if strategy_failure_path.exists():
+        source_artifacts.append(
+            {
+                "kind": "strategy_scan_failures",
+                "path": _source_path(run_account_dir, strategy_failure_path),
+                "row_count": _count_jsonl_rows(strategy_failure_path),
             }
         )
 
@@ -308,6 +337,8 @@ def assemble_daily_decision_brief(
         blockers.append(result_view["decision_reason"] or "account_scan_not_run")
     if all_decision_sources_unavailable:
         blockers.append("all_structured_decision_sources_unavailable")
+    if strategy_failures and not (put_rows or call_rows or combo_rows):
+        blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
         blockers.append("all_required_account_capacity_sources_unavailable")
     if not cash_total_reliable:
@@ -731,6 +762,58 @@ def _load_event_snapshot(
         {"kind": "event_snapshot", "path": display_path, "row_count": len(symbols)}
     )
     return symbols, ""
+
+
+def _load_strategy_step_failures(
+    *,
+    failure_path: Path,
+    run_account_dir: Path,
+    account: str,
+    run_id: str,
+    market: str,
+    data_gaps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row_number, row in enumerate(read_strategy_scan_failures(failure_path), start=1):
+        if (
+            _text(row.get("account")).lower() != account
+            or _text(row.get("run_id")) != run_id
+            or _text(row.get("reason")).lower() != STRATEGY_FAILURE_REASON
+            or _row_market(row) != market
+        ):
+            continue
+        family = _strategy_family_from_failure(row)
+        symbol = canonical_symbol(row.get("symbol")) or _text(row.get("symbol")).upper()
+        identity = (family, symbol)
+        if not family or identity in seen:
+            continue
+        seen.add(identity)
+        failure = {
+            "scope": "strategy",
+            "strategy_family": family,
+            "symbol": symbol,
+            "reason": STRATEGY_FAILURE_REASON,
+            "error_type": _text(row.get("error_type")) or "StrategyStepError",
+            "source": {
+                "path": _source_path(run_account_dir, failure_path),
+                "row": row_number,
+            },
+        }
+        failures.append(failure)
+        data_gaps.append(failure)
+    return failures
+
+
+def _strategy_family_from_failure(row: Mapping[str, Any]) -> str:
+    value = _text(row.get("strategy_family")).lower()
+    if value in {"sell_call", "covered_call"}:
+        return "covered_call"
+    if value in {"combo_yield", "yield_enhancement"}:
+        return "combo_yield"
+    if value == "sell_put":
+        return "sell_put"
+    return ""
 
 
 def _build_market_rejection_summary(
