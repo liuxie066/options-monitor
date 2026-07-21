@@ -177,11 +177,12 @@ def render_fixed_failure(
     phase = f"数据异常 · {batch} 批次失败" if batch else "数据异常 · 本轮批次失败"
     return _bounded_markdown(
         [
-            f"# {account} · {_MARKET_LABELS.get(market, '市场')}期权监控",
-            f"> {phase}",
+            f"# OM · 决策简报 · {account}",
             "",
-            "本轮策略扫描未形成可靠结果，无法生成正常报告。",
-            "下一计划扫描会继续尝试。",
+            f"状态｜{phase}",
+            f"市场｜{_MARKET_LABELS.get(market, '市场')}",
+            "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
+            "后续｜下一计划扫描会继续尝试。",
         ]
     )
 
@@ -300,32 +301,30 @@ def _render_user_view(
     title_mark = "#" * heading_level
     section_mark = "#" * (heading_level + 1)
     lines = [
-        (
-            f"{title_mark} {view['account']} · {view['market_label']}期权监控"
-            if projection in {"fixed_report", "candidate_alert", "query"}
-            else f"{title_mark} OM · {view['account']} · {view['market_label']}"
-        ),
-        f"> {view['phase_line']}",
-        f"> {view['data_as_of']}",
+        f"{title_mark} OM · 决策简报 · {view['account']}",
+        "",
+        f"状态｜{view['phase_line']}",
+        f"市场｜{view['market_label']}",
+        f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
     ]
-    lines.extend(f"> {item}" for item in query_status if str(item).strip())
+    lines.extend(_flat_field_line(item) for item in query_status if str(item).strip())
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
-        lines.extend(["", planning_notice])
+        lines.extend(["", f"提示｜{planning_notice}"])
 
     if bool(view.get("blocked")):
         lines.extend(
             [
                 "",
-                str(view.get("blocked_summary") or "本轮关键数据不可用，暂时无法形成可靠决策。"),
-                "系统将在后续批次自动重新评估。",
+                f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
+                "后续｜系统将在后续批次自动重新评估。",
             ]
         )
         return _bounded_markdown(lines)
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
     if changes:
-        lines.extend(["", "；".join(changes) + "。"])
+        lines.extend(["", "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
     candidate_heading = "新增候选" if projection == "candidate_alert" else "当前候选"
@@ -336,38 +335,62 @@ def _render_user_view(
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
         for index, item in enumerate(candidates, start=1):
-            lines.append(f"{index}. {item['title']}")
+            lines.extend(["", f"**{index}｜{_flat_title(item['title'])}**"])
             for detail in item.get("details") or []:
-                lines.append(f"   - {detail}")
+                lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
             for leg in item.get("legs") or []:
-                lines.append(f"   - {leg}")
+                lines.append(_flat_field_line(leg))
         for note in view.get("candidate_omissions") or []:
-            lines.append(f"- {note}")
+            lines.append(f"补充｜{note}")
 
     positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
     if projection != "candidate_alert":
         lines.extend(["", f"{section_mark} 持仓"])
         if not positions:
-            lines.append("- 当前没有需要展示的期权持仓。")
+            lines.append("当前没有需要展示的期权持仓。")
         for item in positions:
-            lines.append(f"- {item['title']}：{item['status']}")
+            lines.extend(["", f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
-                lines.append(f"  - {detail}")
+                lines.append(f"参考｜{detail}")
         position_omitted = _whole_number(view.get("position_omitted")) or 0
         if position_omitted:
-            lines.append(f"- 另有 {position_omitted} 个持仓未展开")
+            lines.append(f"补充｜另有 {position_omitted} 个持仓未展开")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
     lines.extend(["", f"{section_mark} 资金"])
-    lines.extend(f"- {item}" for item in [*funds, *capacity])
+    lines.extend(_flat_field_line(item) for item in [*funds, *capacity])
 
     reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
     if reminders:
         lines.extend(["", f"{section_mark} 提醒"])
-        lines.extend(f"- {item}" for item in reminders)
+        lines.extend(_flat_field_line(item) for item in reminders)
 
     return _bounded_markdown(lines)
+
+
+def _strip_display_label(value: Any, prefix: str) -> str:
+    text = str(value or "").strip()
+    return text.removeprefix(prefix).strip()
+
+
+def _flat_title(value: Any) -> str:
+    return str(value or "").strip().replace(" · ", "｜")
+
+
+def _flat_field_line(value: Any) -> str:
+    text = str(value or "").strip()
+    if "：" in text:
+        label, body = text.split("：", 1)
+        return f"{label}｜{body}"
+    return text
+
+
+def _candidate_detail_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if "执行前" in text or text.startswith(("近期事件", "已确认", "预计")):
+        return "事件"
+    return "指标"
 
 
 def _candidate_views(

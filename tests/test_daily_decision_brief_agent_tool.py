@@ -251,9 +251,8 @@ def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
         "available_section_count": 2,
         "unavailable_section_count": 1,
     }
-    assert "## lx · 港股期权监控" in data["rendered_markdown"]
-    assert "## lx · 美股期权监控" in data["rendered_markdown"]
-    assert "## sy · 美股期权监控" in data["rendered_markdown"]
+    assert data["rendered_markdown"].count("## OM · 决策简报 · lx") == 2
+    assert "## OM · 决策简报 · sy" in data["rendered_markdown"]
     assert "部分账户或市场的成功扫描快照暂不可用" in data["rendered_markdown"]
     assert "revision" not in data["rendered_markdown"]
     assert delivery_path.read_bytes() == before
