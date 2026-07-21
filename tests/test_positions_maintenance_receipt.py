@@ -146,7 +146,8 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-auto-1"
     assert calls[0]["target"] == "wechat:ops"
-    assert "# OM · 持仓维护 · lx" in calls[0]["message"]
+    assert calls[0]["message"].startswith("# OM · 回执 · lx")
+    assert "类型｜持仓维护" in calls[0]["message"]
     assert "状态｜✅ 已完成" in calls[0]["message"]
     assert "时间｜2026-05-03 08:00:00 北京时间" in calls[0]["message"]
     assert "rec_1｜pos_1｜到期 2026-05-01" in calls[0]["message"]
@@ -253,8 +254,34 @@ def test_build_auto_close_receipt_message_marks_partial_failure() -> None:
     )
 
     assert "状态｜⚠️ 部分完成" in msg
+    assert msg.startswith("# OM · 回执 · lx")
+    assert "类型｜持仓维护" in msg
     assert "结果｜成功 1 · 候选 2 · 错误 1" in msg
     assert "sqlite locked · - retry later" in msg
+    assert_mobile_flat_markdown(msg)
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "result", "expected_status"),
+    [
+        (True, {"mode": "dry_run", "applied_closed": 0, "candidates_should_close": 1}, "ℹ️ 预览"),
+        (False, {"mode": "applied", "applied_closed": 0, "candidates_should_close": 1, "errors": ["boom"]}, "❌ 失败"),
+        (False, {"mode": "applied", "applied_closed": 0, "candidates_should_close": 0, "errors": []}, "ℹ️ 无变更"),
+    ],
+)
+def test_build_auto_close_receipt_message_preserves_status_variants(
+    dry_run: bool,
+    result: dict[str, object],
+    expected_status: str,
+) -> None:
+    msg = build_auto_close_receipt_message(
+        dry_run=dry_run,
+        result={"account": "lx", "broker": "富途", "grace_days": 2, **result},
+    )
+
+    assert msg.startswith("# OM · 回执 · lx")
+    assert "类型｜持仓维护" in msg
+    assert f"状态｜{expected_status}" in msg
     assert_mobile_flat_markdown(msg)
 
 

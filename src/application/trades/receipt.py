@@ -12,6 +12,7 @@ from src.application.notification_delivery_adapter import (
     normalize_notification_delivery_result,
     select_notification_delivery_adapter,
 )
+from src.application.notification_shells import render_receipt
 
 
 def send_trade_intake_receipt(
@@ -204,46 +205,52 @@ def build_trade_intake_receipt_message(
     checks = checks_raw if isinstance(checks_raw, list) else []
     first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
 
-    lines = [
-        f"# OM · 成交回执 · {account}",
-        "",
-        f"状态｜{status_text}",
-        f"动作｜{action}",
-        f"标的｜{symbol}",
-    ]
+    fields: list[tuple[str, object]] = [("动作", action), ("标的", symbol)]
     contract_parts = [part for part in (expiration, strike, _option_type_text(option_type)) if part not in (None, "")]
     if contract_parts:
-        lines.append(f"合约｜{' '.join(str(part) for part in contract_parts)}")
+        fields.append(("合约", " ".join(str(part) for part in contract_parts)))
     if contracts not in (None, ""):
-        lines.append(f"数量｜{contracts} 张")
+        fields.append(("数量", f"{contracts} 张"))
     if price not in (None, ""):
-        lines.append(f"成交｜{price}")
+        fields.append(("成交", price))
     funds = _premium_cashflow_text(deal, result, payload)
     if funds:
-        lines.append(f"资金｜{funds}")
+        fields.append(("资金", funds))
     if trade_time:
-        lines.append(f"时间｜{trade_time}")
+        fields.append(("时间", trade_time))
     if projection_status:
-        lines.append(f"投影｜{projection_status}")
+        fields.append(("投影", projection_status))
     if first_check:
-        lines.append(
-            "目标持仓｜"
-            f"{first_check.get('contracts_open_before')} → {first_check.get('actual_contracts_open_after')}"
-            f" · 预期 {first_check.get('expected_contracts_open_after')}"
+        fields.append(
+            (
+                "目标持仓",
+                f"{first_check.get('contracts_open_before')} → {first_check.get('actual_contracts_open_after')}"
+                f" · 预期 {first_check.get('expected_contracts_open_after')}",
+            )
         )
     if ledger_store:
-        lines.append(f"账本｜{ledger_store.get('sqlite_path') or '-'}")
+        fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
     if _combo_yield_relation_pending(diagnostics):
-        lines.append("组合｜关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。")
-    lines.append(f"诊断｜{reason}")
+        fields.append(("组合", "关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。"))
+    fields.append(("诊断", reason))
+    sections: list[tuple[str, list[str]]] = []
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)
         if candidate_lines:
-            lines.extend(["说明｜需要确认卖出对应的 assigned-stock lot；确认前不会自动写入。", "", "## 可选批次"])
-            lines.extend(line.replace("：", "｜", 1) for line in candidate_lines)
-            lines.append("下一步｜回复“选择 A”")
-    lines.append(f"编号｜`{deal_id}`")
-    return "\n".join(lines)
+            fields.append(("说明", "需要确认卖出对应的 assigned-stock lot；确认前不会自动写入。"))
+            rows = [line.replace("：", "｜", 1) for line in candidate_lines]
+            rows.append("下一步｜回复“选择 A”")
+            rows.append(f"编号｜`{deal_id}`")
+            sections.append(("可选批次", rows))
+    if not sections:
+        fields.append(("编号", f"`{deal_id}`"))
+    return render_receipt(
+        account=account,
+        receipt_type="成交",
+        status=status_text,
+        fields=fields,
+        sections=sections,
+    )
 
 
 def _combo_yield_relation_pending(diagnostics: dict[str, Any]) -> bool:
