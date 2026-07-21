@@ -434,6 +434,9 @@ def mark_no_candidate_notification_metrics(
 
 
 def _notify_error_code(send_tool_dto: dict[str, Any]) -> str:
+    normalized_error = str(send_tool_dto.get("error_code") or "").strip()
+    if normalized_error:
+        return normalized_error
     return "SEND_UNCONFIRMED" if bool(send_tool_dto.get("command_ok")) else "SEND_FAILED"
 
 
@@ -618,6 +621,11 @@ def send_account_message_with_retry(
                 "retry_attempt_count": int(send_tool_dto.get("retry_attempt_count") or 0),
                 "ambiguous_send": bool(send_tool_dto.get("ambiguous_send")),
                 "duplicate_risk": bool(send_tool_dto.get("duplicate_risk")),
+                "local_error_code": send_tool_dto.get("local_error_code"),
+                "request_body_bytes": send_tool_dto.get("request_body_bytes"),
+                "request_body_budget_bytes": send_tool_dto.get("request_body_budget_bytes"),
+                "normalized_markdown_chars": send_tool_dto.get("normalized_markdown_chars"),
+                "normalized_markdown_sha256": send_tool_dto.get("normalized_markdown_sha256"),
             }
         except subprocess.TimeoutExpired as exc:
             message_id = None
@@ -772,6 +780,11 @@ def send_account_message_with_retry(
         "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
         "ambiguous_send": bool(final.get("ambiguous_send")),
         "duplicate_risk": bool(final.get("duplicate_risk")),
+        "local_error_code": final.get("local_error_code"),
+        "request_body_bytes": final.get("request_body_bytes"),
+        "request_body_budget_bytes": final.get("request_body_budget_bytes"),
+        "normalized_markdown_chars": final.get("normalized_markdown_chars"),
+        "normalized_markdown_sha256": final.get("normalized_markdown_sha256"),
     }
 
 
@@ -855,6 +868,11 @@ def execute_per_account_delivery(
                     "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
                     "ambiguous_send": bool(send_result.get("ambiguous_send")),
                     "duplicate_risk": bool(send_result.get("duplicate_risk")),
+                    "local_error_code": send_result.get("local_error_code"),
+                    "request_body_bytes": send_result.get("request_body_bytes"),
+                    "request_body_budget_bytes": send_result.get("request_body_budget_bytes"),
+                    "normalized_markdown_chars": send_result.get("normalized_markdown_chars"),
+                    "normalized_markdown_sha256": send_result.get("normalized_markdown_sha256"),
                 }
             )
             continue
