@@ -503,12 +503,15 @@ def build_notify_failure_summary_message(
     notify_failures: list[dict[str, object]],
 ) -> str:
     lines = [
-        "# 多账户通知投递异常",
+        "# OM · 系统告警 · 通知投递",
         "",
-        f"- run_id: `{run_id}`",
-        f"- 已确认账户: {', '.join(sent_accounts) if sent_accounts else '无'}",
-        "- 失败账户:",
+        "状态｜⚠️ 部分失败",
+        f"批次｜`{run_id}`",
+        f"已确认｜{', '.join(sent_accounts) if sent_accounts else '无'}",
+        f"失败｜{len(notify_failures)} 个账户",
     ]
+    if notify_failures:
+        lines.extend(["", "## 失败明细"])
     for failure in notify_failures:
         account = str(failure.get("account") or "").strip() or "unknown"
         error_code = str(failure.get("error_code") or "SEND_FAILED")
@@ -516,8 +519,16 @@ def build_notify_failure_summary_message(
         message_id = failure.get("message_id") or "none"
         confirmed = bool(failure.get("delivery_confirmed"))
         provider_response_code = failure.get("provider_response_code")
-        provider_part = "" if provider_response_code is None else f" provider_response_code={provider_response_code}"
-        lines.append(f"  - {account}: {error_code} attempts={attempts} confirmed={confirmed} message_id={message_id}{provider_part}")
+        parts = [
+            error_code,
+            f"尝试 {attempts} 次",
+            "已确认" if confirmed else "未确认",
+        ]
+        if message_id != "none":
+            parts.append(f"message_id={message_id}")
+        if provider_response_code is not None:
+            parts.append(f"provider_code={provider_response_code}")
+        lines.append(f"{account}｜{' · '.join(parts)}")
     return "\n".join(lines).strip()
 
 

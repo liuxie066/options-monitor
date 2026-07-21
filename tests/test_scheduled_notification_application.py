@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def test_build_per_account_delivery_batch_supports_one_account_message() -> None:
     from src.application.scheduled_notification import build_per_account_delivery_batch
@@ -504,4 +506,5 @@ def test_local_feishu_size_failure_is_audited_and_never_retried() -> None:
             }
         ],
     )
-    assert "lx: FEISHU_POST_TOO_LARGE attempts=1 confirmed=False" in summary
+    assert "lx｜FEISHU_POST_TOO_LARGE · 尝试 1 次 · 未确认" in summary
+    assert_mobile_flat_markdown(summary)

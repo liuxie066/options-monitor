@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 from src.application.positions.maintenance_receipt import (
     build_auto_close_receipt_message,
     build_auto_close_receipt_identity,
@@ -144,9 +146,11 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-auto-1"
     assert calls[0]["target"] == "wechat:ops"
-    assert "过期自动平仓已写入 option_positions" in calls[0]["message"]
-    assert "账户：lx" in calls[0]["message"]
-    assert "rec_1 | pos_1 | exp=2026-05-01" in calls[0]["message"]
+    assert "# OM · 持仓维护 · lx" in calls[0]["message"]
+    assert "状态｜✅ 已完成" in calls[0]["message"]
+    assert "时间｜2026-05-03 08:00:00 北京时间" in calls[0]["message"]
+    assert "rec_1｜pos_1｜到期 2026-05-01" in calls[0]["message"]
+    assert_mobile_flat_markdown(calls[0]["message"])
     assert out["attempt_count"] == 1
 
 
@@ -243,14 +247,15 @@ def test_build_auto_close_receipt_message_marks_partial_failure() -> None:
             "grace_days": 2,
             "applied_closed": 1,
             "candidates_should_close": 2,
-            "errors": ["rec_2 pos_2: sqlite locked"],
+            "errors": ["rec_2 pos_2: sqlite locked\n    - retry later"],
             "applied": [{"record_id": "rec_1", "position_id": "pos_1", "expiration_ymd": "2026-05-01"}],
         },
     )
 
-    assert "[未完全记录]" in msg
-    assert "平仓：1/2" in msg
-    assert "sqlite locked" in msg
+    assert "状态｜⚠️ 部分完成" in msg
+    assert "结果｜成功 1 · 候选 2 · 错误 1" in msg
+    assert "sqlite locked · - retry later" in msg
+    assert_mobile_flat_markdown(msg)
 
 
 def test_auto_close_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_path: Path) -> None:
