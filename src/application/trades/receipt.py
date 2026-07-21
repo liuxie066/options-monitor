@@ -177,11 +177,14 @@ def build_trade_intake_receipt_message(
     diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
     needs_lot_confirmation = status == "unresolved" and reason == "ambiguous_assigned_stock_sale"
     if status == "failed" and reason == "projection_verification_failed":
-        title = "[写入异常] 成交事件已写入但持仓投影未确认"
+        status_text = "❌ 写入异常"
     elif needs_lot_confirmation:
-        title = "[待确认] 成交未写入 option_positions"
+        status_text = "⚠️ 待确认"
+    elif applied:
+        status_text = "✅ 已完成"
     else:
-        title = "[已记录] 成交已写入 option_positions" if applied else "[未记录] 成交未写入 option_positions"
+        status_text = "❌ 未记录"
+
     account = _value("account", deal, result, payload) or "-"
     symbol = _value("symbol", deal, result, payload) or "-"
     action = _action_text(deal, result, payload)
@@ -202,56 +205,44 @@ def build_trade_intake_receipt_message(
     first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
 
     lines = [
-        title,
+        f"# OM · 成交回执 · {account}",
         "",
-        f"账户：{account}",
-        f"动作：{action}",
-        f"标的：{symbol}",
+        f"状态｜{status_text}",
+        f"动作｜{action}",
+        f"标的｜{symbol}",
     ]
     contract_parts = [part for part in (expiration, strike, _option_type_text(option_type)) if part not in (None, "")]
     if contract_parts:
-        lines.append(f"合约：{' '.join(str(part) for part in contract_parts)}")
+        lines.append(f"合约｜{' '.join(str(part) for part in contract_parts)}")
     if contracts not in (None, ""):
-        lines.append(f"数量：{contracts} 张")
+        lines.append(f"数量｜{contracts} 张")
     if price not in (None, ""):
-        lines.append(f"成交价：{price}")
+        lines.append(f"成交｜{price}")
     funds = _premium_cashflow_text(deal, result, payload)
     if funds:
-        lines.append(f"资金：{funds}")
+        lines.append(f"资金｜{funds}")
     if trade_time:
-        lines.append(f"成交时间：{trade_time}")
-    status_text = (
-        "已记录"
-        if applied
-        else "写入异常"
-        if status == "failed" and reason == "projection_verification_failed"
-        else "待确认"
-        if needs_lot_confirmation
-        else "未记录"
-    )
-    lines.append(f"状态：{status_text}")
+        lines.append(f"时间｜{trade_time}")
     if projection_status:
-        lines.append(f"投影状态：{projection_status}")
+        lines.append(f"投影｜{projection_status}")
     if first_check:
         lines.append(
-            "目标持仓："
-            f"{first_check.get('contracts_open_before')} -> {first_check.get('actual_contracts_open_after')}"
-            f" / expected {first_check.get('expected_contracts_open_after')}"
+            "目标持仓｜"
+            f"{first_check.get('contracts_open_before')} → {first_check.get('actual_contracts_open_after')}"
+            f" · 预期 {first_check.get('expected_contracts_open_after')}"
         )
     if ledger_store:
-        lines.append(f"账本：{ledger_store.get('sqlite_path') or '-'}")
+        lines.append(f"账本｜{ledger_store.get('sqlite_path') or '-'}")
     if _combo_yield_relation_pending(diagnostics):
-        lines.append("组合关系待确认：未提供 pair_intent_id，已按单腿正常记录，未自动归入 Combo Yield 组。")
-    lines.append(f"原因：{reason}")
+        lines.append("组合｜关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。")
+    lines.append(f"诊断｜{reason}")
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)
         if candidate_lines:
-            lines.append("")
-            lines.append("需要确认本次卖出对应哪一批 assigned-stock lot；确认前不会自动写入。")
-            lines.append("候选 lot：")
-            lines.extend(candidate_lines)
-            lines.append("请确认要匹配的选项，例如：选择 A。")
-    lines.append(f"deal_id：{deal_id}")
+            lines.extend(["说明｜需要确认卖出对应的 assigned-stock lot；确认前不会自动写入。", "", "## 可选批次"])
+            lines.extend(line.replace("：", "｜", 1) for line in candidate_lines)
+            lines.append("下一步｜回复“选择 A”")
+    lines.append(f"编号｜`{deal_id}`")
     return "\n".join(lines)
 
 

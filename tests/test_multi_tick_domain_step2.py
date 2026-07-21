@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> None:
     from domain.domain.multi_tick import apply_scan_run_decision
@@ -362,13 +364,22 @@ def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
         results=results,
         now_bj='BJ_NOW',
         cash_footer_lines=['cash'],
-        cash_footer_for_account_fn=lambda lines, account: [f"{account}:{len(lines)}"],
+        cash_footer_for_account_fn=lambda lines, account: [
+            "**💰 现金 CNY**",
+            f"- **{account.upper()}** 总现金折算 ¥1,000 | 担保后可用 ¥200",
+            "",
+            "> 截至 2026-07-21 18:00:00 北京时间",
+        ],
     )
 
     assert list(out) == ['a']
-    assert '监控正常触发，本轮无候选' in out['a']
-    assert '北京时间 BJ_NOW' in out['a']
-    assert 'a:1' in out['a']
+    assert out['a'].startswith('# OM · 决策简报 · a')
+    assert '状态｜扫描完成' in out['a']
+    assert '结论｜当前没有通过筛选的候选。' in out['a']
+    assert '时间｜BJ_NOW 北京时间' in out['a']
+    assert '账户｜A 总现金 ¥1,000｜担保后 ¥200' in out['a']
+    assert '数据｜截至 2026-07-21 18:00:00 北京时间' in out['a']
+    assert_mobile_flat_markdown(out['a'])
 
 
 def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:

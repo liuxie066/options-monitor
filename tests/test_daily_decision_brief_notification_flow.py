@@ -368,7 +368,7 @@ def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: 
     assert envelope["delivery_kind"] == "candidate_alert"
     assert envelope["candidate_identities"] == [IDENTITY]
     assert "新增候选 · 10:30 发现" in envelope["rendered_message"]
-    assert "现金总额：$100,000.00" in envelope["rendered_message"]
+    assert "现金总额｜$100,000.00" in envelope["rendered_message"]
     assert "## 持仓" not in envelope["rendered_message"]
 
 
@@ -396,7 +396,7 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
     assert "本轮暂无符合条件的候选" in message
     assert "## 持仓" in message
     assert "## 资金" in message
-    assert "现金总额：$100,000.00" in message
+    assert "现金总额｜$100,000.00" in message
 
 
 def test_pipeline_failure_nonfixed_is_quiet_but_commits_after_failure_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -471,7 +471,8 @@ def test_scheduled_renderer_uses_batch_time_without_leaking_revision(monkeypatch
     prep = mod._prepare_daily_brief_notification(_request(tmp_path, run_id="render").request)
     message = prep.prepared_messages.messages_by_account["lx"]
     assert "10:00 批次" in message
-    assert "数据截至：美东 09:59 / 北京 21:59" in message
+    assert "状态｜10:00 批次" in message
+    assert "数据｜美东 09:59 / 北京 21:59" in message
     assert "revision" not in message.lower()
 
 
