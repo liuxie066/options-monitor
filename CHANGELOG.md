@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.3.6 - 2026-07-21
+
+### Fixed
+- Suppressed Daily Decision Brief assembly, revision persistence, rendering, and delivery when an account tick explicitly denies notification, preventing no-op scheduled batches from emitting false “数据异常” briefs while preserving genuine pipeline-failure alerts and independent per-account delivery.
+
 ## 1.3.5 - 2026-07-20
 
 ### Changed
