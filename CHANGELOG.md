@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.3.7 - 2026-07-21
+
+### Fixed
+- Added actionable Daily Decision Brief close-position details with an advisory mid price, signed estimated close P&L, and remaining annualized return, while suppressing stale, unavailable, and malformed metrics.
+
 ## 1.3.6 - 2026-07-21
 
 ### Fixed
