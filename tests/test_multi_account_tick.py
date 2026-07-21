@@ -468,3 +468,91 @@ def test_daily_brief_trigger_kind_distinguishes_schedule_manual_and_force() -> N
         )
         == 'force'
     )
+
+
+def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspace(monkeypatch, tmp_path) -> None:
+    import json
+    from zoneinfo import ZoneInfo
+
+    from domain.domain.engine import SchedulerDecisionView
+    from src.application import multi_account_tick as mod
+    from src.application.tick_guard_flow import TickGuardOutcome
+    from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
+
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "_generated": {"schema_version": "1.0", "generator": "options-monitor", "source_format": "yaml", "market": "us"},
+                "accounts": ["lx"],
+                "symbols": [{"symbol": "NVDA", "broker": "US"}],
+                "schedule": {"enabled": True},
+                "notifications": {"daily_brief": {"enabled": True}},
+                "portfolio": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime_root = tmp_path / "runtime"
+    captured = {}
+
+    class _RunLogger:
+        def __init__(self, _base):
+            self.run_id = "run-delivery-only"
+
+        def safe_event(self, *_args, **_kwargs):
+            pass
+
+    def guard(request):
+        return TickGuardOutcome(True, 0, request.base_cfg, request.accounts, request.default_account, ZoneInfo("Asia/Shanghai"))
+
+    decision = {
+        "schema_kind": "scheduler_decision",
+        "schema_version": "1.0",
+        "should_run_scan": False,
+        "is_notify_window_open": False,
+        "in_run_window": True,
+        "now_market": "2026-07-21T14:10:00-04:00",
+        "reason": "当前没有待执行运行点。",
+    }
+
+    def scheduler(_request):
+        return TickSchedulerOutcome(
+            True,
+            0,
+            TickSchedulerContext(
+                markets_to_run=["US"],
+                scheduler_markets=["US"],
+                state_path=runtime_root / "output_shared/state/scheduler_state.json",
+                scheduler_schedule_key="schedule",
+                scheduler_ms=1,
+                scheduler_decision=decision,
+                scheduler_view=SchedulerDecisionView.from_payload(decision),
+                notify_decision_by_account={},
+                scan_decision_by_account={"lx": {"should_run": False, "reason": decision["reason"], "scheduler_decision": decision}},
+                should_run_global=False,
+                reason_global=decision["reason"],
+            ),
+            [],
+        )
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    monkeypatch.setattr(mod, "run_tick_guard_flow", guard)
+    monkeypatch.setattr(mod, "build_tick_scheduler_context", scheduler)
+    monkeypatch.setattr(mod, "prepare_tick_run_workspace", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no workspace")))
+    monkeypatch.setattr(mod, "run_tick_account_execution", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no pipeline")))
+
+    def notification(request):
+        captured["request"] = request
+        return 0
+
+    monkeypatch.setattr(mod, "run_tick_notification_flow", notification)
+    assert mod.main(["--config", str(cfg), "--accounts", "lx"]) == 0
+    assert captured["request"].delivery_only is True
+    assert captured["request"].account_ids == ("lx",)
+    assert not (runtime_root / "output_runs").exists()

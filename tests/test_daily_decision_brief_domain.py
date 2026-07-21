@@ -523,3 +523,20 @@ def test_diff_ignores_event_changes_for_never_important_candidate() -> None:
 
     assert diff["material"] is False
     assert not any(item["change_type"].startswith("candidate_event_") for item in diff["changes"])
+
+
+def test_daily_brief_notification_decision_matrix() -> None:
+    from domain.domain.daily_decision_brief import decide_daily_brief_notification
+
+    cases = [
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": [], "retryable_envelope_kind": "fixed_report"}, "retry_exact"),
+        ({"ran_scan": False, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": []}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": True, "pending_candidate_identities": []}, "fixed_failure"),
+        ({"ran_scan": True, "pipeline_reliable": False, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "none"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": True, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "fixed_report"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": ["candidate:v1:lx:US:NVDA:sell_put"]}, "candidate_alert"),
+        ({"ran_scan": True, "pipeline_reliable": True, "fixed_due": False, "pending_candidate_identities": []}, "none"),
+    ]
+
+    for inputs, expected in cases:
+        assert decide_daily_brief_notification(**inputs)["action"] == expected

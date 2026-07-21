@@ -551,3 +551,157 @@ def test_malformed_mixed_delivery_schema_fails_closed(tmp_path: Path) -> None:
     out = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     assert out["available"] is False
     assert out["reason"] == "state_invalid"
+
+
+def test_v2_attempt_and_confirmation_advance_exact_envelope_and_candidates(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        read_daily_decision_brief_delivery_state,
+        record_daily_decision_brief_candidates,
+        record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action(), _action(symbol="AMD")])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=persisted["current_revision"],
+        brief_digest=persisted["current_brief_digest"],
+        candidate_identities=persisted["current_candidate_identities"],
+    )
+    prepared = _prepare_fixed(tmp_path, persisted)
+    envelope = prepared["envelope"]
+    transport_key = build_notification_transport_key(envelope["delivery_key"])
+
+    attempt = record_daily_decision_brief_delivery_attempt(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=transport_key,
+        ambiguous=False,
+        attempted_at_utc="2026-07-21T14:00:03+00:00",
+    )
+    assert attempt["envelope"]["status"] == "pending"
+    assert attempt["envelope"]["last_attempt_at_utc"] == "2026-07-21T14:00:03+00:00"
+
+    confirmed = confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=transport_key,
+        confirmed_at_utc="2026-07-21T14:00:04+00:00",
+    )
+    assert confirmed["advanced"] is True
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert day["fixed_reports"][TARGET_1000]["status"] == "confirmed"
+    assert day["fixed_reports"][TARGET_1000]["last_attempt_at_utc"] == "2026-07-21T14:00:04+00:00"
+    assert day["pending_candidates"] == {}
+    assert set(day["alerted_candidates"]) == {IDENTITY_AMD, IDENTITY_NVDA}
+    assert {item["via"] for item in day["alerted_candidates"].values()} == {"fixed_report"}
+
+
+def test_v2_ambiguous_attempt_freezes_envelope_and_exact_retry_can_confirm(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        DailyDecisionBriefStateError,
+        confirm_daily_decision_brief_delivery_v2,
+        prepare_daily_decision_brief_delivery,
+        record_daily_decision_brief_candidates,
+        record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=persisted["current_revision"],
+        brief_digest=persisted["current_brief_digest"],
+        candidate_identities=persisted["current_candidate_identities"],
+    )
+    prepared = _prepare_fixed(tmp_path, persisted)
+    envelope = prepared["envelope"]
+    transport_key = build_notification_transport_key(envelope["delivery_key"])
+    ambiguous = record_daily_decision_brief_delivery_attempt(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=transport_key,
+        ambiguous=True,
+    )
+    assert ambiguous["envelope"]["status"] == "ambiguous"
+
+    with pytest.raises(DailyDecisionBriefStateError, match="frozen"):
+        prepare_daily_decision_brief_delivery(
+            base=tmp_path,
+            account="lx",
+            market="US",
+            market_trading_date=MARKET_DATE,
+            run_id="run-2",
+            delivery_kind="fixed_report",
+            source_kind="successful_brief",
+            revision=persisted["current_revision"],
+            source_digest=persisted["current_brief_digest"],
+            scheduled_target_market=TARGET_1000,
+            candidate_identities=persisted["current_candidate_identities"],
+            rendered_message="# changed",
+        )
+
+    confirmed = confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=transport_key,
+    )
+    assert confirmed["envelope"]["status"] == "confirmed"
+
+
+def test_v2_exact_transition_rejects_mismatched_transport_or_payload(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        DailyDecisionBriefStateError,
+        record_daily_decision_brief_delivery_attempt,
+    )
+
+    persisted = _persist(tmp_path)
+    envelope = _prepare_fixed(tmp_path, persisted)["envelope"]
+    common = {
+        "base": tmp_path,
+        "account": "lx",
+        "market": "US",
+        "market_trading_date": MARKET_DATE,
+        "delivery_key": envelope["delivery_key"],
+        "source_digest": envelope["source_digest"],
+        "message_sha256": envelope["message_sha256"],
+        "transport_idempotency_key": "wrong",
+        "ambiguous": False,
+    }
+    with pytest.raises(DailyDecisionBriefStateError, match="idempotency"):
+        record_daily_decision_brief_delivery_attempt(**common)
+    with pytest.raises(ValueError, match="message_sha256"):
+        record_daily_decision_brief_delivery_attempt(
+            **{**common, "transport_idempotency_key": "om-" + "0" * 32, "message_sha256": "bad"}
+        )
