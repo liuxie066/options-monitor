@@ -318,3 +318,87 @@ def test_scheduler_catchup_keeps_original_batch_and_force_has_no_batch() -> None
     )
     assert forced.should_run_scan is True
     assert forced.scheduled_target_market is None
+
+
+def test_scan_scheduler_adds_half_hour_candidate_targets_without_0930() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "cron_interval_min": 10,
+        "run_window": {
+            "start": "09:30",
+            "end": "16:00",
+            "breaks": [{"start": "12:00", "end": "13:00"}],
+        },
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
+    }
+    state = {
+        "last_run_utc_by_account": {},
+        "last_processed_scan_target_utc_by_account": {},
+    }
+
+    open_tick = decide(cfg, state, datetime(2026, 7, 21, 1, 30, tzinfo=timezone.utc), account="lx")
+    assert open_tick.should_run_scan is False
+    assert open_tick.scheduled_scan_target_market is None
+    assert open_tick.next_run_market.endswith("09:40:00+08:00")
+
+    candidate_tick = decide(cfg, state, datetime(2026, 7, 21, 2, 30, tzinfo=timezone.utc), account="lx")
+    assert candidate_tick.should_run_scan is True
+    assert candidate_tick.is_notify_window_open is False
+    assert candidate_tick.scheduled_scan_target_market.endswith("10:30:00+08:00")
+    assert candidate_tick.scheduled_target_market is None
+    assert candidate_tick.reason == "到达候选检查点 10:30：执行扫描。"
+
+    lunch_tick = decide(cfg, state, datetime(2026, 7, 21, 4, 30, tzinfo=timezone.utc), account="lx")
+    assert lunch_tick.should_run_scan is False
+    assert lunch_tick.scheduled_scan_target_market is None
+    assert lunch_tick.next_run_market.endswith("13:00:00+08:00")
+
+
+def test_processed_target_watermark_does_not_let_late_completion_swallow_next_target() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "cron_interval_min": 10,
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
+    }
+    state = {
+        "last_run_utc_by_account": {"lx": "2026-07-21T02:01:00+00:00"},
+        "last_processed_scan_target_utc_by_account": {"lx": "2026-07-21T01:40:00+00:00"},
+    }
+
+    ten_o_clock = decide(cfg, state, datetime(2026, 7, 21, 2, 1, tzinfo=timezone.utc), account="lx")
+    assert ten_o_clock.should_run_scan is True
+    assert ten_o_clock.scheduled_scan_target_market.endswith("10:00:00+08:00")
+    assert ten_o_clock.scheduled_target_market.endswith("10:00:00+08:00")
+
+    state["last_run_utc_by_account"]["lx"] = "2026-07-21T07:51:00+00:00"
+    state["last_processed_scan_target_utc_by_account"]["lx"] = "2026-07-21T07:30:00+00:00"
+    final_report = decide(cfg, state, datetime(2026, 7, 21, 7, 51, tzinfo=timezone.utc), account="lx")
+    assert final_report.should_run_scan is True
+    assert final_report.scheduled_scan_target_market.endswith("15:50:00+08:00")
+
+
+def test_processed_target_watermark_is_account_isolated() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "cron_interval_min": 10,
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
+    }
+    state = {
+        "last_run_utc_by_account": {"lx": "2026-07-21T02:00:05+00:00"},
+        "last_processed_scan_target_utc_by_account": {"lx": "2026-07-21T02:00:00+00:00"},
+    }
+    now = datetime(2026, 7, 21, 2, 5, tzinfo=timezone.utc)
+
+    assert decide(cfg, state, now, account="lx").should_run_scan is False
+    assert decide(cfg, state, now, account="sy").should_run_scan is True
