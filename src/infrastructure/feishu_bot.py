@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Callable
 from urllib.parse import quote
 
-from src.infrastructure.feishu_bitable import http_json, with_tenant_token_retry
+from src.infrastructure.feishu_bitable import FeishuPermanentError, http_json, with_tenant_token_retry
 
 
 HttpJsonFn = Callable[..., dict[str, Any]]
@@ -120,6 +121,84 @@ def send_text_message(
     }
     if uuid:
         payload["uuid"] = str(uuid)
+
+    def _send(tenant_token: str) -> dict[str, Any]:
+        return http_json_fn(
+            "POST",
+            url,
+            payload,
+            headers={
+                "Authorization": f"Bearer {tenant_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            retry_max_attempts=(3 if uuid else 1),
+            log_fn=log_fn,
+            log_success_attempts=bool(log_fn),
+        )
+
+    return with_tenant_token_retry(app_id, app_secret, _send)
+
+
+FEISHU_POST_REQUEST_BUDGET_BYTES = 28 * 1024
+FEISHU_POST_TOO_LARGE = "FEISHU_POST_TOO_LARGE"
+
+
+def send_post_message(
+    *,
+    app_id: str,
+    app_secret: str,
+    open_id: str,
+    markdown: str,
+    uuid: str | None = None,
+    log_fn: Callable[[dict[str, Any]], Any] | None = None,
+    http_json_fn: HttpJsonFn = http_json,
+) -> dict[str, Any]:
+    open_id_value = str(open_id or "").strip()
+    markdown_value = str(markdown or "").strip()
+    if not open_id_value:
+        raise ValueError("open_id is required")
+    if not markdown_value:
+        raise ValueError("markdown is required")
+
+    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
+    url = f"https://open.feishu.cn{request_path}"
+    payload = {
+        "receive_id": open_id_value,
+        "msg_type": "post",
+        "content": json.dumps(
+            {
+                "zh_cn": {
+                    "content": [
+                        [
+                            {
+                                "tag": "md",
+                                "text": markdown_value,
+                            }
+                        ]
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+    }
+    if uuid:
+        payload["uuid"] = str(uuid)
+
+    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    if request_body_bytes > FEISHU_POST_REQUEST_BUDGET_BYTES:
+        raise FeishuPermanentError(
+            "feishu post request exceeds local byte budget",
+            response={
+                "local_error_code": FEISHU_POST_TOO_LARGE,
+                "http_status": None,
+                "feishu_code": None,
+                "http_attempts": [],
+                "request_body_bytes": request_body_bytes,
+                "request_body_budget_bytes": FEISHU_POST_REQUEST_BUDGET_BYTES,
+                "normalized_markdown_chars": len(markdown_value),
+                "normalized_markdown_sha256": hashlib.sha256(markdown_value.encode("utf-8")).hexdigest(),
+            },
+        )
 
     def _send(tenant_token: str) -> dict[str, Any]:
         return http_json_fn(
