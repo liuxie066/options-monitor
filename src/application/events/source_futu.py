@@ -205,7 +205,8 @@ def _rows_from_payload(value: Any, key: str) -> list[dict[str, Any]]:
 def _fetch_split_rows(gateway: Any, *, code: str, max_pages: int, page_size: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     next_key: str | None = None
-    for _ in range(max(1, int(max_pages))):
+    page_limit = max(1, int(max_pages))
+    for _ in range(page_limit):
         payload = gateway.get_corporate_actions_stock_splits(
             code,
             next_key=next_key,
@@ -213,12 +214,12 @@ def _fetch_split_rows(gateway: Any, *, code: str, max_pages: int, page_size: int
         )
         rows.extend(_rows_from_payload(payload, "split_list"))
         if not isinstance(payload, dict):
-            break
+            return rows
         raw_next = str(payload.get("next_key") or "").strip()
         if not raw_next or raw_next == "-1" or raw_next == next_key:
-            break
+            return rows
         next_key = raw_next
-    return rows
+    raise ValueError(f"stock split pagination incomplete after {page_limit} pages")
 
 
 def _first_value(row: dict[str, Any], *keys: str) -> Any:
