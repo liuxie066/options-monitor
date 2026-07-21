@@ -203,11 +203,17 @@ om config get --config-key us --key runtime.prefetch.max_workers
 om run tick --config config.us.json --accounts lx sy --no-send
 ```
 
-确认输出、候选和通知预览都合理，再进行正式运行：
+确认输出、候选和兼容预览都合理，再进行手工扫描（手工/`--force` 不自动发送普通 Tick 通知）：
 
 ```bash
 om run tick --config config.us.json --accounts lx
 om run tick --config config.us.json --accounts lx sy
+```
+
+计划内普通通知只由 guarded scheduler 入口发送：
+
+```bash
+om run tick-cron --market us --accounts lx sy --timeout 600
 ```
 
 ### 5. Linux / Mac 服务化部署
@@ -264,6 +270,8 @@ om run tick --config config.us.json --accounts lx sy
 ./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
 ```
+
+以上直接 `run tick` 是手工扫描入口，不自动发送普通 Tick 通知；计划内投递使用 `run tick-cron`。
 
 单账户只是传一个账户的特例；多账户直接把多个账户标签传给 `--accounts`。
 
@@ -759,7 +767,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | `./om-agent run --tool get_close_advice ...` | 是 | 否 | 否 |
 | `./om-agent run --tool query_cash_headroom ...` | 是 | 否 | 否 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 |
-| `./om run tick --config ...` | 是 | 可能 | 是 |
+| `./om run tick --config ...` | 是 | 可能 | 否（manual/force 不自动发送普通 Tick 通知） |
 | `./om run tick-cron --market ...` | 是 | 可能 | 是 |
 | `./om research strategy-lab update --write ...` | 是 | 否 | 否 |
 | `./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是，默认发送入账回执 |
@@ -814,17 +822,16 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 本工具只做监控、筛选、报告和提醒，不构成投资建议。任何下单前都应自行复核价格、流动性、保证金、仓位暴露和事件风险。
 
-## 期权监控通知与查询（默认关闭）
+## 期权监控通知与查询
 
 这套功能只做监控、报告和提醒，不会自动下单。它复用同一套 canonical 策略扫描、现有通知 route 和现有 10 分钟 timer，不新增第二个 scanner 或 sender。
 
-启用配置仍是：
+scheduled 普通通知统一由 Daily Brief 渲染。配置只保留展示上限：
 
 ```json
 {
   "notifications": {
     "daily_brief": {
-      "enabled": false,
       "max_actions_per_priority": 5,
       "max_candidates_per_strategy": 3,
       "max_rejection_reasons": 5
@@ -833,14 +840,17 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 }
 ```
 
-启用后的节奏：
+旧配置里的 `notifications.daily_brief.enabled=true|false` 在兼容期内仍可读取并给出告警，但值会被忽略：它不会关闭 Daily Brief，也不会切回 Compact/Legacy。
+
+运行节奏：
 
 - timer 仍每 10 分钟唤醒，但只有市场当地 `09:40`、有效整点、有效半点和 `15:50` 执行策略扫描；`09:30` 不扫描，港股午休不扫描。
 - `09:40`、有效整点和 `15:50` 固定发送完整报告；没有候选也发送持仓和资金，不退化为一句心跳。
 - 有效半点发现当日尚未送达的新普通候选时，立即发送新增候选通知；没有新增候选则安静。
 - 固定报告点同时发现新增候选时，只发送一份完整报告，确认送达后再把其中候选记为已提醒。
 - pipeline 失败不会覆盖最近成功快照。固定点失败会明确说明“未形成可靠结果”，不会误报成“本轮无候选”。
-- provider 失败时保留原消息、delivery key 和 message hash；后续 10 分钟唤醒只做 delivery-only 精确重试，不重新扫描。
+- provider 失败时保留原消息、delivery key 和 message hash；后续满足运行窗口的 10 分钟唤醒只做 delivery-only 精确重试，不重新扫描。
+- 手动/force 的可靠扫描可以更新“最近成功快照”，方便随后查询和候选恢复，但不会创建普通通知 envelope，也不会发送普通通知。
 
 固定报告示例：
 
@@ -897,4 +907,4 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 自然语言入口包括“期权监控”“最新期权报告”“港股期权”“美股期权”“lx 期权”和“sy 期权”。Markdown 不展示 revision、内部 identity、broker contract code、raw enum、ISO 时间或内部路径；这些事实仍保留在结构化审计数据中。
 
-`notifications.daily_brief.enabled` 默认仍为 `false`。生产配置、delivery pointer 迁移、真实发送 canary、release 和远端升级都需要单独审批。
+合并代码不等于上线。生产 delivery pointer 迁移、真实发送 canary、release、远端升级和调度观察仍需单独审批；回滚必须停调度并回滚代码/版本和兼容状态，不能恢复 Compact 作为并行 scheduled sender。

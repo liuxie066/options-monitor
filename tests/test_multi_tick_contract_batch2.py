@@ -15,17 +15,16 @@ class _FakeRunLogger:
         self.events.append(rec)
 
 
-def test_multi_tick_account_messages_snapshot_contract_guard_present() -> None:
+def test_multi_tick_scheduled_renderer_authority_is_daily_brief_only() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
-    audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
-    assert 'snapshot_name": "account_messages"' in helper_src
-    assert "prepare_multi_account_notification(" in notification_flow_src
-    assert "prepare_per_account_messages(" in helper_src
-    assert "snapshot_account_messages(" in helper_src
-    assert 'stage="account_messages_snapshot"' in audit_src or 'stage="account_messages_snapshot"' in notification_flow_src
-    assert "account_messages must be a dict" in helper_src
+    assert "_prepare_daily_brief_notification(request)" in notification_flow_src
+    assert "prepare_multi_account_notification(" not in notification_flow_src
+    assert "prepare_per_account_messages(" not in helper_src
+    assert "snapshot_account_messages(" not in helper_src
+    assert "build_account_message_compact" not in notification_flow_src
+    assert "build_account_message" not in notification_flow_src
 
 
 def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path() -> None:
@@ -87,8 +86,9 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     assert "notify_failures.append(" in helper_src
     assert '"final_returncode": int(send_result.get("final_returncode") or 0)' in helper_src
     assert "sent_accounts.append(acct)" in helper_src
-    assert "mark_accounts_notified(" in notification_flow_src
-    assert "mark_notified=True" in cron_runtime_src
+    assert "mark_accounts_notified(" not in notification_flow_src
+    assert "_confirm_daily_brief_execution(" in notification_flow_src
+    assert "confirm_daily_decision_brief_delivery_v2(" in notification_flow_src
     assert "NOTIFY_PARTIAL_FAILED" in finalization_src
     assert "build_run_end_payload(" in finalization_src
     assert '"notify_summary": notify_summary' in cron_runtime_src

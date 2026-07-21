@@ -22,7 +22,7 @@ def _print(payload: dict[str, Any]) -> int:
 def add_run_commands(subparsers: Any) -> None:
     run = subparsers.add_parser("run", help="run long-lived workflows")
     run_sub = run.add_subparsers(dest="run_command", required=True)
-    tick = run_sub.add_parser("tick", help="multi-account tick orchestration")
+    tick = run_sub.add_parser("tick", help="multi-account scan orchestration; direct/manual runs do not auto-send ordinary Tick notifications")
     tick.add_argument("--config", required=True)
     tick.add_argument("--accounts", nargs="+", default=None)
     tick.add_argument("--symbols", nargs="+", default=None)
@@ -30,7 +30,7 @@ def add_run_commands(subparsers: Any) -> None:
     tick.add_argument("--market-config", default="auto", choices=["auto", "hk", "us", "all"])
     tick.add_argument("--no-send", action="store_true")
     tick.add_argument("--smoke", action="store_true")
-    tick.add_argument("--force", action="store_true")
+    tick.add_argument("--force", action="store_true", help="force scanning outside normal run points; does not auto-send ordinary Tick notifications")
     tick.add_argument("--debug", action="store_true")
     tick.add_argument("--opend-phone-verify-continue", action="store_true")
     tick.add_argument("--allow-stale-config", action="store_true")

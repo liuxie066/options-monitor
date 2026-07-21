@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
@@ -95,6 +97,16 @@ def test_build_notification_compact_style() -> None:
     assert "---" not in out
 
 
+def test_build_notification_defaults_to_compact_and_rejects_unknown_renderer() -> None:
+    from src.application.notify_symbols import build_notification
+
+    alerts_text = "## 高优先级\n腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | 风险 保守 | 通过准入\n"
+
+    assert build_notification("", alerts_text) == build_notification("", alerts_text, render_style="compact")
+    with pytest.raises(ValueError, match="compact, legacy"):
+        build_notification("", alerts_text, render_style="unknown")
+
+
 def test_build_notification_compact_style_uses_markdown_enhancement_heading() -> None:
     from src.application.notify_symbols import build_notification
 
@@ -114,7 +126,8 @@ def test_build_notification_legacy_style_uses_flat_fields() -> None:
     from src.application.notify_symbols import build_notification
 
     alerts_text = "## 高优先级\n腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | 风险 保守 | 通过准入\n"
-    out = build_notification("", alerts_text, render_style="legacy")
+    with pytest.warns(DeprecationWarning, match="Legacy Tick renderer"):
+        out = build_notification("", alerts_text, render_style="legacy")
 
     assert "Put" in out
     assert "**[当前账户] 腾讯｜卖Put｜2026-04-29 460**" in out
