@@ -385,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(item, dict) and isinstance(item.get("scheduler_decision"), dict)
     }
 
-    def commit_scan_targets(targets: dict[str, str]) -> None:
+    def commit_scan_targets(targets: dict[str, str | None]) -> None:
         mark_scheduler_accounts(
             config=cfg_path,
             state=state_path,

@@ -94,8 +94,8 @@ class TickNotificationRequest:
     ran_pipeline_accounts: tuple[str, ...] | list[str] = ()
     account_ids: tuple[str, ...] | list[str] = ()
     scheduler_decisions_by_account: dict[str, dict[str, Any]] | None = None
-    scheduled_scan_targets_by_account: dict[str, str] | None = None
-    commit_scan_targets_fn: Callable[[dict[str, str]], None] | None = None
+    scheduled_scan_targets_by_account: dict[str, str | None] | None = None
+    commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None
     delivery_only: bool = False
     trigger_kind: str = "scheduled"
 
@@ -111,6 +111,7 @@ class DailyBriefNotificationPreparation:
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     process_root = (request.repo_root or request.base).resolve()
+    _validate_scheduled_scan_targets(request)
 
     def finish_success(
         fn: Callable[[], int],
@@ -164,26 +165,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         notify_candidates = notification_prep.notify_candidates
         results_count = notification_prep.results_count
 
-    if (
-        daily_brief_prep is not None
-        and not request.delivery_only
-        and request.scheduled_scan_targets_by_account
-    ):
-        if request.commit_scan_targets_fn is None:
-            raise RuntimeError("daily brief scheduled scan target commit callback is required")
-        try:
-            request.commit_scan_targets_fn(dict(request.scheduled_scan_targets_by_account))
-        except Exception as exc:
-            request.audit_helper.guard_mark_failure("SCHEDULER_TARGET_COMMIT_FAILED", "commit_scan_targets")
-            request.audit_helper.audit(
-                "daily_brief",
-                "scan_target_commit_failed",
-                run_id=request.run_id,
-                status="error",
-                message=str(exc),
-                extra={"targets": dict(request.scheduled_scan_targets_by_account)},
-            )
-            raise
+    _commit_scan_targets_before_delivery(request)
 
     request.runlog.safe_event(
         "notify",
@@ -625,6 +607,56 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     )
 
 
+def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
+    if request.delivery_only or str(request.trigger_kind or "scheduled").strip().lower() != "scheduled":
+        return
+    targets = {
+        str(account or "").strip().lower(): str(target or "").strip()
+        for account, target in (request.scheduled_scan_targets_by_account or {}).items()
+        if str(account or "").strip()
+    }
+    scanned_accounts = {
+        _daily_brief_result_account(result)
+        for result in request.results
+        if _daily_brief_result_value(result, "ran_scan") is True and _daily_brief_result_account(result)
+    }
+    missing = sorted(account for account in scanned_accounts if not targets.get(account))
+    if not missing:
+        return
+    request.audit_helper.guard_mark_failure("SCHEDULED_SCAN_TARGET_MISSING", "validate_scan_targets")
+    request.audit_helper.audit(
+        "scheduler",
+        "scheduled_scan_target_missing",
+        run_id=request.run_id,
+        status="error",
+        extra={"accounts": missing},
+    )
+    raise RuntimeError(f"scheduled scan target missing for accounts: {', '.join(missing)}")
+
+
+def _commit_scan_targets_before_delivery(request: TickNotificationRequest) -> None:
+    if request.delivery_only or not request.scheduled_scan_targets_by_account:
+        return
+    targets = dict(request.scheduled_scan_targets_by_account)
+    if str(request.trigger_kind or "scheduled").strip().lower() != "scheduled":
+        targets = {str(account): None for account in targets}
+    if request.commit_scan_targets_fn is None:
+        raise RuntimeError("scheduled scan target commit callback is required")
+    try:
+        request.commit_scan_targets_fn(targets)
+    except Exception as exc:
+        request.audit_helper.guard_mark_failure("SCHEDULER_TARGET_COMMIT_FAILED", "commit_scan_targets")
+        request.audit_helper.audit(
+            "scheduler",
+            "scan_target_commit_failed",
+            run_id=request.run_id,
+            status="error",
+            message=str(exc),
+            extra={"targets": targets},
+        )
+        raise
+
+
 def _daily_brief_enabled(config: dict[str, Any]) -> bool:
     notifications = config.get("notifications") if isinstance(config, dict) else {}
     notification_cfg = notifications if isinstance(notifications, dict) else {}
@@ -696,8 +728,9 @@ def _prepare_daily_brief_notification(
         scan_targets = {
             str(account).strip().lower(): str(target).strip()
             for account, target in (request.scheduled_scan_targets_by_account or {}).items()
-            if str(account).strip() and str(target).strip()
+            if str(account).strip() and target and str(target).strip()
         }
+        scheduled_trigger = str(request.trigger_kind or "scheduled").strip().lower() == "scheduled"
         for result in request.results:
             account = _daily_brief_result_account(result)
             if not account:
@@ -743,16 +776,17 @@ def _prepare_daily_brief_notification(
                     previous = persisted.get("previous_successful_brief")
                     if isinstance(previous, dict) and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]:
                         diff = diff_daily_decision_briefs(previous, persisted["brief"])
-                    recorded = record_daily_decision_brief_candidates(
-                        base=request.base,
-                        account=account,
-                        market=market,
-                        market_trading_date=str(persisted["brief"]["market_trading_date"]),
-                        revision=int(persisted["current_revision"]),
-                        brief_digest=str(persisted["current_brief_digest"]),
-                        candidate_identities=persisted["current_candidate_identities"],
-                    )
-                    pending = list(recorded["pending_candidate_identities"])
+                    if scheduled_trigger:
+                        recorded = record_daily_decision_brief_candidates(
+                            base=request.base,
+                            account=account,
+                            market=market,
+                            market_trading_date=str(persisted["brief"]["market_trading_date"]),
+                            revision=int(persisted["current_revision"]),
+                            brief_digest=str(persisted["current_brief_digest"]),
+                            candidate_identities=persisted["current_candidate_identities"],
+                        )
+                        pending = list(recorded["pending_candidate_identities"])
                 else:
                     failure_source = _write_daily_brief_failure_artifact(
                         request=request,
@@ -762,15 +796,19 @@ def _prepare_daily_brief_notification(
                         result=result,
                     )
 
-                decision = decide_daily_brief_notification(
-                    ran_scan=True,
-                    pipeline_reliable=reliable,
-                    fixed_due=bool(fixed_target),
-                    pending_candidate_identities=pending,
+                decision = (
+                    decide_daily_brief_notification(
+                        ran_scan=True,
+                        pipeline_reliable=reliable,
+                        fixed_due=bool(fixed_target),
+                        pending_candidate_identities=pending,
+                    )
+                    if scheduled_trigger
+                    else {"action": "none", "reason": "non_scheduled_snapshot_only"}
                 )
                 action = str(decision["action"])
                 existing_retry = None
-                if not multi_market:
+                if scheduled_trigger and not multi_market:
                     existing_retry = read_retryable_daily_decision_brief_delivery(
                         base=request.base,
                         account=account,
@@ -841,7 +879,7 @@ def _prepare_daily_brief_notification(
                         )
 
                 retry = None
-                if not multi_market:
+                if scheduled_trigger and not multi_market:
                     retry = read_retryable_daily_decision_brief_delivery(
                         base=request.base,
                         account=account,

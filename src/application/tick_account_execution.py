@@ -110,7 +110,7 @@ class TickAccountExecutionOutcome:
     account_metrics: list[dict[str, Any]]
     ran_any_pipeline: bool
     ran_pipeline_accounts: list[str]
-    scheduled_scan_targets_by_account: dict[str, str]
+    scheduled_scan_targets_by_account: dict[str, str | None]
     prefetch_done: bool
 
 
@@ -160,7 +160,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     prefetch_done = bool(request.prefetch_done)
     ran_any_pipeline = False
     ran_pipeline_accounts: list[str] = []
-    scheduled_scan_targets_by_account: dict[str, str] = {}
+    scheduled_scan_targets_by_account: dict[str, str | None] = {}
     results: list[Any] = []
     account_metrics: list[dict[str, Any]] = []
     for outcome in run_account_outcomes(
@@ -182,8 +182,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         scheduler_decision = account_scan_decision.get("scheduler_decision")
         if account_scan_decision.get("should_run") is not False and isinstance(scheduler_decision, Mapping):
             target = str(scheduler_decision.get("scheduled_scan_target_market") or "").strip()
-            if target:
-                scheduled_scan_targets_by_account[account] = target
+            scheduled_scan_targets_by_account[account] = target or None
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
 
