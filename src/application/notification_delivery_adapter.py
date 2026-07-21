@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +22,7 @@ from src.application.channels.wechat_clawbot.notification import (
 )
 from src.application.secret_resolver import resolve_feishu_bot_config
 from src.infrastructure.feishu_bitable import FeishuError
-from src.infrastructure.feishu_bot import send_text_message
+from src.infrastructure.feishu_bot import send_post_message
 
 
 @dataclass(frozen=True)
@@ -95,11 +95,11 @@ def send_feishu_app_message(
     request_path = f"/open-apis/im/v1/messages?receive_id_type={receive_id_type}"
     http_attempts: list[dict[str, Any]] = []
     try:
-        response_json = send_text_message(
+        response_json = send_post_message(
             app_id=bot_cfg.app_id,
             app_secret=bot_cfg.app_secret,
             open_id=receive_id,
-            text=str(message or ""),
+            markdown=str(message or ""),
             uuid=idempotency_key,
             log_fn=http_attempts.append,
         )
@@ -123,16 +123,23 @@ def send_feishu_app_message(
                     response_json = parsed
             except Exception:
                 pass
+        response_http_attempts = response.get("http_attempts")
         return {
             "ok": False,
             "http_status": response.get("http_status"),
+            "feishu_code": response.get("feishu_code"),
             "request_path": request_path,
             "response_json": response_json,
             "response_tail": body_text[-500:],
             "error_type": type(exc).__name__,
             "error_message": str(exc),
+            "local_error_code": response.get("local_error_code"),
+            "request_body_bytes": response.get("request_body_bytes"),
+            "request_body_budget_bytes": response.get("request_body_budget_bytes"),
+            "normalized_markdown_chars": response.get("normalized_markdown_chars"),
+            "normalized_markdown_sha256": response.get("normalized_markdown_sha256"),
             "idempotency_key": idempotency_key,
-            "http_attempts": http_attempts,
+            "http_attempts": response_http_attempts if isinstance(response_http_attempts, list) else http_attempts,
         }
 
 
@@ -145,7 +152,10 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     message_id = data.get("message_id")
     http_status = result.get("http_status")
     feishu_code = response_json.get("code") if isinstance(response_json.get("code"), int) else None
+    if feishu_code is None and isinstance(result.get("feishu_code"), int):
+        feishu_code = result.get("feishu_code")
     feishu_msg = str(response_json.get("msg") or result.get("error_message") or "").strip()
+    local_error_code = str(result.get("local_error_code") or "").strip() or None
     request_path = str(result.get("request_path") or "/open-apis/im/v1/messages?receive_id_type=open_id")
     response_tail = str(result.get("response_tail") or "")
     idempotency_key = str(result.get("idempotency_key") or "").strip() or None
@@ -174,6 +184,17 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             parts.append(f"response_tail={response_tail}")
         message = " ".join(parts)
 
+    local_diagnostics = {
+        key: result.get(key)
+        for key in (
+            "request_body_bytes",
+            "request_body_budget_bytes",
+            "normalized_markdown_chars",
+            "normalized_markdown_sha256",
+        )
+        if result.get(key) is not None
+    }
+
     return normalize_subprocess_adapter_payload(
         adapter="notify",
         tool_name="feishu_app_message_send",
@@ -196,6 +217,9 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "retry_attempt_count": retry_attempt_count,
             "ambiguous_send": ambiguous_send,
             "duplicate_risk": duplicate_risk,
+            "local_error_code": local_error_code,
+            "error_code": local_error_code,
+            **local_diagnostics,
         },
     )
 

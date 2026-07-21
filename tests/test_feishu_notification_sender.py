@@ -119,11 +119,11 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
     captured: dict[str, str] = {}
 
-    def _send_text_message(**kwargs):  # type: ignore[no-untyped-def]
-        captured.update({key: str(value) for key, value in kwargs.items() if key in {"app_id", "app_secret", "open_id", "text", "uuid"}})
+    def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update({key: str(value) for key, value in kwargs.items() if key in {"app_id", "app_secret", "open_id", "markdown", "uuid"}})
         return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
 
-    monkeypatch.setattr(service, "send_text_message", _send_text_message)
+    monkeypatch.setattr(service, "send_post_message", _send_post_message)
 
     out = service.send_feishu_app_message(
         base=tmp_path,
@@ -138,7 +138,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
     assert captured["app_id"] == "cli_1"
     assert captured["app_secret"] == "sec_1"
     assert captured["open_id"] == "ou_1"
-    assert captured["text"] == "hello"
+    assert captured["markdown"] == "hello"
     assert captured["uuid"] == "idem-1"
 
 
@@ -150,11 +150,11 @@ def test_send_feishu_app_message_ignores_config_target_for_bot_channel(monkeypat
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
     captured: dict[str, str] = {}
 
-    def _send_text_message(**kwargs):  # type: ignore[no-untyped-def]
+    def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
         captured.update({key: str(value) for key, value in kwargs.items() if key in {"open_id"}})
         return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
 
-    monkeypatch.setattr(service, "send_text_message", _send_text_message)
+    monkeypatch.setattr(service, "send_post_message", _send_post_message)
 
     out = service.send_feishu_app_message(
         base=tmp_path,
@@ -566,3 +566,114 @@ def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None
         raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "unsupported notification provider" in str(exc)
+
+
+
+def test_feishu_size_preflight_error_preserves_local_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    diagnostics = {
+        "local_error_code": "FEISHU_POST_TOO_LARGE",
+        "http_status": None,
+        "feishu_code": None,
+        "http_attempts": [],
+        "request_body_bytes": 28673,
+        "request_body_budget_bytes": 28672,
+        "normalized_markdown_chars": 12000,
+        "normalized_markdown_sha256": "a" * 64,
+    }
+
+    def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
+        raise FeishuPermanentError("feishu post request exceeds local byte budget", response=diagnostics)
+
+    monkeypatch.setattr(service, "send_post_message", _send_post_message)
+
+    send_result = service.send_feishu_app_message(
+        base=tmp_path,
+        channel="feishu_app",
+        target="",
+        message="# 简报",
+        notifications={},
+        idempotency_key="idem-1",
+    )
+    normalized = service.normalize_feishu_app_send_output(send_result=send_result)
+
+    assert send_result["http_attempts"] == []
+    assert normalized["command_ok"] is False
+    assert normalized["delivery_confirmed"] is False
+    assert normalized["local_error_code"] == "FEISHU_POST_TOO_LARGE"
+    assert normalized["error_code"] == "FEISHU_POST_TOO_LARGE"
+    assert normalized["http_status"] is None
+    assert normalized["feishu_code"] is None
+    assert normalized["http_attempts"] == []
+    assert normalized["ambiguous_send"] is False
+    assert normalized["duplicate_risk"] is False
+    for key in (
+        "request_body_bytes",
+        "request_body_budget_bytes",
+        "normalized_markdown_chars",
+        "normalized_markdown_sha256",
+    ):
+        assert normalized[key] == diagnostics[key]
+    assert "# 简报" not in repr(send_result)
+    assert "# 简报" not in repr(normalized)
+
+
+def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp_path: Path) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
+
+    canonical_markdown = '# 决策简报\n\n> 中文 "quote" 🙂\n\n- **NVDA**\n  - 合约: 1'
+    captured: dict[str, str] = {}
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+
+    def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
+        captured["feishu"] = kwargs["markdown"]
+        return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
+
+    monkeypatch.setattr(service, "send_post_message", _send_post_message)
+    service.send_feishu_app_message(
+        base=tmp_path,
+        channel="feishu_app",
+        target="",
+        message=canonical_markdown,
+        notifications={},
+        idempotency_key="idem-1",
+    )
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            del bot_token, base_url, timeout
+
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured["wechat"] = kwargs["text"]
+            return {"ret": 0, "data": {"message_id": "wx_1"}}
+
+    state_dir = tmp_path / "wechat-identity"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}),
+        encoding="utf-8",
+    )
+    send_wechat_clawbot_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="ops",
+        message=canonical_markdown,
+        notifications={"wechat_clawbot_state_dir": str(state_dir)},
+        idempotency_key="idem-1",
+        client_factory=FakeClient,
+    )
+
+    assert captured == {"feishu": canonical_markdown, "wechat": canonical_markdown}
