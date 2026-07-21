@@ -34,7 +34,11 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
 
     latest = parse_args(["daily-brief", "latest", "--account", "lx"])
     assert latest.daily_brief_command == "latest"
-    assert latest.market == "US"
+    assert latest.market is None
+
+    aggregate = parse_args(["daily-brief", "latest"])
+    assert aggregate.account is None
+    assert aggregate.market is None
     assert latest.json is False
 
     revision = parse_args(
@@ -56,6 +60,21 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     assert revision.market_trading_date == "2026-07-19"
     assert revision.revision == 2
     assert revision.json is True
+
+    day_default = parse_args(["daily-brief", "day", "--account", "lx", "--date", "2026-07-19"])
+    assert day_default.market == "US"
+
+    inspect = parse_args(["daily-brief", "delivery-inspect", "--account", "lx", "--market", "HK"])
+    assert inspect.daily_brief_command == "delivery-inspect"
+
+    migrate = parse_args(["daily-brief", "delivery-migrate", "--account", "lx", "--market", "HK"])
+    assert migrate.confirm is False
+    assert migrate.dry_run is False
+
+    confirmed = parse_args(
+        ["daily-brief", "delivery-migrate", "--account", "lx", "--market", "HK", "--confirm"]
+    )
+    assert confirmed.confirm is True
 
 
 def test_daily_brief_cli_outputs_markdown_and_json(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -161,3 +180,68 @@ def test_daily_brief_cli_reads_env_runtime_root_then_repo_fallback(monkeypatch, 
     repo_payload = json.loads(capsys.readouterr().out)
     assert repo_payload["brief"]["revision"] == 0
     assert repo_payload["brief"]["run_id"] == "repo-r0"
+
+
+def test_daily_brief_delivery_cli_inspects_and_migrates_v1_pointer(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery,
+        prepare_daily_decision_brief,
+    )
+    from src.interfaces.cli.main import main
+
+    lifecycle = prepare_daily_decision_brief(base=tmp_path, brief=_brief(run_id="legacy-run"))
+    brief = lifecycle["brief"]
+    confirm_daily_decision_brief_delivery(
+        base=tmp_path,
+        market="US",
+        market_trading_date=brief["market_trading_date"],
+        account="lx",
+        revision=brief["revision"],
+        delivery_kind=lifecycle["delivery_kind"],
+        delivery_key=lifecycle["delivery_key"],
+        brief_digest=lifecycle["current_brief_digest"],
+        confirmed_at_utc=datetime(2026, 7, 19, 13, 41, tzinfo=timezone.utc),
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    assert main(["daily-brief", "delivery-inspect", "--account", "lx", "--market", "US"]) == 0
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["reason"] == "migration_available"
+    assert inspected["migration"]["target_schema_version"] == "daily_decision_brief_delivery.v2"
+
+    assert main(["daily-brief", "delivery-migrate", "--account", "lx", "--market", "US"]) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["dry_run"] is True
+    assert dry_run["write_applied"] is False
+
+    assert main(
+        ["daily-brief", "delivery-migrate", "--account", "lx", "--market", "US", "--confirm"]
+    ) == 0
+    migrated = json.loads(capsys.readouterr().out)
+    assert migrated["write_applied"] is True
+    assert migrated["backup_path"].endswith("Z")
+
+
+def test_daily_brief_delivery_cli_reports_invalid_state_without_traceback(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    state_dir = tmp_path / "output_accounts" / "lx" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "daily_decision_brief.US.delivery.json").write_text('{"bad": true}', encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+
+    assert main(["daily-brief", "delivery-inspect", "--account", "lx", "--market", "US"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "STATE_INVALID"

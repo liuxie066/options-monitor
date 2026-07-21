@@ -67,6 +67,9 @@ def normalize_scheduler_decision_payload(raw: dict[str, Any] | Any) -> dict[str,
         "should_run_scan": bool(src.get("should_run_scan")),
         "is_notify_window_open": bool(src.get("is_notify_window_open")),
         "reason": str(src.get("reason") or ""),
+        "scheduled_scan_target_market": (
+            str(src.get("scheduled_scan_target_market") or "").strip() or None
+        ),
     }
     for key in (
         "now_utc",

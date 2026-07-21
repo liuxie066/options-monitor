@@ -274,8 +274,11 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
     for entrypoint in (
         'assemble_daily_decision_briefs(',
-        'prepare_daily_decision_brief(',
-        'render_daily_brief_lifecycle(',
+        'persist_daily_decision_brief_success(',
+        'prepare_daily_decision_brief_delivery(',
+        'render_fixed_report(',
+        'render_candidate_alert(',
+        'render_fixed_failure(',
         'build_per_account_delivery_batch(',
         'decision_builder=decide_notification_delivery',
     ):
@@ -303,8 +306,11 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
 
     for entrypoint in (
         'assemble_daily_decision_briefs(',
-        'prepare_daily_decision_brief(',
-        'render_daily_brief_lifecycle(',
+        'persist_daily_decision_brief_success(',
+        'prepare_daily_decision_brief_delivery(',
+        'render_fixed_report(',
+        'render_candidate_alert(',
+        'render_fixed_failure(',
         'build_per_account_delivery_batch(',
     ):
         assert entrypoint in notification_flow_src

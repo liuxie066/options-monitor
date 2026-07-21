@@ -42,6 +42,7 @@
 
 ## 业务规则
 - [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md)：产品域、模块定义、模块依赖和当前实现差距
+- [OPTION_NOTIFICATION_EXPERIENCE_PRD.md](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：期权监控固定计划点报告、新增候选即时通知、随时查询和资金展示的产品需求
 - [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)：开仓策略架构、Sell Put / Covered Call / Combo Yield 策略边界
 - [ASSIGNED_STOCK_RETURN_DESIGN.md](ASSIGNED_STOCK_RETURN_DESIGN.md)：Sell Put 被指派后正股成本、实时 spot、历史数据和收益统计口径设计
 - [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)：Strategy Lab 策略进化实验室的 PRD、架构、技术方案和安全边界

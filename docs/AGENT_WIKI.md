@@ -513,32 +513,41 @@ Commands, outputs, runtime artifacts, or failing tests.
 Smallest remaining actions, with blockers called out.
 ```
 
-## Daily Decision Brief read model
+## Option notification read and delivery model
 
-`daily_decision_brief.v1` is the canonical account+market+trading-date decision read model. It is advisory-only: opening opportunities are candidates, not orders, execution authorization, or permission to mutate config, positions, Feishu, broker state, or notification routing.
+`daily_decision_brief.v1` is the immutable account+market+trading-date successful-scan model. Delivery v2 separately owns fixed-target confirmation, pending/alerted candidate identities, and exact retry envelopes.
 
-- Scheduled source: keep the existing market scheduler and `run_points`. The first normal US opportunity is 09:40 market time, followed by the existing eligible hourly targets. A process-level failure relies on later eligible timer slots; 10:00 is the next explicit recovery point rather than a guaranteed 09:45 retry.
-- Trigger context: scheduled decisions carry an optional structured market-time target for display. Catch-up retains the original target. Manual/force rendering uses explicit trigger context and displays `手动触发`; it does not infer a batch from scheduler reason text.
-- Time display: scheduled batch and actual data-as-of are separate transient renderer inputs. They do not enter the persisted brief schema, digest, diff, delivery identity, or confirmation pointer.
-- Delivery envelope: the first confirmed single-market brief is full. Later scans still compare a material delta against the last confirmed revision internally, but a user-visible material update contains a change banner plus the complete current compact snapshot. No material change remains silent and resolves before provider route selection.
-- Candidate event authority: derive candidate event risk only from the current run's `output_runs/<run_id>/state/event_snapshot.json`. Candidate CSV compatibility fields (`event_flag`, `event_types`, `event_dates`, `event_source_status`) are never a Daily Brief fallback.
-- Candidate event semantics: expose only confirmed event, confirmed no important event in the candidate attention window, or temporarily unable to confirm. Missing, malformed, stale, partial, conflicting, unsupported, or empty fallback evidence must normalize to unable-to-confirm; raw reason/provider/evidence identifiers remain structured-only.
-- Candidate binding: attach the same additive event-risk projection to the displayed candidate and its stable opening action. Preserve nearest event, calendar-day distance, reliability, attention-window membership, and relation to each relevant expiration; Combo Yield evaluates Put and Call expirations separately.
-- Event materiality: for active P0/P1 candidates present in the current or last-confirmed brief, event addition, date change, entry before expiration, evidence degradation, evidence recovery, and same-chain confirmed removal are material. Freshness/cache-only changes are not material, and provider degradation must not be interpreted as removal.
-- User projection: render only allowlisted human fields. Use readable contracts such as `TCOM · Sell Put · 08-21 $40 Put`; hide internal IDs, broker codes, raw enums, raw ISO timestamps, revision metadata, and rejection dumps from Markdown while preserving them in the structured audit model.
-- Close-position details: for a priced actionable close, show the advisory reference close mid, estimated signed net P&L, and remaining annualized return when available. Label non-negative P&L as locked profit and negative P&L as close P&L; `(mid)` is not a fill guarantee. Hold and unavailable positions remain compact and never reuse stale metrics.
-- Strategy attribution: candidate and position attribution are independent. An empty `candidates.combo_yield` means no new Combo Yield candidate; it must not erase existing position attribution such as `组合增强（Put 侧/Call 侧）`. Renderer code must consume structured strategy/status fields rather than parse `strategy_group_id` or raw `leg_role`.
-- Capacity: candidate capacity is contract-scoped. Sell Put alternatives share account cash, so quantities shown for different candidates must never be summed.
-- Closed market: do not create a fake LIVE run. Read the latest local brief for planning/replay; once `valid_until_utc` expires, the read surface reports effective `planning_only`.
-- Safety: scheduled ordinary notifications use Daily Brief as the sole renderer; the deprecated `notifications.daily_brief.enabled` key is accepted with warning during the compatibility window but has no routing authority. Event risk changes do not alter candidate identity, action IDs, ranking, labeled-only authority, eligibility, or capacity; they never auto-cancel or auto-trade. Production notification canary, release and remote upgrade require separate operator authorization.
-- Multi-market: state/artifacts are market-qualified, but combined outbound remains intentionally fail-closed.
+- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The deprecated `notifications.daily_brief.enabled` key is accepted with a stable warning during compatibility but its value does not change routing.
+- Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan. A process failure relies on a later eligible scheduler slot; it does not invent an off-schedule retry scan.
+- Fixed reports: `09:40`, eligible whole hours, and `15:50` prepare a full user report even with no candidates. A fixed failure prepares an explicit failure report and never projects the previous successful current as this round's result.
+- Candidate alerts: eligible half-hour successful scans send immediately only when `current candidate identities - alerted identities` is non-empty. If fixed-report and new-candidate conditions coincide, the single complete fixed report wins.
+- Trigger safety: manual/force reliable scans may advance the successful current snapshot for later query and candidate recovery, but they do not create an ordinary delivery envelope, resolve a provider route, or send an ordinary notification. Scheduled display uses the structured target; manual/force never infer a batch from reason text.
+- Persistence order: durable successful outcome or fixed-failure evidence plus exact envelope -> exact scheduled-target watermark -> provider send -> attempt/ambiguous/confirmed transition.
+- Retry: no-scan wake-ups may replay only an already persisted exact envelope. They must not run broker access, pipeline, assembler, candidate detection, revision persistence, or message re-rendering.
+- Successful current: ready/degraded reliable scans advance current; failed/blocked/no-op scans do not. Query always reads the latest successful current, never the last delivered message.
+- Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. Sell Put capacities share account cash and cannot be summed.
+- Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
+- Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
+- User projection: fixed report, candidate alert, fixed failure, and query share the Daily Brief human contract. Markdown hides revision, internal IDs, broker codes, raw enums, raw ISO timestamps, paths, and rejection dumps while structured artifacts retain them.
+- Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads remain explicit operator queries requiring an account; market keeps the existing US default when omitted.
+- Query safety: query is byte-for-byte read-only with respect to delivery state and does not refresh data, scan, send, confirm, or mutate candidate state.
+- Delivery ambiguity: ambiguous envelopes are frozen. Later attempts either replay the exact message/key/hash under the provider idempotency contract or wait for explicit confirmation.
+- Multi-market: an explicit combined-market tick is terminal fail-closed before Daily Brief assemble, revision/current persistence, delivery-envelope creation, or provider work. Production scheduled runs remain single-market.
+- Rollout safety: release, remote upgrade, production pointer migration, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
 
 Read surfaces:
 
 ```bash
-./om daily-brief latest --account lx [--market US] [--json]
-./om daily-brief day --account lx --date YYYY-MM-DD [--market US] [--revision N] [--json]
+./om daily-brief latest [--account lx] [--market US|HK] [--json]
+./om daily-brief day --account lx [--market US|HK] --date YYYY-MM-DD [--revision N] [--json]
+./om-agent run --tool daily_decision_brief_read --input-json '{}'
 ./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
 ```
 
-Both surfaces read the same repository and renderer. They do not refresh quotes, run scans, send notifications, or advance delivery state. Missing historical artifacts return an explicit unavailable result.
+Delivery state inspection and migration remain explicit operator commands:
+
+```bash
+./om daily-brief delivery-inspect --account lx --market HK
+./om daily-brief delivery-migrate --account lx --market HK          # dry-run
+./om daily-brief delivery-migrate --account lx --market HK --confirm
+```

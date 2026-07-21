@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
+from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
 from src.application.yield_enhancement_config import (
@@ -54,6 +55,7 @@ class SymbolMonitoringDependencies:
     empty_sell_put_summary_fn: Callable[..., object]
     run_sell_call_scan_fn: Callable[..., object]
     empty_sell_call_summary_fn: Callable[..., object]
+    materialize_empty_sell_call_artifacts_fn: Callable[..., None]
     run_combo_yield_scan_fn: Callable[..., object]
     empty_combo_yield_summary_fn: Callable[..., object]
     materialize_empty_sell_put_artifacts_fn: Callable[..., None]
@@ -225,8 +227,14 @@ def run_symbol_monitoring(
                     run_sell_put=True,
                 )
             )
-        except Exception:
+        except Exception as exc:
             log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
+            append_strategy_scan_failure(
+                report_dir=inputs.report_dir,
+                symbol=symbol,
+                strategy_family="sell_put",
+                error=exc,
+            )
             deps.materialize_empty_sell_put_artifacts_fn(
                 report_dir=inputs.report_dir, symbol_lower=symbol_lower
             )
@@ -260,8 +268,14 @@ def run_symbol_monitoring(
                     global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
                 )
             )
-        except Exception:
+        except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
+            append_strategy_scan_failure(
+                report_dir=inputs.report_dir,
+                symbol=symbol,
+                strategy_family="combo_yield",
+                error=exc,
+            )
             deps.materialize_empty_combo_yield_artifacts_fn(
                 report_dir=inputs.report_dir, symbol_lower=symbol_lower
             )
@@ -276,29 +290,46 @@ def run_symbol_monitoring(
 
     if want_call:
         option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}
-        _append_summary_result(
-            summary_rows,
-            deps.run_sell_call_scan_fn(
-                py=inputs.py,
-                base=inputs.base,
-                symbol=symbol,
-                symbol_lower=symbol_lower,
-                symbol_cfg=symbol_cfg,
-                cc=cc,
-                top_n=inputs.top_n,
-                required_data_dir=inputs.required_data_dir,
-                report_dir=inputs.report_dir,
-                timeout_sec=inputs.timeout_sec,
-                is_scheduled=bool(inputs.is_scheduled),
-                stock=stock,
-                portfolio_ctx=inputs.portfolio_ctx,
-                exchange_rate_converter=exchange_rate_converter,
-                locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
-                locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
-                global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
-                global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
+        try:
+            _append_summary_result(
+                summary_rows,
+                deps.run_sell_call_scan_fn(
+                    py=inputs.py,
+                    base=inputs.base,
+                    symbol=symbol,
+                    symbol_lower=symbol_lower,
+                    symbol_cfg=symbol_cfg,
+                    cc=cc,
+                    top_n=inputs.top_n,
+                    required_data_dir=inputs.required_data_dir,
+                    report_dir=inputs.report_dir,
+                    timeout_sec=inputs.timeout_sec,
+                    is_scheduled=bool(inputs.is_scheduled),
+                    stock=stock,
+                    portfolio_ctx=inputs.portfolio_ctx,
+                    exchange_rate_converter=exchange_rate_converter,
+                    locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
+                    locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
+                    global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
+                    global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
+                )
             )
-        )
+        except Exception as exc:
+            log.exception("symbol_monitoring: sell_call step failed for %s", symbol)
+            append_strategy_scan_failure(
+                report_dir=inputs.report_dir,
+                symbol=symbol,
+                strategy_family="covered_call",
+                error=exc,
+            )
+            deps.materialize_empty_sell_call_artifacts_fn(
+                report_dir=inputs.report_dir,
+                symbol_lower=symbol_lower,
+            )
+            _append_summary_result(
+                summary_rows,
+                deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
+            )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
 

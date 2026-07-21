@@ -11,13 +11,21 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+from domain.domain.daily_decision_brief import (
+    build_daily_brief_candidate_identity,
+    normalize_daily_decision_brief,
+)
 from domain.domain.daily_decision_event_risk import build_candidate_event_risk
 from domain.domain.engine import rank_candidate_rows
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
+from src.application.strategy_scan_failures import (
+    ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
+    FAILURE_REASON as STRATEGY_FAILURE_REASON,
+    read_strategy_scan_failures,
+)
 from src.application.multi_tick.misc import AccountResult
 
 
@@ -55,6 +63,8 @@ def assemble_daily_decision_brief(
     valid_until = _valid_until_utc(config_map, market_norm, now_market)
     run_account_dir = paths.run_account_dir(base_path, run_id_norm, account_norm)
     state_dir = paths.run_account_state_dir(base_path, run_id_norm, account_norm)
+    trace_path = run_account_dir / "candidate_filter_trace.jsonl"
+    strategy_failure_path = run_account_dir / STRATEGY_FAILURE_ARTIFACT_NAME
 
     data_gaps: list[dict[str, Any]] = []
     source_artifacts: list[dict[str, Any]] = []
@@ -97,6 +107,21 @@ def assemble_daily_decision_brief(
     call_rows = _dedupe_rows(call_rows, family="covered_call")
     combo_rows = _dedupe_rows(combo_rows, family="combo_yield")
     close_rows = _dedupe_close_rows(close_rows)
+    strategy_failures = _load_strategy_step_failures(
+        failure_path=strategy_failure_path,
+        run_account_dir=run_account_dir,
+        account=account_norm,
+        run_id=run_id_norm,
+        market=market_norm,
+        data_gaps=data_gaps,
+    )
+    failed_families = {item["strategy_family"] for item in strategy_failures}
+    if "sell_put" in failed_families:
+        put_rows, put_available = [], False
+    if "covered_call" in failed_families:
+        call_rows, call_available = [], False
+    if "combo_yield" in failed_families:
+        combo_rows, combo_available = [], False
 
     ranked_puts = rank_candidate_rows(put_rows, mode="put") if put_rows else []
     ranked_calls = rank_candidate_rows(call_rows, mode="call") if call_rows else []
@@ -223,6 +248,28 @@ def assemble_daily_decision_brief(
         positions.append(_position_view(row))
         actions.append(_close_action(row, account=account_norm))
 
+    portfolio_context = _load_json_artifact(
+        path=state_dir / "portfolio_context.json",
+        run_account_dir=run_account_dir,
+        source_kind="portfolio_context",
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        required=True,
+    )
+    option_positions_context = _load_json_artifact(
+        path=state_dir / "option_positions_context.json",
+        run_account_dir=run_account_dir,
+        source_kind="option_positions_context",
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        required=True,
+    )
+    funds, cash_total_reliable = _build_funds(
+        portfolio_context=portfolio_context,
+        option_positions_context=option_positions_context,
+        data_gaps=data_gaps,
+    )
+
     metrics = _load_json_artifact(
         path=state_dir / "account_metrics.json",
         run_account_dir=run_account_dir,
@@ -241,7 +288,6 @@ def assemble_daily_decision_brief(
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
 
-    trace_path = run_account_dir / "candidate_filter_trace.jsonl"
     reject_logs = sorted(run_account_dir.glob("*_reject_log.csv"))
     rejections = _build_market_rejection_summary(
         trace_path=trace_path,
@@ -263,6 +309,14 @@ def assemble_daily_decision_brief(
                 "row_count": _count_jsonl_rows(trace_path),
             }
         )
+    if strategy_failure_path.exists():
+        source_artifacts.append(
+            {
+                "kind": "strategy_scan_failures",
+                "path": _source_path(run_account_dir, strategy_failure_path),
+                "row_count": _count_jsonl_rows(strategy_failure_path),
+            }
+        )
 
     result_view = _account_result_view(account_result)
     pipeline_failed = not bool(pipeline_succeeded)
@@ -279,10 +333,16 @@ def assemble_daily_decision_brief(
     blockers: list[str] = []
     if pipeline_failed:
         blockers.append(result_view["decision_reason"] or "account_scan_not_completed")
+    elif not result_view["ran_scan"]:
+        blockers.append(result_view["decision_reason"] or "account_scan_not_run")
     if all_decision_sources_unavailable:
         blockers.append("all_structured_decision_sources_unavailable")
+    if strategy_failures and not (put_rows or call_rows or combo_rows):
+        blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
         blockers.append("all_required_account_capacity_sources_unavailable")
+    if not cash_total_reliable:
+        blockers.append("cash_total_unavailable")
 
     if blockers:
         actionability = "blocked"
@@ -297,7 +357,30 @@ def assemble_daily_decision_brief(
         status = "degraded" if data_gaps else "ready"
 
     generated_at = effective_now.isoformat()
-    data_as_of = _latest_as_of(metrics, prefetch, fallback=effective_now).isoformat()
+    data_as_of = _latest_as_of(
+        metrics,
+        prefetch,
+        portfolio_context,
+        option_positions_context,
+        fallback=effective_now,
+    ).isoformat()
+    candidate_index = (
+        _build_candidate_index(
+            account=account_norm,
+            market=market_norm,
+            market_date=market_date,
+            ranked_puts=ranked_puts,
+            ranked_calls=ranked_calls,
+            combo_rows=combo_rows,
+            event_snapshot=event_snapshot,
+            event_snapshot_reason=event_snapshot_reason,
+            data_gaps=data_gaps,
+        )
+        if actionability == "live_actionable"
+        else []
+    )
+    if actionability != "blocked":
+        status = "degraded" if data_gaps else "ready"
     deduped_actions = _dedupe_actions(actions)
     events = _candidate_events(deduped_actions)
     deduped_data_gaps = _dedupe_gaps(data_gaps)
@@ -325,7 +408,9 @@ def assemble_daily_decision_brief(
             "actions": deduped_actions,
             "positions": positions,
             "capacity": capacity,
+            "funds": funds,
             "candidates": candidate_payloads,
+            "candidate_index": candidate_index,
             "rejections": _json_safe(rejections),
             "events": events,
             "data_gaps": deduped_data_gaps,
@@ -679,6 +764,58 @@ def _load_event_snapshot(
     return symbols, ""
 
 
+def _load_strategy_step_failures(
+    *,
+    failure_path: Path,
+    run_account_dir: Path,
+    account: str,
+    run_id: str,
+    market: str,
+    data_gaps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row_number, row in enumerate(read_strategy_scan_failures(failure_path), start=1):
+        if (
+            _text(row.get("account")).lower() != account
+            or _text(row.get("run_id")) != run_id
+            or _text(row.get("reason")).lower() != STRATEGY_FAILURE_REASON
+            or _row_market(row) != market
+        ):
+            continue
+        family = _strategy_family_from_failure(row)
+        symbol = canonical_symbol(row.get("symbol")) or _text(row.get("symbol")).upper()
+        identity = (family, symbol)
+        if not family or identity in seen:
+            continue
+        seen.add(identity)
+        failure = {
+            "scope": "strategy",
+            "strategy_family": family,
+            "symbol": symbol,
+            "reason": STRATEGY_FAILURE_REASON,
+            "error_type": _text(row.get("error_type")) or "StrategyStepError",
+            "source": {
+                "path": _source_path(run_account_dir, failure_path),
+                "row": row_number,
+            },
+        }
+        failures.append(failure)
+        data_gaps.append(failure)
+    return failures
+
+
+def _strategy_family_from_failure(row: Mapping[str, Any]) -> str:
+    value = _text(row.get("strategy_family")).lower()
+    if value in {"sell_call", "covered_call"}:
+        return "covered_call"
+    if value in {"combo_yield", "yield_enhancement"}:
+        return "combo_yield"
+    if value == "sell_put":
+        return "sell_put"
+    return ""
+
+
 def _build_market_rejection_summary(
     *,
     trace_path: Path,
@@ -756,6 +893,178 @@ def _build_market_rejection_summary(
         "risk_alerts": candidate_rejections._risk_alerts(rejected_rows),
         "top_categories": top_categories,
     }
+
+
+def _build_funds(
+    *,
+    portfolio_context: Mapping[str, Any],
+    option_positions_context: Mapping[str, Any],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    cash_total = _currency_amounts(portfolio_context.get("cash_by_currency"))
+    portfolio_as_of = _parse_datetime(portfolio_context.get("as_of_utc"))
+    cash_total_reliable = cash_total is not None and portfolio_as_of is not None
+    if not cash_total_reliable:
+        data_gaps.append(
+            {
+                "scope": "funds",
+                "kind": "cash_total",
+                "reason": "portfolio_cash_unavailable",
+            }
+        )
+
+    secured = _currency_amounts(option_positions_context.get("cash_secured_total_by_ccy"))
+    option_as_of = _parse_datetime(option_positions_context.get("as_of_utc"))
+    unavailable = option_positions_context.get("cash_secured_unavailable_by_symbol")
+    ledger = option_positions_context.get("ledger")
+    unavailable_reliable = unavailable is None or (isinstance(unavailable, Mapping) and not unavailable)
+    ledger_reliable = ledger is None or (
+        isinstance(ledger, Mapping) and not bool(ledger.get("fail_closed"))
+    )
+    secured_reliable = (
+        secured is not None
+        and option_as_of is not None
+        and unavailable_reliable
+        and ledger_reliable
+    )
+    reason = "ok"
+    opening: dict[str, float] = {}
+    if cash_total_reliable and secured_reliable:
+        extra_secured_currencies = set(secured or {}) - set(cash_total or {})
+        if extra_secured_currencies:
+            secured_reliable = False
+            reason = "secured_currency_without_cash_total"
+        else:
+            opening = {
+                currency: float(amount) - float((secured or {}).get(currency, 0.0))
+                for currency, amount in (cash_total or {}).items()
+            }
+    if not secured_reliable:
+        if reason == "ok":
+            reason = "option_cash_secured_unavailable"
+        data_gaps.append(
+            {
+                "scope": "funds",
+                "kind": "option_opening_available",
+                "reason": reason,
+            }
+        )
+    if not cash_total_reliable:
+        reason = "portfolio_cash_unavailable"
+
+    as_of_values = [item for item in (portfolio_as_of, option_as_of) if item is not None]
+    return (
+        {
+            "as_of_utc": max(as_of_values).astimezone(timezone.utc).isoformat() if as_of_values else "",
+            "cash_total_by_currency": cash_total or {},
+            "option_opening_available_by_currency": opening,
+            "available": bool(cash_total_reliable and secured_reliable),
+            "reason": reason,
+        },
+        cash_total_reliable,
+    )
+
+
+def _currency_amounts(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    out: dict[str, float] = {}
+    for raw_currency, raw_amount in value.items():
+        currency = _text(raw_currency).upper()
+        amount = _number(raw_amount)
+        if not currency or amount is None:
+            return None
+        out[currency] = amount
+    return {currency: out[currency] for currency in sorted(out)}
+
+
+def _build_candidate_index(
+    *,
+    account: str,
+    market: str,
+    market_date: str,
+    ranked_puts: list[dict[str, Any]],
+    ranked_calls: list[dict[str, Any]],
+    combo_rows: list[dict[str, Any]],
+    event_snapshot: Mapping[str, Mapping[str, Any]],
+    event_snapshot_reason: str,
+    data_gaps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    families = (
+        ("sell_put", ranked_puts, _sell_put_capacity),
+        ("covered_call", ranked_calls, _covered_call_capacity),
+        ("combo_yield", combo_rows, _sell_put_capacity),
+    )
+    for family, rows, capacity_fn in families:
+        for rank, row in enumerate(rows, start=1):
+            capacity = capacity_fn(row)
+            if capacity is None or int(capacity.get("contracts_available") or 0) < 1:
+                continue
+            if not _candidate_contract_is_complete(row, family=family):
+                data_gaps.append(_row_gap(row, family, "candidate_identity_fields_incomplete"))
+                continue
+            try:
+                identity = build_daily_brief_candidate_identity(
+                    account=account,
+                    market=market,
+                    symbol=row.get("symbol"),
+                    strategy_family=family,
+                )
+            except ValueError:
+                data_gaps.append(_row_gap(row, family, "candidate_identity_invalid"))
+                continue
+            current = grouped.get(identity)
+            if current is not None:
+                current["contract_count"] += 1
+                continue
+            event_risk = _candidate_event_risk(
+                row,
+                family=family,
+                market_date=market_date,
+                snapshot=event_snapshot,
+                snapshot_reason=event_snapshot_reason,
+            )
+            representative = _candidate_view(
+                row,
+                family=family,
+                rank=rank,
+                capacity=capacity,
+                event_risk=event_risk,
+            )
+            canonical = canonical_symbol(row.get("symbol"))
+            representative["symbol"] = canonical
+            representative["strategy_family"] = family
+            grouped[identity] = {
+                "identity": identity,
+                "symbol": canonical,
+                "strategy_family": family,
+                "representative": representative,
+                "contract_count": 1,
+            }
+    return [grouped[identity] for identity in sorted(grouped)]
+
+
+def _candidate_contract_is_complete(row: Mapping[str, Any], *, family: str) -> bool:
+    if family == "combo_yield":
+        return all(
+            (
+                _text(row.get("strategy_group_id") or row.get("candidate_pair_id")),
+                _text(row.get("put_contract_symbol")),
+                _text(row.get("call_contract_symbol")),
+                _text(row.get("put_expiration") or row.get("expiration")),
+                _text(row.get("call_expiration") or row.get("expiration")),
+                _number(row.get("put_strike")),
+                _number(row.get("call_strike")),
+            )
+        )
+    return all(
+        (
+            _text(row.get("contract_symbol") or row.get("code")),
+            _text(row.get("expiration") or row.get("expiration_ymd")),
+            _number(row.get("strike")),
+        )
+    )
 
 
 def _sell_put_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -889,6 +1198,7 @@ def _candidate_view(
             "call_strike": _number(row.get("call_strike")),
             "priority": _priority_from_row(row, default="P1"),
             "metrics": _candidate_metrics(row, rank=rank),
+            "capacity": dict(capacity or {}),
             "event_risk": dict(event_risk or {}),
             "source": _source_view(row),
         }

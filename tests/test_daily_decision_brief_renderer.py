@@ -232,7 +232,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "FUTU｜Sell Put｜暂无法评估（价格不可用）" in message
     assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message
     assert "NVDA 08-21 $100 Put｜按当前现金最多 5 手" in message
-    assert "备选方案共享同一现金额度，数量不可相加" in message
+    assert "多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
     assert_mobile_flat_markdown(message)
     _assert_no_internal_leak(message)
     _assert_no_internal_leak(view)
@@ -761,6 +761,106 @@ def test_no_delivery_kind_renders_empty_message() -> None:
     from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
 
     assert render_daily_brief_lifecycle({"brief": deepcopy(_brief()), "delivery_kind": "none"}) == ""
+
+
+def test_notification_and_query_projections_use_plain_language_and_account_funds() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_candidate_alert,
+        render_fixed_failure,
+        render_fixed_report,
+        render_query_brief,
+    )
+
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {"USD": 180_000.0},
+        "option_opening_available_by_currency": {"USD": 75_000.0},
+        "available": True,
+        "reason": "ok",
+    }
+    candidate_index = []
+    for family in ("sell_put", "covered_call", "combo_yield"):
+        for row in brief["candidates"][family]:
+            representative = deepcopy(row)
+            representative["strategy_family"] = family
+            identity = f"candidate:v1:lx:US:{row['symbol']}:{family}"
+            candidate_index.append(
+                {
+                    "identity": identity,
+                    "symbol": row["symbol"],
+                    "strategy_family": family,
+                    "representative": representative,
+                    "contract_count": 1,
+                }
+            )
+    brief["candidate_index"] = candidate_index
+
+    fixed = render_fixed_report(brief, context=_scheduled_context())
+    assert fixed.startswith("# OM · 决策简报 · lx")
+    assert "状态｜10:00 批次" in fixed
+    assert "## 当前候选" in fixed
+    assert "现金总额｜$180,000.00" in fixed
+    assert "可用于期权开仓｜$75,000.00" in fixed
+    assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
+
+    alert_context = {**_scheduled_context(), "scheduled_target_market": "10:30"}
+    alert = render_candidate_alert(
+        brief,
+        [item["identity"] for item in candidate_index],
+        limits={"max_candidates_per_strategy": 1},
+        context=alert_context,
+    )
+    assert "状态｜新增候选 · 10:30 发现" in alert
+    assert "## 新增候选" in alert
+    assert "## 持仓" not in alert
+    assert "另有 1 个新增候选未展开" in alert
+    assert "MSFT｜Sell Put" in alert
+    assert "NVDA｜Sell Put" in alert
+    assert "较上一轮" not in alert
+    assert "现金总额｜$180,000.00" in alert
+
+    failure = render_fixed_failure(brief, context=_scheduled_context())
+    assert "数据异常 · 10:00 批次失败" in failure
+    assert "未形成可靠结果" in failure
+    assert "## 当前候选" not in failure
+    assert "本轮暂无符合条件的候选" not in failure
+    assert_mobile_flat_markdown(fixed)
+    assert_mobile_flat_markdown(alert)
+    assert_mobile_flat_markdown(failure)
+
+    current_query = render_query_brief(
+        brief,
+        context={"query_time_utc": "2026-07-20T15:00:00+00:00"},
+    )
+    stale_query = render_query_brief(
+        brief,
+        context={"query_time_utc": "2026-07-21T15:00:00+00:00"},
+    )
+    assert "当前查询 · 查询时间" in current_query
+    assert "状态｜今日最新" in current_query
+    assert "状态｜已过期，仅供计划参考" in stale_query
+    assert "今日扫描暂不可用" in stale_query
+    assert "revision" not in current_query + stale_query
+    assert_mobile_flat_markdown(current_query)
+    assert_mobile_flat_markdown(stale_query)
+
+
+def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {},
+        "option_opening_available_by_currency": {},
+        "available": False,
+        "reason": "portfolio_cash_unavailable",
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "现金总额｜暂不可用" in message
+    assert "可用于期权开仓｜暂不可用" in message
+    assert "现金总额｜$0" not in message
 
 
 def test_render_limit_normalization_remains_bounded() -> None:

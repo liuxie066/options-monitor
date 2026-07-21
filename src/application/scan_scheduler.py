@@ -25,11 +25,13 @@ class SchedulerDecision:
     run_window_start_beijing: str
     run_window_end_beijing: str
     schedule_key: str
+    scheduled_scan_target_market: str | None
     scheduled_target_market: str | None
 
 
 STATE_DEFAULT = {
     'last_run_utc_by_account': {},
+    'last_processed_scan_target_utc_by_account': {},
     'last_notify_utc': None,  # legacy
     'last_notify_utc_by_account': {},
 }
@@ -128,6 +130,7 @@ def mark_scheduler_accounts(
     accounts: list[str],
     mark_notified: bool = False,
     mark_scanned: bool = False,
+    processed_scan_targets_by_account: dict[str, str | None] | None = None,
     force: bool = False,
     base_dir: Path | None = None,
     now_utc: datetime | None = None,
@@ -145,7 +148,14 @@ def mark_scheduler_accounts(
 
     schedule_cfg = cfg.get(str(schedule_key or 'schedule'), {}) or {}
     schedule_enabled = bool(schedule_cfg.get('enabled', True))
-    account_ids = [str(a).strip() for a in accounts if str(a).strip()]
+    processed_targets = {
+        str(account).strip(): (str(target).strip() if target else None)
+        for account, target in (processed_scan_targets_by_account or {}).items()
+        if str(account).strip()
+    }
+    account_ids = list(dict.fromkeys(
+        [str(a).strip() for a in accounts if str(a).strip()] + list(processed_targets)
+    ))
     if not account_ids or not (mark_notified or mark_scanned):
         return {
             'updated': False,
@@ -153,6 +163,7 @@ def mark_scheduler_accounts(
             'accounts': account_ids,
             'mark_notified': bool(mark_notified),
             'mark_scanned': bool(mark_scanned),
+            'processed_scan_targets_by_account': processed_targets,
         }
 
     state_data = read_state(state_path)
@@ -182,6 +193,20 @@ def mark_scheduler_accounts(
             for account in account_ids:
                 m[str(account)] = now_s
             state_data['last_run_utc_by_account'] = m
+        if processed_targets:
+            processed = state_data.get('last_processed_scan_target_utc_by_account')
+            if not isinstance(processed, dict):
+                processed = {}
+            for account, target in processed_targets.items():
+                if not target:
+                    continue
+                parsed = maybe_parse_dt(target)
+                if parsed is None or parsed.tzinfo is None:
+                    raise ValueError(f'processed scan target must be timezone-aware: {account}')
+                existing = maybe_parse_dt(processed.get(account))
+                if existing is None or existing.astimezone(timezone.utc) < parsed.astimezone(timezone.utc):
+                    processed[account] = to_iso(parsed)
+            state_data['last_processed_scan_target_utc_by_account'] = processed
 
     if mark_notified or mark_scanned:
         write_state(state_path, state_data)
@@ -191,6 +216,7 @@ def mark_scheduler_accounts(
         'accounts': account_ids,
         'mark_notified': bool(mark_notified),
         'mark_scanned': bool(mark_scanned),
+        'processed_scan_targets_by_account': processed_targets,
     }
 
 
@@ -294,7 +320,7 @@ def _target_allowed_by_gates(*, target: datetime, window_start_dt: datetime, gat
     return True
 
 
-def _scheduled_run_targets(
+def _scheduled_report_targets(
     *,
     now_market: datetime,
     market_tz: ZoneInfo,
@@ -331,6 +357,68 @@ def _scheduled_run_targets(
     ]
 
 
+def _scheduled_candidate_check_targets(
+    *,
+    now_market: datetime,
+    market_tz: ZoneInfo,
+    run_start: time,
+    run_end: time,
+    breaks: list[tuple[time, time]],
+    gates: object,
+) -> list[datetime]:
+    start_dt = _market_session_dt(now_market, market_tz, run_start)
+    end_dt = _market_session_dt(now_market, market_tz, run_end)
+    cursor = start_dt.replace(minute=30, second=0, microsecond=0)
+    if cursor < start_dt:
+        cursor += timedelta(hours=1)
+    targets: list[datetime] = []
+    while cursor < end_dt:
+        if cursor.time() != time(9, 30):
+            targets.append(cursor)
+        cursor += timedelta(hours=1)
+    return [
+        target
+        for target in targets
+        if is_run_window_open(target, run_start, run_end, breaks)
+        and _target_allowed_by_gates(target=target, window_start_dt=start_dt, gates=gates)
+    ]
+
+
+def _scheduled_scan_targets(
+    *,
+    now_market: datetime,
+    market_tz: ZoneInfo,
+    run_start: time,
+    run_end: time,
+    breaks: list[tuple[time, time]],
+    run_points: dict,
+    gates: object,
+) -> tuple[list[datetime], set[datetime]]:
+    report_targets = _scheduled_report_targets(
+        now_market=now_market,
+        market_tz=market_tz,
+        run_start=run_start,
+        run_end=run_end,
+        breaks=breaks,
+        run_points=run_points,
+        gates=gates,
+    )
+    candidate_targets = _scheduled_candidate_check_targets(
+        now_market=now_market,
+        market_tz=market_tz,
+        run_start=run_start,
+        run_end=run_end,
+        breaks=breaks,
+        gates=gates,
+    )
+    return sorted(set(report_targets) | set(candidate_targets)), set(report_targets)
+
+
+# Compatibility for tests/operators that still inspect the old private helper.
+def _scheduled_run_targets(**kwargs) -> list[datetime]:
+    return _scheduled_report_targets(**kwargs)
+
+
 def _next_target_after(
     *,
     now_market: datetime,
@@ -343,7 +431,7 @@ def _next_target_after(
 ) -> datetime:
     day_cursor = now_market
     for _ in range(8):
-        targets = _scheduled_run_targets(
+        targets, _report_targets = _scheduled_scan_targets(
             now_market=day_cursor,
             market_tz=market_tz,
             run_start=run_start,
@@ -376,6 +464,17 @@ def _last_run_for_account(state: dict, account: str | None) -> datetime | None:
     return None
 
 
+def _last_processed_scan_target_for_account(state: dict, account: str | None) -> datetime | None:
+    processed_map = state.get('last_processed_scan_target_utc_by_account')
+    if isinstance(processed_map, dict):
+        if not account:
+            return maybe_parse_dt(state.get('last_processed_scan_target_utc'))
+        raw_value = processed_map.get(str(account))
+        if raw_value:
+            return maybe_parse_dt(raw_value)
+    return _last_run_for_account(state, account)
+
+
 def decide(
     schedule_cfg: dict,
     state: dict,
@@ -403,9 +502,9 @@ def decide(
         cron_interval_min = 10
     catchup_grace = timedelta(minutes=max(1, cron_interval_min) + 2)
 
-    last_run = _last_run_for_account(state, account)
+    last_processed_target = _last_processed_scan_target_for_account(state, account)
 
-    targets = _scheduled_run_targets(
+    targets, report_targets = _scheduled_scan_targets(
         now_market=now_market,
         market_tz=market_tz,
         run_start=run_start,
@@ -462,11 +561,12 @@ def decide(
     else:
         due_target_utc = due_target.astimezone(timezone.utc)
         already_processed = (
-            last_run is not None
-            and last_run.astimezone(timezone.utc) >= due_target_utc
+            last_processed_target is not None
+            and last_processed_target.astimezone(timezone.utc) >= due_target_utc
         )
+        is_report_target = due_target in report_targets
         should_run_scan = not already_processed
-        is_notify_window_open = not already_processed
+        is_notify_window_open = bool(is_report_target and not already_processed)
         if already_processed:
             reason = f'当前运行点 {due_target.strftime("%H:%M")} 已处理，等待下一个运行点。'
             if next_target is None:
@@ -482,7 +582,11 @@ def decide(
             else:
                 next_run = next_target.astimezone(timezone.utc)
         else:
-            reason = f'到达运行点 {due_target.strftime("%H:%M")}：执行扫描并允许通知。'
+            reason = (
+                f'到达运行点 {due_target.strftime("%H:%M")}：执行扫描并允许通知。'
+                if is_report_target
+                else f'到达候选检查点 {due_target.strftime("%H:%M")}：执行扫描。'
+            )
             next_run = now_utc
 
     start_dt_market = datetime.combine(now_market.date(), run_start, tzinfo=market_tz)
@@ -502,8 +606,13 @@ def decide(
         run_window_start_beijing=start_dt_market.astimezone(bj_tz).isoformat(),
         run_window_end_beijing=end_dt_market.astimezone(bj_tz).isoformat(),
         schedule_key=str(schedule_key),
-        scheduled_target_market=(
+        scheduled_scan_target_market=(
             due_target.isoformat() if due_target is not None and not force else None
+        ),
+        scheduled_target_market=(
+            due_target.isoformat()
+            if due_target is not None and due_target in report_targets and not force
+            else None
         ),
     )
 
@@ -574,11 +683,18 @@ def run_scheduler(
     if mark_scanned:
         now_s = to_iso(datetime.now(timezone.utc))
         if account:
+            account_key = str(account)
             m = state_data.get('last_run_utc_by_account')
             if not isinstance(m, dict):
                 m = {}
-            m[str(account)] = now_s
+            m[account_key] = now_s
             state_data['last_run_utc_by_account'] = m
+            if decision.scheduled_scan_target_market:
+                processed = state_data.get('last_processed_scan_target_utc_by_account')
+                if not isinstance(processed, dict):
+                    processed = {}
+                processed[account_key] = to_iso(maybe_parse_dt(decision.scheduled_scan_target_market))
+                state_data['last_processed_scan_target_utc_by_account'] = processed
         write_state(state_path, state_data)
         print(f'[DONE] marked scanned -> {state_path}')
         return payload
@@ -590,11 +706,18 @@ def run_scheduler(
         if result.returncode != 0:
             raise SystemExit(result.returncode)
         if account:
+            account_key = str(account)
             m = state_data.get('last_run_utc_by_account')
             if not isinstance(m, dict):
                 m = {}
-            m[str(account)] = to_iso(datetime.now(timezone.utc))
+            m[account_key] = to_iso(datetime.now(timezone.utc))
             state_data['last_run_utc_by_account'] = m
+            if decision.scheduled_scan_target_market:
+                processed = state_data.get('last_processed_scan_target_utc_by_account')
+                if not isinstance(processed, dict):
+                    processed = {}
+                processed[account_key] = to_iso(maybe_parse_dt(decision.scheduled_scan_target_market))
+                state_data['last_processed_scan_target_utc_by_account'] = processed
         write_state(state_path, state_data)
         print(f'[DONE] scheduler state -> {state_path}')
     elif run_if_due:

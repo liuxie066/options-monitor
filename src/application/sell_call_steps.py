@@ -270,5 +270,19 @@ def run_sell_call_scan_and_summarize(
     return summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
 
 
+def materialize_empty_sell_call_artifacts(*, report_dir: Path, symbol_lower: str) -> None:
+    """Replace current Covered Call outputs with explicit empty artifacts."""
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame().to_csv(
+        (report_dir / f"{symbol_lower}_sell_call_candidates.csv").resolve(),
+        index=False,
+    )
+    (report_dir / f"{symbol_lower}_sell_call_alerts.txt").resolve().write_text(
+        "",
+        encoding="utf-8",
+    )
+
+
 def empty_sell_call_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:
     return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
