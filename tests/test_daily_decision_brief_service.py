@@ -12,6 +12,27 @@ from src.application.multi_tick.misc import AccountResult
 def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path:
     path = base / "output_runs" / run_id / "accounts" / account
     path.mkdir(parents=True, exist_ok=True)
+    state_dir = path / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "portfolio_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:00+00:00",
+                "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "cash_secured_total_by_ccy": {"HKD": 255_000, "USD": 3_000},
+                "cash_secured_unavailable_by_symbol": {},
+            }
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -147,6 +168,124 @@ def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Pat
     assert brief["capacity"]["covered_call"]["contracts_available"] == 2
     assert len([item for item in brief["actions"] if item["strategy_family"] == "sell_put"]) == 2
     assert all("fake" not in item.get("reason", "") for item in brief["actions"])
+
+
+def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["funds"] == {
+        "as_of_utc": "2026-07-17T13:59:30+00:00",
+        "cash_total_by_currency": {"HKD": 480_000.0, "USD": 18_000.0},
+        "option_opening_available_by_currency": {"HKD": 225_000.0, "USD": 15_000.0},
+        "available": True,
+        "reason": "ok",
+    }
+
+
+def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "cash_secured_total_by_ccy": {"USD": 3_000},
+                "cash_secured_unavailable_by_symbol": {"PDD": "basis_missing"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["funds"]["cash_total_by_currency"] == {"HKD": 480_000.0, "USD": 18_000.0}
+    assert brief["funds"]["option_opening_available_by_currency"] == {}
+    assert brief["funds"]["available"] is False
+    assert brief["funds"]["reason"] == "option_cash_secured_unavailable"
+
+
+def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    (account_dir / "state" / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_unavailable_by_symbol": ["malformed"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["funds"]["available"] is False
+    assert brief["funds"]["option_opening_available_by_currency"] == {}
+    assert brief["status"] == "degraded"
+
+
+def test_missing_cash_context_blocks_snapshot_without_fabricating_zero(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    (account_dir / "state" / "portfolio_context.json").unlink()
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "blocked"
+    assert brief["funds"]["cash_total_by_currency"] == {}
+    assert brief["funds"]["option_opening_available_by_currency"] == {}
+    assert "cash_total_unavailable" in brief["actions"][0]["reason"]
+
+
+def test_candidate_index_uses_all_ranked_candidates_beyond_display_limit(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            _put_row(symbol="NVDA", contract="NVDA_LOW", annualized=0.10),
+            _put_row(symbol="NVDA", contract="NVDA_HIGH", annualized=0.30),
+            _put_row(symbol="PDD", contract="PDD_1", annualized=0.25),
+            _put_row(symbol="FUTU", contract="FUTU_1", annualized=0.20),
+            _put_row(symbol="GOOGL", contract="GOOGL_1", annualized=0.15),
+        ]
+    ).to_csv(account_dir / "all_sell_put_candidates_labeled.csv", index=False)
+
+    brief = _assemble(tmp_path)
+
+    assert len(brief["candidates"]["sell_put"]) == 3
+    assert len(brief["candidate_index"]) == 4
+    by_symbol = {item["symbol"]: item for item in brief["candidate_index"]}
+    assert by_symbol["NVDA"]["contract_count"] == 2
+    assert by_symbol["NVDA"]["representative"]["contract_symbol"] == "NVDA_HIGH"
+    assert set(by_symbol) == {"NVDA", "PDD", "FUTU", "GOOGL"}
+
+
+def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+
+    brief = _assemble(tmp_path, result=_result(ran_scan=False, reason="scheduler noop"))
+
+    assert brief["actionability"] == "blocked"
+    assert "scheduler noop" in brief["actions"][0]["reason"]
+    assert brief["candidate_index"] == []
 
 
 def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_path: Path) -> None:
@@ -517,7 +656,7 @@ def test_prefetch_symbol_failure_is_a_local_gap_not_account_blocker(tmp_path: Pa
         account_dir / "pdd_sell_put_candidates_labeled.csv", index=False
     )
     state_dir = account_dir / "state"
-    state_dir.mkdir()
+    state_dir.mkdir(exist_ok=True)
     (state_dir / "required_data_prefetch_summary.json").write_text(
         json.dumps(
             {
