@@ -814,7 +814,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 本工具只做监控、筛选、报告和提醒，不构成投资建议。任何下单前都应自行复核价格、流动性、保证金、仓位暴露和事件风险。
 
-## Daily Decision Brief（v1.3.5，默认关闭）
+## Daily Decision Brief（v1.4.0，默认关闭）
 
 Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不是自动交易或订单系统。消息里的 Sell Put、Covered Call 和组合增强都是需要人工复核的**候选**；系统不会据此自动下单，也不会把候选描述成已经授权的行动。
 
@@ -839,7 +839,11 @@ Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不�
 > 数据截至：美东 09:43 / 北京 21:43
 
 ## 候选
-- TCOM · Sell Put · 08-21 $40 Put（首选）
+- NVDA · Sell Put · 08-21 $160 Put（首选）
+  权利金 $4.20 · 年化 18.6% · Delta -0.22
+  预计 8 月 5 日发布财报，早于当前 Put 到期日；执行前需要重新确认事件窗口和报价。
+- MSFT · Sell Put · 08-21 $450 Put
+  近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。
 
 ## 持仓
 - PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）
@@ -851,11 +855,16 @@ Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不�
 
 - 美股沿用现有 `09:40 + 整点` 批次：交易日首个正常成功的 scheduled scan 发送完整简报，即使当时没有候选；后续整点扫描只有在候选资格/优先级/条件容量、持仓可评估状态或 blocked/recovered 等实质变化时才发送。
 - 后续变化通知不是孤立的增量日志，而是“本轮变化摘要 + 当前完整紧凑快照”；没有实质变化时保持安静，不代表扫描失败。
+- 每个已展示候选都绑定当前 run 的事件风险投影，用户只看到三种语义：**已确认有事件**、**已确认当前合约关注窗口无重要事件**、**暂时无法确认**。结构化投影保留事件日期、距事件天数及其与每个相关到期日的先后关系；组合增强分别检查 Put/Call 两条腿。
+- 唯一权威来源是当前 run 的 `output_runs/<run_id>/state/event_snapshot.json`。候选 CSV 中的 `event_flag`、`event_types`、`event_dates`、`event_source_status` 只为兼容保留，Daily Brief 不读取也不 fallback。
+- event snapshot 缺失、损坏、过期、partial、conflict 或仅有空 fallback 证据时，一律显示“暂时无法确认”，绝不会渲染成“确认无事件”。provider 降级也不等于事件消失。
+- 当前或上一份已确认日报中的重要 P0/P1 候选发生新增事件、日期变化、事件进入到期前窗口、证据降级、证据恢复或同一可靠证据链确认移除时，复用原 material notification 链路发送“变化摘要 + 当前完整快照”。仅 freshness/cache 元数据变化保持安静。
 - `09:40 批次` 表示计划批次，`数据截至` 表示本轮真实数据时间；延迟补跑仍显示原计划批次。手动或 force 触发只显示 `手动触发`，不会伪造计划批次。
 - 候选合约使用 `TCOM · Sell Put · 08-21 $40 Put` 等可读格式，不展示 broker contract code。Sell Put 候选按合约分别展示条件容量，但这些候选共享同一份现金，手数不能相加。
 - 新候选与已有持仓分别归属策略：本轮没有新的组合增强候选，不会抹掉已有持仓的“组合增强（Put 侧/Call 侧）”归属。
 - 用户 Markdown 不展示 `position_lot_id`、`strategy_group_id`、`leg_role`、revision、raw enum、ISO 时间或拒绝原因明细；这些内部 identity 和审计事实仍保留在结构化 artifact/read model 中。
 - 默认 `enabled=false`；本次改版不新增 config migration，Draft PR、release 或远端升级也不会自动开启生产日报，生产启用与 canary 必须另行授权。
+- 事件关联只补充风险事实，不改变候选 identity、action ID、排序、labeled-only authority、资格或 capacity，也不会自动取消候选、自动下单或建立第二套 lifecycle/receipt/sender/renderer/CLI。
 - 休市不会伪造新 LIVE 日报。已有日报超过 `valid_until_utc` 后，只读入口将其标记为 `planning_only`，可用于复盘、次日计划和风险检查。
 - `--no-send`、quiet hours、发送失败或本地确认失败都不会推进 delivery pointer。
 - 多市场同轮运行会分别保存 US/HK 结构化 artifact，但当前版本 fail-closed：不发送组合消息，也不推进任一市场 pointer。
