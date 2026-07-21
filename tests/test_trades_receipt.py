@@ -337,3 +337,28 @@ def test_build_trade_intake_receipt_message_marks_staggered_combo_relation_pendi
     assert "资金：权利金毛流出 USD 73.00" in msg
     assert "组合关系待确认" in msg
     assert "未自动归入 Combo Yield 组" in msg
+
+
+def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    out = send_trade_intake_receipt(
+        base=tmp_path,
+        config={"notifications": {"provider": "feishu_app"}},
+        receipt_config={},
+        apply_changes=True,
+        state={},
+        deal=None,
+        result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx"},
+        payload={"deal_id": "deal-1"},
+        send_fn=lambda **_kwargs: {
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "FEISHU_POST_TOO_LARGE",
+        },
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert out["status"] == "failed"
+    assert out["delivery_confirmed"] is False
+    assert out["error_code"] == "FEISHU_POST_TOO_LARGE"

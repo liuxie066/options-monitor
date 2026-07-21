@@ -251,3 +251,31 @@ def test_build_auto_close_receipt_message_marks_partial_failure() -> None:
     assert "[未完全记录]" in msg
     assert "平仓：1/2" in msg
     assert "sqlite locked" in msg
+
+
+def test_auto_close_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    out = send_auto_close_receipt(
+        base=tmp_path,
+        config={"notifications": {"provider": "feishu_app"}},
+        receipt_config={},
+        dry_run=False,
+        result={
+            "mode": "applied",
+            "account": "lx",
+            "applied_closed": 1,
+            "candidates_should_close": 1,
+            "errors": [],
+        },
+        send_fn=lambda **_kwargs: {
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "FEISHU_POST_TOO_LARGE",
+        },
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert out["status"] == "failed"
+    assert out["delivery_confirmed"] is False
+    assert out["error_code"] == "FEISHU_POST_TOO_LARGE"
