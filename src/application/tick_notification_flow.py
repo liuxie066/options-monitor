@@ -29,7 +29,9 @@ from src.application.cron_runtime import (
     mark_accounts_notified,
 )
 from src.application.daily_decision_brief_renderer import (
-    render_daily_brief_lifecycle,
+    render_candidate_alert,
+    render_fixed_failure,
+    render_fixed_report,
     resolve_daily_brief_render_limits,
 )
 from src.application.daily_decision_brief_repository import (
@@ -783,9 +785,8 @@ def _prepare_daily_brief_notification(
                 if not multi_market and not request.no_send and should_prepare and action in {"fixed_report", "candidate_alert", "fixed_failure"}:
                     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
                     if action == "fixed_failure":
-                        message = render_daily_brief_lifecycle(
-                            {"brief": brief, "diff": {}, "delivery_kind": "full"},
-                            limits=daily_limits,
+                        message = render_fixed_failure(
+                            brief,
                             context=render_context,
                         )
                         assert failure_source is not None
@@ -805,17 +806,24 @@ def _prepare_daily_brief_notification(
                         )
                     else:
                         assert persisted is not None
-                        lifecycle_kind = "full" if action == "fixed_report" else "delta"
-                        message = render_daily_brief_lifecycle(
-                            {"brief": persisted["brief"], "diff": diff, "delivery_kind": lifecycle_kind},
-                            limits=daily_limits,
-                            context=render_context,
-                        )
                         identities = (
                             persisted["current_candidate_identities"]
                             if action == "fixed_report"
                             else pending
                         )
+                        if action == "fixed_report":
+                            message = render_fixed_report(
+                                persisted["brief"],
+                                limits=daily_limits,
+                                context=render_context,
+                            )
+                        else:
+                            message = render_candidate_alert(
+                                persisted["brief"],
+                                identities,
+                                limits=daily_limits,
+                                context=render_context,
+                            )
                         prepared = prepare_daily_decision_brief_delivery(
                             base=request.base,
                             account=account,
@@ -979,7 +987,9 @@ def _daily_brief_render_context(
     return {
         "trigger_kind": trigger_kind,
         "scheduled_target_market": (
-            scheduler.get("scheduled_target_market") if trigger_kind == "scheduled" else None
+            (scheduler.get("scheduled_target_market") or scheduler.get("scheduled_scan_target_market"))
+            if trigger_kind == "scheduled"
+            else None
         ),
         "market_timezone": str(schedule_map.get("timezone") or "").strip(),
         "user_timezone": str(user_timezone or "Asia/Shanghai"),

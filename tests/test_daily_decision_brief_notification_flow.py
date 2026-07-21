@@ -95,6 +95,12 @@ def _brief(*, run_id: str, account: str = "lx", market: str = "US", blocked: boo
         "actions": actions,
         "positions": [],
         "capacity": {"sell_put": {"contracts_available": 1}},
+        "funds": {
+            "cash_total_by_currency": {"USD": 100_000.0},
+            "option_opening_available_by_currency": {"USD": 60_000.0},
+            "available": True,
+            "reason": "ok",
+        },
         "candidates": candidates,
         "rejections": {},
         "events": [],
@@ -284,6 +290,9 @@ def test_nonfixed_new_candidate_prepares_candidate_alert(monkeypatch, tmp_path: 
     envelope = prep.lifecycles_by_account["lx"]["envelope"]
     assert envelope["delivery_kind"] == "candidate_alert"
     assert envelope["candidate_identities"] == [IDENTITY]
+    assert "新增候选 · 10:30 发现" in envelope["rendered_message"]
+    assert "现金总额：$100,000.00" in envelope["rendered_message"]
+    assert "## 持仓" not in envelope["rendered_message"]
 
 
 def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current(monkeypatch, tmp_path: Path) -> None:
@@ -297,6 +306,20 @@ def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current
     assert envelope["delivery_kind"] == "fixed_failure"
     assert "数据异常" in envelope["rendered_message"]
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is False
+
+
+def test_fixed_report_without_candidates_still_contains_positions_and_funds(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch, candidate=False)
+    bundle = _request(tmp_path, run_id="fixed-empty")
+    prep = mod._prepare_daily_brief_notification(bundle.request)
+    message = prep.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
+
+    assert "本轮暂无符合条件的候选" in message
+    assert "## 持仓" in message
+    assert "## 资金" in message
+    assert "现金总额：$100,000.00" in message
 
 
 def test_pipeline_failure_nonfixed_is_quiet_but_commits_after_failure_artifact(monkeypatch, tmp_path: Path) -> None:

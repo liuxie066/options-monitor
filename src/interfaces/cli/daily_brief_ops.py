@@ -24,10 +24,10 @@ def add_daily_brief_commands(subparsers: argparse._SubParsersAction) -> None:
     daily_sub = parser.add_subparsers(dest="daily_brief_command", required=True)
 
     latest = daily_sub.add_parser("latest", help="read the latest available brief")
-    _add_common_arguments(latest)
+    _add_latest_arguments(latest)
 
     day = daily_sub.add_parser("day", help="read a trading-day brief")
-    _add_common_arguments(day)
+    _add_day_arguments(day)
     day.add_argument("--date", dest="market_trading_date", required=True, help="market trading date YYYY-MM-DD")
     day.add_argument("--revision", type=int, help="exact non-negative revision")
 
@@ -47,7 +47,13 @@ def add_daily_brief_commands(subparsers: argparse._SubParsersAction) -> None:
     mode.add_argument("--confirm", action="store_true", help="write v2 state after creating a v1 backup")
 
 
-def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_latest_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--account", help="optional account label; omitted reads all enabled accounts")
+    parser.add_argument("--market", choices=("US", "HK", "us", "hk"), help="optional market; omitted reads all")
+    parser.add_argument("--json", action="store_true", help="print structured JSON instead of Markdown")
+
+
+def _add_day_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--account", required=True, help="account label such as lx")
     parser.add_argument("--market", choices=("US", "HK", "us", "hk"), default="US")
     parser.add_argument("--json", action="store_true", help="print structured JSON instead of Markdown")
@@ -101,8 +107,8 @@ def handle_daily_brief_command(
     try:
         data = read_daily_brief_view(
             base=runtime_root,
-            account=args.account,
-            market=args.market,
+            account=getattr(args, "account", None),
+            market=getattr(args, "market", None),
             market_trading_date=market_trading_date,
             revision=revision,
         )

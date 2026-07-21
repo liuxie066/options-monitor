@@ -814,9 +814,11 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 本工具只做监控、筛选、报告和提醒，不构成投资建议。任何下单前都应自行复核价格、流动性、保证金、仓位暴露和事件风险。
 
-## Daily Decision Brief（v1.4.0，默认关闭）
+## 期权监控通知与查询（默认关闭）
 
-Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不是自动交易或订单系统。消息里的 Sell Put、Covered Call 和组合增强都是需要人工复核的**候选**；系统不会据此自动下单，也不会把候选描述成已经授权的行动。
+这套功能只做监控、报告和提醒，不会自动下单。它复用同一套 canonical 策略扫描、现有通知 route 和现有 10 分钟 timer，不新增第二个 scanner 或 sender。
+
+启用配置仍是：
 
 ```json
 {
@@ -831,54 +833,64 @@ Daily Decision Brief 是 scheduled scan 的结构化、只读决策基线，不�
 }
 ```
 
-用户通知采用紧凑、可独立阅读的固定结构：
+启用后的节奏：
+
+- timer 仍每 10 分钟唤醒，但只有市场当地 `09:40`、有效整点、有效半点和 `15:50` 执行策略扫描；`09:30` 不扫描，港股午休不扫描。
+- `09:40`、有效整点和 `15:50` 固定发送完整报告；没有候选也发送持仓和资金，不退化为一句心跳。
+- 有效半点发现当日尚未送达的新普通候选时，立即发送新增候选通知；没有新增候选则安静。
+- 固定报告点同时发现新增候选时，只发送一份完整报告，确认送达后再把其中候选记为已提醒。
+- pipeline 失败不会覆盖最近成功快照。固定点失败会明确说明“未形成可靠结果”，不会误报成“本轮无候选”。
+- provider 失败时保留原消息、delivery key 和 message hash；后续 10 分钟唤醒只做 delivery-only 精确重试，不重新扫描。
+
+固定报告示例：
 
 ```text
-# OM · lx · 美股
-> 今日首次 · 09:40 批次
-> 数据截至：美东 09:43 / 北京 21:43
+# lx · 港股期权监控
+> 14:00 批次
+> 数据截至：香港 14:00 / 北京 14:00
 
-## 候选
-- NVDA · Sell Put · 08-21 $160 Put（首选）
-  权利金 $4.20 · 年化 18.6% · Delta -0.22
-  预计 8 月 5 日发布财报，早于当前 Put 到期日；执行前需要重新确认事件窗口和报价。
-- MSFT · Sell Put · 08-21 $450 Put
-  近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。
+## 当前候选
+1. 9992.HK · Sell Put · 08-28 HK$145 Put（首选）
+   - 年化 25.2% · Delta -0.23
 
 ## 持仓
-- PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）
+- 0700.HK · Sell Put · 07-30 HK$440 Put：继续观察
 
 ## 资金
-- TCOM 08-21 $40 Put：按当前现金最多 8 手
-- 备选方案共享同一现金额度，数量不可相加
+- 现金总额：HK$480,000.00
+- 可用于期权开仓：HK$225,000.00
+- 9992.HK 08-28 HK$145 Put：按当前现金最多 8 手
+
+## 提醒
+- 多个 Sell Put 候选共享同一现金额度，手数不能相加
 ```
 
-- 美股沿用现有 `09:40 + 整点` 批次：交易日首个正常成功的 scheduled scan 发送完整简报，即使当时没有候选；后续整点扫描只有在候选资格/优先级/条件容量、持仓可评估状态或 blocked/recovered 等实质变化时才发送。
-- 后续变化通知不是孤立的增量日志，而是“本轮变化摘要 + 当前完整紧凑快照”；没有实质变化时保持安静，不代表扫描失败。
-- 每个已展示候选都绑定当前 run 的事件风险投影，用户只看到三种语义：**已确认有事件**、**已确认当前合约关注窗口无重要事件**、**暂时无法确认**。结构化投影保留事件日期、距事件天数及其与每个相关到期日的先后关系；组合增强分别检查 Put/Call 两条腿。
-- 唯一权威来源是当前 run 的 `output_runs/<run_id>/state/event_snapshot.json`。候选 CSV 中的 `event_flag`、`event_types`、`event_dates`、`event_source_status` 只为兼容保留，Daily Brief 不读取也不 fallback。
-- event snapshot 缺失、损坏、过期、partial、conflict 或仅有空 fallback 证据时，一律显示“暂时无法确认”，绝不会渲染成“确认无事件”。provider 降级也不等于事件消失。
-- 当前或上一份已确认日报中的重要 P0/P1 候选发生新增事件、日期变化、事件进入到期前窗口、证据降级、证据恢复或同一可靠证据链确认移除时，复用原 material notification 链路发送“变化摘要 + 当前完整快照”。仅 freshness/cache 元数据变化保持安静。
-- `09:40 批次` 表示计划批次，`数据截至` 表示本轮真实数据时间；延迟补跑仍显示原计划批次。手动或 force 触发只显示 `手动触发`，不会伪造计划批次。
-- 候选合约使用 `TCOM · Sell Put · 08-21 $40 Put` 等可读格式，不展示 broker contract code。Sell Put 候选按合约分别展示条件容量，但这些候选共享同一份现金，手数不能相加。
-- 新候选与已有持仓分别归属策略：本轮没有新的组合增强候选，不会抹掉已有持仓的“组合增强（Put 侧/Call 侧）”归属。
-- 用户 Markdown 不展示 `position_lot_id`、`strategy_group_id`、`leg_role`、revision、raw enum、ISO 时间或拒绝原因明细；这些内部 identity 和审计事实仍保留在结构化 artifact/read model 中。
-- 默认 `enabled=false`；本次改版不新增 config migration，Draft PR、release 或远端升级也不会自动开启生产日报，生产启用与 canary 必须另行授权。
-- 事件关联只补充风险事实，不改变候选 identity、action ID、排序、labeled-only authority、资格或 capacity，也不会自动取消候选、自动下单或建立第二套 lifecycle/receipt/sender/renderer/CLI。
-- 休市不会伪造新 LIVE 日报。已有日报超过 `valid_until_utc` 后，只读入口将其标记为 `planning_only`，可用于复盘、次日计划和风险检查。
-- `--no-send`、quiet hours、发送失败或本地确认失败都不会推进 delivery pointer。
-- 多市场同轮运行会分别保存 US/HK 结构化 artifact，但当前版本 fail-closed：不发送组合消息，也不推进任一市场 pointer。
+资金只显示现金总额、可用于期权开仓的资金和每个候选的容量；不显示总资产、NAV 或证券市值。未知数据明确显示“暂不可用”，不会伪装成 `0`。候选事件事实仍只读取同一 run 的 `event_snapshot.json`；证据缺失或降级时显示“暂时无法确认”，不会伪装成确认无事件，也不会改变候选排序或身份。
 
-只读 CLI：
+随时查询读取最近一次**成功扫描**的 current 快照，不读取最后一次发送消息，也不修改 delivery state：
 
 ```bash
-./om daily-brief latest --account lx --market US
-./om daily-brief day --account lx --market US --date 2026-07-19
-./om daily-brief day --account lx --market US --date 2026-07-19 --revision 0 --json
+# 全部启用账户和市场
+./om daily-brief latest
+
+# 按账户或市场筛选
+./om daily-brief latest --account lx
+./om daily-brief latest --market HK
+./om daily-brief latest --account lx --market US --json
+
+# 运维历史读取仍要求明确账户和市场
+./om daily-brief day --account lx --market US --date 2026-07-21
+./om daily-brief day --account lx --market US --date 2026-07-21 --revision 0 --json
 ```
 
 只读 Agent Tool：
 
 ```bash
+./om-agent run --tool daily_decision_brief_read --input-json '{}'
+./om-agent run --tool daily_decision_brief_read --input-json '{"market":"HK"}'
 ./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
 ```
+
+自然语言入口包括“期权监控”“最新期权报告”“港股期权”“美股期权”“lx 期权”和“sy 期权”。Markdown 不展示 revision、内部 identity、broker contract code、raw enum、ISO 时间或内部路径；这些事实仍保留在结构化审计数据中。
+
+`notifications.daily_brief.enabled` 默认仍为 `false`。生产配置、delivery pointer 迁移、真实发送 canary、release 和远端升级都需要单独审批。

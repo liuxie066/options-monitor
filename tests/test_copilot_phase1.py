@@ -218,6 +218,19 @@ def test_symbol_inputs_are_structurally_required_without_fake_defaults() -> None
         assert "symbol" not in definition.safe_default_input
 
 
+def test_option_monitor_query_binding_exposes_plain_language_scenarios() -> None:
+    from src.application.assistant.tool_bindings import binding_for_intent
+
+    binding = binding_for_intent("daily_decision_brief_read")
+
+    assert binding is not None
+    assert binding.direct_executable is True
+    assert binding.display_name == "期权监控"
+    assert set(("期权监控", "最新期权报告", "港股期权", "美股期权", "lx 期权", "sy 期权")).issubset(
+        set(binding.examples)
+    )
+
+
 def test_observation_projection_prioritizes_contract_facts_and_missing_boundaries() -> None:
     filler = {f"metadata_{index}": index for index in range(25)}
     response = {
