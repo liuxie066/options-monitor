@@ -59,6 +59,7 @@ from src.application.tick_run_context import (
     complete_tick_idempotency as _complete_tick_idempotency,
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
+from src.application.scan_scheduler import mark_scheduler_accounts
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_config_freshness import (
@@ -92,6 +93,12 @@ def _resolve_daily_brief_trigger_kind(*, force_mode: bool, trigger_context: dict
         return 'force'
     source = str(trigger_context.get('source') or '').strip().lower()
     return 'scheduled' if source in {'cron', 'scheduler'} else 'manual'
+
+
+def _daily_brief_enabled(config: dict[str, Any]) -> bool:
+    notifications = config.get("notifications") if isinstance(config, dict) else {}
+    daily = notifications.get("daily_brief") if isinstance(notifications, dict) else {}
+    return isinstance(daily, dict) and daily.get("enabled") is True
 
 
 def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[str, dict[str, Any]]) -> bool:
@@ -372,26 +379,74 @@ def main(argv: list[str] | None = None) -> int:
     scan_decision_by_account = scheduler_context.scan_decision_by_account
     should_run_global = scheduler_context.should_run_global
     reason_global = scheduler_context.reason_global
+    scheduler_decisions_by_account = {
+        str(account).strip().lower(): dict(item["scheduler_decision"])
+        for account, item in scan_decision_by_account.items()
+        if isinstance(item, dict) and isinstance(item.get("scheduler_decision"), dict)
+    }
+
+    def commit_scan_targets(targets: dict[str, str]) -> None:
+        mark_scheduler_accounts(
+            config=cfg_path,
+            state=state_path,
+            schedule_key=str(scheduler_schedule_key),
+            accounts=list(targets),
+            mark_scanned=True,
+            processed_scan_targets_by_account=targets,
+            base_dir=repo_root,
+        )
 
     if not _has_scan_to_run(
         should_run_global=should_run_global,
         scan_decision_by_account=scan_decision_by_account,
     ):
-        runlog.safe_event(
-            'run_end',
-            'skip',
-            message=str(reason_global or 'scheduler_skip_no_scan'),
-            data=_safe_runlog_data(
-                {
-                    'reason': reason_global,
-                    'scheduler_decision': scheduler_decision,
-                    'accounts': account_ids,
-                    'run_workspace_created': False,
-                }
-            ),
+        delivery_only_allowed = (
+            _daily_brief_enabled(base_cfg)
+            and len(scheduler_markets) == 1
+            and any(item.get("in_run_window") is True for item in scheduler_decisions_by_account.values())
         )
-        complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
-        return 0
+        if not delivery_only_allowed:
+            runlog.safe_event(
+                'run_end',
+                'skip',
+                message=str(reason_global or 'scheduler_skip_no_scan'),
+                data=_safe_runlog_data(
+                    {
+                        'reason': reason_global,
+                        'scheduler_decision': scheduler_decision,
+                        'accounts': account_ids,
+                        'run_workspace_created': False,
+                    }
+                ),
+            )
+            complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
+            return 0
+        return run_tick_notification_flow(
+            TickNotificationRequest(
+                base=base,
+                repo_root=repo_root,
+                cfg_path=cfg_path,
+                state_path=state_path,
+                scheduler_schedule_key=str(scheduler_schedule_key),
+                base_cfg=base_cfg,
+                run_id=run_id,
+                runlog=runlog,
+                results=[],
+                tick_metrics={"delivery_only": True},
+                no_send=no_send,
+                bj_tz=bj_tz,
+                audit_helper=audit_helper,
+                vpy=vpy,
+                complete_tick_idempotency_fn=complete_tick_idempotency,
+                markets_to_run=markets_to_run,
+                scheduler_markets=scheduler_markets,
+                scheduler_decision=scheduler_decision,
+                account_ids=tuple(account_ids),
+                scheduler_decisions_by_account=scheduler_decisions_by_account,
+                delivery_only=True,
+                trigger_kind=trigger_kind,
+            )
+        )
 
     workspace = prepare_tick_run_workspace(
         base=base,
@@ -474,6 +529,10 @@ def main(argv: list[str] | None = None) -> int:
             scheduler_markets=scheduler_markets,
             scheduler_decision=scheduler_decision,
             ran_pipeline_accounts=account_execution.ran_pipeline_accounts,
+            account_ids=tuple(account_ids),
+            scheduler_decisions_by_account=scheduler_decisions_by_account,
+            scheduled_scan_targets_by_account=account_execution.scheduled_scan_targets_by_account,
+            commit_scan_targets_fn=commit_scan_targets,
             trigger_kind=trigger_kind,
         )
     )

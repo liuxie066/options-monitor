@@ -471,6 +471,158 @@ def read_retryable_daily_decision_brief_delivery(
     return {**result, "reason": "none", "envelope": None}
 
 
+def record_daily_decision_brief_delivery_attempt(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+    ambiguous: bool,
+    attempted_at_utc: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Record one exact provider attempt without rotating its envelope."""
+
+    attempted_at = _coerce_utc_iso(attempted_at_utc)
+    with _locked_delivery_envelope(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_trading_date,
+        delivery_key=delivery_key,
+        source_digest=source_digest,
+        message_sha256=message_sha256,
+        transport_idempotency_key=transport_idempotency_key,
+    ) as (state, day, envelope, delivery_path):
+        if envelope["status"] in {"confirmed", "expired_unconfirmed"}:
+            return {
+                "updated": False,
+                "reason": "already_final",
+                "envelope": dict(envelope),
+                "path": delivery_path,
+            }
+        envelope["last_attempt_at_utc"] = attempted_at
+        if ambiguous:
+            envelope["status"] = "ambiguous"
+        atomic_write_json(delivery_path, state)
+        return {
+            "updated": True,
+            "reason": "ambiguous" if ambiguous else "definite_failure",
+            "envelope": dict(envelope),
+            "path": delivery_path,
+        }
+
+
+def confirm_daily_decision_brief_delivery_v2(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+    confirmed_at_utc: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Confirm one exact v2 envelope and advance candidate delivery state."""
+
+    confirmed_at = _coerce_utc_iso(confirmed_at_utc)
+    with _locked_delivery_envelope(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_trading_date,
+        delivery_key=delivery_key,
+        source_digest=source_digest,
+        message_sha256=message_sha256,
+        transport_idempotency_key=transport_idempotency_key,
+    ) as (state, day, envelope, delivery_path):
+        if envelope["status"] == "expired_unconfirmed":
+            raise DailyDecisionBriefStateError("expired daily brief delivery cannot be confirmed")
+        if envelope["status"] == "confirmed":
+            return {
+                "advanced": False,
+                "reason": "already_confirmed",
+                "envelope": dict(envelope),
+                "path": delivery_path,
+            }
+        envelope["status"] = "confirmed"
+        envelope["last_attempt_at_utc"] = confirmed_at
+        envelope["confirmed_at_utc"] = confirmed_at
+        if envelope["delivery_kind"] in {"fixed_report", "candidate_alert"}:
+            revision = int(envelope["revision"])
+            via = str(envelope["delivery_kind"])
+            for identity in envelope["candidate_identities"]:
+                day["alerted_candidates"].setdefault(
+                    identity,
+                    {
+                        "revision": revision,
+                        "brief_digest": str(envelope["source_digest"]),
+                        "delivery_key": str(envelope["delivery_key"]),
+                        "confirmed_at_utc": confirmed_at,
+                        "via": via,
+                    },
+                )
+                day["pending_candidates"].pop(identity, None)
+        atomic_write_json(delivery_path, state)
+        return {
+            "advanced": True,
+            "reason": "confirmed",
+            "envelope": dict(envelope),
+            "path": delivery_path,
+        }
+
+
+def expire_daily_decision_brief_delivery_day(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+) -> dict[str, Any]:
+    """Expire unresolved envelopes for one market day without touching later days."""
+
+    base_path = Path(base).resolve()
+    account_norm = _normalize_account(account)
+    market_norm = _normalize_market(market)
+    date_norm = _normalize_market_date(market_trading_date)
+    delivery_path = _delivery_path(base_path, account_norm, market_norm)
+    lock_path = paths.account_state_dir(base_path, account_norm) / f"daily_decision_brief.{market_norm}.lock"
+    with _exclusive_lock(lock_path):
+        raw = _read_json_strict(delivery_path)
+        if raw is _MISSING:
+            return {"updated": False, "reason": "not_found", "path": delivery_path}
+        state = _normalize_delivery_state(
+            raw,
+            base=base_path,
+            path=delivery_path,
+            account=account_norm,
+            market=market_norm,
+        )
+        day = state["days"].get(date_norm)
+        if not day:
+            return {"updated": False, "reason": "no_delivery_day", "path": delivery_path}
+        changed = False
+        envelopes = list(day["fixed_reports"].values())
+        if isinstance(day.get("candidate_delivery"), Mapping):
+            envelopes.append(day["candidate_delivery"])
+        for envelope in envelopes:
+            if envelope["status"] in {"pending", "ambiguous"}:
+                envelope["status"] = "expired_unconfirmed"
+                changed = True
+        if changed:
+            atomic_write_json(delivery_path, state)
+        return {
+            "updated": changed,
+            "reason": "expired" if changed else "already_final",
+            "path": delivery_path,
+        }
+
+
 def inspect_daily_decision_brief_delivery(
     *,
     base: Path,
@@ -1449,6 +1601,61 @@ def _normalize_legacy_confirmation(
         "brief_digest": brief_digest,
         "confirmed_at_utc": confirmed_at,
     }
+
+
+@contextmanager
+def _locked_delivery_envelope(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+) -> Iterator[tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path]]:
+    base_path = Path(base).resolve()
+    account_norm = _normalize_account(account)
+    market_norm = _normalize_market(market)
+    date_norm = _normalize_market_date(market_trading_date)
+    key_norm = str(delivery_key or "").strip()
+    digest_norm = _normalize_sha256(source_digest, field="source_digest")
+    message_digest_norm = _normalize_sha256(message_sha256, field="message_sha256")
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    if str(transport_idempotency_key or "").strip() != build_notification_transport_key(key_norm):
+        raise DailyDecisionBriefStateError("daily brief provider idempotency key mismatch")
+    delivery_path = _delivery_path(base_path, account_norm, market_norm)
+    lock_path = paths.account_state_dir(base_path, account_norm) / f"daily_decision_brief.{market_norm}.lock"
+    with _exclusive_lock(lock_path):
+        raw = _read_json_strict(delivery_path)
+        if raw is _MISSING:
+            raise DailyDecisionBriefStateError(f"daily brief delivery state is missing: {delivery_path}")
+        state = _normalize_delivery_state(
+            raw,
+            base=base_path,
+            path=delivery_path,
+            account=account_norm,
+            market=market_norm,
+        )
+        day = state["days"].get(date_norm)
+        if not day:
+            raise DailyDecisionBriefStateError("daily brief delivery day is missing")
+        envelope = next(
+            (item for item in day["fixed_reports"].values() if item["delivery_key"] == key_norm),
+            None,
+        )
+        candidate = day.get("candidate_delivery")
+        if envelope is None and isinstance(candidate, Mapping) and candidate.get("delivery_key") == key_norm:
+            envelope = candidate
+        if envelope is None:
+            raise DailyDecisionBriefStateError("daily brief delivery key does not reference a prepared envelope")
+        if envelope["source_digest"] != digest_norm:
+            raise DailyDecisionBriefStateError("daily brief delivery source digest mismatch")
+        if envelope["message_sha256"] != message_digest_norm:
+            raise DailyDecisionBriefStateError("daily brief delivery message digest mismatch")
+        yield state, day, envelope, delivery_path
 
 
 def _validate_successful_revision_source(
