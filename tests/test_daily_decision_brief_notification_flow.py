@@ -234,6 +234,64 @@ def test_daily_brief_default_off_preserves_legacy_preparation(monkeypatch, tmp_p
     bundle = _request(tmp_path, run_id="disabled", config=_config(enabled=False))
     assert mod.run_tick_notification_flow(bundle.request) == 0
     assert called["legacy"] == 1
+    assert bundle.commits == [{"lx": FIXED_TARGET}]
+
+
+@pytest.mark.parametrize(
+    ("trigger_kind", "target"),
+    (("manual", HALF_TARGET), ("force", None)),
+)
+def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
+    monkeypatch,
+    tmp_path: Path,
+    trigger_kind: str,
+    target: str | None,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        read_latest_daily_decision_brief,
+    )
+
+    _patch_assembler(monkeypatch)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id=f"{trigger_kind}-snapshot", fixed=False)
+    scheduler = dict(bundle.request.scheduler_decisions_by_account["lx"])
+    scheduler["scheduled_scan_target_market"] = target
+    scheduler["scheduled_target_market"] = None
+    bundle.request = replace(
+        bundle.request,
+        trigger_kind=trigger_kind,
+        scheduler_decisions_by_account={"lx": scheduler},
+        scheduled_scan_targets_by_account={"lx": target},
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
+    assert read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["available"] is False
+    assert calls == []
+    assert bundle.commits == [{"lx": None}]
+
+
+def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_send(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must fail before prepare")),
+    )
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="missing-target")
+    bundle.request = replace(bundle.request, scheduled_scan_targets_by_account={})
+
+    with pytest.raises(RuntimeError, match="scheduled scan target missing for accounts: lx"):
+        mod.run_tick_notification_flow(bundle.request)
+    assert calls == []
+    assert bundle.commits == []
+    assert bundle.request.audit_helper.failures == [("SCHEDULED_SCAN_TARGET_MISSING", "validate_scan_targets")]
 
 
 def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, tmp_path: Path) -> None:

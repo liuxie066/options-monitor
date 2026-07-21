@@ -395,10 +395,16 @@ def test_processed_target_watermark_is_account_isolated() -> None:
         "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
     }
     state = {
-        "last_run_utc_by_account": {"lx": "2026-07-21T02:00:05+00:00"},
+        "last_run_utc_by_account": {
+            "lx": "2026-07-21T02:00:05+00:00",
+            "sy": "2026-07-21T02:00:05+00:00",
+        },
         "last_processed_scan_target_utc_by_account": {"lx": "2026-07-21T02:00:00+00:00"},
     }
     now = datetime(2026, 7, 21, 2, 5, tzinfo=timezone.utc)
 
     assert decide(cfg, state, now, account="lx").should_run_scan is False
+    assert decide(cfg, state, now, account="sy").should_run_scan is False
+
+    state["last_run_utc_by_account"].pop("sy")
     assert decide(cfg, state, now, account="sy").should_run_scan is True

@@ -253,10 +253,15 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             no_send=True,
             scan_decision_by_account={
                 "lx": {
+                    "should_run": True,
                     "scheduler_decision": {
                         "scheduled_scan_target_market": "2026-07-21T10:00:00-04:00",
-                    }
-                }
+                    },
+                },
+                "sy": {
+                    "should_run": True,
+                    "scheduler_decision": {"scheduled_scan_target_market": None},
+                },
             },
             state_path=tmp_path / "scheduler_state.json",
             scheduler_schedule_key="schedule",
@@ -270,6 +275,7 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
     assert outcome.ran_pipeline_accounts == ["lx"]
     assert outcome.scheduled_scan_targets_by_account == {
         "lx": "2026-07-21T10:00:00-04:00",
+        "sy": None,
     }
     assert not (tmp_path / "scheduler_state.json").exists()
 
