@@ -966,6 +966,15 @@ def _position_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "quote_status",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
+    out["metrics"] = {
+        key: _json_safe(row.get(key))
+        for key in (
+            "close_mid",
+            "realized_if_close",
+            "remaining_annualized_return",
+        )
+        if row.get(key) is not None
+    }
     out["strategy_family"] = _text(
         row.get("strategy_family") or row.get("strategy") or "close_advice"
     ).lower()

@@ -234,6 +234,108 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     _assert_no_internal_leak(view)
 
 
+def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["market"] = "HK"
+    brief["positions"] = [
+        {
+            "symbol": "3690.HK",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-28",
+            "strike": 65,
+            "option_type": "put",
+            "close_action": "close",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "metrics": {
+                "close_mid": 0.52,
+                "realized_if_close": 474.5,
+                "remaining_annualized_return": 0.042,
+            },
+        }
+    ]
+    brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
+
+    message = render_full_brief(brief)
+
+    assert "- 3690.HK · Sell Put · 08-28 HK$65 Put：建议平仓" in message
+    assert (
+        "  - 参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · 剩余年化 4.2%"
+        in message
+    )
+
+    brief["market"] = "US"
+    brief["positions"][0]["symbol"] = "NVDA"
+    us_message = render_full_brief(brief)
+    assert "参考平仓价 $0.52（mid） · 预计锁定收益 $474.50 · 剩余年化 4.2%" in us_message
+
+
+def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["market"] = "HK"
+    brief["positions"] = [
+        {
+            "symbol": "LOSS.HK",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-28",
+            "strike": 50,
+            "option_type": "put",
+            "close_action": "close",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "metrics": {"realized_if_close": -125.5},
+        },
+        {
+            "symbol": "PARTIAL.HK",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-28",
+            "strike": 55,
+            "option_type": "put",
+            "close_action": "close",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "metrics": {
+                "close_mid": 0.3,
+                "realized_if_close": "nan",
+                "remaining_annualized_return": "invalid",
+            },
+        },
+        {
+            "symbol": "HOLD.HK",
+            "strategy_family": "sell_put",
+            "close_action": "hold",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "metrics": {"close_mid": 88, "realized_if_close": 9999},
+        },
+        {
+            "symbol": "GAP.HK",
+            "strategy_family": "sell_put",
+            "close_action": "not_evaluable",
+            "evaluation_status": "not_evaluable",
+            "quote_status": "quote_unusable",
+            "metrics": {"close_mid": 77, "realized_if_close": 8888},
+        },
+    ]
+    brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
+
+    message = render_full_brief(brief)
+
+    assert "预计平仓损益 -HK$125.50" in message
+    assert "PARTIAL.HK · Sell Put · 08-28 HK$55 Put：建议平仓" in message
+    assert "参考平仓价 HK$0.30（mid）" in message
+    assert "nan" not in message.lower()
+    assert "invalid" not in message.lower()
+    assert "HK$88.00" not in message
+    assert "HK$9,999.00" not in message
+    assert "HK$77.00" not in message
+    assert "HK$8,888.00" not in message
+
+
 def test_combo_position_attribution_is_independent_from_new_combo_candidates() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
