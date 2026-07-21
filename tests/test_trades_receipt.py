@@ -192,7 +192,8 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-1"
     assert calls[0]["target"] == "wechat:ops"
-    assert "# OM · 成交回执 · lx" in calls[0]["message"]
+    assert calls[0]["message"].startswith("# OM · 回执 · lx")
+    assert "类型｜成交" in calls[0]["message"]
     assert "状态｜✅ 已完成" in calls[0]["message"]
     assert "资金｜权利金毛流入 USD 123.00" in calls[0]["message"]
     assert "时间｜2026-05-19 13:08:31 北京时间" in calls[0]["message"]
@@ -240,6 +241,8 @@ def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     )
 
     assert "状态｜❌ 未记录" in msg
+    assert msg.startswith("# OM · 回执 · lx")
+    assert "类型｜成交" in msg
     assert "missing_required_fields:multiplier" in msg
     assert "9992.HK" in msg
 
@@ -280,10 +283,13 @@ def test_build_trade_intake_receipt_message_marks_ambiguous_assigned_stock_sale_
     )
 
     assert "状态｜⚠️ 待确认" in msg
+    assert msg.startswith("# OM · 回执 · lx")
+    assert "类型｜成交" in msg
     assert "确认前不会自动写入" in msg
     assert "A｜FUTU USD；剩余 100 股；成本 120.0/股" in msg
     assert "B｜FUTU USD；剩余 100 股；成本 117.45/股" in msg
     assert "下一步｜回复“选择 A”" in msg
+    assert msg.index("下一步｜回复“选择 A”") < msg.index("编号｜`deal-stock-1`")
     assert "状态｜❌ 未记录" not in msg
     assert_mobile_flat_markdown(msg)
 
