@@ -349,6 +349,7 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 
 - Per-account content: `src/application/notify_symbols.py`
 - Multi-account wrapper: `src/application/multi_tick/notify_format.py`
+- Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
 - Perception audit card: `assistant_perception` events written by
   `src/application/tick_notification_flow.py`
@@ -357,6 +358,8 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with exactly one `zh_cn.content` `md` node and no duplicate `title`, while WeChat ClawBot sends the same string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter.
 
 Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
+
+System notices use `# OM · 系统通知 · <component>` and receipts use `# OM · 回执 · <account>` plus `类型｜成交` or `类型｜持仓维护`. `notification_shells.py` owns only the flat Markdown H1/field/section layout. OpenD rate limits and recovery, delivery-failure aggregation/retry, trade receipt warnings, and maintenance receipt status/dedupe/persistence remain with their existing callers; the shell must not send, retry, inspect provider byte limits, or classify business state.
 
 Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
 
