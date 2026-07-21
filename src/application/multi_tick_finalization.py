@@ -59,16 +59,28 @@ def finalize_no_account_notification(
     audit_fn: Callable[..., Any],
     safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
     on_success: Callable[[], Any],
+    reason: str = "no_account_notification",
+    run_end_outcome: str = "ok",
+    error_code: str | None = None,
+    return_code: int = 0,
 ) -> int:
-    runlog.safe_event("notify", "skip", message="no account notification content")
+    outcome = str(run_end_outcome or "ok").strip().lower()
+    audit_status = "error" if outcome == "error" else "skip"
+    notify_message = "no account notification content" if reason == "no_account_notification" else reason
+    notify_event_kwargs: dict[str, Any] = {"message": notify_message}
+    if error_code:
+        notify_event_kwargs["error_code"] = error_code
+    runlog.safe_event("notify", audit_status, **notify_event_kwargs)
     shared_payload, account_payloads = build_no_account_notification_payloads(
         now_utc_fn=utc_now_fn,
         results=results,
         run_dir=str(tick_metrics.get("run_dir") or ""),
+        reason=reason,
+        error_code=error_code,
     )
     try:
         state_repo.write_shared_last_run(base, shared_payload)
-        audit_fn("write", "write_shared_last_run", run_id=run_id, status="skip", message="no_account_notification")
+        audit_fn("write", "write_shared_last_run", run_id=run_id, status=audit_status, message=reason)
     except Exception as exc:
         _record_finalize_degraded(
             runlog=runlog,
@@ -77,7 +89,7 @@ def finalize_no_account_notification(
             audit_fn=audit_fn,
             action="write_shared_last_run",
             exc=exc,
-            extra={"reason": "no_account_notification"},
+            extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
         )
     for result in results:
         account = str(result.account)
@@ -85,7 +97,7 @@ def finalize_no_account_notification(
         try:
             state_repo.write_account_last_run(base, result.account, payload)
             state_repo.write_run_account_last_run(base, run_id, result.account, payload)
-            audit_fn("write", "write_account_last_run", run_id=run_id, account=account, status="skip", message="no_account_notification")
+            audit_fn("write", "write_account_last_run", run_id=run_id, account=account, status=audit_status, message=reason)
         except Exception as exc:
             _record_finalize_degraded(
                 runlog=runlog,
@@ -95,14 +107,16 @@ def finalize_no_account_notification(
                 action="write_account_last_run",
                 exc=exc,
                 account=account,
-                extra={"reason": "no_account_notification"},
+                extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
             )
     try:
         tick_metrics["sent"] = False
-        tick_metrics["reason"] = "no_account_notification"
+        tick_metrics["reason"] = reason
+        if error_code:
+            tick_metrics["error_code"] = str(error_code)
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
-        audit_fn("write", "write_tick_metrics", run_id=run_id, status="skip", message="no_account_notification")
+        audit_fn("write", "write_tick_metrics", run_id=run_id, status=audit_status, message=reason)
     except Exception as exc:
         _record_finalize_degraded(
             runlog=runlog,
@@ -111,23 +125,25 @@ def finalize_no_account_notification(
             audit_fn=audit_fn,
             action="write_tick_metrics",
             exc=exc,
-            extra={"reason": "no_account_notification"},
+            extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
         )
 
-    runlog.safe_event(
-        "run_end",
-        "ok",
-        data=safe_data_fn(
+    run_end_kwargs: dict[str, Any] = {
+        "data": safe_data_fn(
             build_run_end_payload(
                 no_send=no_send,
                 results=results,
                 sent_accounts=[],
-                reason="no_account_notification",
+                reason=reason,
             )
-        ),
-    )
-    on_success()
-    return 0
+        )
+    }
+    if error_code:
+        run_end_kwargs["error_code"] = error_code
+    runlog.safe_event("run_end", outcome, **run_end_kwargs)
+    if outcome != "error":
+        on_success()
+    return int(return_code)
 
 
 def finalize_multi_tick_run(

@@ -55,3 +55,32 @@ def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp
     assert captured["report_dir"] == (runtime_root / "output_shared" / "reports").resolve()
     assert captured["state_dir"] == (runtime_root / "output_shared" / "state").resolve()
     assert captured["required_data_dir"] == (runtime_root / "output_shared" / "required_data").resolve()
+
+
+def test_stage_only_notification_always_builds_compact_compatibility_bundle(monkeypatch, tmp_path: Path) -> None:
+    from src.application import pipeline_alert_steps as mod
+
+    (tmp_path / "symbols_alerts.txt").write_text("alerts", encoding="utf-8")
+    calls: list[dict] = []
+    logs: list[str] = []
+    monkeypatch.setattr(mod, "run_pipeline_notification_stage", lambda **kwargs: calls.append(dict(kwargs)))
+
+    mod.run_stage_only_alert_notify(
+        report_dir=tmp_path,
+        stage_only="notify",
+        want=lambda step: step == "notify",
+        log=logs.append,
+    )
+
+    assert calls[0]["render_style"] == "compact"
+    assert calls[0]["output"] == (tmp_path / "symbols_notification.txt").resolve()
+    assert any("not delivery evidence" in message for message in logs)
+
+
+def test_pipeline_runtime_has_no_config_driven_legacy_compatibility_bundle() -> None:
+    from src.application import pipeline_runtime as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    assert 'notifications_cfg.get("render_style")' not in source
+    assert 'render_style="compact"' in source
+    assert "not delivery evidence" in source
