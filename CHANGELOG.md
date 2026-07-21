@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.4.1 - 2026-07-21
+
+### Changed
+- Switched proactive Feishu App notifications to `post` payloads with exactly one Markdown node while preserving the canonical WeChat Markdown path, the 28 KiB preflight limit, delivery confirmation, retry, and operator-controlled text rollback boundaries.
+- Made Daily Brief the only scheduled ordinary-notification renderer; Compact Tick is now compatibility-only, Legacy Tick is deprecated, and manual or forced runs no longer auto-send ordinary Tick notifications.
+- Standardized Daily Brief, Tick compatibility output, no-candidate states, System Notices, and receipts on a mobile-flat Markdown layout with one H1, limited H2 sections, and flat `字段｜值` rows.
+- Shared minimal System Notice and Receipt presentation shells while keeping business state, deduplication, persistence, rate limits, retries, and provider behavior in their existing callers.
+- Removed legacy renderer-selection keys from defaults and examples while continuing to accept known old keys with compatibility warnings during the migration window.
+
+### Fixed
+- Removed nested-list, blockquote, and duplicate-title formatting that made Feishu mobile notifications difficult to read.
+- Made unsupported multi-market scheduled notification delivery fail terminally with deterministic idempotency evidence, and prevented compatibility artifacts from being treated as canonical delivery evidence.
+
 ## 1.4.0 - 2026-07-21
 
 ### Added
