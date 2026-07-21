@@ -22,6 +22,7 @@ _STRATEGY_LABELS = {
     "combo_yield": "组合增强",
 }
 _OPTION_LABELS = {"put": "Put", "call": "Call"}
+_EVENT_TYPE_LABELS = {"earnings": "财报", "ex_dividend": "除息", "split": "拆股"}
 _COMBO_LEG_LABELS = {
     "funding_put": "Put 侧",
     "sell_put": "Put 侧",
@@ -295,7 +296,10 @@ def _candidate_views(
                         "family": family,
                         "title": f"{symbol} · 组合增强（{choice}）",
                         "legs": [f"Put：{put_contract}", f"Call：{call_contract}"],
-                        "details": _candidate_metric_details(row, family=family, market=market),
+                        "details": [
+                            *_candidate_metric_details(row, family=family, market=market),
+                            _candidate_event_line(row, family=family),
+                        ],
                     }
                 )
                 continue
@@ -310,7 +314,10 @@ def _candidate_views(
                 {
                     "family": family,
                     "title": (f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）"),
-                    "details": _candidate_metric_details(row, family=family, market=market),
+                    "details": [
+                        *_candidate_metric_details(row, family=family, market=market),
+                        _candidate_event_line(row, family=family),
+                    ],
                     "legs": [],
                 }
             )
@@ -354,6 +361,23 @@ def _candidate_metric_details(
     if net_income is not None:
         parts.append(f"预计净收入 {_money(net_income, market=market)}")
     return [" · ".join(parts)] if parts else []
+
+
+def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
+    risk = candidate.get("event_risk") if isinstance(candidate.get("event_risk"), Mapping) else {}
+    state = _lower(risk.get("user_state"))
+    if state == "confirmed_none":
+        return "已确认当前期权到期前没有近期重要事件；执行前仍需复核报价。"
+    if state != "confirmed_event":
+        return "近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。"
+
+    event = risk.get("nearest_event") if isinstance(risk.get("nearest_event"), Mapping) else {}
+    event_label = _event_label(event)
+    relation = _event_expiry_relation_text(risk, family=family)
+    if not event_label:
+        return "近期事件数据不完整，当前无法确认没有重要事件；执行前需要再次检查。"
+    relation_text = f"，{relation}" if relation else ""
+    return f"预计 {event_label}{relation_text}；执行前需要重新确认事件窗口和报价。"
 
 
 def _position_views(
@@ -627,10 +651,17 @@ def _canonical_decimal_text(value: Any) -> str:
 
 def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     changes = [item for item in diff.get("changes") or [] if isinstance(item, Mapping)]
-    if any(_lower(item.get("change_type")) == "recovered" for item in changes):
-        return ["数据已恢复，以下为当前结果"]
+    recovered = any(_lower(item.get("change_type")) == "recovered" for item in changes)
 
     summaries: list[str] = []
+    event_summaries: list[str] = []
+    date_changed_actions = {
+        str((item.get("action") or {}).get("action_id"))
+        for item in changes
+        if _lower(item.get("change_type")) == "candidate_event_date_changed"
+        and isinstance(item.get("action"), Mapping)
+        and (item.get("action") or {}).get("action_id")
+    }
     grouped: dict[tuple[str, str], int] = {}
     invalidated_candidate_labels: list[str] = []
     position_symbols: list[str] = []
@@ -642,7 +673,20 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
         family = _lower(action.get("strategy_family"))
         action_type = _lower(action.get("action_type"))
         candidate_action = action_type in {"open_candidate", "open_combo_yield"}
-        if change_type == "candidate_added":
+        if change_type == "candidate_event_date_changed":
+            summary = _event_change_summary(change, market=market)
+            if summary:
+                event_summaries.append(summary)
+        elif change_type == "candidate_event_entered_expiry_window":
+            if str(action.get("action_id") or "") not in date_changed_actions:
+                summary = _event_change_summary(change, market=market)
+                if summary:
+                    event_summaries.append(summary)
+        elif change_type.startswith("candidate_event_"):
+            summary = _event_change_summary(change, market=market)
+            if summary:
+                event_summaries.append(summary)
+        elif change_type == "candidate_added":
             grouped[(change_type, family)] = grouped.get((change_type, family), 0) + 1
         elif change_type == "candidate_invalidated":
             label = _change_contract_label(action, market=market)
@@ -678,6 +722,13 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
         elif change_type in {"actionability_changed", "blocked"}:
             generic_state_change = True
 
+    if recovered:
+        recovered_summaries = ["数据已恢复，以下为当前结果", *event_summaries]
+        if len(recovered_summaries) <= 2:
+            return recovered_summaries
+        return [*recovered_summaries[:2], f"另有 {len(recovered_summaries) - 2} 项变化"]
+
+    summaries.extend(event_summaries)
     for (change_type, family), count in grouped.items():
         strategy = _STRATEGY_LABELS.get(family, "期权")
         if change_type == "candidate_added":
@@ -706,6 +757,44 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
     return [*summaries[:2], f"另有 {len(summaries) - 2} 项变化"]
 
 
+def _event_change_summary(change: Mapping[str, Any], *, market: str) -> str:
+    change_type = _lower(change.get("change_type"))
+    action = change.get("action") if isinstance(change.get("action"), Mapping) else {}
+    before = change.get("before_event_risk") if isinstance(change.get("before_event_risk"), Mapping) else {}
+    after = change.get("after_event_risk") if isinstance(change.get("after_event_risk"), Mapping) else {}
+    label = _candidate_change_label(action, market=market)
+    if not label:
+        return ""
+    before_event = before.get("nearest_event") if isinstance(before.get("nearest_event"), Mapping) else {}
+    after_event = after.get("nearest_event") if isinstance(after.get("nearest_event"), Mapping) else {}
+    event = before_event if change_type == "candidate_event_removed" else (after_event or before_event)
+    event_label = _event_label(event)
+    family = _lower(action.get("strategy_family"))
+    relation = _event_expiry_relation_text(after, family=family, current=True)
+
+    if change_type == "candidate_event_added":
+        return f"较上一轮：{label} 新增 {event_label or '重要事件'}" + (f"，{relation}" if relation else "")
+    if change_type == "candidate_event_date_changed":
+        event_type = _EVENT_TYPE_LABELS.get(_lower(event.get("event_type")), "重要事件")
+        event_date = _event_date_label(event.get("event_date"))
+        return f"较上一轮：{label} {event_type}日期调整至 {event_date}" + (f"，{relation}" if relation else "")
+    if change_type == "candidate_event_entered_expiry_window":
+        return f"较上一轮：{label} 的{event_label or '重要事件'}已进入当前合约关注窗口" + (
+            f"，{relation}" if relation else ""
+        )
+    if change_type == "candidate_event_evidence_degraded":
+        return f"较上一轮：{label} 近期事件数据变得不完整，当前无法确认没有重要事件"
+    if change_type == "candidate_event_evidence_recovered":
+        if _lower(after.get("user_state")) == "confirmed_none":
+            return f"较上一轮：{label} 事件证据已恢复，已确认当前期权到期前没有近期重要事件"
+        return f"较上一轮：{label} 事件证据已恢复，现预计 {event_label or '有重要事件'}" + (
+            f"，{relation}" if relation else ""
+        )
+    if change_type == "candidate_event_removed":
+        return f"较上一轮：{label} 已确认移除原定 {event_label or '重要事件'}"
+    return ""
+
+
 def _changed_position_symbols(diff: Mapping[str, Any]) -> set[str]:
     out: set[str] = set()
     for change in diff.get("changes") or []:
@@ -731,6 +820,72 @@ def _change_contract_label(action: Mapping[str, Any], *, market: str) -> str:
     if not symbol or contract == "合约信息不完整":
         return ""
     return f"{symbol} {contract}"
+
+
+def _candidate_change_label(action: Mapping[str, Any], *, market: str) -> str:
+    if _lower(action.get("strategy_family")) != "combo_yield":
+        return _change_contract_label(action, market=market)
+    symbol = _upper(action.get("symbol"))
+    contract = _human_contract(
+        expiration=action.get("expiration"),
+        strike=action.get("strike"),
+        option_type="put",
+        market=market,
+    )
+    return f"{symbol} 组合增强（{contract}）" if symbol and contract != "合约信息不完整" else symbol
+
+
+def _event_label(event: Mapping[str, Any]) -> str:
+    event_type = _EVENT_TYPE_LABELS.get(_lower(event.get("event_type")))
+    event_date = _event_date_label(event.get("event_date"))
+    if not event_type or not event_date:
+        return ""
+    verb = {"财报": "发布财报", "除息": "除息", "拆股": "实施拆股"}[event_type]
+    return f"{event_date}{verb}"
+
+
+def _event_date_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text[:10])
+    except ValueError:
+        return ""
+    return f"{parsed.month} 月 {parsed.day} 日"
+
+
+def _event_expiry_relation_text(
+    risk: Mapping[str, Any],
+    *,
+    family: str,
+    current: bool = False,
+) -> str:
+    relations = risk.get("expiration_relations") if isinstance(risk.get("expiration_relations"), Mapping) else {}
+    prefix = "现在" if current else ""
+    if family != "combo_yield":
+        relation = relations.get("contract") if isinstance(relations.get("contract"), Mapping) else {}
+        option = "Put" if family == "sell_put" else ("Call" if family == "covered_call" else "期权")
+        return _one_expiry_relation(relation.get("relation"), label=option, prefix=prefix)
+
+    parts = []
+    for key, label in (("put", "Put"), ("call", "Call")):
+        relation = relations.get(key) if isinstance(relations.get(key), Mapping) else {}
+        text = _one_expiry_relation(relation.get("relation"), label=label, prefix="")
+        if text:
+            parts.append(text)
+    return prefix + "、".join(parts) if parts else ""
+
+
+def _one_expiry_relation(value: Any, *, label: str, prefix: str) -> str:
+    relation = _lower(value)
+    if relation == "before_expiration":
+        return f"{prefix}早于当前 {label} 到期日"
+    if relation == "on_expiration":
+        return f"{prefix}与当前 {label} 同日"
+    if relation == "after_expiration":
+        return f"{prefix}晚于当前 {label} 到期日"
+    return ""
 
 
 def _phase_label(
