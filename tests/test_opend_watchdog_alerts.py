@@ -104,7 +104,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch)
     assert captured["channel"] == "wechat_clawbot"
     assert captured["target"] == "clawbot:test"
     message = str(captured["message"])
-    assert message.startswith("# OM · 系统告警 · OpenD")
+    assert message.startswith("# OM · 系统通知 · OpenD")
     assert "状态｜❌ 不可用" in message
     assert "时间｜2026-07-21 16:30:00 北京时间" in message
     assert "影响｜本轮行情与交易数据可能不完整" in message
