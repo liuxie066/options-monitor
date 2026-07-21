@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
+from domain.domain.daily_decision_event_risk import normalize_candidate_event_risk
+
 
 DAILY_DECISION_BRIEF_SCHEMA_VERSION = "daily_decision_brief.v1"
 DAILY_DECISION_BRIEF_DIFF_SCHEMA_VERSION = "daily_decision_brief_diff.v1"
@@ -78,6 +80,8 @@ def normalize_daily_brief_action(action: Mapping[str, Any]) -> dict[str, Any]:
     out["position_lot_id"] = str(src.get("position_lot_id") or "").strip()
     out["strategy_group_id"] = str(src.get("strategy_group_id") or "").strip()
     out["leg_role"] = _lower(src.get("leg_role"))
+    if out["action_type"] in {"open_candidate", "open_combo_yield"}:
+        out["event_risk"] = normalize_candidate_event_risk(src.get("event_risk"))
     out["action_id"] = build_daily_brief_action_id(out)
     return out
 
@@ -130,13 +134,29 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
             "actions": normalized_actions,
             "positions": _mapping_list(src.get("positions"), field="positions"),
             "capacity": _mapping(src.get("capacity"), field="capacity"),
-            "candidates": _mapping(src.get("candidates"), field="candidates"),
+            "candidates": _normalize_candidate_groups(src.get("candidates")),
             "rejections": _mapping(src.get("rejections"), field="rejections"),
             "events": _mapping_list(src.get("events"), field="events"),
             "data_gaps": _mapping_list(src.get("data_gaps"), field="data_gaps"),
             "source_artifacts": _mapping_list(src.get("source_artifacts"), field="source_artifacts"),
         }
     )
+    return out
+
+
+def _normalize_candidate_groups(value: Any) -> dict[str, Any]:
+    groups = _mapping(value, field="candidates")
+    out: dict[str, Any] = {}
+    for family, items in groups.items():
+        if not isinstance(items, list):
+            out[family] = items
+            continue
+        out[family] = [
+            {**dict(item), "event_risk": normalize_candidate_event_risk(item.get("event_risk"))}
+            if isinstance(item, Mapping)
+            else item
+            for item in items
+        ]
     return out
 
 

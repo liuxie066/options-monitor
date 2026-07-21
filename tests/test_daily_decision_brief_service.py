@@ -15,6 +15,29 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
     return path
 
 
+def _write_event_snapshot(base: Path, symbols: dict) -> None:
+    state_dir = base / "output_runs" / "run-1" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "event_snapshot.json").write_text(
+        json.dumps({"schema_version": 1, "symbols": symbols}),
+        encoding="utf-8",
+    )
+
+
+def _complete_event_item(*, events: list[dict] | None = None, source_status: str = "ok") -> dict:
+    return {
+        "symbol": "NVDA",
+        "selected_provider": "futu",
+        "source_status": source_status,
+        "events": list(events or []),
+        "coverage": {
+            "earnings": {"status": "complete", "error": ""},
+            "ex_dividend": {"status": "complete", "error": ""},
+            "split": {"status": "complete", "error": ""},
+        },
+    }
+
+
 def _config(*, timezone_name: str = "America/New_York") -> dict:
     return {
         "schedule": {
@@ -126,6 +149,132 @@ def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Pat
     assert all("fake" not in item.get("reason", "") for item in brief["actions"])
 
 
+def test_candidate_event_projection_binds_snapshot_to_candidate_and_action(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    _write_event_snapshot(
+        tmp_path,
+        {
+            "NVDA": _complete_event_item(
+                events=[
+                    {
+                        "type": "earnings",
+                        "date": "2026-08-05",
+                        "raw": {"fiscal_year": "2026", "financial_type": "Q2"},
+                    }
+                ]
+            )
+        },
+    )
+
+    brief = _assemble(tmp_path)
+    candidate = brief["candidates"]["sell_put"][0]
+    action = next(item for item in brief["actions"] if item["action_type"] == "open_candidate")
+    risk = candidate["event_risk"]
+
+    assert action["event_risk"] == risk
+    assert risk["user_state"] == "confirmed_event"
+    assert risk["days_to_event"] == 19
+    assert risk["expiration_relations"]["contract"] == {
+        "expiration": "2026-08-21",
+        "relation": "before_expiration",
+        "days_before_expiration": 16,
+    }
+    assert risk["in_attention_window"] is True
+    assert brief["events"] == [
+        {
+            **risk["events"][0],
+            "symbol": "NVDA",
+            "candidate_action_id": action["action_id"],
+            "strategy_family": "sell_put",
+            "contract_symbol": "NVDA260821P00100000",
+            "strategy_group_id": "",
+        }
+    ]
+
+
+def test_candidate_event_projection_confirms_complete_primary_absence(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    _write_event_snapshot(tmp_path, {"NVDA": _complete_event_item()})
+
+    brief = _assemble(tmp_path)
+
+    assert brief["candidates"]["sell_put"][0]["event_risk"]["user_state"] == "confirmed_none"
+    assert brief["events"] == []
+
+
+def test_candidate_event_projection_never_falls_back_to_candidate_csv_fields(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    row = _put_row()
+    row.update(
+        {
+            "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-08-05",
+            "event_source_status": "ok",
+        }
+    )
+    pd.DataFrame([row]).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+
+    brief = _assemble(tmp_path)
+
+    assert brief["candidates"]["sell_put"][0]["event_risk"]["user_state"] == "unknown"
+    assert brief["candidates"]["sell_put"][0]["event_risk"]["reason_code"] == "event_snapshot_missing"
+    assert brief["events"] == []
+
+
+def test_malformed_event_snapshot_degrades_candidate_to_unknown(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    state_dir = tmp_path / "output_runs" / "run-1" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "event_snapshot.json").write_text("{broken", encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+
+    risk = brief["candidates"]["sell_put"][0]["event_risk"]
+    assert risk["user_state"] == "unknown"
+    assert risk["reason_code"] == "event_snapshot_malformed"
+    assert any(item["reason"] == "event_snapshot_malformed" for item in brief["data_gaps"])
+
+
+def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            _put_row(contract="NVDA_LOW", annualized=0.10),
+            _put_row(contract="NVDA_HIGH", annualized=0.25),
+        ]
+    ).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+
+    without_snapshot = _assemble(tmp_path)
+    before = {
+        item["contract_symbol"]: item["action_id"]
+        for item in without_snapshot["actions"]
+        if item["action_type"] == "open_candidate"
+    }
+    _write_event_snapshot(tmp_path, {"NVDA": _complete_event_item()})
+    with_snapshot = _assemble(tmp_path)
+    after = {
+        item["contract_symbol"]: item["action_id"]
+        for item in with_snapshot["actions"]
+        if item["action_type"] == "open_candidate"
+    }
+
+    assert before == after
+    assert [item["contract_symbol"] for item in with_snapshot["candidates"]["sell_put"]] == [
+        "NVDA_HIGH",
+        "NVDA_LOW",
+    ]
+
+
 def test_candidate_priority_reuses_tier_without_promoting_rank_one(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
@@ -224,6 +373,48 @@ def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: P
     assert combos[0]["call_leg_role"] == "participation_call"
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
     assert [item["strategy_group_id"] for item in combo_actions] == ["pair-b", "pair-a"]
+
+
+def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "candidate_pair_id": "pair-a",
+                "put_contract_symbol": "NVDA_P100",
+                "call_contract_symbol": "NVDA_C125",
+                "put_expiration": "2026-08-21",
+                "call_expiration": "2026-09-18",
+                "put_strike": 100,
+                "call_strike": 125,
+                "annualized_net_credit_yield": 0.20,
+            }
+        ]
+    ).to_csv(account_dir / "nvda_combo_yield_candidates.csv", index=False)
+    _write_event_snapshot(
+        tmp_path,
+        {"NVDA": _complete_event_item(events=[{"type": "earnings", "date": "2026-08-30"}])},
+    )
+
+    brief = _assemble(tmp_path)
+    candidate = brief["candidates"]["combo_yield"][0]
+    action = next(item for item in brief["actions"] if item["action_type"] == "open_combo_yield")
+
+    assert action["event_risk"] == candidate["event_risk"]
+    assert candidate["event_risk"]["expiration_relations"] == {
+        "put": {
+            "expiration": "2026-08-21",
+            "relation": "after_expiration",
+            "days_before_expiration": -9,
+        },
+        "call": {
+            "expiration": "2026-09-18",
+            "relation": "before_expiration",
+            "days_before_expiration": 19,
+        },
+    }
+    assert candidate["event_risk"]["in_attention_window"] is True
 
 
 def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(tmp_path: Path) -> None:
