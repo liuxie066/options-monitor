@@ -16,6 +16,7 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.trade_time_format import format_iso_time_beijing
 
 _AUTO_CLOSE_RECEIPT_STATE_NAME = "auto_close_receipts.json"
 _AUTO_CLOSE_RECEIPT_STATE_MAX_ITEMS = 200
@@ -267,49 +268,42 @@ def build_auto_close_receipt_message(
     mode = str(result.get("mode") or "").strip().lower()
 
     if dry_run or mode == "dry_run":
-        title = "[预览] 过期自动平仓未写入 option_positions"
-        status_text = "预览"
+        status_text = "ℹ️ 预览"
     elif errors and applied > 0:
-        title = "[未完全记录] 过期自动平仓部分写入 option_positions"
-        status_text = "部分失败"
+        status_text = "⚠️ 部分完成"
     elif errors:
-        title = "[未记录] 过期自动平仓未写入 option_positions"
-        status_text = "失败"
+        status_text = "❌ 失败"
     elif applied > 0:
-        title = "[已记录] 过期自动平仓已写入 option_positions"
-        status_text = "已记录"
+        status_text = "✅ 已完成"
     else:
-        title = "[无变更] 过期自动平仓未写入 option_positions"
-        status_text = "无变更"
+        status_text = "ℹ️ 无变更"
 
+    account = _display(result.get("account"))
     lines = [
-        title,
+        f"# OM · 持仓维护 · {account}",
         "",
-        f"账户：{_display(result.get('account'))}",
-        f"券商：{_display(result.get('broker'))}",
-        f"规则：到期 + {_display(result.get('grace_days'))} 天",
-        f"状态：{status_text}",
-        f"平仓：{applied}/{candidates}",
-        f"错误：{len(errors)}",
+        f"状态｜{status_text}",
+        f"券商｜{_display(result.get('broker'))}",
+        f"规则｜到期后 {_display(result.get('grace_days'))} 天",
+        f"结果｜成功 {applied} · 候选 {candidates} · 错误 {len(errors)}",
     ]
-    as_of = _optional_str(result.get("as_of_utc"))
+    as_of = format_iso_time_beijing(result.get("as_of_utc"))
     if as_of:
-        lines.append(f"时间：{as_of}")
+        lines.append(f"时间｜{as_of}")
 
     applied_items = [item for item in list(result.get("applied") or []) if isinstance(item, dict)]
     if applied_items:
-        lines.extend(["", "明细："])
+        lines.extend(["", "## 已完成"])
         for item in applied_items[:6]:
             lines.append(_applied_line(item))
         if len(applied_items) > 6:
-            lines.append(f"- 另有 {len(applied_items) - 6} 条已省略")
+            lines.append(f"补充｜另有 {len(applied_items) - 6} 条未展开")
 
     if errors:
-        lines.extend(["", "错误："])
-        for error in errors[:5]:
-            lines.append(f"- {error}")
+        lines.extend(["", "## 失败"])
+        lines.extend(errors[:5])
         if len(errors) > 5:
-            lines.append(f"- 另有 {len(errors) - 5} 条错误已省略")
+            lines.append(f"补充｜另有 {len(errors) - 5} 条错误未展开")
 
     return "\n".join(lines).strip()
 
@@ -566,17 +560,21 @@ def _int_value(value: Any) -> int:
 def _errors(result: dict[str, Any]) -> list[str]:
     raw = result.get("errors")
     if isinstance(raw, list):
-        return [str(item) for item in raw]
+        return [_flat_error(item) for item in raw]
     if raw:
-        return [str(raw)]
+        return [_flat_error(raw)]
     return []
+
+
+def _flat_error(value: Any) -> str:
+    return " · ".join(part.strip() for part in str(value).splitlines() if part.strip())
 
 
 def _applied_line(item: dict[str, Any]) -> str:
     record_id = _display(item.get("record_id"))
     position_id = _display(item.get("position_id"))
     expiration = _display(item.get("expiration_ymd") or item.get("expiration_ms"))
-    return f"- {record_id} | {position_id} | exp={expiration}"
+    return f"{record_id}｜{position_id}｜到期 {expiration}"
 
 
 def _display(value: Any) -> str:

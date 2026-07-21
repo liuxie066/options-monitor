@@ -195,59 +195,85 @@ def render_daily_brief_lifecycle(
 
 def _render_user_view(view: Mapping[str, Any]) -> str:
     lines = [
-        f"# OM · {view['account']} · {view['market_label']}",
-        f"> {view['phase_line']}",
-        str(view["data_as_of"]),
+        f"# OM · 决策简报 · {view['account']}",
+        "",
+        f"状态｜{view['phase_line']}",
+        f"市场｜{view['market_label']}",
+        f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
     ]
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
-        lines.extend(["", planning_notice])
+        lines.extend(["", f"提示｜{planning_notice}"])
 
     if bool(view.get("blocked")):
         lines.extend(
             [
                 "",
-                str(view.get("blocked_summary") or "本轮关键数据不可用，暂时无法形成可靠决策。"),
-                "系统将在后续批次自动重新评估。",
+                f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
+                "后续｜系统将在后续批次自动重新评估。",
             ]
         )
         return _bounded_markdown(lines)
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
     if changes:
-        lines.extend(["", "；".join(changes) + "。"])
+        lines.extend(["", "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
     lines.extend(["", "## 候选"])
     if not candidates:
-        lines.append("- 当前没有通过筛选的候选。")
+        lines.append("当前没有通过筛选的候选。")
     else:
         for index, item in enumerate(candidates, start=1):
-            lines.append(f"{index}. {item['title']}")
+            lines.extend(["", f"**{index}｜{_flat_title(item['title'])}**"])
             for detail in item.get("details") or []:
-                lines.append(f"   - {detail}")
+                lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
             for leg in item.get("legs") or []:
-                lines.append(f"   - {leg}")
+                lines.append(_flat_field_line(leg))
         for note in view.get("candidate_omissions") or []:
-            lines.append(f"- {note}")
+            lines.append(f"补充｜{note}")
 
     positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
     if positions:
         lines.extend(["", "## 持仓"])
         for item in positions:
-            lines.append(f"- {item['title']}：{item['status']}")
+            lines.extend(["", f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
-                lines.append(f"  - {detail}")
+                lines.append(f"参考｜{detail}")
         position_omitted = _whole_number(view.get("position_omitted")) or 0
         if position_omitted:
-            lines.append(f"- 另有 {position_omitted} 个持仓未展开")
+            lines.append(f"补充｜另有 {position_omitted} 个持仓未展开")
 
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
     if capacity:
         lines.extend(["", "## 资金"])
-        lines.extend(f"- {item}" for item in capacity)
+        lines.extend(_flat_field_line(item) for item in capacity)
 
     return _bounded_markdown(lines)
+
+
+def _strip_display_label(value: Any, prefix: str) -> str:
+    text = str(value or "").strip()
+    return text.removeprefix(prefix).strip()
+
+
+def _flat_title(value: Any) -> str:
+    return str(value or "").strip().replace(" · ", "｜")
+
+
+def _flat_field_line(value: Any) -> str:
+    text = str(value or "").strip()
+    if "：" in text:
+        label, body = text.split("：", 1)
+        return f"{label}｜{body}"
+    return text
+
+
+def _candidate_detail_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if "执行前" in text or text.startswith(("近期事件", "已确认", "预计")):
+        return "事件"
+    return "指标"
 
 
 def _candidate_views(

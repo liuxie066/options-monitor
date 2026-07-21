@@ -556,8 +556,8 @@ def test_scheduled_notification_renders_batch_and_localized_data_time(monkeypatc
     prepared = mod._prepare_daily_brief_notification(bundle.request)
     message = prepared.prepared_messages.messages_by_account["lx"]
 
-    assert "> 今日首次 · 10:00 批次" in message
-    assert "数据截至：美东 09:39 / 北京 21:39" in message
+    assert "状态｜今日首次 · 10:00 批次" in message
+    assert "数据｜美东 09:39 / 北京 21:39" in message
     assert "2026-07-19T" not in message
     lifecycle = prepared.lifecycles_by_account["lx"]
     assert "scheduled_target_market" not in lifecycle["brief"]
@@ -584,5 +584,5 @@ def test_force_notification_says_manual_and_ignores_scheduler_batch(monkeypatch,
     prepared = mod._prepare_daily_brief_notification(bundle.request)
     message = prepared.prepared_messages.messages_by_account["lx"]
 
-    assert "> 手动触发" in message
+    assert "状态｜手动触发" in message
     assert "10:00 批次" not in message
