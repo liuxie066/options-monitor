@@ -42,6 +42,12 @@ _CLOSE_ACTION_LABELS = {
     "hold_call": "继续持有 Call",
     "hold": "继续观察",
 }
+_CLOSE_DETAIL_ACTIONS = {
+    "close",
+    "close_put_keep_call",
+    "sell_call_take_profit",
+    "sell_call_salvage",
+}
 
 
 @dataclass
@@ -230,6 +236,8 @@ def _render_user_view(view: Mapping[str, Any]) -> str:
         lines.extend(["", "## 持仓"])
         for item in positions:
             lines.append(f"- {item['title']}：{item['status']}")
+            for detail in item.get("details") or []:
+                lines.append(f"  - {detail}")
         position_omitted = _whole_number(view.get("position_omitted")) or 0
         if position_omitted:
             lines.append(f"- 另有 {position_omitted} 个持仓未展开")
@@ -377,7 +385,7 @@ def _position_views(
     *,
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
-) -> tuple[list[dict[str, str]], int]:
+) -> tuple[list[dict[str, Any]], int]:
     positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
     changed_keys = _changed_position_keys(diff)
     changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
@@ -388,7 +396,7 @@ def _position_views(
     )
     omitted = len(positions) - len(selected)
     market = _upper(brief.get("market"))
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     for row in selected:
         symbol = _upper(row.get("symbol")) or "未知标的"
         strategy = _position_strategy_label(row)
@@ -398,7 +406,14 @@ def _position_views(
             title_parts.append(strategy)
         if contract:
             title_parts.append(contract)
-        out.append({"title": " · ".join(title_parts), "status": _position_status_label(row)})
+        status = _position_status_label(row)
+        out.append(
+            {
+                "title": " · ".join(title_parts),
+                "status": status,
+                "details": _position_close_details(row, market=market, status=status),
+            }
+        )
     return out, omitted
 
 
@@ -448,6 +463,24 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     if tier in {"", "observe", "weak", "none"}:
         return "继续观察"
     return "暂无法评估（数据暂不可用）"
+
+
+def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:
+    if status.startswith("暂无法评估") or _lower(row.get("close_action")) not in _CLOSE_DETAIL_ACTIONS:
+        return []
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
+    parts: list[str] = []
+    close_mid = _number(metrics.get("close_mid"))
+    if close_mid is not None:
+        parts.append(f"参考平仓价 {_money(close_mid, market=market)}（mid）")
+    realized = _number(metrics.get("realized_if_close"))
+    if realized is not None:
+        label = "预计锁定收益" if realized >= 0 else "预计平仓损益"
+        parts.append(f"{label} {_money(realized, market=market)}")
+    remaining_annualized = _number(metrics.get("remaining_annualized_return"))
+    if remaining_annualized is not None:
+        parts.append(f"剩余年化 {_percent(remaining_annualized)}")
+    return [" · ".join(parts)] if parts else []
 
 
 def _capacity_views(
@@ -959,8 +992,9 @@ def _strike_label(value: Any, *, market: str) -> str:
 
 
 def _money(value: float, *, market: str) -> str:
+    sign = "-" if value < 0 else ""
     prefix = "$" if market == "US" else ("HK$" if market == "HK" else "")
-    return f"{prefix}{value:,.2f}"
+    return f"{sign}{prefix}{abs(value):,.2f}"
 
 
 def _percent(value: float) -> str:

@@ -619,10 +619,14 @@ def _prepare_daily_brief_notification(
     for result in request.results:
         if isinstance(result, dict):
             account = str(result.get("account") or "").strip().lower()
+            should_notify = result.get("should_notify")
         else:
             account = str(getattr(result, "account", "") or "").strip().lower()
+            should_notify = getattr(result, "should_notify", None)
         if not account:
             raise ValueError("daily brief account result is missing account")
+        if should_notify is False:
+            continue
 
         briefs = assemble_daily_decision_briefs(
             base=request.base,
