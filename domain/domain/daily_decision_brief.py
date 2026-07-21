@@ -94,6 +94,34 @@ def build_daily_brief_candidate_identity(
     return f"candidate:v1:{account_norm}:{market_norm}:{symbol_norm}:{family_norm}"
 
 
+def decide_daily_brief_notification(
+    *,
+    ran_scan: bool,
+    pipeline_reliable: bool,
+    fixed_due: bool,
+    pending_candidate_identities: list[str] | tuple[str, ...],
+    retryable_envelope_kind: str | None = None,
+) -> dict[str, Any]:
+    """Choose the one allowed Daily Brief delivery action for this tick."""
+
+    retry_kind = str(retryable_envelope_kind or "").strip().lower() or None
+    if not ran_scan:
+        return {
+            "action": "retry_exact" if retry_kind else "none",
+            "reason": "retryable_envelope" if retry_kind else "no_scan_no_retry",
+        }
+    if not pipeline_reliable:
+        return {
+            "action": "fixed_failure" if fixed_due else "none",
+            "reason": "fixed_scan_failed" if fixed_due else "nonfixed_scan_failed",
+        }
+    if fixed_due:
+        return {"action": "fixed_report", "reason": "fixed_report_due"}
+    if pending_candidate_identities:
+        return {"action": "candidate_alert", "reason": "pending_candidates"}
+    return {"action": "none", "reason": "no_pending_candidates"}
+
+
 def build_daily_brief_action_id(action: Mapping[str, Any]) -> str:
     identity = {
         field: _normalize_action_identity_value(field, action.get(field))
@@ -901,6 +929,7 @@ __all__ = [
     "DAILY_DECISION_BRIEF_SCHEMA_VERSION",
     "build_daily_brief_action_id",
     "build_daily_brief_candidate_identity",
+    "decide_daily_brief_notification",
     "build_daily_brief_id",
     "daily_brief_digest",
     "diff_daily_decision_briefs",

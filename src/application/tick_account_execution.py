@@ -175,14 +175,15 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             or shared_prefetch_state.get("force_done")
         )
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
+        account = str(outcome.result.account)
         if outcome.ran_pipeline:
-            account = str(outcome.result.account)
             ran_pipeline_accounts.append(account)
-            scheduler_decision = request.scan_decision_by_account.get(account, {}).get("scheduler_decision")
-            if isinstance(scheduler_decision, Mapping):
-                target = str(scheduler_decision.get("scheduled_scan_target_market") or "").strip()
-                if target:
-                    scheduled_scan_targets_by_account[account] = target
+        account_scan_decision = request.scan_decision_by_account.get(account, {})
+        scheduler_decision = account_scan_decision.get("scheduler_decision")
+        if account_scan_decision.get("should_run") is not False and isinstance(scheduler_decision, Mapping):
+            target = str(scheduler_decision.get("scheduled_scan_target_market") or "").strip()
+            if target:
+                scheduled_scan_targets_by_account[account] = target
         account_metrics.append(outcome.acct_metrics)
         results.append(outcome.result)
 
