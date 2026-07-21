@@ -3,7 +3,7 @@
 ## 0. Plan 元信息
 
 - 日期：2026-07-21
-- 状态：accepted after second adversarial review，进入 implementation gate
+- 状态：accepted after final renderer-consolidation re-review (`docs/reviews/plan-review-20260721-235237.md`)
 - 产品真源：`docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md`
 - 实施范围：scheduler、成功扫描快照、通知决策与确认状态、用户投影、只读查询、状态迁移
 - 当前边界：本地实施与验证；不自动改线上配置、不触发真实通知、不迁移生产状态
@@ -194,7 +194,7 @@ read tool / CLI
 | `src/application/agent_tools/daily_brief.py` | 单账户/单市场 current/revision 只读工具 | latest 查询支持可选账户/市场聚合；Markdown 使用 query context；普通不可用文案隐藏 revision；精确 revision 保留为结构化运维能力 | 不刷新、不发送、不推进状态；不硬编码中文触发词 |
 | `src/interfaces/cli/daily_brief_ops.py` | `daily-brief latest/day` | latest 支持 all/single 范围；保留 day/revision 运维读取；增加显式 delivery-state inspect/migrate 子命令时必须 dry-run 默认 | 不把迁移埋进普通 latest 查询 |
 | `src/application/agent_tools/operations_impl.py` | scheduler/runtime 状态展示 | additive 展示 processed scheduled target 与 actual last run；旧 state 仍可读 | 不改变 readiness 判定权威 |
-| `src/application/config_defaults.py` / `config_validator.py` | schedule/daily brief 默认与校验 | 预计只更新语义文档和现有字段测试；不增加键 | 不改变 `daily_brief.enabled` 默认值 |
+| `src/application/config_defaults.py` / `config_validator.py` | schedule/daily brief 默认与校验 | canonical defaults/examples 不再包含 `daily_brief.enabled`；兼容期内已知 boolean 值只产生稳定 deprecation warning，值不参与路由 | 不增加新的 renderer 开关，不允许切回 Compact/Legacy |
 | docs/tests | 合同与回归 | 更新 scheduler 语义、通知矩阵、迁移 runbook、查询示例 | 不改无关文档或旧 review artifact |
 
 ### 5.1 预计无需修改的模块
@@ -662,7 +662,7 @@ ambiguous send 只记录 attempt/freeze envelope，不写 confirmed fixed/alerte
 4. 校验通过才按原 route 处理；provider definite failure 保持 pending，ambiguous 继续冻结，confirmed 才推进 fixed/candidate 状态；
 5. 整个分支不得创建 pipeline workspace、执行 prefetch/account pipeline，也不得调用 broker、brief assembler、candidate detector 或 current persistence；
 6. 不改变 revision、candidate identities、delivery key、rendered message、message hash 或 source；只追加 attempt/audit 时间；
-7. 只处理当前 scheduler market、当前 market trading date、仍在既有发送窗口内的 envelope；`--market-config all` 继续按现有多市场 fail-closed 合同不主动 dispatch；
+7. 只处理当前 scheduler market、当前 market trading date、仍在既有发送窗口内的 envelope；`--market-config all` 按最新多市场 terminal fail-closed 合同在 Daily Brief assemble/persistence/envelope/provider 之前终止；
 8. 没有 retryable envelope 时按原 no-scan 语义完成 skipped；`15:50` full-report definite failure 可在 `16:00` 现有 timer 唤醒中精确重试；这不是第二套扫描频率或第二 sender。
 
 ## 12. Renderer 与用户消息
@@ -1045,14 +1045,15 @@ git diff --check
 
 ### 19.1 代码回滚
 
-- 停止新版本普通通知路径；
-- 保留 immutable revisions、run-scoped plans 和 audit；
-- 不删除 v2 state；
-- 若必须运行旧代码，先在停调度条件下恢复迁移前 v1 backup，再校验 pointer；旧代码不能直接读取 v2。
+- 先停止相关 market scheduler，阻断新的普通通知扫描、envelope 和 provider attempt；
+- 保留 immutable revisions、run-scoped plans 和 audit，不删除 v2 state；
+- 仅执行整版本代码回滚和状态兼容回滚，禁止 mixed fleet；
+- 若旧版本不能读取 v2，必须在停调度条件下从已验证的迁移前 v1 backup 恢复并校验 pointer 后再启动；
+- Compact/Legacy 不得被恢复为 parallel scheduled sender。
 
 ### 19.2 行为回退
 
-最小紧急回退使用现有 `notifications.daily_brief.enabled=false`，避免新旧普通通知并行；系统故障/业务回执按独立合同保留。该配置变更需生产批准。
+`notifications.daily_brief.enabled` 已失去路由权，不能作为紧急开关。需要停止普通通知时，使用已批准的 scheduler/service 停止流程；系统故障通知和业务回执按各自独立合同保留。恢复前必须完成代码/版本、delivery state 和 scheduler 水位校验。
 
 ### 19.3 数据恢复
 
@@ -1070,7 +1071,7 @@ git diff --check
 
 ### 已接受的 residual risks
 
-- production scheduler 正常按单市场运行；显式 `--market-config all` 继续只生成各市场快照并 fail closed 不主动发送，避免一次 tick 把两个市场合并。若要支持 multi-market 主动 dispatch，应另做路由 work unit。
+- production scheduler 正常按单市场运行；显式 `--market-config all` 在 Daily Brief assemble、revision/current、delivery envelope 和 provider attempt 之前 terminal fail closed，不承诺生成各市场 current。若要支持 multi-market snapshot 或主动 dispatch，应另做独立 work unit。
 - 固定点与半点的每次成功扫描都会增加 immutable revision；本 work unit 先监控每日 revision 数量和磁盘增量，不顺带设计 retention。超过运行预算后再由现有 cleanup ownership 增加“保留 current、delivery 引用和审计所需 revision”的安全清理策略。
 - provider 同日长时间故障仍会形成 fixed backlog；现有 10 分钟唤醒会在发送允许窗口内精确重试持久化 envelope，但不会额外扫描或刷新内容。窗口结束后仍未确认的批次跨交易日转为 `expired_unconfirmed` 而非次日补发，需通过审计/告警暴露。
 - v1 pointer 无固定计划点，迁移不能诚实恢复历史 fixed confirmation；只保留 legacy confirmation 和可验证的候选送达证据。

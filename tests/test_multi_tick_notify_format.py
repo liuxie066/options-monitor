@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.notification_format_assertions import assert_mobile_flat_markdown
+
+
+def test_legacy_account_renderer_emits_deprecation_warning() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message
+
+    result = AccountResult(
+        account="lx",
+        ran_scan=True,
+        should_notify=False,
+        decision_reason="compatibility_test",
+        notification_text="",
+    )
+    with pytest.warns(DeprecationWarning, match="Legacy Tick full-message renderer"):
+        assert build_account_message(result, now_bj="2026-07-21 12:00:00") == ""
 
 
 def test_account_message_is_plain_text_for_weixin() -> None:

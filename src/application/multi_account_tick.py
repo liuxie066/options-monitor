@@ -95,12 +95,6 @@ def _resolve_daily_brief_trigger_kind(*, force_mode: bool, trigger_context: dict
     return 'scheduled' if source in {'cron', 'scheduler'} else 'manual'
 
 
-def _daily_brief_enabled(config: dict[str, Any]) -> bool:
-    notifications = config.get("notifications") if isinstance(config, dict) else {}
-    daily = notifications.get("daily_brief") if isinstance(notifications, dict) else {}
-    return isinstance(daily, dict) and daily.get("enabled") is True
-
-
 def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[str, dict[str, Any]]) -> bool:
     if bool(should_run_global):
         return True
@@ -127,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
-    ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of run window / run points (sending still respects --no-send and should_notify decisions).')
+    ap.add_argument('--force', action='store_true', help='Force the scan pipeline outside normal run points; force runs do not auto-send ordinary Tick notifications.')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
     ap.add_argument('--allow-stale-config', action='store_true', help='Emergency override: skip generated runtime config freshness checks.')
@@ -227,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             'runtime_root': str(base),
             'runtime_root_source': runtime_resolution.source,
             'trigger_source': trigger_context.get('source'),
+            'trigger_kind': trigger_kind,
             'trigger_job_id': trigger_context.get('job_id'),
             'outer_delivery_mode': trigger_context.get('delivery_mode'),
             'outer_announce_expected': trigger_context.get('announce_expected'),
@@ -240,11 +235,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg_path=cfg_path,
         market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
         accounts=args.accounts or [],
+        trigger_kind=trigger_kind,
     )
     market_cfg = idempotency.market_config
     execution_bucket = idempotency.bucket
     execution_idempotency_key = idempotency.key
     idempotency_accounts = idempotency.accounts
+    idempotency_trigger_kind = idempotency.trigger_kind
     audit_helper = MultiTickAuditHelper(
         base=base,
         base_cfg=base_cfg,
@@ -259,7 +256,13 @@ def main(argv: list[str] | None = None) -> int:
         write_run_artifacts=False,
     )
 
-    def complete_tick_idempotency(status: str = "completed", message: str | None = None) -> None:
+    def complete_tick_idempotency(
+        status: str = "completed",
+        message: str | None = None,
+        *,
+        ok: bool = True,
+        error_code: str | None = None,
+    ) -> None:
         try:
             _complete_tick_idempotency(
                 base=base,
@@ -267,11 +270,30 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=run_id,
                 market_config=market_cfg,
                 accounts=idempotency_accounts,
+                trigger_kind=idempotency_trigger_kind,
                 status=status,
                 message=message,
+                ok=ok,
+                error_code=error_code,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if not ok:
+                error = "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
+                runlog.safe_event(
+                    "idempotency",
+                    "error",
+                    error_code=error,
+                    message=str(exc),
+                    data=_safe_runlog_data({"status": status, "terminal_error_code": error_code}),
+                )
+                audit_helper.audit(
+                    "idempotency",
+                    "complete_tick_execution_failed",
+                    status="error",
+                    message=str(exc),
+                    extra={"status": status, "error_code": error, "terminal_error_code": error_code},
+                )
+                raise
 
     for it in syms0:
         if not isinstance(it, dict):
@@ -298,9 +320,22 @@ def main(argv: list[str] | None = None) -> int:
             'pid': os.getpid(),
             'market_config': market_cfg,
             'accounts': idempotency_accounts,
+            'trigger_kind': idempotency_trigger_kind,
         },
     )
     if not bool(dedupe.get('claimed')):
+        record = dedupe.get('record') if isinstance(dedupe.get('record'), dict) else {}
+        if str(record.get('status') or '').strip().lower() == 'unsupported_failed':
+            error_code = str(record.get('error_code') or 'daily_brief_multi_market_delivery_unsupported')
+            audit_helper.audit(
+                'idempotency',
+                'replay_terminal_tick_failure',
+                status='error',
+                message=error_code,
+                extra={'bucket': execution_bucket, 'error_code': error_code},
+            )
+            runlog.safe_event('run_end', 'error', error_code=error_code, message=error_code)
+            return 2
         audit_helper.audit(
             'idempotency',
             'skip_duplicate_tick',
@@ -401,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
         scan_decision_by_account=scan_decision_by_account,
     ):
         delivery_only_allowed = (
-            _daily_brief_enabled(base_cfg)
+            trigger_kind == "scheduled"
             and len(scheduler_markets) == 1
             and any(item.get("in_run_window") is True for item in scheduler_decisions_by_account.values())
         )
@@ -467,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         'scheduler_ms': scheduler_ms,
         'scheduler_decision': scheduler_decision,
         'trigger_context': trigger_context,
+        'trigger_kind': trigger_kind,
         'accounts': [],
         'sent': False,
         'reason': '',

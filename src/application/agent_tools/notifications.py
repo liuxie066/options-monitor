@@ -11,8 +11,21 @@ _PREVIEW_NOTIFICATION_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "preview_notification.output.v1",
     "source_label": "OM notification formatter",
     "result_shape": "scalar",
-    "fact_fields": ["account_label", "notification_text"],
-    "model_preview_fields": ["account_label", "notification_text"],
+    "fact_fields": [
+        "account_label",
+        "notification_text",
+        "renderer",
+        "render_style",
+        "authority",
+        "delivery_evidence",
+    ],
+    "model_preview_fields": [
+        "account_label",
+        "notification_text",
+        "renderer",
+        "authority",
+        "delivery_evidence",
+    ],
 }
 
 
@@ -33,6 +46,11 @@ PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
         "alerts_path": "optional file path when alerts_text omitted",
         "changes_path": "optional file path when changes_text omitted",
         "account_label": "optional account label",
+        "render_style": {
+            "type": "string",
+            "enum": ["compact", "legacy"],
+            "description": "Optional compatibility renderer; compact is the default and legacy is deprecated",
+        },
     },
     handler=_preview_notification_tool,
     pure_read=True,
@@ -46,7 +64,7 @@ PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
         },
     ),
     output_contract=_PREVIEW_NOTIFICATION_OUTPUT_CONTRACT,
-    copilot_input_fields=("alerts_text", "changes_text", "account_label"),
+    copilot_input_fields=("alerts_text", "changes_text", "account_label", "render_style"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (PREVIEW_NOTIFICATION_TOOL,)

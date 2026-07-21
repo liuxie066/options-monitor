@@ -62,7 +62,7 @@ GitHub checks on accepted PR-review head `2c40ca38`:
 ## Documentation Decision
 
 - `docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md` and the accepted implementation plan record the product and architecture contract.
-- `README.md` and `docs/AGENT_WIKI.md` document the fixed/half-hour schedule, one-pipeline rule, complete-report behavior, latest read surfaces, funds fields, delivery inspection/migration commands, and default-off production boundary.
+- `README.md` and `docs/AGENT_WIKI.md` document the fixed/half-hour schedule, one-pipeline rule, complete-report behavior, latest read surfaces, funds fields, delivery inspection/migration commands, Daily Brief sole scheduled-renderer authority, and separately gated production rollout.
 - `docs/INDEX.md` and generated dependency artifacts were updated.
 - Gateflow goal, plan-review, implementation, code-review, aggregate deepreview, PR-review, fix, re-review, and closeout evidence are retained in the repository.
 
@@ -89,7 +89,7 @@ GitHub checks on accepted PR-review head `2c40ca38`:
 
 This work unit did not:
 
-- enable `notifications.daily_brief.enabled` in production;
+- release and remotely upgrade the version that makes Daily Brief the sole scheduled ordinary-notification renderer;
 - inspect or migrate the production lx/sy delivery pointers;
 - send a real notification or manually trigger a real tick;
 - change a service or production runtime config;

@@ -23,7 +23,6 @@
     "channel": "wechat_clawbot",
     "target": "wechat:ops",
     "daily_brief": {
-      "enabled": false,
       "max_actions_per_priority": 5,
       "max_candidates_per_strategy": 3,
       "max_rejection_reasons": 5

@@ -13,16 +13,17 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
 
     monkeypatch.setattr(
         mod,
-        "prepare_multi_account_notification",
-        lambda **_kwargs: SimpleNamespace(
+        "_prepare_daily_brief_notification",
+        lambda _request: mod.DailyBriefNotificationPreparation(
             prepared_messages=SimpleNamespace(
                 messages_by_account={},
                 threshold_met=False,
                 used_heartbeat=False,
                 heartbeat_accounts=(),
             ),
-            notify_candidates=[],
-            results_count=0,
+            lifecycles_by_account={},
+            delivery_keys_by_account={},
+            markets=("US",),
         ),
     )
     monkeypatch.setattr(
@@ -50,9 +51,12 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
         ),
         vpy=Path("python3"),
         complete_tick_idempotency_fn=lambda **kwargs: completions.append(dict(kwargs)),
+        markets_to_run=("US",),
+        scheduler_markets=("US",),
+        trigger_kind="scheduled",
     )
 
     assert mod.run_tick_notification_flow(request) == 0
     perception_actions = [action for event_type, action, _kwargs in audits if event_type == "assistant_perception"]
     assert perception_actions == ["notification_prepared", "no_account_notification"]
-    assert completions == [{"status": "completed", "message": "no_account_notification"}]
+    assert completions == [{"status": "skipped", "message": "no_daily_brief_delivery"}]

@@ -8,26 +8,13 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import decide_daily_brief_notification, diff_daily_decision_briefs
-from domain.domain.intermediate_objects import SchemaValidationError, SnapshotDTO
-from domain.domain.multi_tick import cash_footer_for_account, evaluate_dnd_quiet_hours
-from domain.domain.multi_tick_result import (
-    build_account_messages,
-    build_no_candidate_account_messages,
-)
+from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 from domain.domain.engine import (
     build_failure_audit_fields,
     decide_notification_delivery,
-    filter_notify_candidates as engine_filter_notify_candidates,
-    rank_notify_candidates,
-    resolve_multi_tick_engine_entrypoint,
 )
-from domain.storage.repositories import run_repo, state_repo
-from src.application.account_config import cash_footer_accounts_from_config
-from src.application.cron_runtime import (
-    apply_notify_results_to_tick_metrics,
-    build_notify_summary,
-    mark_accounts_notified,
-)
+from domain.storage.repositories import state_repo
+from src.application.cron_runtime import apply_notify_results_to_tick_metrics, build_notify_summary
 from src.application.daily_decision_brief_renderer import (
     render_candidate_alert,
     render_fixed_failure,
@@ -43,10 +30,8 @@ from src.application.daily_decision_brief_repository import (
     record_daily_decision_brief_delivery_attempt,
 )
 from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
-from src.application.multi_tick.cash_footer import query_cash_footer
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
 from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
-from src.application.multi_tick.notify_format import build_account_message, build_account_message_compact
 from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
     finalize_no_account_notification,
@@ -58,17 +43,10 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
-    build_notify_failure_summary_message,
     build_per_account_delivery_batch,
     execute_per_account_delivery,
-    mark_no_candidate_notification_metrics,
-    prepare_multi_account_notification,
-    send_account_message_with_retry,
 )
-from src.infrastructure.external_services import (
-    run_scan_scheduler_cli,
-)
-from src.infrastructure.io_utils import bj_now, read_json, utc_now
+from src.infrastructure.io_utils import read_json, utc_now
 
 
 @dataclass(frozen=True)
@@ -97,7 +75,7 @@ class TickNotificationRequest:
     scheduled_scan_targets_by_account: dict[str, str | None] | None = None
     commit_scan_targets_fn: Callable[[dict[str, str | None]], None] | None = None
     delivery_only: bool = False
-    trigger_kind: str = "scheduled"
+    trigger_kind: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -106,7 +84,7 @@ class DailyBriefNotificationPreparation:
     lifecycles_by_account: dict[str, dict[str, Any]]
     delivery_keys_by_account: dict[str, str]
     markets: tuple[str, ...]
-    multi_market_delivery_skipped: bool = False
+    multi_market_delivery_unsupported: bool = False
 
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
@@ -124,48 +102,40 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             request.complete_tick_idempotency_fn(status=status, message=message)
         return rc
 
-    now_bj = bj_now()
-    daily_brief_prep: DailyBriefNotificationPreparation | None = None
-    if _daily_brief_enabled(request.base_cfg):
-        daily_brief_prep = _prepare_daily_brief_notification(request)
-        prepared_messages = daily_brief_prep.prepared_messages
-        notify_candidates: list[Any] = []
-        results_count = len(request.results)
-    else:
-        try:
-            notifications_cfg = request.base_cfg.get("notifications", {}) or {}
-            render_style = str(notifications_cfg.get("render_style") or "compact").strip().lower()
-            if render_style == "compact":
-                build_account_message_fn = build_account_message_compact
-            else:
-                build_account_message_fn = build_account_message
-
-            notification_prep = prepare_multi_account_notification(
-                results=request.results,
-                base=request.base,
-                config_path=request.cfg_path,
-                config=request.base_cfg,
-                now_bj=now_bj,
-                as_of_utc=utc_now(),
-                filter_notify_candidates_fn=engine_filter_notify_candidates,
-                rank_notify_candidates_fn=rank_notify_candidates,
-                query_cash_footer_fn=query_cash_footer,
-                cash_footer_accounts_from_config_fn=cash_footer_accounts_from_config,
-                cash_footer_for_account_fn=cash_footer_for_account,
-                build_account_message_fn=build_account_message_fn,
-                build_account_messages_fn=build_account_messages,
-                build_no_candidate_account_messages_fn=build_no_candidate_account_messages,
-                snapshot_cls=SnapshotDTO,
-                engine_entrypoint=resolve_multi_tick_engine_entrypoint,
-            )
-        except SchemaValidationError as exc:
-            request.audit_helper.fail_schema_validation(stage="account_messages_snapshot", exc=exc, run_id=request.run_id)
-            raise
-        prepared_messages = notification_prep.prepared_messages
-        notify_candidates = notification_prep.notify_candidates
-        results_count = notification_prep.results_count
+    daily_brief_prep = _prepare_daily_brief_notification(request)
+    prepared_messages = daily_brief_prep.prepared_messages
+    notify_candidates: list[Any] = []
+    results_count = len(request.results)
 
     _commit_scan_targets_before_delivery(request)
+
+    if str(request.trigger_kind or "manual").strip().lower() != "scheduled":
+        reason = "non_scheduled_ordinary_notification_disabled"
+        request.audit_helper.audit(
+            "notify",
+            reason,
+            run_id=request.run_id,
+            status="skip",
+            extra={"trigger_kind": request.trigger_kind, "provider_attempted": False},
+        )
+        return finish_success(
+            lambda: finalize_no_account_notification(
+                base=request.base,
+                run_id=request.run_id,
+                runlog=request.runlog,
+                results=request.results,
+                tick_metrics=request.tick_metrics,
+                no_send=request.no_send,
+                state_repo=state_repo,
+                utc_now_fn=utc_now,
+                audit_fn=request.audit_helper.audit,
+                safe_data_fn=_safe_runlog_data,
+                on_success=request.audit_helper.guard_mark_success,
+                reason=reason,
+            ),
+            status="completed",
+            message=reason,
+        )
 
     request.runlog.safe_event(
         "notify",
@@ -181,14 +151,33 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
 
     route_hint = _notification_perception_route_hint(request.base_cfg)
 
-    if daily_brief_prep is not None and daily_brief_prep.multi_market_delivery_skipped:
-        _record_daily_brief_multi_market_skip(request, daily_brief_prep)
-        request.audit_helper.guard_mark_success()
-        request.complete_tick_idempotency_fn(
-            status="skipped",
-            message="daily_brief_multi_market_delivery_skipped",
+    if daily_brief_prep.multi_market_delivery_unsupported:
+        error_code = "daily_brief_multi_market_delivery_unsupported"
+        _record_daily_brief_multi_market_failure(request, daily_brief_prep)
+        rc = finalize_no_account_notification(
+            base=request.base,
+            run_id=request.run_id,
+            runlog=request.runlog,
+            results=request.results,
+            tick_metrics=request.tick_metrics,
+            no_send=request.no_send,
+            state_repo=state_repo,
+            utc_now_fn=utc_now,
+            audit_fn=request.audit_helper.audit,
+            safe_data_fn=_safe_runlog_data,
+            on_success=request.audit_helper.guard_mark_success,
+            reason=error_code,
+            run_end_outcome="error",
+            error_code=error_code,
+            return_code=2,
         )
-        return 0
+        request.complete_tick_idempotency_fn(
+            status="unsupported_failed",
+            message=error_code,
+            ok=False,
+            error_code=error_code,
+        )
+        return rc
 
     if not bool(prepared_messages.threshold_met):
         _audit_notification_perception(
@@ -225,56 +214,14 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 no_send=request.no_send,
             ),
         )
-        if daily_brief_prep is not None:
-            if request.delivery_only:
-                request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
-            request.audit_helper.guard_mark_success()
-            request.complete_tick_idempotency_fn(
-                status="skipped",
-                message="no_retryable_delivery" if request.delivery_only else "no_daily_brief_delivery",
-            )
-            return 0
-        return finish_success(
-            lambda: finalize_no_account_notification(
-                base=request.base,
-                run_id=request.run_id,
-                runlog=request.runlog,
-                results=request.results,
-                tick_metrics=request.tick_metrics,
-                no_send=request.no_send,
-                state_repo=state_repo,
-                utc_now_fn=utc_now,
-                audit_fn=request.audit_helper.audit,
-                safe_data_fn=_safe_runlog_data,
-                on_success=request.audit_helper.guard_mark_success,
-            ),
-            status="completed",
-            message="no_account_notification",
+        if request.delivery_only:
+            request.runlog.safe_event("run_end", "skip", message="no_retryable_delivery")
+        request.audit_helper.guard_mark_success()
+        request.complete_tick_idempotency_fn(
+            status="skipped",
+            message="no_retryable_delivery" if request.delivery_only else "no_daily_brief_delivery",
         )
-
-    if prepared_messages.used_heartbeat:
-        heartbeat_accounts = {
-            str(account or "").strip().lower()
-            for account in getattr(prepared_messages, "heartbeat_accounts", ())
-            if str(account or "").strip()
-        }
-        heartbeat_account_messages = dict(account_messages)
-        if heartbeat_accounts:
-            heartbeat_account_messages = {
-                account: message
-                for account, message in account_messages.items()
-                if str(account or "").strip().lower() in heartbeat_accounts
-            }
-        request.runlog.safe_event(
-            "notify",
-            "prepare",
-            message="sending no-candidate monitor heartbeat",
-            data=_safe_runlog_data({"accounts": list(heartbeat_account_messages.keys())}),
-        )
-        mark_no_candidate_notification_metrics(
-            tick_metrics=request.tick_metrics,
-            account_messages=heartbeat_account_messages,
-        )
+        return 0
 
     notify_route = resolve_notification_delivery_route(config=request.base_cfg)
     notif_cfg = notify_route.get("notifications") or {}
@@ -398,13 +345,13 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         return 0
 
     sent_accounts: list[str] = []
+    would_send_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
     send_attempted_count = 0
     send_confirmed_count = 0
     retry_attempt_count = 0
     ambiguous_send_count = 0
     duplicate_risk_count = 0
-    failure_summary_delivery: dict[str, object] | None = None
     if bool(notify_delivery.get("should_send")):
         assert delivery_batch is not None
         try:
@@ -434,28 +381,18 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             ),
             base=process_root,
             failure_stage=delivery_adapter.failure_stage,
-            idempotency_keys_by_account=(
-                daily_brief_prep.delivery_keys_by_account
-                if daily_brief_prep is not None
-                else None
-            ),
+            idempotency_keys_by_account=daily_brief_prep.delivery_keys_by_account,
         )
         sent_accounts = list(execution.sent_accounts)
         notify_failures = list(execution.notify_failures)
-        confirmation_failures: list[dict[str, object]] = []
-        if daily_brief_prep is not None:
-            sent_accounts, confirmation_failures = _confirm_daily_brief_execution(
-                request=request,
-                preparation=daily_brief_prep,
-                execution=execution,
-            )
-            notify_failures.extend(confirmation_failures)
-        send_attempted_count = execution.send_attempted_count
-        send_confirmed_count = (
-            len(sent_accounts)
-            if daily_brief_prep is not None
-            else execution.send_confirmed_count
+        sent_accounts, confirmation_failures = _confirm_daily_brief_execution(
+            request=request,
+            preparation=daily_brief_prep,
+            execution=execution,
         )
+        notify_failures.extend(confirmation_failures)
+        send_attempted_count = execution.send_attempted_count
+        send_confirmed_count = len(sent_accounts)
         retry_attempt_count = execution.retry_attempt_count
         ambiguous_send_count = execution.ambiguous_send_count + sum(
             1 for item in confirmation_failures if bool(item.get("ambiguous_send"))
@@ -463,37 +400,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         duplicate_risk_count = execution.duplicate_risk_count + sum(
             1 for item in confirmation_failures if bool(item.get("duplicate_risk"))
         )
-        if notify_failures and daily_brief_prep is None:
-            failure_summary_result = send_account_message_with_retry(
-                base=process_root,
-                channel=delivery_batch.channel,
-                target=delivery_batch.target,
-                account="notify_failure_summary",
-                message=build_notify_failure_summary_message(
-                    run_id=request.run_id,
-                    sent_accounts=sent_accounts,
-                    notify_failures=notify_failures,
-                ),
-                run_id=request.run_id,
-                runlog=request.runlog,
-                audit_fn=request.audit_helper.audit,
-                send_fn=_send_with_route_notifications,
-                normalize_fn=delivery_adapter.normalize_fn,
-                safe_data_fn=_safe_runlog_data,
-                failure_fields_builder=build_failure_audit_fields,
-                failure_stage=delivery_adapter.failure_stage,
-                max_attempts=1,
-                retry_delays_sec=(),
-            )
-            failure_summary_delivery = {
-                "ok": bool(failure_summary_result.get("ok")),
-                "error_code": failure_summary_result.get("error_code"),
-                "attempts": int(failure_summary_result.get("attempts") or 0),  # pyright: ignore[reportArgumentType]
-                "message_id": failure_summary_result.get("message_id"),
-                "delivery_confirmed": bool(failure_summary_result.get("delivery_confirmed")),
-            }
     else:
-        sent_accounts = list(account_messages.keys())
+        would_send_accounts = list(account_messages.keys())
+        sent_accounts = [] if request.delivery_only else list(would_send_accounts)
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
     _audit_notification_perception(
@@ -525,6 +434,20 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         if notify_failures:
             request.runlog.safe_event("run_end", "error", error_code="NOTIFY_FAILED")
             return 1
+        if request.no_send:
+            request.runlog.safe_event(
+                "run_end",
+                "skip",
+                data=_safe_runlog_data(
+                    {"would_send_accounts": would_send_accounts, "delivery_only": True}
+                ),
+            )
+            request.audit_helper.guard_mark_success()
+            request.complete_tick_idempotency_fn(
+                status="skipped",
+                message="delivery_only_no_send",
+            )
+            return 0
         request.runlog.safe_event(
             "run_end",
             "ok",
@@ -536,21 +459,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             message="delivery_only_sent" if sent_accounts else "delivery_only_no_send",
         )
         return 0
-
-    if not request.no_send and daily_brief_prep is None:
-        try:
-            mark_accounts_notified(
-                runner=run_scan_scheduler_cli,
-                vpy=request.vpy,
-                base=process_root,
-                config=request.cfg_path,
-                state=request.state_path,
-                state_dir=run_repo.get_run_state_dir(request.base, request.run_id),
-                schedule_key=str(request.scheduler_schedule_key),
-                accounts=sent_accounts,
-            )
-        except Exception:
-            pass
 
     notify_summary = build_notify_summary(
         sent_accounts=sent_accounts,
@@ -570,8 +478,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             notify_failures=notify_failures,
             notify_summary=notify_summary,
         )
-        if failure_summary_delivery is not None:
-            request.tick_metrics["notify_failure_summary_delivery"] = failure_summary_delivery
         state_repo.write_tick_metrics(request.base, request.run_id, request.tick_metrics)
         state_repo.append_tick_metrics_history(request.base, request.run_id, request.tick_metrics)
         request.audit_helper.audit(
@@ -657,13 +563,6 @@ def _commit_scan_targets_before_delivery(request: TickNotificationRequest) -> No
         raise
 
 
-def _daily_brief_enabled(config: dict[str, Any]) -> bool:
-    notifications = config.get("notifications") if isinstance(config, dict) else {}
-    notification_cfg = notifications if isinstance(notifications, dict) else {}
-    daily_cfg = notification_cfg.get("daily_brief")
-    return isinstance(daily_cfg, dict) and daily_cfg.get("enabled") is True
-
-
 def _daily_brief_limits(config: dict[str, Any]) -> dict[str, Any]:
     notifications = config.get("notifications") if isinstance(config, dict) else {}
     notification_cfg = notifications if isinstance(notifications, dict) else {}
@@ -683,6 +582,25 @@ def _prepare_daily_brief_notification(
     )
     if not markets:
         raise ValueError("daily brief requires at least one scheduler market")
+    if len(markets) != 1:
+        request.tick_metrics["daily_brief"] = {
+            "enabled": True,
+            "renderer": "daily_brief",
+            "markets": list(markets),
+            "prepared": [],
+            "error_code": "daily_brief_multi_market_delivery_unsupported",
+        }
+        return DailyBriefNotificationPreparation(
+            prepared_messages=PreparedPerAccountMessages(
+                messages_by_account={},
+                threshold_met=False,
+                used_heartbeat=False,
+            ),
+            lifecycles_by_account={},
+            delivery_keys_by_account={},
+            markets=markets,
+            multi_market_delivery_unsupported=True,
+        )
 
     multi_market = len(markets) != 1
     lifecycles_by_account: dict[str, dict[str, Any]] = {}
@@ -921,10 +839,10 @@ def _prepare_daily_brief_notification(
 
     request.tick_metrics["daily_brief"] = {
         "enabled": True,
+        "renderer": "daily_brief",
         "delivery_only": bool(request.delivery_only),
         "markets": list(markets),
         "prepared": lifecycle_audit,
-        "multi_market_delivery_skipped": multi_market,
     }
     for item in lifecycle_audit:
         request.audit_helper.audit(
@@ -945,7 +863,7 @@ def _prepare_daily_brief_notification(
         lifecycles_by_account=lifecycles_by_account,
         delivery_keys_by_account=delivery_keys_by_account,
         markets=markets,
-        multi_market_delivery_skipped=multi_market,
+        multi_market_delivery_unsupported=multi_market,
     )
 
 
@@ -1035,23 +953,30 @@ def _daily_brief_render_context(
     }
 
 
-def _record_daily_brief_multi_market_skip(
+def _record_daily_brief_multi_market_failure(
     request: TickNotificationRequest,
     preparation: DailyBriefNotificationPreparation,
 ) -> None:
     markets = list(preparation.markets)
     request.runlog.safe_event(
         "daily_brief",
-        "skip",
-        message="daily_brief_multi_market_delivery_skipped",
+        "error",
+        error_code="daily_brief_multi_market_delivery_unsupported",
+        message="daily_brief_multi_market_delivery_unsupported",
         data=_safe_runlog_data({"markets": markets}),
     )
     request.audit_helper.audit(
         "daily_brief",
-        "daily_brief_multi_market_delivery_skipped",
+        "daily_brief_multi_market_delivery_unsupported",
         run_id=request.run_id,
-        status="skip",
-        extra={"markets": markets, "delivery_pointer_advanced": False},
+        status="error",
+        message="daily_brief_multi_market_delivery_unsupported",
+        extra={
+            "markets": markets,
+            "delivery_pointer_advanced": False,
+            "provider_attempted": False,
+            "error_code": "daily_brief_multi_market_delivery_unsupported",
+        },
     )
 
 

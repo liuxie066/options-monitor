@@ -16,6 +16,7 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_iso_time_beijing
 
 _AUTO_CLOSE_RECEIPT_STATE_NAME = "auto_close_receipts.json"
@@ -279,33 +280,36 @@ def build_auto_close_receipt_message(
         status_text = "ℹ️ 无变更"
 
     account = _display(result.get("account"))
-    lines = [
-        f"# OM · 持仓维护 · {account}",
-        "",
-        f"状态｜{status_text}",
-        f"券商｜{_display(result.get('broker'))}",
-        f"规则｜到期后 {_display(result.get('grace_days'))} 天",
-        f"结果｜成功 {applied} · 候选 {candidates} · 错误 {len(errors)}",
+    fields: list[tuple[str, object]] = [
+        ("券商", _display(result.get("broker"))),
+        ("规则", f"到期后 {_display(result.get('grace_days'))} 天"),
+        ("结果", f"成功 {applied} · 候选 {candidates} · 错误 {len(errors)}"),
     ]
     as_of = format_iso_time_beijing(result.get("as_of_utc"))
     if as_of:
-        lines.append(f"时间｜{as_of}")
+        fields.append(("时间", as_of))
 
+    sections: list[tuple[str, list[str]]] = []
     applied_items = [item for item in list(result.get("applied") or []) if isinstance(item, dict)]
     if applied_items:
-        lines.extend(["", "## 已完成"])
-        for item in applied_items[:6]:
-            lines.append(_applied_line(item))
+        applied_rows = [_applied_line(item) for item in applied_items[:6]]
         if len(applied_items) > 6:
-            lines.append(f"补充｜另有 {len(applied_items) - 6} 条未展开")
+            applied_rows.append(f"补充｜另有 {len(applied_items) - 6} 条未展开")
+        sections.append(("已完成", applied_rows))
 
     if errors:
-        lines.extend(["", "## 失败"])
-        lines.extend(errors[:5])
+        error_rows = errors[:5]
         if len(errors) > 5:
-            lines.append(f"补充｜另有 {len(errors) - 5} 条错误未展开")
+            error_rows.append(f"补充｜另有 {len(errors) - 5} 条错误未展开")
+        sections.append(("失败", error_rows))
 
-    return "\n".join(lines).strip()
+    return render_receipt(
+        account=account,
+        receipt_type="持仓维护",
+        status=status_text,
+        fields=fields,
+        sections=sections,
+    )
 
 
 def build_auto_close_receipt_identity(

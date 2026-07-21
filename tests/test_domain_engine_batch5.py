@@ -42,16 +42,15 @@ def test_resolve_multi_tick_engine_entrypoint_notify_threshold_matches_legacy() 
         assert bool(actual_bundle.get('threshold_met')) is expected
 
 
-def test_main_uses_notify_threshold_entrypoint_batch5() -> None:
+def test_scheduled_notification_uses_daily_brief_authority_without_legacy_threshold_path() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
     notification_src = (base / 'src' / 'application' / 'scheduled_notification.py').read_text(encoding='utf-8')
 
-    assert 'prepare_multi_account_notification(' in notification_flow_src
-    assert 'prepare_per_account_messages(' in notification_src
-    assert 'notify_account_messages=account_messages' in notification_src
-    assert 'notify_min_accounts=1' in notification_src
-    assert 'decide_notify_threshold_met(' not in notification_src
+    assert '_prepare_daily_brief_notification(request)' in notification_flow_src
+    assert 'prepare_multi_account_notification(' not in notification_flow_src
+    assert 'prepare_per_account_messages(' not in notification_src
+    assert 'mark_no_candidate_notification_metrics(' not in notification_src
 
 
 def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_account_scheduler_map() -> None:

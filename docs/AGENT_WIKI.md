@@ -240,7 +240,7 @@ Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, sp
 Tick flow:
 
 ```text
-./om run tick --config <runtime-config.json>
+./om run tick --config <runtime-config.json>  # manual scan; no ordinary Tick auto-send
 -> src.application.multi_account_tick.run_tick
    -> tick_guard_flow
    -> tick_scheduler_context
@@ -250,9 +250,11 @@ Tick flow:
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
       -> optional close advice
       -> per-account metrics and notification text
-   -> tick_notification_flow
+   -> tick_notification_flow  # scheduled only: Daily Decision Brief ordinary delivery
    -> run state and audit writes
 ```
+
+Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
 
 Entrypoint signature:
 
@@ -347,12 +349,17 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 
 - Per-account content: `src/application/notify_symbols.py`
 - Multi-account wrapper: `src/application/multi_tick/notify_format.py`
+- Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
 - Perception audit card: `assistant_perception` events written by
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with exactly one `zh_cn.content` `md` node and no duplicate `title`, while WeChat ClawBot sends the same string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter.
+
+Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
+
+System notices use `# OM · 系统通知 · <component>` and receipts use `# OM · 回执 · <account>` plus `类型｜成交` or `类型｜持仓维护`. `notification_shells.py` owns only the flat Markdown H1/field/section layout. OpenD rate limits and recovery, delivery-failure aggregation/retry, trade receipt warnings, and maintenance receipt status/dedupe/persistence remain with their existing callers; the shell must not send, retry, inspect provider byte limits, or classify business state.
 
 Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
 
@@ -510,19 +517,23 @@ Smallest remaining actions, with blockers called out.
 
 `daily_decision_brief.v1` is the immutable account+market+trading-date successful-scan model. Delivery v2 separately owns fixed-target confirmation, pending/alerted candidate identities, and exact retry envelopes.
 
-- Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan.
+- Renderer authority: scheduled automatic ordinary notifications use Daily Brief only. Compact/Legacy has no scheduled sender authority. The deprecated `notifications.daily_brief.enabled` key is accepted with a stable warning during compatibility but its value does not change routing.
+- Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan. A process failure relies on a later eligible scheduler slot; it does not invent an off-schedule retry scan.
 - Fixed reports: `09:40`, eligible whole hours, and `15:50` prepare a full user report even with no candidates. A fixed failure prepares an explicit failure report and never projects the previous successful current as this round's result.
-- Candidate alerts: eligible half-hour successful scans send only when `current candidate identities - alerted identities` is non-empty. Fixed report wins when fixed and new-candidate conditions coincide.
-- Persistence order: durable outcome/envelope -> exact scheduled-target watermark -> provider send -> attempt/ambiguous/confirmed transition.
+- Candidate alerts: eligible half-hour successful scans send immediately only when `current candidate identities - alerted identities` is non-empty. If fixed-report and new-candidate conditions coincide, the single complete fixed report wins.
+- Trigger safety: manual/force reliable scans may advance the successful current snapshot for later query and candidate recovery, but they do not create an ordinary delivery envelope, resolve a provider route, or send an ordinary notification. Scheduled display uses the structured target; manual/force never infer a batch from reason text.
+- Persistence order: durable successful outcome or fixed-failure evidence plus exact envelope -> exact scheduled-target watermark -> provider send -> attempt/ambiguous/confirmed transition.
 - Retry: no-scan wake-ups may replay only an already persisted exact envelope. They must not run broker access, pipeline, assembler, candidate detection, revision persistence, or message re-rendering.
 - Successful current: ready/degraded reliable scans advance current; failed/blocked/no-op scans do not. Query always reads the latest successful current, never the last delivered message.
 - Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. Sell Put capacities share account cash and cannot be summed.
-- User projection: fixed report, candidate alert, fixed failure, and query share the existing renderer and human contract formatting. Markdown hides revision, internal IDs, broker codes, raw enums, raw ISO timestamps, paths, and rejection dumps.
-- Candidate event authority: user event facts still come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
+- Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
+- Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
+- User projection: fixed report, candidate alert, fixed failure, and query share the Daily Brief human contract. Markdown hides revision, internal IDs, broker codes, raw enums, raw ISO timestamps, paths, and rejection dumps while structured artifacts retain them.
 - Query scope: latest accepts optional account and market. Missing filters are resolved from canonical `config.us.json` / `config.hk.json`, then rendered by account and market without combining funds. Day/revision reads remain explicit operator queries requiring an account; market keeps the existing US default when omitted.
 - Query safety: query is byte-for-byte read-only with respect to delivery state and does not refresh data, scan, send, confirm, or mutate candidate state.
 - Delivery ambiguity: ambiguous envelopes are frozen. Later attempts either replay the exact message/key/hash under the provider idempotency contract or wait for explicit confirmation.
-- Default-off safety: `notifications.daily_brief.enabled` remains `false`. Production enablement, pointer migration, real-send canary, release, and remote upgrade require separate operator authorization.
+- Multi-market: an explicit combined-market tick is terminal fail-closed before Daily Brief assemble, revision/current persistence, delivery-envelope creation, or provider work. Production scheduled runs remain single-market.
+- Rollout safety: release, remote upgrade, production pointer migration, real-send canary, and scheduler observation require separate operator authorization. Rollback stops the scheduler and rolls back code/version plus compatible state; it never restores Compact as a parallel scheduled sender.
 
 Read surfaces:
 

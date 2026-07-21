@@ -127,7 +127,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "notifications": {
             "daily_brief": {
-                "enabled": False,
                 "max_actions_per_priority": 5,
                 "max_candidates_per_strategy": 3,
                 "max_rejection_reasons": 5,

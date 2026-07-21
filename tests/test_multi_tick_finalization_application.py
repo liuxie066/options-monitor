@@ -8,7 +8,7 @@ from types import SimpleNamespace
 def test_finalize_no_account_notification_records_degraded_writes_and_still_succeeds(
     fake_runlog_factory,
 ) -> None:
-    mod = importlib.import_module("src.application.multi_tick_finalization")
+    mod = importlib.reload(importlib.import_module("src.application.multi_tick_finalization"))
     events: list[dict] = []
     audit_calls: list[tuple[tuple, dict]] = []
     success = {"called": 0}
@@ -141,3 +141,53 @@ def test_finalize_multi_tick_run_success_calls_on_success(fake_runlog_factory, t
     assert success["called"] == 1
     assert shared_payloads == [{"prev": {"history": [1]}, "meta": {"sent_accounts": ["lx"]}}]
     assert any(e.get("step") == "run_end" and e.get("status") == "ok" for e in events)
+
+
+def test_finalize_no_account_notification_supports_terminal_error_outcome(
+    fake_runlog_factory,
+    tmp_path,
+) -> None:
+    mod = importlib.reload(importlib.import_module("src.application.multi_tick_finalization"))
+    events: list[dict] = []
+    shared_payloads: list[dict] = []
+    account_payloads: list[dict] = []
+    metrics_payloads: list[dict] = []
+    success = {"called": 0}
+    state_repo = SimpleNamespace(
+        write_shared_last_run=lambda _base, payload: shared_payloads.append(dict(payload)),
+        write_account_last_run=lambda _base, _account, payload: account_payloads.append(dict(payload)),
+        write_run_account_last_run=lambda *_args, **_kwargs: None,
+        write_tick_metrics=lambda _base, _run_id, payload: metrics_payloads.append(dict(payload)),
+        append_tick_metrics_history=lambda *_args, **_kwargs: None,
+    )
+
+    rc = mod.finalize_no_account_notification(
+        base=tmp_path,
+        run_id="run-multi-market",
+        runlog=fake_runlog_factory(events),
+        results=[SimpleNamespace(account="lx")],
+        tick_metrics={"run_dir": str(tmp_path / "run")},
+        no_send=False,
+        state_repo=state_repo,
+        utc_now_fn=lambda: "2026-07-21T12:00:00+00:00",
+        audit_fn=lambda *_args, **_kwargs: None,
+        safe_data_fn=lambda payload: payload,
+        on_success=lambda: success.__setitem__("called", success["called"] + 1),
+        reason="daily_brief_multi_market_delivery_unsupported",
+        run_end_outcome="error",
+        error_code="daily_brief_multi_market_delivery_unsupported",
+        return_code=2,
+    )
+
+    assert rc == 2
+    assert success["called"] == 0
+    assert shared_payloads[0]["reason"] == "daily_brief_multi_market_delivery_unsupported"
+    assert account_payloads[0]["error_code"] == "daily_brief_multi_market_delivery_unsupported"
+    assert metrics_payloads[0]["sent"] is False
+    assert metrics_payloads[0]["reason"] == "daily_brief_multi_market_delivery_unsupported"
+    assert any(
+        event.get("step") == "run_end"
+        and event.get("status") == "error"
+        and event.get("error_code") == "daily_brief_multi_market_delivery_unsupported"
+        for event in events
+    )

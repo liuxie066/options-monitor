@@ -101,7 +101,7 @@ All residual risks are classified and non-blocking for merge.
 
 This merge-fix work does not:
 
-- enable `notifications.daily_brief.enabled` in production;
+- release and remotely upgrade the consolidated Daily Brief scheduled-renderer version;
 - release or deploy code;
 - migrate lx/sy delivery pointers;
 - trigger a real tick;
@@ -115,3 +115,17 @@ Conclude the merge commit, push the feature branch, wait for PR #109 checks, per
 ## Artifact
 
 `docs/gateflow/option-notification-experience-main-merge-fix-20260721.md`
+
+## Second latest-main integration — renderer consolidation and v1.4.1
+
+- Second merged base: `origin/main@ba6efbe9df943db62c19880f2733918d39f5f3c1` (`release: v1.4.1`).
+- Latest-main authority retained: Daily Brief is the sole scheduled ordinary renderer; deprecated `daily_brief.enabled` values are ignored for routing; manual/force has no ordinary provider path; combined multi-market execution is terminal fail-closed before Daily Brief persistence/provider work.
+- PR #109 behavior retained: one canonical scan; fixed complete reports; half-hour new-candidate alerts; successful current/read surfaces; funds without total assets; delivery v2 exact envelopes and delivery-only retry.
+- Integration finding `MR109-INTEGRATION-03`: delivery-only `--no-send` falsely recorded sent — fixed with skipped/would-send semantics and pending-envelope regression coverage.
+- Integration finding `MR109-INTEGRATION-04`: option plan/test claimed multi-market snapshot persistence contrary to latest terminal guard — plan/docs/tests corrected and re-PlanReviewed.
+- Superseded PlanReview: `docs/reviews/plan-review-20260721-234559.md`.
+- Accepted final PlanReview: `docs/reviews/plan-review-20260721-235237.md`.
+- Final PR re-review: `docs/reviews/code-review-20260721-160110.md` — pass.
+- Full repository tests: `2985 passed, 10 skipped`.
+- Ruff, compileall, dependency graph (`479` modules, `0` cycles), US/HK config validation, conflict-marker scan, and whitespace checks: passed.
+- Production boundaries unchanged: no release/deploy/config/service/pointer migration/tick/real notification action was performed.
