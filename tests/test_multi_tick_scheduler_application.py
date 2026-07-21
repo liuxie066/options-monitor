@@ -66,8 +66,10 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
         },
         "sy": {
             "should_run_scan": True,
-            "is_notify_window_open": True,
+            "is_notify_window_open": False,
             "reason": "sy_due",
+            "scheduled_scan_target_market": "2026-07-21T10:30:00-04:00",
+            "scheduled_target_market": None,
         },
     }
     calls: list[str | None] = []
@@ -108,7 +110,10 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
     assert out.scan_decision_by_account["lx"]["reason"] == "lx_not_due"
     assert out.scan_decision_by_account["sy"]["should_run"] is True
     assert out.scan_decision_by_account["sy"]["reason"] == "sy_due"
-    assert out.notify_decision_by_account["sy"].is_notify_window_open is True
+    assert out.scan_decision_by_account["sy"]["scheduler_decision"]["scheduled_scan_target_market"] == (
+        "2026-07-21T10:30:00-04:00"
+    )
+    assert out.notify_decision_by_account["sy"].is_notify_window_open is False
     assert [event["action"] for event in audit_events if event["action"] == "scan_scheduler_account"] == [
         "scan_scheduler_account",
         "scan_scheduler_account",

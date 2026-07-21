@@ -14,6 +14,8 @@ class SchedulerDecisionView:
     should_run_scan: bool
     is_notify_window_open: bool
     reason: str
+    scheduled_scan_target_market: str | None = None
+    scheduled_target_market: str | None = None
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any] | Any) -> 'SchedulerDecisionView':
@@ -22,6 +24,12 @@ class SchedulerDecisionView:
             should_run_scan=bool(src.get('should_run_scan')),
             is_notify_window_open=resolve_notify_window_open(src),
             reason=str(src.get('reason') or ''),
+            scheduled_scan_target_market=(
+                str(src.get('scheduled_scan_target_market') or '').strip() or None
+            ),
+            scheduled_target_market=(
+                str(src.get('scheduled_target_market') or '').strip() or None
+            ),
         )
 
 

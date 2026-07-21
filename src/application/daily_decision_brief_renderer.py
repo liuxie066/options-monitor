@@ -74,6 +74,7 @@ def build_daily_brief_user_view(
     cfg = resolve_daily_brief_render_limits(limits)
     ctx = dict(context or {})
     market = _upper(brief.get("market"))
+    ctx.setdefault("market", market)
     account = _lower(brief.get("account")) or "-"
     actionability = _lower(brief.get("actionability"))
     normalized_diff = dict(diff or {})
@@ -84,7 +85,12 @@ def build_daily_brief_user_view(
         context=ctx,
     )
     scheduled_batch = _scheduled_batch_label(ctx, market=market)
-    phase_line = phase + (f" · {scheduled_batch} 批次" if scheduled_batch else "")
+    if delivery_kind == "fixed_report" and scheduled_batch:
+        phase_line = f"{scheduled_batch} 批次"
+    else:
+        phase_line = phase
+        if scheduled_batch and delivery_kind not in {"candidate_alert", "query"}:
+            phase_line += f" · {scheduled_batch} 批次"
 
     candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
         brief,
@@ -92,6 +98,10 @@ def build_daily_brief_user_view(
         limits=cfg,
     )
     position_views, position_omitted = _position_views(brief, diff=normalized_diff, limits=cfg)
+    capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    strategy_failure_labels = _strategy_failure_labels(brief)
+    if strategy_failure_labels:
+        reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
     view = {
         "account": account,
         "market": market,
@@ -104,11 +114,98 @@ def build_daily_brief_user_view(
         "change_summaries": _change_summaries(normalized_diff, market=market),
         "candidates": candidate_views,
         "candidate_omissions": candidate_omissions,
+        "candidate_empty_summary": (
+            "本轮候选结果不完整，部分策略扫描失败。"
+            if strategy_failure_labels
+            else "本轮暂无符合条件的候选。"
+        ),
         "positions": position_views,
         "position_omitted": position_omitted,
-        "capacity": _capacity_views(brief, selected_rows=selected_candidate_rows),
+        "funds": _fund_views(brief),
+        "capacity": capacity,
+        "reminders": reminders,
     }
     return view
+
+
+def render_fixed_report(
+    brief: Mapping[str, Any],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="fixed_report",
+        limits=limits,
+        context=context,
+    )
+    return _render_user_view(view, projection="fixed_report")
+
+
+def render_candidate_alert(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    filtered, omitted = _candidate_alert_brief(brief, candidate_identities)
+    alert_limits = dict(limits or {})
+    alert_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
+    view = build_daily_brief_user_view(
+        filtered,
+        delivery_kind="candidate_alert",
+        limits=alert_limits,
+        context=context,
+    )
+    if omitted:
+        view["candidate_omissions"] = [
+            f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
+        ]
+    return _render_user_view(view, projection="candidate_alert")
+
+
+def render_fixed_failure(
+    failure: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    market = _upper(failure.get("market"))
+    account = _lower(failure.get("account")) or "-"
+    batch = _scheduled_batch_label(dict(context or {}), market=market)
+    phase = f"数据异常 · {batch} 批次失败" if batch else "数据异常 · 本轮批次失败"
+    return _bounded_markdown(
+        [
+            f"# OM · 决策简报 · {account}",
+            "",
+            f"状态｜{phase}",
+            f"市场｜{_MARKET_LABELS.get(market, '市场')}",
+            "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
+            "后续｜下一计划扫描会继续尝试。",
+        ]
+    )
+
+
+def render_query_brief(
+    brief: Mapping[str, Any],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+    heading_level: int = 1,
+) -> str:
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="query",
+        limits=limits,
+        context=context,
+    )
+    return _render_user_view(
+        view,
+        projection="query",
+        heading_level=heading_level,
+        query_status=_query_status_lines(brief, context=dict(context or {})),
+    )
 
 
 def render_full_brief(
@@ -193,14 +290,24 @@ def render_daily_brief_lifecycle(
     return _render_user_view(view)
 
 
-def _render_user_view(view: Mapping[str, Any]) -> str:
+def _render_user_view(
+    view: Mapping[str, Any],
+    *,
+    projection: str = "legacy",
+    heading_level: int = 1,
+    query_status: Iterable[str] = (),
+) -> str:
+    heading_level = max(1, min(int(heading_level), 5))
+    title_mark = "#" * heading_level
+    section_mark = "#" * (heading_level + 1)
     lines = [
-        f"# OM · 决策简报 · {view['account']}",
+        f"{title_mark} OM · 决策简报 · {view['account']}",
         "",
         f"状态｜{view['phase_line']}",
         f"市场｜{view['market_label']}",
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
     ]
+    lines.extend(_flat_field_line(item) for item in query_status if str(item).strip())
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
         lines.extend(["", f"提示｜{planning_notice}"])
@@ -220,9 +327,12 @@ def _render_user_view(view: Mapping[str, Any]) -> str:
         lines.extend(["", "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    lines.extend(["", "## 候选"])
+    candidate_heading = "新增候选" if projection == "candidate_alert" else "当前候选"
+    if projection == "legacy":
+        candidate_heading = "候选"
+    lines.extend(["", f"{section_mark} {candidate_heading}"])
     if not candidates:
-        lines.append("当前没有通过筛选的候选。")
+        lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
         for index, item in enumerate(candidates, start=1):
             lines.extend(["", f"**{index}｜{_flat_title(item['title'])}**"])
@@ -234,8 +344,10 @@ def _render_user_view(view: Mapping[str, Any]) -> str:
             lines.append(f"补充｜{note}")
 
     positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
-    if positions:
-        lines.extend(["", "## 持仓"])
+    if projection != "candidate_alert":
+        lines.extend(["", f"{section_mark} 持仓"])
+        if not positions:
+            lines.append("当前没有需要展示的期权持仓。")
         for item in positions:
             lines.extend(["", f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
@@ -244,10 +356,15 @@ def _render_user_view(view: Mapping[str, Any]) -> str:
         if position_omitted:
             lines.append(f"补充｜另有 {position_omitted} 个持仓未展开")
 
+    funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
-    if capacity:
-        lines.extend(["", "## 资金"])
-        lines.extend(_flat_field_line(item) for item in capacity)
+    lines.extend(["", f"{section_mark} 资金"])
+    lines.extend(_flat_field_line(item) for item in [*funds, *capacity])
+
+    reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
+    if reminders:
+        lines.extend(["", f"{section_mark} 提醒"])
+        lines.extend(_flat_field_line(item) for item in reminders)
 
     return _bounded_markdown(lines)
 
@@ -509,11 +626,20 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
     return [" · ".join(parts)] if parts else []
 
 
+def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:
+    failed = {
+        _lower(item.get("strategy_family"))
+        for item in brief.get("data_gaps") or []
+        if isinstance(item, Mapping) and _lower(item.get("reason")) == "strategy_step_failed"
+    }
+    return [label for family, label in _STRATEGY_LABELS.items() if family in failed]
+
+
 def _capacity_views(
     brief: Mapping[str, Any],
     *,
     selected_rows: Mapping[str, list[Mapping[str, Any]]],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     market = _upper(brief.get("market"))
@@ -532,8 +658,9 @@ def _capacity_views(
             market=market,
         )
         out.append(f"{symbol} {contract}：按当前现金最多 {contracts} 手")
+    reminders = []
     if len(all_sell_put_rows) > 1 and out:
-        out.append("备选方案共享同一现金额度，数量不可相加")
+        reminders.append("多个 Sell Put 候选共享同一现金额度，手数不能相加")
 
     covered_call_rows = list(selected_rows.get("covered_call") or [])
     for row in covered_call_rows:
@@ -548,7 +675,45 @@ def _capacity_views(
             market=market,
         )
         out.append(f"{symbol} {contract}：按当前持股最多 {contracts} 手")
+    return out, reminders
+
+
+def _fund_views(brief: Mapping[str, Any]) -> list[str]:
+    funds = brief.get("funds") if isinstance(brief.get("funds"), Mapping) else {}
+    cash = _currency_amounts(funds.get("cash_total_by_currency"))
+    opening = _currency_amounts(funds.get("option_opening_available_by_currency"))
+    out = [
+        *(
+            [f"现金总额：{_currency_money(currency, amount)}" for currency, amount in cash.items()]
+            if cash
+            else ["现金总额：暂不可用"]
+        ),
+        *(
+            [f"可用于期权开仓：{_currency_money(currency, amount)}" for currency, amount in opening.items()]
+            if opening
+            else ["可用于期权开仓：暂不可用"]
+        ),
+    ]
     return out
+
+
+def _currency_amounts(value: Any) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, float] = {}
+    for raw_currency, raw_amount in value.items():
+        currency = _upper(raw_currency)
+        amount = _number(raw_amount)
+        if currency and amount is not None:
+            out[currency] = amount
+    return {currency: out[currency] for currency in sorted(out)}
+
+
+def _currency_money(currency: str, value: float) -> str:
+    prefixes = {"USD": "$", "HKD": "HK$", "CNY": "¥", "RMB": "¥"}
+    sign = "-" if value < 0 else ""
+    prefix = prefixes.get(currency, f"{currency} ")
+    return f"{sign}{prefix}{abs(value):,.2f}"
 
 
 def _capacity_contracts(candidate: Mapping[str, Any]) -> int | None:
@@ -922,6 +1087,15 @@ def _phase_label(
     context: Mapping[str, Any],
 ) -> str:
     trigger_kind = _lower(context.get("trigger_kind"))
+    if delivery_kind == "query":
+        query_time = _parse_datetime(context.get("query_time_utc")) or datetime.now(timezone.utc)
+        user_tz = _safe_zoneinfo(str(context.get("user_timezone") or "Asia/Shanghai"))
+        return f"当前查询 · 查询时间 {query_time.astimezone(user_tz).strftime('%H:%M')}"
+    if delivery_kind == "candidate_alert":
+        batch = _scheduled_batch_label(context, market=_upper(context.get("market")))
+        return f"新增候选 · {batch} 发现" if batch else "新增候选"
+    if delivery_kind == "fixed_report":
+        return "固定报告"
     if trigger_kind in {"manual", "force"}:
         return "手动触发"
     if actionability == "blocked":
@@ -934,6 +1108,21 @@ def _phase_label(
     if delivery_kind == "full":
         return "今日首次"
     return "当前简报"
+
+
+def _query_status_lines(brief: Mapping[str, Any], *, context: Mapping[str, Any]) -> list[str]:
+    now_utc = _parse_datetime(context.get("query_time_utc")) or datetime.now(timezone.utc)
+    market = _upper(brief.get("market"))
+    market_tz = _safe_zoneinfo(str(context.get("market_timezone") or _MARKET_TIMEZONES.get(market) or "UTC"))
+    trading_date = str(brief.get("market_trading_date") or "").strip()
+    today = now_utc.astimezone(market_tz).date().isoformat()
+    effective = _lower(brief.get("actionability"))
+    if trading_date == today and effective == "live_actionable":
+        return ["状态：今日最新"]
+    lines = ["状态：已过期，仅供计划参考"]
+    if trading_date != today:
+        lines.append("今日扫描暂不可用")
+    return lines
 
 
 def _scheduled_batch_label(context: Mapping[str, Any], *, market: str) -> str:
@@ -972,6 +1161,37 @@ def _data_as_of_label(brief: Mapping[str, Any], *, context: Mapping[str, Any]) -
     if market_tz.key == user_tz.key:
         return f"数据截至：{market_label} {market_text}"
     return f"数据截至：{market_label} {market_text} / {user_label} {user_text}"
+
+
+def _candidate_alert_brief(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+) -> tuple[dict[str, Any], int]:
+    identities = list(dict.fromkeys(str(item or "").strip() for item in candidate_identities if str(item or "").strip()))
+    index = {
+        str(item.get("identity") or "").strip(): item
+        for item in brief.get("candidate_index") or []
+        if isinstance(item, Mapping) and str(item.get("identity") or "").strip()
+    }
+    selected = [index[identity] for identity in identities if identity in index]
+    missing = [identity for identity in identities if identity not in index]
+    if missing:
+        raise ValueError("candidate alert identity is absent from the successful brief")
+    shown = selected[:_DEFAULT_MAX_CANDIDATES]
+    candidates: dict[str, list[Mapping[str, Any]]] = {
+        "sell_put": [],
+        "covered_call": [],
+        "combo_yield": [],
+    }
+    for item in shown:
+        family = _lower(item.get("strategy_family"))
+        representative = item.get("representative")
+        if family in candidates and isinstance(representative, Mapping):
+            candidates[family].append(representative)
+    filtered = dict(brief)
+    filtered["candidates"] = candidates
+    filtered["positions"] = []
+    return filtered, max(0, len(selected) - len(shown))
 
 
 def _local_time_text(value: datetime, *, trading_date: str) -> str:
@@ -1126,8 +1346,12 @@ __all__ = [
     "build_daily_brief_user_view",
     "resolve_daily_brief_render_limits",
     "render_blocked_brief",
+    "render_candidate_alert",
     "render_daily_brief_lifecycle",
     "render_delta_brief",
+    "render_fixed_failure",
+    "render_fixed_report",
     "render_full_brief",
+    "render_query_brief",
     "render_recovery_brief",
 ]

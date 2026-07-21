@@ -418,11 +418,12 @@ class _Audit:
         return None
 
 
-def test_manual_trigger_finishes_without_preparing_or_sending_ordinary_notification(monkeypatch, tmp_path: Path) -> None:
+def test_manual_trigger_updates_snapshot_without_sending_ordinary_notification(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
 
     completions: list[dict] = []
     finalizations: list[dict] = []
+    preparations: list[str] = []
     config = {
         "notifications": {
             "provider": "wechat_clawbot",
@@ -452,11 +453,22 @@ def test_manual_trigger_finishes_without_preparing_or_sending_ordinary_notificat
         ran_pipeline_accounts=("lx",),
         trigger_kind="manual",
     )
-    monkeypatch.setattr(
-        mod,
-        "_prepare_daily_brief_notification",
-        lambda _request: (_ for _ in ()).throw(AssertionError("manual path must not prepare Daily Brief")),
-    )
+
+    def _prepare(_request):
+        preparations.append(_request.run_id)
+        return mod.DailyBriefNotificationPreparation(
+            prepared_messages=SimpleNamespace(
+                messages_by_account={},
+                threshold_met=False,
+                used_heartbeat=False,
+                heartbeat_accounts=(),
+            ),
+            lifecycles_by_account={},
+            delivery_keys_by_account={},
+            markets=("US",),
+        )
+
+    monkeypatch.setattr(mod, "_prepare_daily_brief_notification", _prepare)
     monkeypatch.setattr(
         mod,
         "resolve_notification_delivery_route",
@@ -470,6 +482,7 @@ def test_manual_trigger_finishes_without_preparing_or_sending_ordinary_notificat
     monkeypatch.setattr(mod, "finalize_no_account_notification", _finalize)
 
     assert mod.run_tick_notification_flow(request) == 0
+    assert preparations == ["run-manual"]
     assert finalizations[0]["reason"] == "non_scheduled_ordinary_notification_disabled"
     assert completions == [
         {"status": "completed", "message": "non_scheduled_ordinary_notification_disabled"}

@@ -277,6 +277,7 @@ def scheduler_status_tool(
     decision_payload["schedule_enabled"] = schedule_enabled
 
     last_run_by_account = state_data.get("last_run_utc_by_account")
+    last_processed_target_by_account = state_data.get("last_processed_scan_target_utc_by_account")
     last_notify_by_account = state_data.get("last_notify_utc_by_account")
     data = {
         "decision": decision_payload,
@@ -284,6 +285,11 @@ def scheduler_status_tool(
             "state_path": mask_path(state_path),
             "last_run_utc_for_account": (
                 last_run_by_account.get(account) if account and isinstance(last_run_by_account, dict) else None
+            ),
+            "last_processed_scan_target_utc_for_account": (
+                last_processed_target_by_account.get(account)
+                if account and isinstance(last_processed_target_by_account, dict)
+                else None
             ),
             "last_notify_utc": state_data.get("last_notify_utc"),
             "last_notify_utc_for_account": (

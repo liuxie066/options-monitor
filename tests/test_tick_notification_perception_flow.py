@@ -59,4 +59,4 @@ def test_no_account_notification_perception_does_not_resolve_delivery_route(monk
     assert mod.run_tick_notification_flow(request) == 0
     perception_actions = [action for event_type, action, _kwargs in audits if event_type == "assistant_perception"]
     assert perception_actions == ["notification_prepared", "no_account_notification"]
-    assert completions == [{"status": "completed", "message": "no_account_notification"}]
+    assert completions == [{"status": "skipped", "message": "no_daily_brief_delivery"}]

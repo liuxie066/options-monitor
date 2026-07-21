@@ -3199,9 +3199,9 @@ def test_close_advice_text_can_drive_account_message_without_opening_candidates(
 
     msg = build_account_message(result, now_bj="2026-04-16 21:30:00", cash_footer_lines=[])
 
-    assert "账户提醒（lx）" in msg
+    assert "# OM · 决策简报 · lx" in msg
     assert "平仓建议" in msg
-    assert "Put 0 / Covered Call 0" in msg
+    assert "结论｜Sell Put 0 · Covered Call 0" in msg
 
 
 def test_compact_close_advice_renders_legacy_risk_exit_as_read_only_compatibility() -> None:

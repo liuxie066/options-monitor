@@ -234,6 +234,13 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "examples": ("刚才通知发生了什么", "最近一次通知为什么没发", "查看这个 run 的通知感知事件"),
         "summary": "read compressed tick notification perception events from audit artifacts",
     },
+    "daily_decision_brief_read": {
+        "display_name": "期权监控",
+        "arguments": ("account", "market", "date", "revision"),
+        "direct_executable": True,
+        "examples": ("期权监控", "最新期权报告", "港股期权", "美股期权", "lx 期权", "sy 期权"),
+        "summary": "read the latest successful option-monitor snapshot without scanning or sending",
+    },
     "query_cash_headroom": {
         "intent_name": "cash_headroom_query",
         "display_name": "现金余量",
