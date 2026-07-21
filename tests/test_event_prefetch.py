@@ -46,6 +46,79 @@ def test_event_prefetch_fetches_symbol_once_across_strategy_lanes(tmp_path: Path
     assert out["summary"]["unique_symbols_total"] == 1
     assert out["summary"]["fetch_attempts"] == 1
     assert out["symbols"]["AAPL"]["source_status"] == "ok"
+    assert out["symbols"]["AAPL"]["coverage"] == {}
+
+
+def test_event_prefetch_persists_structured_coverage_and_reuses_it_from_cache(tmp_path: Path) -> None:
+    from src.application.events.prefetch import prefetch_event_data
+
+    snapshot_path = tmp_path / "run_state" / "event_snapshot.json"
+    coverage = {
+        "earnings": {"status": "complete", "error": ""},
+        "ex_dividend": {"status": "complete", "error": ""},
+        "split": {"status": "partial", "error": "split unavailable"},
+    }
+    calls: list[str] = []
+
+    def fetcher(symbol: str) -> dict:
+        calls.append(symbol)
+        return {
+            "events": [{"type": "earnings", "date": "2026-08-05"}],
+            "coverage": coverage,
+        }
+
+    first = prefetch_event_data(
+        base=tmp_path,
+        cfg=_cfg(),
+        snapshot_path=snapshot_path,
+        fetcher=fetcher,
+        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+    )
+    second = prefetch_event_data(
+        base=tmp_path,
+        cfg=_cfg(),
+        snapshot_path=snapshot_path,
+        fetcher=fetcher,
+        now=datetime(2026, 7, 21, 1, tzinfo=timezone.utc),
+    )
+
+    assert calls == ["AAPL"]
+    assert first["symbols"]["AAPL"]["coverage"] == coverage
+    assert second["symbols"]["AAPL"]["coverage"] == coverage
+    assert second["symbols"]["AAPL"]["cache_status"] == "hit_ok"
+
+    cache = json.loads((tmp_path / "output_shared" / "state" / "event_store.json").read_text())
+    assert cache["symbols"]["futu:AAPL"]["coverage"] == coverage
+
+
+def test_event_prefetch_rejects_malformed_structured_events_as_source_error(tmp_path: Path) -> None:
+    from src.application.events.prefetch import prefetch_event_data
+
+    out = prefetch_event_data(
+        base=tmp_path,
+        cfg=_cfg(),
+        snapshot_path=tmp_path / "run_state" / "event_snapshot.json",
+        fetcher=lambda _symbol: {
+            "events": "not-a-list",
+            "coverage": {
+                "earnings": {"status": "complete", "error": ""},
+                "ex_dividend": {"status": "complete", "error": ""},
+                "split": {"status": "complete", "error": ""},
+            },
+        },
+        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+    )
+
+    item = out["symbols"]["AAPL"]
+    assert item["source_status"] == "error"
+    assert item["coverage"] == {}
+    assert "events list of objects" in item["source_error"]
+
+    cache = json.loads((tmp_path / "output_shared" / "state" / "event_store.json").read_text())
+    cached = cache["symbols"]["futu:AAPL"]
+    assert cached["source_status"] == "error"
+    assert "events" not in cached
+    assert "coverage" not in cached
 
 
 def test_event_prefetch_includes_yield_enhancement_for_return_first() -> None:
