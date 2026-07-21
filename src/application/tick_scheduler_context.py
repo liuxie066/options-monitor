@@ -183,6 +183,7 @@ def _ensure_scheduler_state_file(base: Path, state_path: Path) -> None:
                 state_path.name,
                 {
                     "last_run_utc_by_account": {},
+                    "last_processed_scan_target_utc_by_account": {},
                     "last_notify_utc": None,
                 },
             )

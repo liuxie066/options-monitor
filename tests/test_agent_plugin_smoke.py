@@ -4225,3 +4225,40 @@ def test_version_update_auto_preview_adapts_warnings_and_contract(monkeypatch, t
         "recommendation only; confirm before writing VERSION",
     ]
     assert out["meta"]["remote_name"] == "origin"
+
+
+def test_scheduler_status_exposes_processed_scan_target_watermark(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg = _minimal_cfg()
+    cfg["schedule"] = {
+        "enabled": True,
+        "timezone": "America/New_York",
+        "cron_interval_min": 10,
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
+    }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    state_path = tmp_path / "state" / "scheduler_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_run_utc_by_account": {"user1": "2026-07-21T14:31:00+00:00"},
+                "last_processed_scan_target_utc_by_account": {
+                    "user1": "2026-07-21T14:30:00+00:00"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = run_tool(
+        "scheduler_status",
+        {"config_path": str(cfg_path), "state": str(state_path), "account": "user1"},
+    )
+
+    assert out["data"]["state"]["last_processed_scan_target_utc_for_account"] == (
+        "2026-07-21T14:30:00+00:00"
+    )
