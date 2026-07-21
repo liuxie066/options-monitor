@@ -85,7 +85,8 @@ def _request(
     tmp_path: Path,
     *,
     run_id: str,
-    results: list[dict] | None = None,
+    results: list[object] | None = None,
+    ran_pipeline_accounts: tuple[str, ...] | None = None,
     markets: tuple[str, ...] = ("US",),
     no_send: bool = False,
     config: dict | None = None,
@@ -111,7 +112,11 @@ def _request(
         markets_to_run=markets,
         scheduler_markets=markets,
         scheduler_decision={"in_run_window": True},
-        ran_pipeline_accounts=tuple(str(item["account"]) for item in (results or [{"account": "lx"}])),
+        ran_pipeline_accounts=(
+            ran_pipeline_accounts
+            if ran_pipeline_accounts is not None
+            else tuple(str(item["account"]) for item in (results or [{"account": "lx"}]))
+        ),
     )
     return SimpleNamespace(request=request, completions=completions)
 
@@ -335,6 +340,115 @@ def test_prepare_and_confirmation_are_account_isolated(monkeypatch, tmp_path: Pa
     assert set(preparation.prepared_messages.messages_by_account) == {"lx", "sy"}
     assert set(preparation.lifecycles_by_account) == {"lx", "sy"}
     assert preparation.delivery_keys_by_account["lx"] != preparation.delivery_keys_by_account["sy"]
+
+
+def test_noop_account_does_not_prepare_or_send_daily_brief(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.multi_tick.misc import AccountResult
+
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-op account must not be assembled")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_notification_delivery_route",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-op account must not resolve delivery")),
+    )
+    monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **_kwargs: 0)
+    bundle = _request(
+        tmp_path,
+        run_id="run-noop",
+        results=[AccountResult("lx", False, False, "already processed", "")],
+        ran_pipeline_accounts=(),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert bundle.request.tick_metrics["daily_brief"]["prepared"] == []
+    assert bundle.completions == [{"status": "completed", "message": "no_account_notification"}]
+
+
+def test_explicit_notification_denial_skips_even_completed_scan(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    monkeypatch.setattr(
+        mod,
+        "assemble_daily_decision_briefs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("denied account must not be assembled")),
+    )
+    bundle = _request(
+        tmp_path,
+        run_id="run-notify-denied",
+        results=[{"account": "lx", "ran_scan": True, "should_notify": False}],
+    )
+
+    preparation = mod._prepare_daily_brief_notification(bundle.request)
+
+    assert preparation.prepared_messages.messages_by_account == {}
+    assert preparation.lifecycles_by_account == {}
+    assert bundle.request.tick_metrics["daily_brief"]["prepared"] == []
+
+
+def test_mixed_accounts_prepare_only_accounts_not_explicitly_denied(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    assembled: list[str] = []
+
+    def _assemble(*, run_id, account, markets_to_run, **_kwargs):
+        assembled.append(account)
+        return {
+            market: _brief(run_id=run_id, account=account, market=market)
+            for market in markets_to_run
+        }
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", _assemble)
+    bundle = _request(
+        tmp_path,
+        run_id="run-mixed",
+        results=[
+            {"account": "lx", "ran_scan": False, "should_notify": False},
+            {"account": "sy", "ran_scan": True, "should_notify": True},
+        ],
+        ran_pipeline_accounts=("sy",),
+    )
+
+    preparation = mod._prepare_daily_brief_notification(bundle.request)
+
+    assert assembled == ["sy"]
+    assert set(preparation.prepared_messages.messages_by_account) == {"sy"}
+    assert set(preparation.lifecycles_by_account) == {"sy"}
+
+
+def test_pipeline_failure_with_notification_allowed_still_prepares_blocked_brief(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.multi_tick.misc import AccountResult
+
+    def _assemble(*, run_id, account, markets_to_run, pipeline_succeeded, **_kwargs):
+        assert pipeline_succeeded is False
+        return {
+            market: _brief(run_id=run_id, account=account, market=market, blocked=True)
+            for market in markets_to_run
+        }
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", _assemble)
+    bundle = _request(
+        tmp_path,
+        run_id="run-pipeline-failed",
+        results=[
+            AccountResult("lx", True, True, "pipeline failed", "")
+        ],
+        ran_pipeline_accounts=(),
+    )
+
+    preparation = mod._prepare_daily_brief_notification(bundle.request)
+
+    assert set(preparation.prepared_messages.messages_by_account) == {"lx"}
+    assert preparation.lifecycles_by_account["lx"]["brief"]["status"] == "blocked"
+    assert "数据异常" in preparation.prepared_messages.messages_by_account["lx"]
 
 
 def test_provider_success_but_local_confirmation_failure_is_not_marked_sent(monkeypatch, tmp_path: Path) -> None:
