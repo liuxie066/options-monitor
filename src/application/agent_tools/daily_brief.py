@@ -217,11 +217,11 @@ def _aggregate_daily_brief_view(
     }
     warning = ""
     if reason == "partial":
-        warning = "> 部分账户或市场的成功扫描快照暂不可用。"
+        warning = "提醒｜部分账户或市场的成功扫描快照暂不可用。"
     elif reason == "not_found":
-        warning = "> 当前启用范围还没有可用的成功扫描快照。"
+        warning = "提醒｜当前启用范围还没有可用的成功扫描快照。"
     elif reason == "scope_not_enabled":
-        warning = "> 没有匹配的启用账户或市场。"
+        warning = "提醒｜没有匹配的启用账户或市场。"
     rendered_parts = ["# 期权监控"]
     if warning:
         rendered_parts.extend(["", warning])
@@ -295,11 +295,13 @@ def _render_unavailable(*, query: dict[str, Any], reason: str, heading_level: in
     date_text = query.get("market_trading_date") or "最近成功扫描"
     return "\n".join(
         [
-            f"{title_mark} {query['account']} · {_MARKET_LABELS.get(str(query['market']), '市场')}期权监控",
-            "> 当前查询",
-            f"> 范围：{date_text}",
+            f"{title_mark} OM · 决策简报 · {query['account']}",
             "",
-            f"当前查询不可用：暂时没有成功扫描快照（{reason}）。",
+            "状态｜当前查询",
+            f"市场｜{_MARKET_LABELS.get(str(query['market']), '市场')}",
+            f"范围｜{date_text}",
+            "",
+            f"结论｜当前查询不可用：暂时没有成功扫描快照（{reason}）。",
         ]
     )
 

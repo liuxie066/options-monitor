@@ -25,6 +25,19 @@ def format_trade_time_beijing(ms: Any) -> str | None:
     return dt.strftime("%Y-%m-%d %H:%M:%S 北京时间")
 
 
+def format_iso_time_beijing(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S 北京时间")
+
+
 def add_trade_time_beijing(row: dict[str, Any], *, key: str = "trade_time_ms", field: str = "trade_time_beijing") -> dict[str, Any]:
     out = dict(row)
     formatted = format_trade_time_beijing(out.get(key))

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 742 (`src`: 408, `domain`: 63, `scripts`: 7, `tests`: 264)
-- Internal import edges: 4282 total, 1935 production/script edges excluding tests
+- Python files scanned: 743 (`src`: 408, `domain`: 63, `scripts`: 7, `tests`: 265)
+- Internal import edges: 4310 total, 1937 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -43,10 +43,10 @@ flowchart LR
   scripts -->|7| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1632| application
+  tests -->|1647| application
   tests -->|378| domain
   tests -->|2| domain_services
-  tests -->|107| infrastructure
+  tests -->|108| infrastructure
   tests -->|184| interfaces
   tests -->|10| scripts
   tests -->|16| storage
@@ -73,10 +73,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1632 |
+| tests | application | 1647 |
 | tests | domain | 378 |
 | tests | interfaces | 184 |
-| tests | infrastructure | 107 |
+| tests | infrastructure | 108 |
 | tests | storage | 16 |
 | tests | scripts | 10 |
 | tests | domain_services | 2 |
@@ -93,8 +93,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.storage | 28 |
 | src.application.ledger | domain.domain.ledger | 28 |
 | src.application.ledger | domain.domain | 28 |
+| src.application.positions | src.application | 20 |
 | src.application | domain.domain.engine | 19 |
-| src.application.positions | src.application | 19 |
 | src.application | src.application.ledger | 18 |
 | src.application.positions | domain.domain | 17 |
 | src.application | src.application.multi_tick | 16 |
@@ -102,7 +102,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.research | src.application | 16 |
 | src.application | src.application.positions | 15 |
 | src.application.inbound | src.application | 15 |
-| src.application.multi_tick | src.application | 14 |
+| src.application.multi_tick | src.application | 15 |
 | src.application.trades | domain.domain | 13 |
 | src.application.trades | src.application | 12 |
 | src.application.positions | domain.domain.ledger | 11 |

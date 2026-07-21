@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def test_build_notification_block_compact_sell_put() -> None:
     from src.application.notify_symbols import _build_notification_block_compact
@@ -17,8 +19,8 @@ def test_build_notification_block_compact_sell_put() -> None:
     )
 
     assert "🟢 Put 腾讯 460P · 04-29 · 挂单 2.3" in out
-    assert "- 权利金 2.3 · 年化 12% · 29天" in out
-    assert "- 保守 · Δ 0.25 · 担保 ¥46000" in out
+    assert "收益｜权利金 2.3 · 年化 12% · 29天" in out
+    assert "风险｜保守 · Δ 0.25 · 担保 ¥46000" in out
     assert "---" not in out
 
 
@@ -37,8 +39,8 @@ def test_build_notification_block_compact_yield_enhancement() -> None:
     )
 
     assert "💎 组合·同期 英伟达 95P+110C · 06-19" in out
-    assert "- 净权利金 95 · 年化 8.0% · 45天" in out
-    assert "- 中性 · Call Δ 0.15" in out
+    assert "收益｜净权利金 95 · 年化 8.0% · 45天" in out
+    assert "风险｜中性 · Call Δ 0.15" in out
     assert "评分" not in out
     assert "预期波动" not in out
     assert "---" not in out
@@ -108,15 +110,16 @@ def test_build_notification_compact_style_uses_markdown_enhancement_heading() ->
     assert "卖0.950/买1.2" not in out
 
 
-def test_build_notification_legacy_style_unchanged() -> None:
+def test_build_notification_legacy_style_uses_flat_fields() -> None:
     from src.application.notify_symbols import build_notification
 
     alerts_text = "## 高优先级\n腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | 风险 保守 | 通过准入\n"
     out = build_notification("", alerts_text, render_style="legacy")
 
     assert "Put" in out
-    assert "### [当前账户] 腾讯 · 卖Put" in out
-    assert "---" in out
+    assert "**[当前账户] 腾讯｜卖Put｜2026-04-29 460**" in out
+    assert "收益｜" in out
+    assert "---" not in out
 
 
 def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> None:
@@ -214,15 +217,23 @@ def test_build_account_message_compact() -> None:
             notification_text=notif,
         ),
         now_bj="2026-05-12 22:31:00",
-        cash_footer_lines=["LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
+        cash_footer_lines=[
+            "**💰 现金 CNY**",
+            "- **LX** 总现金折算 ¥1,000 (CNY) | 担保后可用 ¥200 (CNY)",
+            "",
+            "> 截至 2026-05-12 22:30:00 北京时间",
+        ],
     )
 
-    assert "# OM · lx · 2026-05-12 22:31:00 BJ" in message
-    assert "Put 1 · Call 0 · 平仓 1" in message
+    assert "# OM · 决策简报 · lx" in message
+    assert "时间｜2026-05-12 22:31:00 北京时间" in message
+    assert "结论｜Put 1 · Call 0 · 平仓 1" in message
     assert "## 候选\nPut\n- 腾讯 卖Put 2026-04-29 460P" in message
-    assert "## 持仓\n- NVDA Put 2026-06-19 150P · 强烈建议平仓" in message
-    assert "## 资金\n- LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
+    assert "## 持仓\nNVDA Put 2026-06-19 150P · 强烈建议平仓" in message
+    assert "## 资金\n账户｜LX 总现金 ¥1,000 (CNY)｜担保后 ¥200 (CNY)" in message
+    assert "数据｜截至 2026-05-12 22:30:00 北京时间" in message
     assert "──────────────" not in message
+    assert_mobile_flat_markdown(message)
 
 
 def test_build_account_message_compact_without_close_advice() -> None:
@@ -246,7 +257,8 @@ def test_build_account_message_compact_without_close_advice() -> None:
         cash_footer_lines=None,
     )
 
-    assert "# OM · sy · 2026-05-12 22:31:00 BJ" in message
-    assert "Put 1 · Call 0 · 平仓 0" in message
-    assert "## 持仓\n- 无平仓建议" in message
+    assert "# OM · 决策简报 · sy" in message
+    assert "结论｜Put 1 · Call 0 · 平仓 0" in message
+    assert "## 持仓\n当前没有平仓建议。" in message
     assert "\n## 资金\n" not in message
+    assert_mobile_flat_markdown(message)

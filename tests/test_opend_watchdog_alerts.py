@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def _ensure_repo_path() -> None:
     import sys
@@ -84,6 +86,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch)
         return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
 
     monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+    monkeypatch.setattr(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00")
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -92,14 +95,23 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch)
             base,
             cfg,
             error_code="OPEND_RATE_LIMIT",
-            message_text="rate limited",
+            message_text="rate limited\n  - retry exhausted",
+            detail="first line\n    - nested detail",
         )
 
     assert ok is True
     assert captured["provider"] == "wechat_clawbot"
     assert captured["channel"] == "wechat_clawbot"
     assert captured["target"] == "clawbot:test"
-    assert "options-monitor OpenD 告警" in str(captured["message"])
+    message = str(captured["message"])
+    assert message.startswith("# OM · 系统告警 · OpenD")
+    assert "状态｜❌ 不可用" in message
+    assert "时间｜2026-07-21 16:30:00 北京时间" in message
+    assert "影响｜本轮行情与交易数据可能不完整" in message
+    assert "原因｜rate limited · - retry exhausted" in message
+    assert "诊断｜`OPEND_RATE_LIMIT`" in message
+    assert "详情｜first line · - nested detail" in message
+    assert_mobile_flat_markdown(message)
 
 
 def test_send_opend_alert_no_send_does_not_consume_rate_limit(monkeypatch) -> None:
@@ -380,7 +392,10 @@ def test_consecutive_threshold_gates_alert() -> None:
             }
         }
 
-        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
+        with (
+            mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
+        ):
             # First two calls should be gated (below threshold).
             r1 = opend_guard.send_opend_alert(base, cfg, error_code="OPEND_PORT_CLOSED", message_text="test")
             assert r1 is False, "should be gated at count=1"
@@ -418,7 +433,10 @@ def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
                 "opend_alert_cooldown_sec": 1,
             }
         }
-        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
+        with (
+            mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
+        ):
             r = opend_guard.send_opend_alert(
                 base, cfg,
                 error_code="OPEND_NEEDS_PHONE_VERIFY",
@@ -456,7 +474,10 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
             }
         }
 
-        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
+        with (
+            mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
+            mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
+        ):
             # No failures recorded yet; recovery notice should NOT be sent.
             r = opend_guard.send_opend_recovery_notice(base, cfg)
             assert r is False
@@ -472,7 +493,11 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
             assert len(calls) == 1
             # Message should indicate recovery.
             sent_msg = str(calls[0]["message"])
-            assert "已恢复" in sent_msg
+            assert sent_msg.startswith("# OM · 系统通知 · OpenD")
+            assert "状态｜✅ 已恢复" in sent_msg
+            assert "时间｜2026-07-21 16:30:00 北京时间" in sent_msg
+            assert "结果｜数据连接已恢复，后续批次将自动重新评估" in sent_msg
+            assert_mobile_flat_markdown(sent_msg)
 
             # Counter reset: second recovery sends nothing.
             r = opend_guard.send_opend_recovery_notice(base, cfg)

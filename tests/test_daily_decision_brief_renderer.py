@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def _candidate(
     *,
@@ -213,23 +215,25 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     )
     message = render_daily_brief_lifecycle(lifecycle, context=_scheduled_context())
 
-    assert message.startswith("# OM · lx · 美股")
-    assert "> 今日首次 · 10:00 批次" in message
-    assert "数据截至：美东 10:03 / 北京 22:03" in message
+    assert message.startswith("# OM · 决策简报 · lx")
+    assert "状态｜今日首次 · 10:00 批次" in message
+    assert "市场｜美股" in message
+    assert "数据｜美东 10:03 / 北京 22:03" in message
     assert "## 候选" in message
     assert "## 持仓" in message
     assert "## 资金" in message
-    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in message
-    assert "NVDA · Sell Put · 08-21 $100 Put（备选 2）" in message
-    assert "AAPL · Covered Call · 08-21 $250 Call（首选）" in message
-    assert "TSLA · 组合增强（首选）" in message
-    assert "Put：08-21 $300 Put" in message
-    assert "Call：09-18 $400 Call" in message
-    assert "PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）" in message
-    assert "FUTU · Sell Put：暂无法评估（价格不可用）" in message
-    assert "MSFT 08-21 $400 Put：按当前现金最多 2 手" in message
-    assert "NVDA 08-21 $100 Put：按当前现金最多 5 手" in message
+    assert "MSFT｜Sell Put｜08-21 $400 Put（首选）" in message
+    assert "NVDA｜Sell Put｜08-21 $100 Put（备选 2）" in message
+    assert "AAPL｜Covered Call｜08-21 $250 Call（首选）" in message
+    assert "TSLA｜组合增强（首选）" in message
+    assert "Put｜08-21 $300 Put" in message
+    assert "Call｜09-18 $400 Call" in message
+    assert "PDD｜组合增强（Put 侧）｜暂无法评估（行情覆盖不足）" in message
+    assert "FUTU｜Sell Put｜暂无法评估（价格不可用）" in message
+    assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message
+    assert "NVDA 08-21 $100 Put｜按当前现金最多 5 手" in message
     assert "多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
+    assert_mobile_flat_markdown(message)
     _assert_no_internal_leak(message)
     _assert_no_internal_leak(view)
 
@@ -260,9 +264,9 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
 
     message = render_full_brief(brief)
 
-    assert "- 3690.HK · Sell Put · 08-28 HK$65 Put：建议平仓" in message
+    assert "3690.HK｜Sell Put｜08-28 HK$65 Put｜建议平仓" in message
     assert (
-        "  - 参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · 剩余年化 4.2%"
+        "参考｜参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · 剩余年化 4.2%"
         in message
     )
 
@@ -326,7 +330,7 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
     message = render_full_brief(brief)
 
     assert "预计平仓损益 -HK$125.50" in message
-    assert "PARTIAL.HK · Sell Put · 08-28 HK$55 Put：建议平仓" in message
+    assert "PARTIAL.HK｜Sell Put｜08-28 HK$55 Put｜建议平仓" in message
     assert "参考平仓价 HK$0.30（mid）" in message
     assert "nan" not in message.lower()
     assert "invalid" not in message.lower()
@@ -344,7 +348,7 @@ def test_combo_position_attribution_is_independent_from_new_combo_candidates() -
     message = render_full_brief(brief)
 
     assert "TSLA · 组合增强" not in message
-    assert "PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）" in message
+    assert "PDD｜组合增强（Put 侧）｜暂无法评估（行情覆盖不足）" in message
     assert "combo-pdd-secret" not in message
     assert "funding_put" not in message
 
@@ -360,10 +364,10 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
         context=_scheduled_context(),
     )
 
-    assert message.startswith("# OM · lx · 美股")
-    assert "> 数据异常 · 10:00 批次" in message
-    assert "本轮行情覆盖不足，暂时无法形成可靠决策。" in message
-    assert "系统将在后续批次自动重新评估。" in message
+    assert message.startswith("# OM · 决策简报 · lx")
+    assert "状态｜数据异常 · 10:00 批次" in message
+    assert "结论｜本轮行情覆盖不足，暂时无法形成可靠决策。" in message
+    assert "后续｜系统将在后续批次自动重新评估。" in message
     assert "## 候选" not in message
     assert "## 持仓" not in message
     assert "MSFT" not in message
@@ -410,10 +414,10 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
         },
         context=_scheduled_context(),
     )
-    assert "> 盘中更新 · 10:00 批次" in delta
+    assert "状态｜盘中更新 · 10:00 批次" in delta
     assert "较上一轮：新增 1 个 Sell Put 候选" in delta
     assert "MSFT 08-21 $400 Put 条件容量 1 → 2 手" in delta
-    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in delta
+    assert "MSFT｜Sell Put｜08-21 $400 Put（首选）" in delta
     assert "secret-in-diff" not in delta
 
     recovery = render_daily_brief_lifecycle(
@@ -424,9 +428,9 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
         },
         context=_scheduled_context(),
     )
-    assert "> 数据已恢复 · 10:00 批次" in recovery
+    assert "状态｜数据已恢复 · 10:00 批次" in recovery
     assert "数据已恢复，以下为当前结果。" in recovery
-    assert "MSFT · Sell Put · 08-21 $400 Put（首选）" in recovery
+    assert "MSFT｜Sell Put｜08-21 $400 Put（首选）" in recovery
 
 
 def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() -> None:
@@ -480,10 +484,10 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     ]
     message = render_full_brief(brief)
 
-    assert "A · Sell Put：暂无法评估（行情覆盖不足）" in message
-    assert "B · Sell Put：暂无法评估（价格不可用）" in message
-    assert "C · Sell Put：暂无法评估（数据暂不可用）" in message
-    assert "D · Sell Put：继续观察" in message
+    assert "A｜Sell Put｜暂无法评估（行情覆盖不足）" in message
+    assert "B｜Sell Put｜暂无法评估（价格不可用）" in message
+    assert "C｜Sell Put｜暂无法评估（数据暂不可用）" in message
+    assert "D｜Sell Put｜继续观察" in message
     assert "future_state" not in message
 
 
@@ -511,9 +515,10 @@ def test_malformed_fields_and_unknown_enums_do_not_echo_raw_values() -> None:
     }
     message = render_full_brief(brief)
 
-    assert message.startswith("# OM · lx · 市场")
-    assert "数据截至：数据时间未知" in message
-    assert "TCOM · Sell Put · 合约信息不完整（首选）" in message
+    assert message.startswith("# OM · 决策简报 · lx")
+    assert "市场｜市场" in message
+    assert "数据｜数据时间未知" in message
+    assert "TCOM｜Sell Put｜合约信息不完整（首选）" in message
     for raw in (
         "FUTURE_MARKET",
         "FUTURE_STATE",
@@ -539,7 +544,7 @@ def test_manual_trigger_omits_scheduled_batch_and_planning_is_plain_language() -
         },
     )
 
-    assert "> 手动触发" in message
+    assert "状态｜手动触发" in message
     assert "10:00 批次" not in message
     assert "当前已不在可执行时段，仅供规划参考。" in message
     assert "PLANNING" not in message
@@ -584,15 +589,15 @@ def test_renderer_honors_section_limits() -> None:
         },
     )
 
-    assert "P0 · Sell Put" in message
-    assert "P1 · Sell Put" in message
-    assert "P2 · Sell Put" not in message
+    assert "P0｜Sell Put" in message
+    assert "P1｜Sell Put" in message
+    assert "P2｜Sell Put" not in message
     assert "另有 6 个持仓未展开" in message
-    assert "C6 · Sell Put" in message
-    assert "C7 · Sell Put" not in message
+    assert "C6｜Sell Put" in message
+    assert "C7｜Sell Put" not in message
     assert "Sell Put 另有 13 个候选未展开" in message
-    assert "C6 08-21 $106 Put：按当前现金最多 1 手" in message
-    assert "C7 08-21 $107 Put：按当前现金最多 1 手" not in message
+    assert "C6 08-21 $106 Put｜按当前现金最多 1 手" in message
+    assert "C7 08-21 $107 Put｜按当前现金最多 1 手" not in message
 
 
 def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
@@ -638,13 +643,13 @@ def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
         limits={"max_candidates_per_strategy": 1},
     )
 
-    assert "C2 · Sell Put · 08-21 $102 Put（备选 3）" in message
-    assert "C3 · Sell Put · 08-21 $103 Put（备选 4）" in message
-    assert "C0 · Sell Put" not in message
+    assert "C2｜Sell Put｜08-21 $102 Put（备选 3）" in message
+    assert "C3｜Sell Put｜08-21 $103 Put（备选 4）" in message
+    assert "C0｜Sell Put" not in message
     assert "Sell Put 另有 2 个候选未展开" in message
-    assert "C2 08-21 $102 Put：按当前现金最多 3 手" in message
-    assert "C3 08-21 $103 Put：按当前现金最多 4 手" in message
-    assert "C0 08-21 $100 Put：按当前现金最多 1 手" not in message
+    assert "C2 08-21 $102 Put｜按当前现金最多 3 手" in message
+    assert "C3 08-21 $103 Put｜按当前现金最多 4 手" in message
+    assert "C0 08-21 $100 Put｜按当前现金最多 1 手" not in message
 
 
 def test_invalidated_candidate_banner_keeps_removed_contract_identifiable() -> None:
@@ -722,7 +727,7 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
         limits={"max_actions_per_priority": 1},
     )
 
-    assert "PDD · 组合增强（Put 侧） · 08-21 $95 Put：建议平掉 Put，保留 Call" in view_message
+    assert "PDD｜组合增强（Put 侧）｜08-21 $95 Put｜建议平掉 Put，保留 Call" in view_message
     assert "继续观察" not in view_message
     assert "另有 2 个持仓未展开" in view_message
     assert "lot-2" not in view_message
@@ -791,11 +796,11 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     brief["candidate_index"] = candidate_index
 
     fixed = render_fixed_report(brief, context=_scheduled_context())
-    assert fixed.startswith("# lx · 美股期权监控")
-    assert "> 10:00 批次" in fixed
+    assert fixed.startswith("# OM · 决策简报 · lx")
+    assert "状态｜10:00 批次" in fixed
     assert "## 当前候选" in fixed
-    assert "现金总额：$180,000.00" in fixed
-    assert "可用于期权开仓：$75,000.00" in fixed
+    assert "现金总额｜$180,000.00" in fixed
+    assert "可用于期权开仓｜$75,000.00" in fixed
     assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
 
     alert_context = {**_scheduled_context(), "scheduled_target_market": "10:30"}
@@ -805,20 +810,23 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
         limits={"max_candidates_per_strategy": 1},
         context=alert_context,
     )
-    assert "> 新增候选 · 10:30 发现" in alert
+    assert "状态｜新增候选 · 10:30 发现" in alert
     assert "## 新增候选" in alert
     assert "## 持仓" not in alert
     assert "另有 1 个新增候选未展开" in alert
-    assert "MSFT · Sell Put" in alert
-    assert "NVDA · Sell Put" in alert
+    assert "MSFT｜Sell Put" in alert
+    assert "NVDA｜Sell Put" in alert
     assert "较上一轮" not in alert
-    assert "现金总额：$180,000.00" in alert
+    assert "现金总额｜$180,000.00" in alert
 
     failure = render_fixed_failure(brief, context=_scheduled_context())
     assert "数据异常 · 10:00 批次失败" in failure
     assert "未形成可靠结果" in failure
     assert "## 当前候选" not in failure
     assert "本轮暂无符合条件的候选" not in failure
+    assert_mobile_flat_markdown(fixed)
+    assert_mobile_flat_markdown(alert)
+    assert_mobile_flat_markdown(failure)
 
     current_query = render_query_brief(
         brief,
@@ -829,10 +837,12 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
         context={"query_time_utc": "2026-07-21T15:00:00+00:00"},
     )
     assert "当前查询 · 查询时间" in current_query
-    assert "状态：今日最新" in current_query
-    assert "状态：已过期，仅供计划参考" in stale_query
+    assert "状态｜今日最新" in current_query
+    assert "状态｜已过期，仅供计划参考" in stale_query
     assert "今日扫描暂不可用" in stale_query
     assert "revision" not in current_query + stale_query
+    assert_mobile_flat_markdown(current_query)
+    assert_mobile_flat_markdown(stale_query)
 
 
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
@@ -848,9 +858,9 @@ def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
 
     message = render_fixed_report(brief, context=_scheduled_context())
 
-    assert "现金总额：暂不可用" in message
-    assert "可用于期权开仓：暂不可用" in message
-    assert "现金总额：$0" not in message
+    assert "现金总额｜暂不可用" in message
+    assert "可用于期权开仓｜暂不可用" in message
+    assert "现金总额｜$0" not in message
 
 
 def test_render_limit_normalization_remains_bounded() -> None:
@@ -971,7 +981,7 @@ def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None
 
     assert "较上一轮：NVDA 08-21 $100 Put 财报日期调整至 8 月 5 日，现在早于当前 Put 到期日。" in message
     assert message.count("进入当前合约关注窗口") == 0
-    assert "NVDA · Sell Put · 08-21 $100 Put（备选 2）" in message
+    assert "NVDA｜Sell Put｜08-21 $100 Put（备选 2）" in message
 
 
 def test_event_evidence_degradation_summary_does_not_claim_event_removal() -> None:
