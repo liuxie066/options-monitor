@@ -234,6 +234,11 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert data["views"]["close_advice_snapshot"]["row_grain"] == "account + position_id + advice_run_id"
     assert data["views"]["runtime_tick_status"]["row_grain"] == "market + account + latest_run"
     assert "notification_status" in data["views"]["runtime_tick_status"]["fields"]
+    assert "compatibility_notification_exists" in data["views"]["runtime_tick_status"]["fields"]
+    assert data["views"]["runtime_tick_status"]["deprecated_fields"]["notification_exists"] == {
+        "replacement": "compatibility_notification_exists",
+        "removal_phase": "phase_c",
+    }
     assert "notification_status" in data["views"]["runtime_tick_status"]["recommended_filters"]
     assert data["views"]["quote_freshness"]["row_grain"] == "symbol + market + source"
     assert data["views"]["upgrade_operation_status"]["row_grain"] == "command_id + operation_id"
@@ -1041,6 +1046,49 @@ def test_analysis_query_runtime_tick_status_surfaces_notification_conflict(monke
     ]
     assert meta["requested_views"] == ["runtime_tick_status"]
     assert meta["materialized_views"] == ["runtime_tick_status"]
+
+
+def test_analysis_runtime_tick_status_uses_compatibility_name_without_treating_absence_as_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_runtime_status_tool(*_args, **_kwargs):
+        return {
+            "config": {"config_key": "us", "accounts": ["lx"]},
+            "summary": {
+                "latest_status": "success",
+                "latest_run_path": "output_runs/run-1",
+                "warning_count": 0,
+                "warning_codes": [],
+            },
+            "freshness": {"status": "fresh", "age_seconds": 12},
+            "notification_diagnosis": {"status": "sent", "reason": "delivery confirmed"},
+            "accounts": {"lx": {"compatibility_notification": {"exists": False}}},
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
+
+    data, warnings, _meta = _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {
+            "sql": (
+                "select compatibility_notification_exists, notification_exists, notification_status "
+                "from runtime_tick_status"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "compatibility_notification_exists": False,
+            "notification_exists": False,
+            "notification_status": "sent",
+        }
+    ]
+    assert data["evidence"]["diagnostics"][0]["status"] == "observed_runtime_status"
+    assert data["evidence"]["diagnostics"][0]["severity"] == "info"
 
 
 def test_analysis_query_runtime_tick_status_surfaces_scheduler_reason(monkeypatch: pytest.MonkeyPatch) -> None:

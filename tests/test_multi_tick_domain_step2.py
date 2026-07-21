@@ -323,65 +323,6 @@ def test_filter_notify_candidates_delegates_to_engine() -> None:
         mod.filter_notify_candidates_engine = old  # type: ignore[assignment]
 
 
-def test_build_account_messages_aggregates_non_empty_messages() -> None:
-    from domain.domain.multi_tick_result import build_account_messages
-    from src.application.multi_tick.misc import AccountResult
-
-    def _cash_footer_for_account(lines: list[str], account: str) -> list[str]:
-        return [f"{account}:{len(lines)}"]
-
-    def _build_account_message(result, *, now_bj, cash_footer_lines: list[str]) -> str:
-        if result.account == 'a':
-            return f"{result.account}@{now_bj}|{','.join(cash_footer_lines)}"
-        return ''
-
-    results = [
-        AccountResult('a', True, True, 'ok', 'x'),
-        AccountResult('b', True, True, 'ok', 'y'),
-    ]
-
-    out = build_account_messages(
-        notify_candidates=results,
-        now_bj='BJ_NOW',
-        cash_footer_lines=['line1'],
-        cash_footer_for_account_fn=_cash_footer_for_account,
-        build_account_message_fn=_build_account_message,
-    )
-    assert out == {'a': 'a@BJ_NOW|a:1'}
-
-
-def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
-    from domain.domain.multi_tick_result import build_no_candidate_account_messages
-    from src.application.multi_tick.misc import AccountResult
-
-    results = [
-        AccountResult('a', True, True, 'ok', ''),
-        AccountResult('b', True, False, 'closed', ''),
-        AccountResult('c', False, True, 'skip', ''),
-    ]
-
-    out = build_no_candidate_account_messages(
-        results=results,
-        now_bj='BJ_NOW',
-        cash_footer_lines=['cash'],
-        cash_footer_for_account_fn=lambda lines, account: [
-            "**💰 现金 CNY**",
-            f"- **{account.upper()}** 总现金折算 ¥1,000 | 担保后可用 ¥200",
-            "",
-            "> 截至 2026-07-21 18:00:00 北京时间",
-        ],
-    )
-
-    assert list(out) == ['a']
-    assert out['a'].startswith('# OM · 决策简报 · a')
-    assert '状态｜扫描完成' in out['a']
-    assert '结论｜当前没有通过筛选的候选。' in out['a']
-    assert '时间｜BJ_NOW 北京时间' in out['a']
-    assert '账户｜A 总现金 ¥1,000｜担保后 ¥200' in out['a']
-    assert '数据｜截至 2026-07-21 18:00:00 北京时间' in out['a']
-    assert_mobile_flat_markdown(out['a'])
-
-
 def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
     from domain.domain.multi_tick_result import build_no_account_notification_payloads
     from src.application.multi_tick.misc import AccountResult
@@ -410,6 +351,17 @@ def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
     assert per_account['a']['result']['decision_reason'] == 'ok'
     assert per_account['b']['run_dir'] == '/tmp/run'
     assert calls['n'] == 3
+
+    failed_shared, failed_per_account = build_no_account_notification_payloads(
+        now_utc_fn=_now,
+        results=results,
+        run_dir='/tmp/run',
+        reason='daily_brief_multi_market_delivery_unsupported',
+        error_code='daily_brief_multi_market_delivery_unsupported',
+    )
+    assert failed_shared['reason'] == 'daily_brief_multi_market_delivery_unsupported'
+    assert failed_shared['error_code'] == 'daily_brief_multi_market_delivery_unsupported'
+    assert failed_per_account['a']['error_code'] == 'daily_brief_multi_market_delivery_unsupported'
 
 
 def test_build_shared_last_run_payload_merges_prev_and_caps_history() -> None:

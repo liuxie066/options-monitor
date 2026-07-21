@@ -159,8 +159,6 @@ def main(argv: list[str] | None = None) -> int:
     if "symbols" in cfg:
         top_n = cfg.get("outputs", {}).get("top_n_alerts", 3)
         runtime = cfg.get("runtime", {}) or {}
-        notifications_cfg = cfg.get("notifications", {}) or {}
-        render_style = str(notifications_cfg.get("render_style") or "compact").strip().lower()
         symbol_timeout_sec = int(runtime.get("symbol_timeout_sec", 120))
         portfolio_timeout_sec = int(runtime.get("portfolio_timeout_sec", 60))
 
@@ -172,7 +170,6 @@ def main(argv: list[str] | None = None) -> int:
                 stage_only=stage_only,
                 want=_want,
                 log=log,
-                render_style=render_style,
             )
             return 0
 
@@ -249,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 alerts_input=(report_dir / "symbols_alerts.txt").resolve(),
                 changes_input=changes_path,
                 output=(report_dir / "symbols_notification.txt").resolve(),
-                render_style=render_style,
+                render_style="compact",
             )
 
         portfolio_cfg = cfg.get("portfolio", {}) or {}
@@ -272,9 +269,9 @@ def main(argv: list[str] | None = None) -> int:
 
         notifications_cfg = cfg.get("notifications", {}) or {}
         if notifications_cfg.get("enabled", False):
-            log("[INFO] notifications enabled in config; pipeline prepared notification text for sending.")
+            log("[INFO] notifications enabled; generated Compact compatibility notification bundle (not delivery evidence).")
         else:
-            log("[INFO] notifications disabled; generated notification text only.")
+            log("[INFO] notifications disabled; generated Compact compatibility notification bundle only.")
         if not is_scheduled:
             print("\n[DONE] Symbols pipeline finished")
             print(f"- {report_dir}/symbols_summary.csv")

@@ -418,11 +418,11 @@ class _Audit:
         return None
 
 
-def test_disabled_config_uses_exact_legacy_notification_path(monkeypatch, tmp_path: Path) -> None:
+def test_manual_trigger_finishes_without_preparing_or_sending_ordinary_notification(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
 
-    called = {"legacy": 0}
     completions: list[dict] = []
+    finalizations: list[dict] = []
     config = {
         "notifications": {
             "provider": "wechat_clawbot",
@@ -437,9 +437,9 @@ def test_disabled_config_uses_exact_legacy_notification_path(monkeypatch, tmp_pa
         state_path=tmp_path / "scheduler_state.json",
         scheduler_schedule_key="us",
         base_cfg=config,
-        run_id="run-disabled",
+        run_id="run-manual",
         runlog=_RunLog(),
-        results=[{"account": "lx"}],
+        results=[{"account": "lx", "notification_text": "# malicious legacy renderer"}],
         tick_metrics={},
         no_send=False,
         bj_tz=ZoneInfo("Asia/Shanghai"),
@@ -450,32 +450,30 @@ def test_disabled_config_uses_exact_legacy_notification_path(monkeypatch, tmp_pa
         scheduler_markets=("US",),
         scheduler_decision={"in_run_window": True},
         ran_pipeline_accounts=("lx",),
+        trigger_kind="manual",
     )
     monkeypatch.setattr(
         mod,
         "_prepare_daily_brief_notification",
-        lambda _request: (_ for _ in ()).throw(AssertionError("disabled path must not prepare Daily Brief")),
+        lambda _request: (_ for _ in ()).throw(AssertionError("manual path must not prepare Daily Brief")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_notification_delivery_route",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("manual path must not resolve delivery")),
     )
 
-    def _legacy(**_kwargs):
-        called["legacy"] += 1
-        return SimpleNamespace(
-            prepared_messages=SimpleNamespace(
-                messages_by_account={},
-                threshold_met=False,
-                used_heartbeat=False,
-                heartbeat_accounts=(),
-            ),
-            notify_candidates=[],
-            results_count=0,
-        )
+    def _finalize(**kwargs):
+        finalizations.append(dict(kwargs))
+        return 0
 
-    monkeypatch.setattr(mod, "prepare_multi_account_notification", _legacy)
-    monkeypatch.setattr(mod, "finalize_no_account_notification", lambda **_kwargs: 0)
+    monkeypatch.setattr(mod, "finalize_no_account_notification", _finalize)
 
     assert mod.run_tick_notification_flow(request) == 0
-    assert called == {"legacy": 1}
-    assert completions == [{"status": "completed", "message": "no_account_notification"}]
+    assert finalizations[0]["reason"] == "non_scheduled_ordinary_notification_disabled"
+    assert completions == [
+        {"status": "completed", "message": "non_scheduled_ordinary_notification_disabled"}
+    ]
 
 
 def test_event_change_reuses_confirmed_pointer_and_freshness_only_is_silent(tmp_path: Path) -> None:

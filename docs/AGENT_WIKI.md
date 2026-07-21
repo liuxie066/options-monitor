@@ -240,7 +240,7 @@ Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, sp
 Tick flow:
 
 ```text
-./om run tick --config <runtime-config.json>
+./om run tick --config <runtime-config.json>  # manual scan; no ordinary Tick auto-send
 -> src.application.multi_account_tick.run_tick
    -> tick_guard_flow
    -> tick_scheduler_context
@@ -250,9 +250,11 @@ Tick flow:
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
       -> optional close advice
       -> per-account metrics and notification text
-   -> tick_notification_flow
+   -> tick_notification_flow  # scheduled only: Daily Decision Brief ordinary delivery
    -> run state and audit writes
 ```
+
+Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
 
 Entrypoint signature:
 
@@ -347,12 +349,17 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 
 - Per-account content: `src/application/notify_symbols.py`
 - Multi-account wrapper: `src/application/multi_tick/notify_format.py`
+- Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
 - Perception audit card: `assistant_perception` events written by
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with exactly one `zh_cn.content` `md` node and no duplicate `title`, while WeChat ClawBot sends the same string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter.
+
+Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
+
+System notices use `# OM · 系统通知 · <component>` and receipts use `# OM · 回执 · <account>` plus `类型｜成交` or `类型｜持仓维护`. `notification_shells.py` owns only the flat Markdown H1/field/section layout. OpenD rate limits and recovery, delivery-failure aggregation/retry, trade receipt warnings, and maintenance receipt status/dedupe/persistence remain with their existing callers; the shell must not send, retry, inspect provider byte limits, or classify business state.
 
 Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
 
@@ -523,7 +530,7 @@ Smallest remaining actions, with blockers called out.
 - Strategy attribution: candidate and position attribution are independent. An empty `candidates.combo_yield` means no new Combo Yield candidate; it must not erase existing position attribution such as `组合增强（Put 侧/Call 侧）`. Renderer code must consume structured strategy/status fields rather than parse `strategy_group_id` or raw `leg_role`.
 - Capacity: candidate capacity is contract-scoped. Sell Put alternatives share account cash, so quantities shown for different candidates must never be summed.
 - Closed market: do not create a fake LIVE run. Read the latest local brief for planning/replay; once `valid_until_utc` expires, the read surface reports effective `planning_only`.
-- Safety: `notifications.daily_brief.enabled` defaults to `false`. Event risk changes do not alter candidate identity, action IDs, ranking, labeled-only authority, eligibility, or capacity; they never auto-cancel or auto-trade. This projection adds no config migration, CLI, second lifecycle, receipt, sender, renderer, or scheduler. Production enablement, notification canary, release and remote upgrade require separate operator authorization.
+- Safety: scheduled ordinary notifications use Daily Brief as the sole renderer; the deprecated `notifications.daily_brief.enabled` key is accepted with warning during the compatibility window but has no routing authority. Event risk changes do not alter candidate identity, action IDs, ranking, labeled-only authority, eligibility, or capacity; they never auto-cancel or auto-trade. Production notification canary, release and remote upgrade require separate operator authorization.
 - Multi-market: state/artifacts are market-qualified, but combined outbound remains intentionally fail-closed.
 
 Read surfaces:
