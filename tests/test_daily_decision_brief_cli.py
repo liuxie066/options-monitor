@@ -34,7 +34,11 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
 
     latest = parse_args(["daily-brief", "latest", "--account", "lx"])
     assert latest.daily_brief_command == "latest"
-    assert latest.market == "US"
+    assert latest.market is None
+
+    aggregate = parse_args(["daily-brief", "latest"])
+    assert aggregate.account is None
+    assert aggregate.market is None
     assert latest.json is False
 
     revision = parse_args(
@@ -56,6 +60,9 @@ def test_daily_brief_cli_parser_supports_latest_day_revision_and_json() -> None:
     assert revision.market_trading_date == "2026-07-19"
     assert revision.revision == 2
     assert revision.json is True
+
+    day_default = parse_args(["daily-brief", "day", "--account", "lx", "--date", "2026-07-19"])
+    assert day_default.market == "US"
 
     inspect = parse_args(["daily-brief", "delivery-inspect", "--account", "lx", "--market", "HK"])
     assert inspect.daily_brief_command == "delivery-inspect"

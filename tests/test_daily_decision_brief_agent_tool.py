@@ -200,3 +200,77 @@ def test_agent_tool_reads_env_runtime_root_then_repo_fallback(monkeypatch, tmp_p
     assert repo_data["brief"]["revision"] == 0
     assert repo_data["brief"]["run_id"] == "repo-r0"
     assert repo_warnings == []
+
+
+def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from copy import deepcopy
+
+    import src.application.agent_tools.daily_brief as mod
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+
+    for account, market in (("lx", "HK"), ("lx", "US")):
+        brief = deepcopy(_brief(run_id=f"run-{account}-{market.lower()}"))
+        brief["account"] = account
+        brief["market"] = market
+        brief["funds"] = {
+            "cash_total_by_currency": {"HKD" if market == "HK" else "USD": 100_000.0},
+            "option_opening_available_by_currency": {"HKD" if market == "HK" else "USD": 60_000.0},
+            "available": True,
+            "reason": "ok",
+        }
+        prepare_daily_decision_brief(base=tmp_path, brief=brief)
+
+    delivery_path = tmp_path / "output_accounts" / "lx" / "state" / "daily_decision_brief.US.delivery.json"
+    delivery_path.write_bytes(b'{"sentinel":true}\n')
+    before = delivery_path.read_bytes()
+    monkeypatch.setattr(
+        mod,
+        "_enabled_daily_brief_scopes",
+        lambda **_kwargs: [("lx", "HK"), ("lx", "US"), ("sy", "US")],
+    )
+
+    data = mod.read_daily_brief_view(
+        base=tmp_path,
+        now_utc=datetime(2026, 7, 19, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert data["available"] is True
+    assert data["reason"] == "partial"
+    assert [(item["query"]["account"], item["query"]["market"]) for item in data["sections"]] == [
+        ("lx", "HK"),
+        ("lx", "US"),
+        ("sy", "US"),
+    ]
+    assert data["coverage"] == {
+        "status": "partial",
+        "reason": "partial",
+        "section_count": 3,
+        "available_section_count": 2,
+        "unavailable_section_count": 1,
+    }
+    assert "## lx · 港股期权监控" in data["rendered_markdown"]
+    assert "## lx · 美股期权监控" in data["rendered_markdown"]
+    assert "## sy · 美股期权监控" in data["rendered_markdown"]
+    assert "部分账户或市场的成功扫描快照暂不可用" in data["rendered_markdown"]
+    assert "revision" not in data["rendered_markdown"]
+    assert delivery_path.read_bytes() == before
+
+
+def test_agent_tool_default_query_has_no_required_scope() -> None:
+    from src.application.agent_tools.daily_brief import DAILY_DECISION_BRIEF_READ_TOOL
+
+    manifest = DAILY_DECISION_BRIEF_READ_TOOL.to_manifest()
+
+    assert manifest["input_json_schema"].get("required") in (None, [])
+    assert manifest["safe_default_input"] == {}
+    assert manifest["examples"][0] == {"input": {}}
+    assert "期权监控" in manifest["description"]
+
+
+def test_agent_tool_day_query_keeps_existing_us_market_default() -> None:
+    import src.application.agent_tools.daily_brief as mod
+
+    mod._validate_daily_brief_input({"account": "lx", "date": "2026-07-19"})
