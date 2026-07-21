@@ -174,3 +174,26 @@ def test_scheduler_decision_normalizer_preserves_structured_target() -> None:
     )
 
     assert out['scheduled_target_market'] == '2026-07-20T10:00:00-04:00'
+
+
+def test_scheduler_decision_round_trips_optional_scan_target() -> None:
+    from domain.domain.engine.decision_engine import resolve_scheduler_decision
+
+    decision, view = resolve_scheduler_decision(
+        {
+            "should_run_scan": True,
+            "is_notify_window_open": False,
+            "reason": "candidate check",
+            "scheduled_scan_target_market": "2026-07-21T10:30:00-04:00",
+            "scheduled_target_market": None,
+        }
+    )
+
+    assert decision["scheduled_scan_target_market"] == "2026-07-21T10:30:00-04:00"
+    assert decision["scheduled_target_market"] is None
+    assert view.scheduled_scan_target_market == "2026-07-21T10:30:00-04:00"
+    assert view.scheduled_target_market is None
+
+    legacy, legacy_view = resolve_scheduler_decision({"should_run_scan": False, "reason": "legacy"})
+    assert legacy["scheduled_scan_target_market"] is None
+    assert legacy_view.scheduled_scan_target_market is None

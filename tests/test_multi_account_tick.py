@@ -138,27 +138,73 @@ def test_default_account_must_be_active_account() -> None:
         assert "--default-account must be one of active accounts" in str(exc)
 
 
-def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
+def test_mark_scheduler_accounts_records_exact_target_and_completion(tmp_path) -> None:
     import json
-    from pathlib import Path
-    from src.application import tick_account_execution as mod
+    from datetime import datetime, timezone
+    from src.application.scan_scheduler import mark_scheduler_accounts
 
-    base = tmp_path
     config = tmp_path / "config.us.json"
     config.write_text(json.dumps({"schedule": {"enabled": True}}), encoding="utf-8")
     state = tmp_path / "scheduler_state.json"
+    completed_at = datetime(2026, 7, 21, 14, 1, tzinfo=timezone.utc)
 
-    mod.mark_scanned_accounts(
-        base=base,
+    mark_scheduler_accounts(
         config=config,
         state=state,
-        state_dir=Path("output_runs/run-1/state"),
         schedule_key="schedule",
         accounts=["lx", "sy"],
+        mark_scanned=True,
+        processed_scan_targets_by_account={
+            "lx": "2026-07-21T10:00:00-04:00",
+            "sy": "2026-07-21T10:30:00-04:00",
+        },
+        base_dir=tmp_path,
+        now_utc=completed_at,
     )
 
     data = json.loads(state.read_text(encoding="utf-8"))
-    assert set(data["last_run_utc_by_account"]) == {"lx", "sy"}
+    assert data["last_run_utc_by_account"] == {
+        "lx": completed_at.isoformat(),
+        "sy": completed_at.isoformat(),
+    }
+    assert data["last_processed_scan_target_utc_by_account"] == {
+        "lx": "2026-07-21T14:00:00+00:00",
+        "sy": "2026-07-21T14:30:00+00:00",
+    }
+
+
+
+def test_mark_scheduler_accounts_does_not_regress_processed_target(tmp_path) -> None:
+    import json
+    from datetime import datetime, timezone
+    from src.application.scan_scheduler import mark_scheduler_accounts
+
+    config = tmp_path / "config.us.json"
+    config.write_text(json.dumps({"schedule": {"enabled": True}}), encoding="utf-8")
+    state = tmp_path / "scheduler_state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "last_run_utc_by_account": {"lx": "2026-07-21T14:31:00+00:00"},
+                "last_processed_scan_target_utc_by_account": {"lx": "2026-07-21T14:30:00+00:00"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    mark_scheduler_accounts(
+        config=config,
+        state=state,
+        schedule_key="schedule",
+        accounts=["lx"],
+        mark_scanned=True,
+        processed_scan_targets_by_account={"lx": "2026-07-21T14:00:00+00:00"},
+        base_dir=tmp_path,
+        now_utc=datetime(2026, 7, 21, 14, 32, tzinfo=timezone.utc),
+    )
+
+    data = json.loads(state.read_text(encoding="utf-8"))
+    assert data["last_processed_scan_target_utc_by_account"]["lx"] == "2026-07-21T14:30:00+00:00"
 
 
 def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
@@ -181,10 +227,7 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             ),
         ]
 
-    marked: list[list[str]] = []
-
     monkeypatch.setattr(mod, "run_account_outcomes", fake_run_account_outcomes)
-    monkeypatch.setattr(mod, "mark_scanned_accounts", lambda **kwargs: marked.append(list(kwargs["accounts"])))
 
     outcome = mod.run_tick_account_execution(
         TickAccountExecutionRequest(
@@ -208,7 +251,13 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
             force_mode=False,
             smoke=False,
             no_send=True,
-            scan_decision_by_account={},
+            scan_decision_by_account={
+                "lx": {
+                    "scheduler_decision": {
+                        "scheduled_scan_target_market": "2026-07-21T10:00:00-04:00",
+                    }
+                }
+            },
             state_path=tmp_path / "scheduler_state.json",
             scheduler_schedule_key="schedule",
             runlog=SimpleNamespace(),
@@ -219,7 +268,10 @@ def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(m
     assert outcome.prefetch_done is True
     assert outcome.ran_any_pipeline is True
     assert outcome.ran_pipeline_accounts == ["lx"]
-    assert marked == [["lx"]]
+    assert outcome.scheduled_scan_targets_by_account == {
+        "lx": "2026-07-21T10:00:00-04:00",
+    }
+    assert not (tmp_path / "scheduler_state.json").exists()
 
 
 def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_path) -> None:
