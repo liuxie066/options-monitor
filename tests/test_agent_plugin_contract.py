@@ -244,6 +244,13 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert tools["portfolio_capital_bridge"]["output_contract"]["schema_version"] == "portfolio.capital_bridge.v1"
     assert "accounts[].steps" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
     assert "fallback_text" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
+    assert tools["preview_notification"]["input_schema"]["render_style"]["enum"] == ["compact", "legacy"]
+    assert "renderer" in tools["preview_notification"]["output_contract"]["fact_fields"]
+    assert "authority" in tools["preview_notification"]["output_contract"]["fact_fields"]
+    assert "delivery_evidence" in tools["preview_notification"]["output_contract"]["fact_fields"]
+    assert "notification_authority.ordinary_scheduled_renderer" in tools["runtime_status"]["output_contract"]["fact_fields"]
+    assert "shared.compatibility_notification.authority" in tools["runtime_status"]["output_contract"]["fact_fields"]
+    assert "notification_authority" in tools["runtime_status"]["output_contract"]["model_preview_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None

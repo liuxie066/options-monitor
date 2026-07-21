@@ -68,6 +68,14 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "summary.ledger_trade_event_count",
         "summary.projection_verify_ok",
         "summary.warning_count",
+        "notification_authority.ordinary_scheduled_renderer",
+        "notification_authority.compatibility_artifact.authority",
+        "notification_authority.compatibility_artifact.delivery_evidence",
+        "shared.compatibility_notification.artifact_kind",
+        "shared.compatibility_notification.primary_renderer",
+        "shared.compatibility_notification.authority",
+        "shared.compatibility_notification.delivery_evidence",
+        "account_summary.accounts_with_compatibility_notification",
         "latest_run.path",
         "latest_scanned_run.path",
     ],
@@ -78,7 +86,14 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "summary.projection_verify_ok",
         "summary.service_upgrade_error",
     ],
-    "model_preview_fields": ["summary", "freshness", "account_summary", "warnings"],
+    "model_preview_fields": [
+        "summary",
+        "notification_authority",
+        "freshness",
+        "account_summary",
+        "shared.compatibility_notification",
+        "warnings",
+    ],
 }
 
 def _mask_path_str(value: Any) -> str:
