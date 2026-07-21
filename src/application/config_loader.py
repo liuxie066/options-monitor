@@ -21,6 +21,9 @@ from src.application.runtime_config_paths import write_json_atomic
 from src.application.settings import build_effective_env
 
 
+SCHEDULED_CONFIG_VALIDATOR_VERSION = 'notification-renderer-v2'
+
+
 def data_config_candidates(*, base: Path) -> list[Path]:
     base = Path(base).resolve()
     candidates = [
@@ -86,16 +89,19 @@ def _scheduled_validation_cache_state(*, cfg: dict, state_dir: Path) -> tuple[bo
     payload = json.dumps(cfg, ensure_ascii=False, sort_keys=True)
     sha256 = hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
-    prev = None
+    prev_sha256 = None
+    prev_validator_version = None
     try:
         if cache_path.exists() and cache_path.stat().st_size > 0:
             data = json.loads(cache_path.read_text(encoding='utf-8'))
             if isinstance(data, dict):
-                prev = data.get('sha256')
+                prev_sha256 = data.get('sha256')
+                prev_validator_version = data.get('validator_version')
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        prev = None
+        prev_sha256 = None
+        prev_validator_version = None
 
-    if prev == sha256:
+    if prev_sha256 == sha256 and prev_validator_version == SCHEDULED_CONFIG_VALIDATOR_VERSION:
         return False, cache_path, sha256
 
     return True, cache_path, sha256
@@ -106,7 +112,7 @@ def _mark_scheduled_validation_cached(*, cache_path: Path, sha256: str) -> None:
         cache_path,
         {
             'sha256': sha256,
-            'validator_version': 'v1',
+            'validator_version': SCHEDULED_CONFIG_VALIDATOR_VERSION,
             'written_at_utc': datetime.now(timezone.utc).isoformat(),
         },
     )

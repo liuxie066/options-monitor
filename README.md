@@ -203,11 +203,17 @@ om config get --config-key us --key runtime.prefetch.max_workers
 om run tick --config config.us.json --accounts lx sy --no-send
 ```
 
-确认输出、候选和通知预览都合理，再进行正式运行：
+确认输出、候选和兼容预览都合理，再进行手工扫描（手工/`--force` 不自动发送普通 Tick 通知）：
 
 ```bash
 om run tick --config config.us.json --accounts lx
 om run tick --config config.us.json --accounts lx sy
+```
+
+计划内普通通知只由 guarded scheduler 入口发送：
+
+```bash
+om run tick-cron --market us --accounts lx sy --timeout 600
 ```
 
 ### 5. Linux / Mac 服务化部署
@@ -264,6 +270,8 @@ om run tick --config config.us.json --accounts lx sy
 ./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
 ```
+
+以上直接 `run tick` 是手工扫描入口，不自动发送普通 Tick 通知；计划内投递使用 `run tick-cron`。
 
 单账户只是传一个账户的特例；多账户直接把多个账户标签传给 `--accounts`。
 
@@ -759,7 +767,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | `./om-agent run --tool get_close_advice ...` | 是 | 否 | 否 |
 | `./om-agent run --tool query_cash_headroom ...` | 是 | 否 | 否 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 |
-| `./om run tick --config ...` | 是 | 可能 | 是 |
+| `./om run tick --config ...` | 是 | 可能 | 否（manual/force 不自动发送普通 Tick 通知） |
 | `./om run tick-cron --market ...` | 是 | 可能 | 是 |
 | `./om research strategy-lab update --write ...` | 是 | 否 | 否 |
 | `./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是，默认发送入账回执 |
