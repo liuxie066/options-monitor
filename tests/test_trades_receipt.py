@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 from src.application.trades.receipt import (
     build_trade_intake_receipt_message,
     decide_trade_intake_receipt,
@@ -190,10 +192,12 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-1"
     assert calls[0]["target"] == "wechat:ops"
-    assert "成交已写入 option_positions" in calls[0]["message"]
-    assert "资金：权利金毛流入 USD 123.00" in calls[0]["message"]
-    assert "成交时间：2026-05-19 13:08:31 北京时间" in calls[0]["message"]
-    assert "deal_id：deal-1" in calls[0]["message"]
+    assert "# OM · 成交回执 · lx" in calls[0]["message"]
+    assert "状态｜✅ 已完成" in calls[0]["message"]
+    assert "资金｜权利金毛流入 USD 123.00" in calls[0]["message"]
+    assert "时间｜2026-05-19 13:08:31 北京时间" in calls[0]["message"]
+    assert "编号｜`deal-1`" in calls[0]["message"]
+    assert_mobile_flat_markdown(calls[0]["message"])
 
 
 def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: Path) -> None:
@@ -235,7 +239,7 @@ def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
         payload={"symbol": "9992.HK", "qty": 1, "price": 6.3},
     )
 
-    assert "[未记录]" in msg
+    assert "状态｜❌ 未记录" in msg
     assert "missing_required_fields:multiplier" in msg
     assert "9992.HK" in msg
 
@@ -275,13 +279,13 @@ def test_build_trade_intake_receipt_message_marks_ambiguous_assigned_stock_sale_
         payload={"symbol": "FUTU", "qty": 100, "price": 100.0},
     )
 
-    assert "[待确认]" in msg
-    assert "状态：待确认" in msg
+    assert "状态｜⚠️ 待确认" in msg
     assert "确认前不会自动写入" in msg
-    assert "A：FUTU USD；剩余 100 股；成本 120.0/股" in msg
-    assert "B：FUTU USD；剩余 100 股；成本 117.45/股" in msg
-    assert "请确认要匹配的选项，例如：选择 A" in msg
-    assert "[未记录]" not in msg
+    assert "A｜FUTU USD；剩余 100 股；成本 120.0/股" in msg
+    assert "B｜FUTU USD；剩余 100 股；成本 117.45/股" in msg
+    assert "下一步｜回复“选择 A”" in msg
+    assert "状态｜❌ 未记录" not in msg
+    assert_mobile_flat_markdown(msg)
 
 
 def test_build_trade_intake_receipt_message_marks_projection_verification_failure() -> None:
@@ -297,9 +301,8 @@ def test_build_trade_intake_receipt_message_marks_projection_verification_failur
         payload={"symbol": "0700.HK", "qty": 2, "price": 1.2},
     )
 
-    assert "[写入异常]" in msg
-    assert "[已记录]" not in msg
-    assert "状态：写入异常" in msg
+    assert "状态｜❌ 写入异常" in msg
+    assert "状态｜✅ 已完成" not in msg
     assert "projection_verification_failed" in msg
 
 
@@ -333,9 +336,9 @@ def test_build_trade_intake_receipt_message_marks_staggered_combo_relation_pendi
         },
     )
 
-    assert "[已记录]" in msg
-    assert "资金：权利金毛流出 USD 73.00" in msg
-    assert "组合关系待确认" in msg
+    assert "状态｜✅ 已完成" in msg
+    assert "资金｜权利金毛流出 USD 73.00" in msg
+    assert "组合｜关系待确认" in msg
     assert "未自动归入 Combo Yield 组" in msg
 
 

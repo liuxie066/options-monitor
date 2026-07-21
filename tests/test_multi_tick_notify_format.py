@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.notification_format_assertions import assert_mobile_flat_markdown
+
 
 def test_account_message_is_plain_text_for_weixin() -> None:
     from src.application.multi_tick.misc import AccountResult
@@ -13,6 +15,9 @@ def test_account_message_is_plain_text_for_weixin() -> None:
         "Covered Call\n"
         "英伟达 Covered Call 2026-06-18 180C\n"
         "覆盖 1张 cover 1\n"
+        "\n"
+        "### [lx] 平仓建议 (1)\n"
+        "- NVDA Put 2026-06-19 150P · 建议平仓\n"
     )
     message = build_account_message(
         AccountResult(
@@ -23,15 +28,25 @@ def test_account_message_is_plain_text_for_weixin() -> None:
             notification_text=notif,
         ),
         now_bj='2026-04-08 22:31:00',
-        cash_footer_lines=["💰 现金 CNY", "LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
+        cash_footer_lines=[
+            "**💰 现金 CNY**",
+            "- **LX** 总现金折算 ¥1,000 (CNY) | 担保后可用 ¥200 (CNY)",
+            "",
+            "> 截至 2026-04-08 22:30:00 北京时间",
+        ],
     )
 
-    assert "# 📊 Options Monitor\n## 账户提醒（lx）" in message
-    assert "北京时间 2026-04-08 22:31:00" in message
-    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 1" in message
-    assert "LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
+    assert message.startswith("# OM · 决策简报 · lx")
+    assert "状态｜扫描完成" in message
+    assert "时间｜2026-04-08 22:31:00 北京时间" in message
+    assert "结论｜Sell Put 1 · Covered Call 1" in message
+    assert "## 资金" in message
+    assert "账户｜LX 总现金 ¥1,000 (CNY)｜担保后 ¥200 (CNY)" in message
+    assert "数据｜截至 2026-04-08 22:30:00 北京时间" in message
+    assert "## [lx] 平仓建议 (1)" in message
     assert "**" not in message
     assert "\n>" not in message
+    assert_mobile_flat_markdown(message)
 
 
 def test_account_message_skips_accounts_without_notification_text() -> None:
@@ -77,7 +92,30 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
         cash_footer_lines=[],
     )
 
-    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 0 / Combo Yield 1" in message
+    assert "结论｜Sell Put 1 · Covered Call 0 · Combo Yield 1" in message
+
+
+def test_real_no_candidate_fragment_wraps_once_in_scheduled_renderers() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message, build_account_message_compact
+    from src.application.notify_symbols import build_notification
+
+    body = build_notification('', '', account_label='LX')
+    result = AccountResult(
+        account='lx',
+        ran_scan=True,
+        should_notify=True,
+        decision_reason='dense',
+        notification_text=body,
+    )
+
+    for renderer in (build_account_message, build_account_message_compact):
+        message = renderer(result, now_bj='2026-07-21 18:10:00', cash_footer_lines=[])
+        assert sum(line.startswith('# ') for line in message.splitlines()) == 1
+        assert message.startswith('# OM · 决策简报 · lx')
+        assert '当前没有通过筛选的候选。' in message
+        assert '# OM · 决策简报\n' not in message
+        assert_mobile_flat_markdown(message)
 
 
 def test_compact_account_overview_ignores_reject_summary_strategy_names() -> None:
@@ -103,11 +141,12 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
         cash_footer_lines=[],
     )
 
-    assert "Put 0 · Call 0 · 平仓 0\n" in message
-    assert "## 候选\n- 无符合承保条件候选" in message
+    assert "结论｜Put 0 · Call 0 · 平仓 0\n" in message
+    assert "## 候选\n当前没有通过筛选的候选。" in message
     assert "- 主要过滤：" not in message
     assert "通过 184 条" not in message
     assert "组合收益 1" not in message
+    assert_mobile_flat_markdown(message)
 
 
 def test_compact_account_overview_counts_candidate_lines_only() -> None:
@@ -137,7 +176,7 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         cash_footer_lines=[],
     )
 
-    assert "Put 0 · Call 1 · 组合 1 · 平仓 0\n" in message
+    assert "结论｜Put 0 · Call 1 · 组合 1 · 平仓 0\n" in message
     assert "## 候选\nCall" in message
     assert "- 主要过滤：" not in message
 
@@ -198,10 +237,11 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
     )
 
     assert "Put 0 · Call 1 · 平仓 0 · 待补 1" in message
-    assert "## 持仓\n- 无平仓建议\n- 待补:" in message
+    assert "## 持仓\n当前没有平仓建议。\n待补｜以下持仓需要补充数据" in message
     assert "9992.HK Call 2026-07-30 200.00C · 持仓对应合约已定位，但当前未取得可用价格" in message
     assert "0700.HK Call 2026-07-30 520.00C" not in message
     assert "价差过宽" not in message
+    assert_mobile_flat_markdown(message)
 
 
 def test_compact_account_overview_hides_non_data_gap_count() -> None:
@@ -229,6 +269,6 @@ def test_compact_account_overview_hides_non_data_gap_count() -> None:
         cash_footer_lines=[],
     )
 
-    assert "Put 0 · Call 0 · 平仓 0\n" in message
+    assert "结论｜Put 0 · Call 0 · 平仓 0\n" in message
     assert "待补" not in message
     assert "价差过宽" not in message

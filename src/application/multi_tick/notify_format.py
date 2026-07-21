@@ -178,25 +178,23 @@ def build_account_message(
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
-    lines.append("# 📊 Options Monitor")
-    lines.append(f"## 账户提醒（{acct}）")
+    lines.append(f"# OM · 决策简报 · {acct}")
     lines.append('')
-    lines.append(f"北京时间 {now_bj}")
-    lines.append('')
-    lines.append(f"### 账户 {acct} · 本轮候选")
-    counts_line = f"- {SELL_PUT_SECTION_LABEL} {put_n} / {COVERED_CALL_SECTION_LABEL} {call_n}"
+    lines.append("状态｜扫描完成")
+    lines.append(f"时间｜{now_bj} 北京时间")
+    counts_line = f"Sell Put {put_n} · Covered Call {call_n}"
     if enhancement_n > 0:
-        counts_line += f" / Combo Yield {enhancement_n}"
-    lines.append(counts_line)
+        counts_line += f" · Combo Yield {enhancement_n}"
+    lines.append(f"结论｜{counts_line}")
     lines.append('')
     body = annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip()
+    body = re.sub(r"(?m)^### ", "## ", body)
     lines.append(body)
     lines.append('')
 
-    footer_lines = cash_footer_lines or []
+    footer_lines = _flat_cash_footer_lines(cash_footer_lines or [])
     if footer_lines:
-        lines.extend(list(footer_lines))
-        lines.append('')
+        lines.extend(["## 资金", *footer_lines, ''])
 
     return '\n'.join(lines).strip() + '\n'
 
@@ -265,7 +263,7 @@ def _compact_candidate_lines(lines: list[str]) -> list[str]:
         s = str(raw or "").strip()
         if not s:
             continue
-        if "暂无符合条件的候选" in s:
+        if "暂无符合条件的候选" in s or "当前没有通过筛选的候选" in s:
             saw_no_candidate = True
             continue
         if s.startswith("📋 本轮扫描完成"):
@@ -274,7 +272,7 @@ def _compact_candidate_lines(lines: list[str]) -> list[str]:
     while out and out[-1] == "":
         out.pop()
     if not out and saw_no_candidate:
-        return ["- 无符合承保条件候选"]
+        return ["当前没有通过筛选的候选。"]
     return out
 
 
@@ -362,7 +360,7 @@ def _compact_close_gap_line(line: str) -> str:
 
 def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[list[str], int, int]:
     if not lines:
-        return ["- 无平仓建议"], 0, 0
+        return ["当前没有平仓建议。"], 0, 0
     action_count = sum(1 for line in lines if _is_close_action_line(line))
     gap_lines = [str(line).strip() for line in lines if _is_displayable_close_gap_line(str(line))]
     gap_count = len(gap_lines)
@@ -379,29 +377,29 @@ def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[l
             continue
         if "本次无 strong/medium 平仓建议" in s or "本次未生成 strong/medium 提醒" in s:
             if not action_count:
-                out.append("- 无平仓建议")
+                out.append("当前没有平仓建议。")
             continue
         if s == "- 待补数据:" or s == "待补数据:":
             in_gap = True
             if gap_count:
-                out.append("- 待补:")
+                out.append("待补｜以下持仓需要补充数据")
             continue
         if in_gap:
             if _is_displayable_close_gap_line(s):
                 if shown_gap < max_gap_items:
-                    out.append(_compact_close_gap_line(s))
+                    out.append(_compact_close_gap_line(s).removeprefix("- ").strip())
                 shown_gap += 1
             continue
-        out.append(s)
+        out.append(s.removeprefix("- ").strip())
 
     if gap_count > max_gap_items:
-        out.append(f"- 另有 {gap_count - max_gap_items} 条待补数据")
+        out.append(f"补充｜另有 {gap_count - max_gap_items} 条待补数据")
     if not out:
-        out.append("- 无平仓建议")
+        out.append("当前没有平仓建议。")
     return out, action_count, gap_count
 
 
-def _compact_cash_footer_lines(footer_lines: list[str]) -> list[str]:
+def _flat_cash_footer_lines(footer_lines: list[str]) -> list[str]:
     out: list[str] = []
     for raw in footer_lines:
         s = str(raw or "").strip()
@@ -409,12 +407,15 @@ def _compact_cash_footer_lines(footer_lines: list[str]) -> list[str]:
             continue
         if "💰" in s:
             continue
-        cleaned = s.replace("**", "")
-        if cleaned.startswith("- "):
-            cleaned = cleaned[2:].strip()
+        cleaned = s.replace("**", "").removeprefix("- ").strip()
+        if cleaned.startswith("> "):
+            detail = cleaned[2:].strip()
+            out.append(f"数据｜{detail}" if detail.startswith("截至 ") else f"说明｜{detail}")
+            continue
         cleaned = cleaned.replace("总现金折算 ", "总现金 ")
         cleaned = cleaned.replace("担保后可用 ", "担保后 ")
-        out.append(f"- {cleaned}")
+        cleaned = cleaned.replace(" | ", "｜")
+        out.append(f"账户｜{cleaned}")
     return out
 
 
@@ -436,29 +437,31 @@ def build_account_message_compact(
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
-    lines.append(f"# OM · {acct} · {now_bj} BJ")
+    lines.append(f"# OM · 决策简报 · {acct}")
     lines.append('')
+    lines.append("状态｜扫描完成")
+    lines.append(f"时间｜{now_bj} 北京时间")
     overview_parts = [f"Put {put_n}", f"Call {call_n}"]
     if enhancement_n > 0:
         overview_parts.append(f"组合 {enhancement_n}")
     overview_parts.append(f"平仓 {close_action_n}")
     if close_gap_n > 0:
         overview_parts.append(f"待补 {close_gap_n}")
-    lines.append(' · '.join(overview_parts))
+    lines.append(f"结论｜{' · '.join(overview_parts)}")
     lines.append('')
 
     lines.append("## 候选")
     if candidate_lines:
         lines.extend(candidate_lines)
     else:
-        lines.append("- 无符合承保条件候选")
+        lines.append("当前没有通过筛选的候选。")
     lines.append('')
 
     lines.append("## 持仓")
     lines.extend(close_lines)
     lines.append('')
 
-    cash_lines = _compact_cash_footer_lines(cash_footer_lines or [])
+    cash_lines = _flat_cash_footer_lines(cash_footer_lines or [])
     if cash_lines:
         lines.append("## 资金")
         lines.extend(cash_lines)

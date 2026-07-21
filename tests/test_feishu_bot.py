@@ -6,6 +6,7 @@ import json
 import pytest
 
 from src.infrastructure import feishu_bot
+from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
 def _post_request_body_bytes(markdown: str, *, uuid: str | None = None) -> int:
@@ -511,14 +512,16 @@ def test_real_notification_renderers_are_embedded_unchanged_in_single_md_node(
         "failure-recovery": failure_recovery,
     }
 
-    assert daily_brief.startswith("# OM · lx · 美股\n> ")
-    assert "\n## 候选\n1. " in daily_brief
-    assert "\n   - " in daily_brief
+    assert daily_brief.startswith("# OM · 决策简报 · lx")
+    assert "状态｜当前简报" in daily_brief
+    assert "\n## 候选\n\n**1｜" in daily_brief
     assert all(section in compact_tick for section in ("## 候选", "## 持仓", "## 资金"))
-    assert "合约：2026-08-21 100 Put" in trade_receipt
-    assert "候选 lot：" in trade_receipt
-    assert "明细：" in maintenance_receipt and "错误：" in maintenance_receipt
-    assert "FEISHU_POST_TOO_LARGE attempts=1" in failure_recovery
+    assert "合约｜2026-08-21 100 Put" in trade_receipt
+    assert "## 可选批次" in trade_receipt
+    assert "## 已完成" in maintenance_receipt and "## 失败" in maintenance_receipt
+    assert "FEISHU_POST_TOO_LARGE · 尝试 1 次" in failure_recovery
+    for message in messages.values():
+        assert_mobile_flat_markdown(message)
 
     payloads: list[dict] = []
     monkeypatch.setattr(
