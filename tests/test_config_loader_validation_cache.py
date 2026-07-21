@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import hashlib
+import json
 
 
 def test_scheduled_validation_is_cached() -> None:
@@ -59,6 +61,39 @@ def test_scheduled_validation_failure_is_not_cached() -> None:
         assert not cache_path.exists()
 
     assert len(calls) == 2
+
+
+def test_scheduled_validation_rechecks_same_hash_when_validator_version_changes() -> None:
+    from src.application.config_loader import SCHEDULED_CONFIG_VALIDATOR_VERSION, load_config
+
+    calls: list[int] = []
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        state_dir = base / 'state'
+        state_dir.mkdir()
+        cfg_path = base / 'cfg.json'
+        cfg = {"symbols": [{"symbol": "0700.HK"}], "notifications": {"render_style": "compact"}}
+        cfg_path.write_text(json.dumps(cfg), encoding='utf-8')
+        payload = json.dumps(cfg, ensure_ascii=False, sort_keys=True)
+        cfg_hash = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        (state_dir / 'config_validation_cache.json').write_text(
+            json.dumps({"sha256": cfg_hash, "validator_version": "v1"}),
+            encoding='utf-8',
+        )
+
+        load_config(
+            base=base,
+            config_path=cfg_path,
+            is_scheduled=True,
+            log=lambda _message: None,
+            validate_config_fn=lambda _cfg: calls.append(1),
+            state_dir=state_dir,
+        )
+
+        cache = json.loads((state_dir / 'config_validation_cache.json').read_text(encoding='utf-8'))
+
+    assert calls == [1]
+    assert cache["validator_version"] == SCHEDULED_CONFIG_VALIDATOR_VERSION
 
 
 def test_resolve_data_config_path_prefers_explicit_path() -> None:

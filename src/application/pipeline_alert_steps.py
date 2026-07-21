@@ -25,7 +25,6 @@ def run_stage_only_alert_notify(
     stage_only: str,
     want,
     log,
-    render_style: str = "compact",
 ) -> None:
     """Run ONLY alert or notify stage using existing output files."""
 
@@ -53,7 +52,8 @@ def run_stage_only_alert_notify(
             alerts_input=(report_dir / 'symbols_alerts.txt').resolve(),
             changes_input=(report_dir / 'symbols_changes.txt').resolve(),
             output=(report_dir / 'symbols_notification.txt').resolve(),
-            render_style=render_style,
+            render_style="compact",
         )
+        log("[INFO] generated Compact compatibility notification bundle (not delivery evidence).")
 
     log(f"[INFO] stage-only done: {stage_only}")

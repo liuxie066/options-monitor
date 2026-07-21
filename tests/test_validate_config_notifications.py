@@ -606,7 +606,7 @@ def test_validate_config_rejects_invalid_daily_brief_contract() -> None:
             assert expected in str(exc)
 
 
-def test_daily_brief_defaults_and_examples_remain_disabled() -> None:
+def test_daily_brief_defaults_and_examples_remove_deprecated_enabled_switch() -> None:
     import json
     from pathlib import Path
 
@@ -616,6 +616,37 @@ def test_daily_brief_defaults_and_examples_remain_disabled() -> None:
     example = json.loads((root / "configs" / "examples" / "user.common.example.json").read_text())
     system = json.loads((root / "configs" / "system.json").read_text())
 
-    assert DEFAULT_CONFIG["defaults"]["notifications"]["daily_brief"]["enabled"] is False
-    assert example["notifications"]["daily_brief"]["enabled"] is False
-    assert system["defaults"]["notifications"]["daily_brief"]["enabled"] is False
+    assert "enabled" not in DEFAULT_CONFIG["defaults"]["notifications"]["daily_brief"]
+    assert "enabled" not in example["notifications"]["daily_brief"]
+    assert "enabled" not in system["defaults"]["notifications"]["daily_brief"]
+
+
+def test_deprecated_notification_renderer_keys_warn_but_do_not_fail(capsys) -> None:
+    import src.application.config_validator as mod
+
+    for enabled in (True, False):
+        cfg = _base_cfg()
+        cfg["notifications"] = {
+            "daily_brief": {"enabled": enabled},
+            "render_style": "legacy",
+        }
+        mod.validate_config(cfg)
+
+    stderr = capsys.readouterr().err
+    assert stderr.count("NOTIFICATIONS_DAILY_BRIEF_ENABLED_DEPRECATED") == 2
+    assert stderr.count("NOTIFICATIONS_RENDER_STYLE_DEPRECATED") == 2
+    assert stderr.count("notifications.daily_brief.enabled is deprecated and ignored") == 2
+    assert stderr.count("notifications.render_style=legacy is deprecated and ignored") == 2
+
+
+def test_notification_render_style_rejects_unknown_or_wrong_type() -> None:
+    import src.application.config_validator as mod
+
+    for value in ("typo", 1, None):
+        cfg = _base_cfg()
+        cfg["notifications"] = {"render_style": value}
+        try:
+            mod.validate_config(cfg)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert "notifications.render_style must be one of: compact, legacy" in str(exc)
