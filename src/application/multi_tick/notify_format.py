@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 
 from domain.domain.strategy_vocab import (
     STRATEGY_COVERED_CALL,
@@ -169,6 +170,11 @@ def build_account_message(
     now_bj: str,
     cash_footer_lines: list[str] | None = None,
 ) -> str:
+    warnings.warn(
+        "Legacy Tick full-message renderer is deprecated and compatibility-only; scheduled delivery uses Daily Brief.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not (result.should_notify and result.notification_text.strip()):
         return ''
 
@@ -425,6 +431,7 @@ def build_account_message_compact(
     now_bj: str,
     cash_footer_lines: list[str] | None = None,
 ) -> str:
+    """Build the compatibility-only Compact Tick full-message artifact."""
     if not (result.should_notify and result.notification_text.strip()):
         return ''
 

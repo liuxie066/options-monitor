@@ -254,7 +254,7 @@ Tick flow:
    -> run state and audit writes
 ```
 
-Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle, not evidence that a Daily Brief was prepared or sent.
+Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
 
 Entrypoint signature:
 
@@ -355,6 +355,8 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 - Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with exactly one `zh_cn.content` `md` node and no duplicate `title`, while WeChat ClawBot sends the same string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter.
+
+Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
 
 Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
 

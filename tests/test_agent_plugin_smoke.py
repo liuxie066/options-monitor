@@ -1646,8 +1646,21 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     assert out["warnings"] == []
     assert out["data"]["summary"]["ok"] is True
     assert out["data"]["summary"]["latest_status"] == "ok"
-    assert out["data"]["shared"]["notification"]["text"] == "shared notification\n"
-    assert out["data"]["accounts"]["user1"]["notification"]["text"] == "account notification\n"
+    shared_compatibility = out["data"]["shared"]["compatibility_notification"]
+    assert shared_compatibility["text"] == "shared notification\n"
+    assert shared_compatibility["artifact_kind"] == "compatibility_notification_bundle"
+    assert shared_compatibility["primary_renderer"] == "compact"
+    assert shared_compatibility["may_include"] == ["candidate_reject_summary", "close_advice"]
+    assert shared_compatibility["authority"] == "compatibility_only"
+    assert shared_compatibility["delivery_evidence"] is False
+    assert "deprecated_field" not in shared_compatibility
+    assert out["data"]["shared"]["notification"] == {**shared_compatibility, "deprecated_field": True}
+    account_compatibility = out["data"]["accounts"]["user1"]["compatibility_notification"]
+    assert account_compatibility["text"] == "account notification\n"
+    assert out["data"]["accounts"]["user1"]["notification"] == {
+        **account_compatibility,
+        "deprecated_field": True,
+    }
     assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["send_confirmed_count"] == 1
     assert out["data"]["option_positions_context"]["ledger"]["status"] == "ok"
     assert out["data"]["summary"]["ledger_status"] == "ok"
@@ -1664,7 +1677,25 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     assert out["data"]["notification_diagnosis"]["status"] == "sent"
     assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
     assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1
-    assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
+    run_compatibility = out["data"]["latest_run"]["accounts"]["user1"]["compatibility_notification"]
+    assert run_compatibility["text"] == "run account notification\n"
+    assert out["data"]["latest_run"]["accounts"]["user1"]["notification"] == {
+        **run_compatibility,
+        "deprecated_field": True,
+    }
+    authority = out["data"]["notification_authority"]
+    assert authority["ordinary_scheduled_renderer"] == "daily_brief"
+    assert authority["legacy_renderer"] == {
+        "renderer": "legacy",
+        "status": "deprecated",
+        "removal_phase": "phase_c",
+    }
+    assert authority["legacy_aliases"]["shared.notification"]["replacement"] == "shared.compatibility_notification"
+    account_summary = out["data"]["account_summary"]
+    assert account_summary["accounts"]["user1"]["compatibility_notification_exists"] is True
+    assert account_summary["accounts"]["user1"]["notification_exists"] is True
+    assert account_summary["accounts_with_compatibility_notification"] == 1
+    assert account_summary["accounts_with_notification"] == 1
     assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
     assert out["data"]["latest_run"]["accounts"]["user1"]["expired_position_maintenance"]["json"]["receipt"]["status"] == "sent"
     assert out["data"]["latest_run"]["accounts"]["user1"]["auto_close_receipt"]["receipt_key"] == "receipt-key-1"
@@ -2270,7 +2301,6 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     shared_state_dir.mkdir(parents=True)
     report_dir.mkdir(parents=True)
     (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    (report_dir / "symbols_notification.txt").write_text("ready\n", encoding="utf-8")
     (runtime_root / "service.profile.json").write_text(
         json.dumps(
             {
@@ -2302,14 +2332,17 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     )
 
     assert data["shared"]["last_run"]["exists"] is True
-    assert data["shared"]["notification"]["exists"] is True
+    assert data["shared"]["compatibility_notification"]["exists"] is False
+    assert data["shared"]["notification"]["exists"] is False
     assert str(data["shared"]["last_run"]["path"]).endswith("last_run.json")
-    assert str(data["shared"]["notification"]["path"]).endswith("symbols_notification.txt")
+    assert str(data["shared"]["compatibility_notification"]["path"]).endswith("symbols_notification.txt")
     assert "openclaw_profile" not in data
     assert data["service_profile"]["profile"]["loaded"] is True
     assert data["service_profile"]["loaded"] is True
     assert "No last_run.json found under output_shared/state or output_shared/state." not in warnings
     assert "No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports." not in warnings
+    assert "No symbols_notification.txt found for latest scanned run or legacy report paths." not in warnings
+    assert all("symbols_notification.txt" not in warning for warning in warnings)
 
 
 def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp_path: Path) -> None:
@@ -4178,6 +4211,32 @@ def test_preview_notification_is_read_only() -> None:
     assert out["ok"] is True
     assert "### Put" in out["data"]["notification_text"]
     assert "🟢 Put NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]
+    assert out["data"]["renderer"] == "compact"
+    assert out["data"]["render_style"] == "compact"
+    assert out["data"]["authority"] == "compatibility_only"
+    assert out["data"]["delivery_evidence"] is False
+    assert out["warnings"] == ["Compact Tick preview is compatibility-only and is not scheduled delivery evidence."]
+
+    legacy = run_tool(
+        "preview_notification",
+        {"alerts_text": alerts, "account_label": "user1", "render_style": "legacy"},
+    )
+    assert legacy["ok"] is True
+    assert legacy["data"]["renderer"] == "legacy"
+    assert "deprecated" in legacy["warnings"][0].lower()
+
+    unknown = run_tool(
+        "preview_notification",
+        {"alerts_text": alerts, "account_label": "user1", "render_style": "unknown"},
+    )
+    assert unknown["ok"] is False
+
+    empty = run_tool(
+        "preview_notification",
+        {"alerts_text": alerts, "account_label": "user1", "render_style": ""},
+    )
+    assert empty["ok"] is False
+    assert empty["error"]["code"] == "INPUT_ERROR"
 
 
 def test_version_update_auto_apply_requires_preview_fields(monkeypatch, tmp_path: Path) -> None:
