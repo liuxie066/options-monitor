@@ -14,6 +14,7 @@ def _action(
     state: str = "active",
     mid: float = 1.0,
     contracts_available: int | None = 1,
+    event_risk: dict | None = None,
 ) -> dict:
     return {
         "priority": priority,
@@ -37,6 +38,43 @@ def _action(
                 else {}
             ),
         },
+        **({"event_risk": event_risk} if event_risk is not None else {}),
+    }
+
+
+def _scenario_event_risk(state: str, *, fetched_at: str = "") -> dict:
+    event = (
+        {
+            "event_id": "event-q2",
+            "event_series_id": "event-series-earnings",
+            "event_type": "earnings",
+            "event_date": "2026-08-05",
+            "occurrence_anchor": "2026|Q2",
+            "anchored": True,
+        }
+        if state == "confirmed_event"
+        else None
+    )
+    return {
+        "user_state": state,
+        "reason_code": state,
+        "reliable": state != "unknown",
+        "evidence_chain_id": "event-chain-futu",
+        "nearest_event": event,
+        "events": [event] if event else [],
+        "expiration_relations": (
+            {
+                "contract": {
+                    "expiration": "2026-08-21",
+                    "relation": "before_expiration",
+                    "days_before_expiration": 16,
+                }
+            }
+            if event
+            else {}
+        ),
+        "in_attention_window": bool(event),
+        **({"fetched_at": fetched_at} if fetched_at else {}),
     }
 
 
@@ -94,7 +132,7 @@ def _confirm(base: Path, lifecycle: dict) -> None:
         delivery_kind=lifecycle["delivery_kind"],
         delivery_key=lifecycle["delivery_key"],
         brief_digest=lifecycle["current_brief_digest"],
-        confirmed_at_utc="2026-04-01T13:41:00+00:00",
+        confirmed_at_utc=f"{brief['market_trading_date']}T13:41:00+00:00",
     )
 
 
@@ -438,3 +476,66 @@ def test_disabled_config_uses_exact_legacy_notification_path(monkeypatch, tmp_pa
     assert mod.run_tick_notification_flow(request) == 0
     assert called == {"legacy": 1}
     assert completions == [{"status": "completed", "message": "no_account_notification"}]
+
+
+def test_event_change_reuses_confirmed_pointer_and_freshness_only_is_silent(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import prepare_daily_decision_brief
+
+    baseline_action = _action(event_risk=_scenario_event_risk("confirmed_none"))
+    baseline_action.update(
+        {
+            "expiration": "2026-08-21",
+            "contract_symbol": "NVDA260821P00100000",
+        }
+    )
+    baseline = _brief(run_id="run-event-none", actions=[baseline_action])
+    baseline.update(
+        {
+            "market_trading_date": "2026-07-21",
+            "generated_at_utc": "2026-07-21T13:40:00+00:00",
+            "data_as_of_utc": "2026-07-21T13:39:00+00:00",
+            "valid_until_utc": "2026-07-21T20:00:00+00:00",
+        }
+    )
+    first = prepare_daily_decision_brief(base=tmp_path, brief=baseline)
+    _confirm(tmp_path, first)
+
+    event_action = _action(event_risk=_scenario_event_risk("confirmed_event"))
+    event_action.update(
+        {
+            "expiration": "2026-08-21",
+            "contract_symbol": "NVDA260821P00100000",
+        }
+    )
+    changed = {**baseline, "run_id": "run-event-added", "actions": [event_action]}
+    second = prepare_daily_decision_brief(base=tmp_path, brief=changed)
+
+    assert second["delivery_kind"] == "delta"
+    assert second["last_delivered_revision"] == 0
+    assert "candidate_event_added" in {item["change_type"] for item in second["diff"]["changes"]}
+    _confirm(tmp_path, second)
+
+    fresh_action = _action(
+        event_risk=_scenario_event_risk(
+            "confirmed_event",
+            fetched_at="2026-07-21T15:00:00+00:00",
+        )
+    )
+    fresh_action.update(
+        {
+            "expiration": "2026-08-21",
+            "contract_symbol": "NVDA260821P00100000",
+        }
+    )
+    freshness_only = {
+        **baseline,
+        "run_id": "run-event-freshness",
+        "generated_at_utc": "2026-07-21T15:00:00+00:00",
+        "data_as_of_utc": "2026-07-21T14:59:00+00:00",
+        "actions": [fresh_action],
+    }
+    third = prepare_daily_decision_brief(base=tmp_path, brief=freshness_only)
+
+    assert third["delivery_kind"] == "none"
+    assert third["last_delivered_revision"] == second["current_revision"]
+    assert third["diff"]["material"] is False
