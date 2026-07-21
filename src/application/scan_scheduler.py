@@ -470,7 +470,8 @@ def _last_processed_scan_target_for_account(state: dict, account: str | None) ->
         if not account:
             return maybe_parse_dt(state.get('last_processed_scan_target_utc'))
         raw_value = processed_map.get(str(account))
-        return maybe_parse_dt(raw_value) if raw_value else None
+        if raw_value:
+            return maybe_parse_dt(raw_value)
     return _last_run_for_account(state, account)
 
 
