@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 1.4.11 - 2026-07-23
+
 ### Changed
 - Removed the historical monthly-income reporting model and its public Agent/CLI/Assistant/analysis/portfolio compatibility surfaces. Option performance now has one public authority: explicit `activity`, `cash`, `pnl`, and `capital` namespaces; real option trade cash remains `cash.option_trade_cash_gross` and is never presented as income or profit.
+
+### Fixed
+- Evaluated assigned-stock sale validation at the sale event time so canonical lifecycle projection can consume all facts that precede the sale, including same-day events later than the current wall clock.
 
 ## 1.4.10 - 2026-07-23
 
