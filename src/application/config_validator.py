@@ -471,17 +471,6 @@ def _validate_enabled_side_template_strategy(
     )
 
 
-def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
-    if key not in cfg or cfg.get(key) is None:
-        return
-    values = cfg.get(key)
-    if not isinstance(values, list) or not values:
-        die(f'{path}.{key} must be a non-empty array')
-    for index, value in enumerate(values):
-        if _finite_number(value, f'{path}.{key}[{index}]') < 0:
-            die(f'{path}.{key}[{index}] must be >= 0')
-
-
 def _validate_optional_strike_bounds(cfg: dict, path: str):
     min_strike = cfg.get('min_strike')
     max_strike = cfg.get('max_strike')
