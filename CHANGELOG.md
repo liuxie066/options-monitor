@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.3 - 2026-07-22
+
+### Fixed
+- Kept visible blank lines between Daily Brief sections and candidate items in Feishu App delivery: Feishu `post` Markdown nodes collapse empty lines, so section separators now use a zero-width-space spacer that survives the send path and restores readable spacing on mobile and desktop.
+
 ## 1.4.2 - 2026-07-21
 
 ### Added
