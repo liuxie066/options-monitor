@@ -477,6 +477,8 @@ Tool Gateway 只读列出：
 
 利润、现金和交易活动是三个并列口径：利润看 `pnl`，现金变化看 `cash`，权利金活动看 `activity`。不要把权利金重复加到 PnL，也不要把指派买入正股的本金当作亏损。组合桥接同样分开：`portfolio_pnl_bridge` 对接总资产/PnL 恒等式，`portfolio_cash_bridge` 对接现金余额恒等式。
 
+现金的 CNY 金额在交易事件写入时按成交附近的汇率快照冻结，查询时不再拿当前汇率反推。原币金额始终保留；旧事件没有换算快照或成交附近没有可用汇率时，CNY 保持 `null/partial`，并在 `missing` 中给出原因。
+
 旧的 `./om option-positions report monthly-income` 和 `monthly_income_report` 仍可用于回滚，但已废弃，不再作为新消费者入口。
 
 ### 通知预览
