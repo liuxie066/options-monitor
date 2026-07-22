@@ -153,6 +153,33 @@ This synthesis never infers assignment from a close type and never invents an
 assigned-stock sale, Call exercise, or future Call terminal value. Assignment
 semantics remain in the separate full-lifecycle reporting path.
 
+## Fee Evidence and Action Safety
+
+Close Advice uses `domain/domain/fee_calc.py` as its only option-fee authority.
+The dated assumptions are intentionally visible rather than presented as
+account-level exact fees:
+
+- USD uses Futu HK's fixed-package schedule and reports
+  `fee_calc_status=schedule_estimate` with
+  `fee_calc_basis=futu_us_fixed_package_2026-07-22`. The position contract does
+  not currently carry the account's fixed/tiered platform-package selection.
+- HKD uses the Tier-1 exchange tariff as an upper bound and reports
+  `fee_calc_status=conservative_estimate` with
+  `fee_calc_basis=futu_hk_tier1_upper_bound_2026-07-22`. The tariff is waived
+  when the option price is exactly HKD 0.01.
+- Missing or non-Futu broker evidence, unsupported currency, and invalid fee
+  inputs are explicit non-authoritative statuses; they never silently fall back
+  to USD.
+
+`estimated_pnl_if_close_gross`, `estimated_close_fee`, and
+`estimated_pnl_if_close_net` retain lifetime-P&L meaning. Long positions also
+expose `net_close_proceeds`, the sell-to-close value less the estimated fee.
+An existing actionable short close or long take-profit requires positive net
+lifetime P&L. A long-call salvage action instead requires positive
+`net_close_proceeds`, so a valid residual-value sale may still have negative
+lifetime P&L. Missing fee evidence makes only an otherwise-actionable row
+`not_evaluable`; it does not manufacture an action from an existing hold.
+
 ## Calibration Evidence
 
 Short-vol rows expose the evidence needed to calibrate the existing thresholds

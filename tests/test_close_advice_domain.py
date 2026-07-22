@@ -7,6 +7,10 @@ from domain.domain.close_advice import (
     CloseAdviceInput,
     EXIT_STATE_HOLD,
     EXIT_STATE_NOT_EVALUABLE,
+    EXIT_STATE_PROFIT_CAPTURE,
+    EXIT_STATE_SALVAGE,
+    EXIT_STATE_TAKE_PROFIT,
+    apply_fee_economic_safety,
     evaluate_close_advice,
 )
 
@@ -147,3 +151,77 @@ def test_close_advice_nan_quote_is_treated_as_missing_data() -> None:
     assert row["tier"] == "not_evaluable"
     assert row["exit_state"] == EXIT_STATE_NOT_EVALUABLE
     assert "missing_mid" in row["data_quality_flags"]
+
+
+def test_fee_safety_keeps_non_actionable_hold_unchanged_without_fee_evidence() -> None:
+    row = {"tier": "none", "exit_state": EXIT_STATE_HOLD, "fee_calc_status": "unavailable"}
+
+    assert apply_fee_economic_safety(row) == row
+
+
+def test_fee_safety_fails_closed_for_actionable_row_without_usable_fee() -> None:
+    row = apply_fee_economic_safety(
+        {
+            "tier": "strong",
+            "exit_state": EXIT_STATE_PROFIT_CAPTURE,
+            "fee_calc_status": "unsupported_currency",
+            "estimated_pnl_if_close_net": None,
+        }
+    )
+
+    assert row["tier"] == "not_evaluable"
+    assert row["exit_state"] == EXIT_STATE_NOT_EVALUABLE
+    assert row["evaluation_status"] == "not_evaluable"
+    assert "fee_evidence_unavailable" in row["data_quality_flags"]
+
+
+def test_fee_safety_requires_positive_net_lifetime_pnl_for_profit_actions() -> None:
+    for exit_state in (EXIT_STATE_PROFIT_CAPTURE, EXIT_STATE_TAKE_PROFIT):
+        blocked = apply_fee_economic_safety(
+            {
+                "tier": "medium",
+                "exit_state": exit_state,
+                "fee_calc_status": "schedule_estimate",
+                "estimated_pnl_if_close_net": 0.0,
+            }
+        )
+        allowed = apply_fee_economic_safety(
+            {
+                "tier": "medium",
+                "exit_state": exit_state,
+                "fee_calc_status": "schedule_estimate",
+                "estimated_pnl_if_close_net": 0.01,
+            }
+        )
+
+        assert blocked["tier"] == "none"
+        assert blocked["exit_state"] == EXIT_STATE_HOLD
+        assert "not_profitable_after_fee" in blocked["data_quality_flags"]
+        assert allowed["tier"] == "medium"
+        assert allowed["exit_state"] == exit_state
+
+
+def test_fee_safety_uses_net_proceeds_for_long_salvage() -> None:
+    allowed = apply_fee_economic_safety(
+        {
+            "tier": "optional",
+            "exit_state": EXIT_STATE_SALVAGE,
+            "fee_calc_status": "conservative_estimate",
+            "estimated_pnl_if_close_net": -95.0,
+            "net_close_proceeds": 5.0,
+        }
+    )
+    blocked = apply_fee_economic_safety(
+        {
+            "tier": "optional",
+            "exit_state": EXIT_STATE_SALVAGE,
+            "fee_calc_status": "conservative_estimate",
+            "estimated_pnl_if_close_net": -100.0,
+            "net_close_proceeds": 0.0,
+        }
+    )
+
+    assert allowed["exit_state"] == EXIT_STATE_SALVAGE
+    assert blocked["tier"] == "none"
+    assert blocked["exit_state"] == EXIT_STATE_HOLD
+    assert "non_positive_net_close_proceeds" in blocked["data_quality_flags"]

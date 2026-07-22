@@ -23,6 +23,7 @@ from domain.domain.close_advice import (
     EXIT_STATE_PROFIT_CAPTURE,
     EXIT_STATE_SALVAGE,
     EXIT_STATE_TAKE_PROFIT,
+    apply_fee_economic_safety,
     evaluate_close_advice,
     evaluate_long_call_convexity_advice,
     evaluate_short_vol_close_advice,
@@ -32,14 +33,18 @@ from domain.domain.close_advice import (
     synthesize_combo_yield_group_close_advice,
 )
 from domain.domain.combo_yield_lifecycle import build_option_group_inventory
-from domain.domain.fee_calc import calc_futu_option_fee
+from domain.domain.fee_calc import (
+    FUTU_HK_OPTION_FEE_BASIS,
+    FUTU_US_OPTION_FEE_BASIS,
+    calc_futu_option_fee,
+)
 from src.infrastructure.io_utils import atomic_write_text, read_json, safe_read_csv
 from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     effective_multiplier,
     normalize_account,
 )
-from domain.domain.option_position_identity import normalize_currency
+from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from src.application.opend_utils import normalize_underlier
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
@@ -91,7 +96,10 @@ OUTPUT_COLUMNS = [
     "remaining_premium",
     "estimated_pnl_if_close_gross",
     "estimated_close_fee",
+    "fee_calc_status",
+    "fee_calc_basis",
     "estimated_pnl_if_close_net",
+    "net_close_proceeds",
     "realized_if_close",
     "buy_to_close_fee",
     "buy_to_close_cost",
@@ -1179,6 +1187,7 @@ def _is_yield_enhancement_long_call_position(pos: dict[str, Any]) -> bool:
 def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
     strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
     return {
+        "broker": normalize_broker(pos.get("broker")),
         "strategy": str(pos.get("strategy") or strategy_snapshot.get("strategy") or "").strip(),
         "leg_role": str(pos.get("leg_role") or strategy_snapshot.get("leg_role") or "").strip(),
         "strategy_group_id": str(pos.get("strategy_group_id") or strategy_snapshot.get("strategy_group_id") or "").strip(),
@@ -1378,17 +1387,39 @@ def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
+    row["fee_calc_status"] = "not_required"
+    row["fee_calc_basis"] = None
+    row["estimated_close_fee"] = None
+    row["estimated_pnl_if_close_net"] = None
+    row["buy_to_close_fee"] = None
+    row["sell_to_close_fee"] = None
+    row["close_fee"] = None
+    row["net_close_proceeds"] = None
     mid = safe_float(row.get("close_mid"))
-    contracts = safe_int(row.get("contracts_open")) or 1
     if mid is None:
         return row
+    row["fee_calc_status"] = "unavailable"
+    broker_raw = str(row.get("broker") or "").strip()
+    broker = normalize_broker(broker_raw)
+    if not broker:
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
+    if broker != "富途":
+        row["fee_calc_status"] = "unsupported_broker"
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
+    currency = normalize_currency(row.get("currency"))
+    if currency not in {"USD", "HKD"}:
+        row["fee_calc_status"] = "unsupported_currency"
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
+    contracts = safe_int(row.get("contracts_open"))
+    if contracts is None or contracts <= 0:
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
     multiplier = safe_int(row.get("multiplier"))
     if multiplier is None or multiplier <= 0:
         return _with_extra_flags(row, ["fee_calc_unavailable"])
     is_long_close = str(row.get("position_side") or "").strip().lower() == "long"
     try:
         fee = calc_futu_option_fee(
-            row.get("currency"),
+            currency,
             mid,
             contracts=contracts,
             multiplier=multiplier,
@@ -1401,6 +1432,12 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
         gross = safe_float(row.get("realized_if_close"))
     row["estimated_pnl_if_close_gross"] = gross
     row["estimated_close_fee"] = float(fee)
+    if currency == "HKD":
+        row["fee_calc_status"] = "conservative_estimate"
+        row["fee_calc_basis"] = FUTU_HK_OPTION_FEE_BASIS
+    else:
+        row["fee_calc_status"] = "schedule_estimate"
+        row["fee_calc_basis"] = FUTU_US_OPTION_FEE_BASIS
     net = gross - float(fee) if gross is not None else None
     row["estimated_pnl_if_close_net"] = net
     # Deprecated compatibility alias: historically this field was net after the runner applied fees.
@@ -1408,6 +1445,7 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
     row["close_fee"] = float(fee)
     if is_long_close:
         row["sell_to_close_fee"] = float(fee)
+        row["net_close_proceeds"] = mid * multiplier * contracts - float(fee)
     else:
         row["buy_to_close_fee"] = float(fee)
         remaining = safe_float(row.get("remaining_premium"))
@@ -1492,25 +1530,6 @@ def _apply_close_calibration_context(row: dict[str, Any], pos: dict[str, Any]) -
         status = "complete"
     row["close_calibration_status"] = status
     row["close_calibration_missing"] = ";".join(missing) or None
-    return row
-
-
-def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
-    realized = safe_float(row.get("realized_if_close"))
-    if realized is None:
-        return row
-    if str(row.get("position_side") or "").strip().lower() == "long":
-        return row
-    if str(row.get("tier") or "").strip().lower() == "none":
-        return row
-    if realized > 0:
-        return row
-    row = _with_extra_flags(row, ["not_profitable_after_fee"])
-    row["tier"] = "none"
-    row["tier_label"] = "不提醒"
-    row["reason"] = "扣除平仓手续费后已无正收益，不建议作为收益型买回提醒"
-    row["exit_state"] = EXIT_STATE_HOLD
-    row["exit_reason_type"] = EXIT_STATE_HOLD
     return row
 
 
@@ -2468,7 +2487,7 @@ def run_close_advice(
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
             row = _apply_buy_to_close_fee(row)
-            row = _apply_fee_profitability_gate(row)
+            row = apply_fee_economic_safety(row)
         row = _apply_close_calibration_context(row, pos0)
         status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
