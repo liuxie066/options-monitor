@@ -804,9 +804,9 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert fixed.startswith("# OM · 决策简报 · lx")
     assert "状态｜10:00 批次" in fixed
     assert "## 当前候选" in fixed
-    assert "现金总额｜$180,000.00" in fixed
+    assert "现金总额｜$180,000.00" not in fixed
     assert "现金总额（折CNY）｜¥1,260,000.00" in fixed
-    assert "可用于期权开仓｜$75,000.00" in fixed
+    assert "可用于期权开仓｜$75,000.00" not in fixed
     assert "可用于期权开仓（折CNY）｜¥525,000.00" in fixed
     assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
 
@@ -824,7 +824,8 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "MSFT｜Sell Put" in alert
     assert "NVDA｜Sell Put" in alert
     assert "较上一轮" not in alert
-    assert "现金总额｜$180,000.00" in alert
+    assert "现金总额｜$180,000.00" not in alert
+    assert "现金总额（折CNY）｜¥1,260,000.00" in alert
 
     failure = render_fixed_failure(brief, context=_scheduled_context())
     assert "数据异常 · 10:00 批次失败" in failure
@@ -850,6 +851,25 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "revision" not in current_query + stale_query
     assert_mobile_flat_markdown(current_query)
     assert_mobile_flat_markdown(stale_query)
+
+
+def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {"HKD": 480_000.0, "USD": 18_000.0},
+        "option_opening_available_by_currency": {"HKD": 225_000.0},
+        "available": True,
+        "reason": "ok",
+    }
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "现金总额｜HK$480,000.00" in message
+    assert "现金总额｜$18,000.00" in message
+    assert "可用于期权开仓｜HK$225,000.00" in message
+    assert "折CNY" not in message
 
 
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
