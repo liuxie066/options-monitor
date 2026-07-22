@@ -103,8 +103,6 @@ def run_symbol_monitoring(
         want_put=want_put,
         want_call=want_call,
         portfolio_ctx=inputs.portfolio_ctx,
-        usd_per_cny_exchange_rate=inputs.usd_per_cny_exchange_rate,
-        cny_per_hkd_exchange_rate=inputs.cny_per_hkd_exchange_rate,
     )
     want_put = bool(prefilters.want_put)
     want_call = bool(prefilters.want_call)
