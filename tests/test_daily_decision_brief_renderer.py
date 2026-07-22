@@ -149,6 +149,8 @@ def _brief() -> dict:
                     "put_strike": 300,
                     "call_expiration": "2026-09-18",
                     "call_strike": 400,
+                    "put_sell_reference": 3.45,
+                    "call_buy_reference": 1.05,
                     "metrics": {"annualized_net_credit_yield": 0.154, "net_income": 620},
                     "strategy_group_id": "combo-candidate-secret",
                 }
@@ -226,8 +228,8 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "NVDA｜Sell Put｜08-21 $100 Put（备选 2）" in message
     assert "AAPL｜Covered Call｜08-21 $250 Call（首选）" in message
     assert "TSLA｜组合增强（首选）" in message
-    assert "Put｜08-21 $300 Put" in message
-    assert "Call｜09-18 $400 Call" in message
+    assert "Put｜08-21 $300 Put · 卖出参考 $3.45" in message
+    assert "Call｜09-18 $400 Call · 买入参考 $1.05" in message
     assert "PDD｜组合增强（Put 侧）｜暂无法评估（行情覆盖不足）" in message
     assert "FUTU｜Sell Put｜暂无法评估（价格不可用）" in message
     assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message

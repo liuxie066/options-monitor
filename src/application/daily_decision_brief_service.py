@@ -1196,6 +1196,8 @@ def _candidate_view(
             "call_expiration": _text(row.get("call_expiration") or row.get("expiration")),
             "put_strike": _number(row.get("put_strike")),
             "call_strike": _number(row.get("call_strike")),
+            "put_sell_reference": _number(row.get("put_bid")),
+            "call_buy_reference": _number(row.get("call_ask")),
             "priority": _priority_from_row(row, default="P1"),
             "metrics": _candidate_metrics(row, rank=rank),
             "capacity": dict(capacity or {}),
