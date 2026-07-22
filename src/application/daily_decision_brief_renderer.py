@@ -542,6 +542,10 @@ def _position_views(
     limits: Mapping[str, int],
 ) -> tuple[list[dict[str, Any]], int]:
     positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
+    total = len(positions)
+    # 无行动指向的持仓（继续观察、无法评估）不逐条展示，但仍计入“另有 N 个持仓未展开”，
+    # 避免用户以为持仓丢失
+    positions = [row for row in positions if _position_has_advice(row)]
     changed_keys = _changed_position_keys(diff)
     changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
     unchanged_positions = [row for row in positions if row not in changed_positions]
@@ -549,7 +553,7 @@ def _position_views(
         [*changed_positions, *unchanged_positions],
         max(limits["max_actions_per_priority"], len(changed_positions)),
     )
-    omitted = len(positions) - len(selected)
+    omitted = total - len(selected)
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
     for row in selected:
@@ -600,16 +604,16 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     if statuses & {"quote_unusable", "unavailable"}:
         return "暂无法评估（价格不可用）"
     if statuses & {"not_evaluable", "error", "blocked"}:
-        return "暂无法评估（数据暂不可用）"
+        return "暂无法评估（报价质量不足）"
 
     known_evaluation = {"", "evaluable", "evaluated", "ready", "priced"}
     known_quote = {"", "available", "fresh", "priced", "ready"}
     if evaluation not in known_evaluation or quote not in known_quote:
-        return "暂无法评估（数据暂不可用）"
+        return "暂无法评估（报价质量不足）"
 
     action = _lower(row.get("close_action"))
     if action == "not_evaluable":
-        return "暂无法评估（数据暂不可用）"
+        return "暂无法评估（报价质量不足）"
     if action in _CLOSE_ACTION_LABELS:
         return _CLOSE_ACTION_LABELS[action]
     tier = _lower(row.get("tier"))
@@ -617,7 +621,18 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
         return "建议复核持仓"
     if tier in {"", "observe", "weak", "none"}:
         return "继续观察"
-    return "暂无法评估（数据暂不可用）"
+    return "暂无法评估（报价质量不足）"
+
+
+_POSITION_ACTIONABLE_LABELS = frozenset(
+    [_CLOSE_ACTION_LABELS[action] for action in _CLOSE_DETAIL_ACTIONS] + ["建议复核持仓"]
+)
+
+
+def _position_has_advice(row: Mapping[str, Any]) -> bool:
+    # 只展示指向实际动作的持仓（平仓/止盈建议、需人工复核）；
+    # “继续观察”和无法评估的持仓不需要用户做出变化，属于干扰信息
+    return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
 
 
 def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:

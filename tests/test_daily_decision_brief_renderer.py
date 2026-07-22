@@ -230,8 +230,9 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "TSLA｜组合增强（首选）" in message
     assert "Put｜08-21 $300 Put · 卖出参考 $3.45" in message
     assert "Call｜09-18 $400 Call · 买入参考 $1.05" in message
-    assert "PDD｜组合增强（Put 侧）｜暂无法评估（行情覆盖不足）" in message
-    assert "FUTU｜Sell Put｜暂无法评估（价格不可用）" in message
+    assert "暂无法评估" not in message
+    assert "PDD" not in message
+    assert "FUTU" not in message
     assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message
     assert "NVDA 08-21 $100 Put｜按当前现金最多 5 手" in message
     assert "多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
@@ -338,6 +339,8 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
     assert "invalid" not in message.lower()
     assert "HK$88.00" not in message
     assert "HK$9,999.00" not in message
+    assert "HOLD.HK" not in message
+    assert "GAP.HK" not in message
     assert "HK$77.00" not in message
     assert "HK$8,888.00" not in message
 
@@ -350,7 +353,8 @@ def test_combo_position_attribution_is_independent_from_new_combo_candidates() -
     message = render_full_brief(brief)
 
     assert "TSLA · 组合增强" not in message
-    assert "PDD｜组合增强（Put 侧）｜暂无法评估（行情覆盖不足）" in message
+    assert "NVDA｜组合增强（Put 侧）" in message
+    assert "PDD" not in message
     assert "combo-pdd-secret" not in message
     assert "funding_put" not in message
 
@@ -486,10 +490,14 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     ]
     message = render_full_brief(brief)
 
-    assert "A｜Sell Put｜暂无法评估（行情覆盖不足）" in message
-    assert "B｜Sell Put｜暂无法评估（价格不可用）" in message
-    assert "C｜Sell Put｜暂无法评估（数据暂不可用）" in message
-    assert "D｜Sell Put｜继续观察" in message
+    assert "暂无法评估" not in message
+    assert "继续观察" not in message
+    assert "**A｜Sell Put" not in message
+    assert "**B｜Sell Put" not in message
+    assert "**C｜Sell Put" not in message
+    assert "**D｜Sell Put" not in message
+    assert "当前没有需要展示的期权持仓。" in message
+    assert "另有 4 个持仓未展开" in message
     assert "future_state" not in message
 
 
@@ -562,7 +570,7 @@ def test_renderer_honors_section_limits() -> None:
             "strategy_family": "sell_put",
             "quote_status": "priced",
             "evaluation_status": "evaluable",
-            "close_action": "hold",
+            "close_action": "close",
         }
         for i in range(8)
     ]
