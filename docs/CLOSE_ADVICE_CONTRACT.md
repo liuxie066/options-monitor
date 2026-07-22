@@ -415,6 +415,38 @@ profile or family. Meeting the floor permits paired policy analysis only. It
 does not select a winner, change production policy, or authorize notification
 changes. Candidate-only Shadow Replay datasets retain their prior status shape.
 
+### Paired close-policy analysis
+
+`om research shadow-replay analyze` adds a close-policy report only when the
+optional close facet exists. The report consumes the exact episode/outcome keys
+selected by mechanical readiness; it does not recreate a second eligibility
+rule. Under-sampled segments and mechanically incomplete outcomes remain in
+coverage and inconclusive counts but do not enter promotion metrics.
+
+Episode comparison uses terminal evidence when it is promotion-usable,
+otherwise the longest promotion-usable fixed horizon. Close precision follows
+its separate definition and uses the best promotion-usable hold horizon. P3
+always compares current and replacement contracts on the same outcome row; if
+that row is unavailable, switch metrics remain inconclusive.
+
+Policy metrics report P0/P1/P2/P3 action counts, net incremental outcomes for
+determinate close/hold actions, premature-close regret, avoided-loss benefit,
+close and switch transaction costs, close precision, path tails,
+assignment/called-away willingness alignment, repeated reminders, and action
+transitions. They are emitted at aggregate, profile/family, market, account,
+episode, and earliest-episode-per-unique-lot grains. Every metric includes its
+population, usable count, and inconclusive count. `review` is never imputed as
+either a close or a hold transaction.
+
+Threshold sensitivity is one-factor-at-a-time and descriptive only: strong
+remaining annualized maximum at 3%/4.5%/6%, medium at 5%/7%/9%, and every
+current capture threshold at minus five/current/plus five percentage points.
+It uses the decision-time DTE, capture ratio, and remaining annualized return
+persisted in the episode. Missing historical threshold inputs remain
+inconclusive; expiration and UTC timestamps are not used to reconstruct DTE.
+The analysis emits no policy winner or parameter recommendation and leaves
+production promotion false pending the durable CEO decision artifact.
+
 ## Acceptance Matrix
 
 | Area | Acceptance standard |

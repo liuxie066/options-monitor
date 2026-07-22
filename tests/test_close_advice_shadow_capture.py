@@ -46,6 +46,7 @@ def _close_row(*, account: str, lot_id: str, tier: str = "medium") -> dict[str, 
         "close_calibration_status": "complete",
         "capture_ratio": 0.85,
         "remaining_annualized_return": 0.07,
+        "dte": 29,
         "close_mid": 0.2,
         "bid": 0.19,
         "ask": 0.21,
@@ -203,6 +204,13 @@ def test_close_facet_captures_formal_and_all_shadow_policy_results(tmp_path: Pat
     }
     assert episode["p0_parity"]["recommendation_matches"] is True
     assert episode["decision_economics"]["close_now_cost"] == 22.5
+    assert episode["decision_economics"]["decision_close_slippage"] == 1.0
+    assert episode["material_economic_buckets"]["dte"] == 29.0
+    assert episode["threshold_inputs"] == {
+        "capture_ratio": 0.85,
+        "dte": 29,
+        "remaining_annualized_return": 0.07,
+    }
     assert episode["replacement_evidence"]["entry_credit"] == 200
     assert episode["replacement_evidence"]["fee_calc_status"] == "candidate_futu_fee"
     assert episode["replacement_provenance"] == {

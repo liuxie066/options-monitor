@@ -482,6 +482,7 @@ def _close_episode_observation(
             for policy, result in normalized_results.items()
         },
         "economic_buckets": _material_economic_buckets(row),
+        "threshold_inputs": _threshold_inputs(row),
         "decision_economics": decision_economics,
         "replacement": _material_replacement_facts(reallocation_row),
     }
@@ -512,6 +513,7 @@ def _close_episode_observation(
             )
         },
         "material_economic_buckets": material_facts["economic_buckets"],
+        "threshold_inputs": material_facts["threshold_inputs"],
         "decision_economics": decision_economics,
         "replacement_evidence": material_facts["replacement"],
         "replacement_provenance": _replacement_provenance(reallocation_row),
@@ -564,12 +566,24 @@ def _material_economic_buckets(row: dict[str, Any]) -> dict[str, Any]:
         "evaluation_status": text(row.get("evaluation_status")).lower(),
         "fee_calc_status": text(row.get("fee_calc_status")).lower(),
         "close_calibration_status": text(row.get("close_calibration_status")).lower(),
+        "dte": _rounded_number(row.get("dte"), digits=0),
     }
     for key in _MATERIAL_RATIO_FIELDS:
         out[key] = _rounded_number(row.get(key), digits=4)
     for key in _MATERIAL_MONEY_FIELDS:
         out[key] = _rounded_number(row.get(key), digits=2)
     return out
+
+
+def _threshold_inputs(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dte": _rounded_number(row.get("dte"), digits=0),
+        "capture_ratio": _rounded_number(row.get("capture_ratio"), digits=12),
+        "remaining_annualized_return": _rounded_number(
+            row.get("remaining_annualized_return"),
+            digits=12,
+        ),
+    }
 
 
 def _material_replacement_facts(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -610,6 +624,7 @@ def _replacement_provenance(row: dict[str, Any] | None) -> dict[str, Any]:
 
 def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dict[str, Any]:
     ask = _first_number(row, "ask")
+    close_mid = _first_number(row, "close_mid")
     contracts = _first_number(row, "contracts_open", fallback=position.get("contracts_open"))
     if contracts is None:
         contracts = _first_number(position, "contracts")
@@ -621,6 +636,7 @@ def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dic
         "close_fee",
     )
     close_cost = None
+    close_slippage = None
     if (
         ask is not None
         and ask >= 0
@@ -632,11 +648,14 @@ def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dic
         and fee >= 0
     ):
         close_cost = ask * multiplier * contracts + fee
+        if close_mid is not None and close_mid >= 0 and ask >= close_mid:
+            close_slippage = (ask - close_mid) * multiplier * contracts
     return {
         "decision_ask": _rounded_number(ask, digits=6),
         "contracts": _rounded_number(contracts, digits=0),
         "multiplier": _rounded_number(multiplier, digits=6),
         "decision_close_fee": _rounded_number(fee, digits=6),
+        "decision_close_slippage": _rounded_number(close_slippage, digits=6),
         "close_now_cost": _rounded_number(close_cost, digits=6),
         "fee_calc_status": text(row.get("fee_calc_status")).lower(),
         "fee_calc_basis": text(row.get("fee_calc_basis")) or None,

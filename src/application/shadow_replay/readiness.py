@@ -423,6 +423,14 @@ def summarize_close_decision_readiness(
         "point_in_time_coverage": point_in_time_coverage,
         "segments": segments,
         "promotable_segments": promotable_segments,
+        "analysis_eligibility": {
+            "promotion_usable_episode_ids": sorted(promotion_usable_ids),
+            "promotion_usable_outcome_keys": [
+                {"episode_id": episode_id, "outcome_kind": text(row.get("outcome_kind")).lower()}
+                for episode_id, rows in sorted(promotion_outcomes_by_episode.items())
+                for row in sorted(rows, key=lambda item: text(item.get("outcome_kind")).lower())
+            ],
+        },
         "inconclusive_reasons": dict(sorted(inconclusive_reasons.items())),
         "outcome_duplicate_key_count": outcome_duplicate_count,
         "outcome_matrix": {

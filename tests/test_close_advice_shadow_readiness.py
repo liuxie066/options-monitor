@@ -163,6 +163,8 @@ def test_close_readiness_passes_exact_overall_segment_and_coverage_boundaries() 
     assert result["terminal_lifecycle_coverage"]["usable_terminal_episode_count"] == 0
     assert result["fee_coverage"]["promotion_fee_complete_episode_count"] == 30
     assert result["paired_policy_coverage"]["all_four_policy_projection_count"] == 35
+    assert len(result["analysis_eligibility"]["promotion_usable_episode_ids"]) == 30
+    assert len(result["analysis_eligibility"]["promotion_usable_outcome_keys"]) == 30
     assert len(result["promotable_segments"]) == 2
     assert result["policy_quality_judgment"] == "not_evaluated"
     assert result["production_promotion_allowed"] is False
