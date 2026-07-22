@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.5 - 2026-07-22
+
+### Fixed
+- Daily Brief funds no longer degrade when secured margin exists in a currency missing from the cash table (e.g. an account holding only HKD money-fund assets while selling USD puts): cash and option-opening availability are now also aggregated to explicit CNY totals using the exchange rates embedded in the option positions context, per-currency opening is computed for cash currencies only, and the brief renders `现金总额（折CNY）` / `可用于期权开仓（折CNY）` lines alongside the per-currency ones.
+
 ## 1.4.4 - 2026-07-22
 
 ### Changed
