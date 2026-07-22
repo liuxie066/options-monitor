@@ -419,12 +419,13 @@ Close evidence is an optional facet of the existing dataset, never candidate row
 Collect or reuse local evidence at bounded horizons:
 
 - first usable mark inside deterministic windows: 1d=[1,2], 3d=[3,4], 7d=[7,9], and 14d=[14,17] calendar days after `observed_at_utc`;
-- expiry/settlement fact when available;
+- expiry/settlement fact when available; an option/spot snapshot is an expiry mark only on the contract expiration calendar date, never on a later date;
 - canonical ledger lifecycle outcome including assignment/called-away when recorded;
 - underlying mark needed for stress/path interpretation;
 - replacement candidate marks only when that replacement existed at decision time.
 
 OpenD collection remains explicit `--write`; dry-run stays default. Historical points that were never collected cannot be recreated from a current chain.
+Only a fresh OpenD collection with its actual collection time is point-in-time verified. A manually supplied `--as-of` or a local required-data CSV without a native quote timestamp is retained as unverified diagnostic evidence and cannot settle a usable Close Advice outcome.
 
 ### 9.4 Counterfactual outcomes
 

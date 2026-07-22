@@ -471,6 +471,7 @@ def _close_episode_observation(
             "formal close recommendation does not match P0_current projection: "
             f"path={close_path} row={source_row_number}"
         )
+    decision_economics = _decision_economics(row, position=position)
     material_facts = {
         "normalized_decision_facts": asdict(facts),
         "formal_recommendation_state": formal["recommendation_state"],
@@ -479,6 +480,7 @@ def _close_episode_observation(
             for policy, result in normalized_results.items()
         },
         "economic_buckets": _material_economic_buckets(row),
+        "decision_economics": decision_economics,
         "replacement": _material_replacement_facts(reallocation_row),
     }
     fingerprint = _sha256_json(material_facts)
@@ -506,6 +508,7 @@ def _close_episode_observation(
             )
         },
         "material_economic_buckets": material_facts["economic_buckets"],
+        "decision_economics": decision_economics,
         "replacement_evidence": material_facts["replacement"],
         "position_identity": _position_identity(position, row=row),
         "source": {
@@ -570,9 +573,56 @@ def _material_replacement_facts(row: dict[str, Any] | None) -> dict[str, Any]:
         "status": text(source.get("reallocation_status")).lower() or "not_evaluable",
         "reason": text(source.get("reallocation_reason")).lower(),
         "contract_symbol": text(source.get("replacement_contract_symbol")).upper() or None,
+        "symbol": text(source.get("replacement_symbol")).upper() or None,
+        "option_type": text(source.get("replacement_option_type")).lower() or None,
         "expiration": text(source.get("replacement_expiration")) or None,
         "strike": _rounded_number(source.get("replacement_strike"), digits=4),
         "rank": _rounded_number(source.get("replacement_rank"), digits=0),
+        "entry_credit": _rounded_number(source.get("replacement_entry_credit"), digits=6),
+        "contracts": _rounded_number(source.get("replacement_contracts"), digits=0),
+        "multiplier": _rounded_number(source.get("replacement_multiplier"), digits=6),
+        "currency": text(source.get("replacement_currency")).upper() or None,
+        "fee_calc_status": text(source.get("replacement_fee_calc_status")).lower() or None,
+        "open_fee": _rounded_number(source.get("replacement_open_fee"), digits=6),
+        "entry_slippage": _rounded_number(source.get("replacement_spread_slippage"), digits=6),
+    }
+
+
+def _decision_economics(row: dict[str, Any], *, position: dict[str, Any]) -> dict[str, Any]:
+    ask = _first_number(row, "ask")
+    contracts = _first_number(row, "contracts_open", fallback=position.get("contracts_open"))
+    if contracts is None:
+        contracts = _first_number(position, "contracts")
+    multiplier = _first_number(row, "multiplier", fallback=position.get("multiplier"))
+    fee = _first_number(
+        row,
+        "estimated_close_fee",
+        "buy_to_close_fee",
+        "close_fee",
+    )
+    close_cost = None
+    if (
+        ask is not None
+        and ask >= 0
+        and contracts is not None
+        and contracts > 0
+        and multiplier is not None
+        and multiplier > 0
+        and fee is not None
+        and fee >= 0
+    ):
+        close_cost = ask * multiplier * contracts + fee
+    return {
+        "decision_ask": _rounded_number(ask, digits=6),
+        "contracts": _rounded_number(contracts, digits=0),
+        "multiplier": _rounded_number(multiplier, digits=6),
+        "decision_close_fee": _rounded_number(fee, digits=6),
+        "close_now_cost": _rounded_number(close_cost, digits=6),
+        "fee_calc_status": text(row.get("fee_calc_status")).lower(),
+        "fee_calc_basis": text(row.get("fee_calc_basis")) or None,
+        "currency": text(row.get("currency") or position.get("currency")).upper() or None,
+        "broker": text(position.get("broker") or row.get("broker")) or None,
+        "evidence_status": "complete" if close_cost is not None else "incomplete",
     }
 
 
@@ -809,6 +859,15 @@ def _rounded_number(value: Any, *, digits: int) -> float | int | None:
     except (TypeError, ValueError):
         return None
     return int(rounded) if digits == 0 else rounded
+
+
+def _first_number(row: dict[str, Any], *keys: str, fallback: Any = None) -> float | None:
+    for key in keys:
+        value = _rounded_number(row.get(key), digits=12)
+        if value is not None:
+            return float(value)
+    value = _rounded_number(fallback, digits=12)
+    return float(value) if value is not None else None
 
 
 def _sha256_json(payload: dict[str, Any]) -> str:

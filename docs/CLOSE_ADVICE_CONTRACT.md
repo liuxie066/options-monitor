@@ -335,6 +335,57 @@ The shadow status is one of:
 Promotion into production requires closed-lifecycle replay evidence and an
 explicit policy decision.
 
+### Close-decision replay marks and outcomes
+
+The optional Shadow Replay close facet keeps Close Advice evidence separate
+from candidate evidence:
+
+- `close_decision_episodes.jsonl` stores immutable decision-time facts and the
+  P0/P1/P2/P3 projections;
+- `close_decision_marks.jsonl` stores the current contract and, when P3 selected
+  one at decision time, its replacement on the same horizon row;
+- `close_decision_outcomes.jsonl` stores four horizon results plus one terminal
+  result per episode.
+
+Horizon windows are calendar-day windows relative to `observed_at_utc`:
+1d=[1,2], 3d=[3,4], 7d=[7,9], and 14d=[14,17]. The first verified mark in a
+window is used. An expiry quote is accepted only on the contract expiration
+date; a later spot cannot be relabeled as the expiry spot.
+
+Only a fresh OpenD fetch using its actual collection time has
+`point_in_time_status=verified_fresh_collection`. A manual `--as-of` value or a
+local required-data CSV without a native quote timestamp is retained with an
+unverified status and settlement fails closed with
+`mark_point_in_time_unverified`. This prevents a current quote from being
+backdated into historical evidence.
+
+Short-option outcomes use decision-time incremental value:
+
+```text
+close_now_cost = decision_ask * multiplier * contracts + decision_close_fee
+hold_to_horizon_incremental = close_now_cost
+                              - (future_ask * multiplier * contracts
+                                 + future_close_fee)
+close_now_incremental = 0
+```
+
+P3 replacement results use the same horizon and subtract replacement open and
+exit fees plus observed entry slippage. Missing entry, exit, fee, mark, or
+point-in-time evidence remains explicitly inconclusive.
+
+Terminal precedence is canonical lifecycle evidence first, then a verified
+expiration-date mark for an expired-worthless result. Assignment or
+called-away rows require an explicitly decision-time-sliced lifecycle P&L for a
+money outcome, bound to the episode by `episode_id` or the exact
+`decision_observed_at_utc`; full-lifecycle or unbound P&L is not substituted.
+Multiple lifecycle events, mismatched contract quantities, ITM expiry without canonical lifecycle,
+or missing fees/prices remain inconclusive.
+
+`om research shadow-replay mark` and `collect` remain dry-run by default;
+`--write` is required for local dataset mutation. Dataset build adds the close
+facet only with `--include-close-decisions`, and settlement accepts repeatable
+canonical projected lifecycle evidence through `--lifecycle-path`.
+
 ## Acceptance Matrix
 
 | Area | Acceptance standard |

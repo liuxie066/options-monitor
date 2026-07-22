@@ -101,6 +101,11 @@ def test_put_reallocation_shadow_uses_released_cny_capacity_and_keeps_inputs_unc
     assert row["released_capacity"] == 70_000
     assert row["replacement_capacity_required"] == 60_000
     assert row["replacement_open_fee"] == 2
+    assert row["replacement_entry_credit"] == 200
+    assert row["replacement_contracts"] == 1
+    assert row["replacement_multiplier"] == 100
+    assert row["replacement_currency"] == "USD"
+    assert row["replacement_fee_calc_status"] == "candidate_futu_fee"
     assert row["replacement_spread_slippage"] == pytest.approx(5)
     assert row["recovery_days"] < row["recovery_horizon_days"]
 

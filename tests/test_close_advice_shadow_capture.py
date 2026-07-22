@@ -51,6 +51,10 @@ def _close_row(*, account: str, lot_id: str, tier: str = "medium") -> dict[str, 
         "ask": 0.21,
         "remaining_premium": 20,
         "estimated_close_fee": 1.5,
+        "fee_calc_basis": "futu_us_fixed_package_2026-07-22",
+        "contracts_open": 1,
+        "multiplier": 100,
+        "currency": "USD",
         "policy_version": "p0_current.v1",
         "recommendation_state": "close",
         "decision_basis": f"profit_capture_{tier}",
@@ -68,12 +72,14 @@ def _make_run(
     context_as_of: str = "2026-07-23T00:00:00Z",
     duplicate_lot: bool = False,
     replacement_run_id: str | None = None,
+    contracts: int = 1,
 ) -> tuple[Path, Path, Path]:
     account_dir = root / "output_runs" / run_id / "accounts" / account
     close_path = account_dir / "close_advice.csv"
     context_path = account_dir / "state" / "option_positions_context.json"
     reallocation_path = account_dir / "close_advice_reallocation_shadow.csv"
     row = _close_row(account=account, lot_id=lot_id, tier=tier)
+    row["contracts_open"] = contracts
     _write_csv(close_path, [row])
     position = {
         "record_id": lot_id,
@@ -83,6 +89,10 @@ def _make_run(
         "side": "short",
         "expiration": "2026-08-21",
         "strike": 100,
+        "contracts": contracts,
+        "contracts_open": contracts,
+        "multiplier": 100,
+        "currency": "USD",
     }
     positions = [position, dict(position)] if duplicate_lot else [position]
     context_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,9 +106,18 @@ def _make_run(
         "reallocation_status": "review_switch",
         "reallocation_reason": "higher_efficiency_recovers_switch_cost_within_horizon",
         "replacement_contract_symbol": "AMD260821P00090000",
+        "replacement_symbol": "AMD",
+        "replacement_option_type": "put",
         "replacement_expiration": "2026-08-21",
         "replacement_strike": 90,
         "replacement_rank": 1,
+        "replacement_entry_credit": 200,
+        "replacement_contracts": 1,
+        "replacement_multiplier": 100,
+        "replacement_currency": "USD",
+        "replacement_fee_calc_status": "candidate_futu_fee",
+        "replacement_open_fee": 2,
+        "replacement_spread_slippage": 5,
     }
     if replacement_run_id:
         reallocation["replacement_run_id"] = replacement_run_id
@@ -181,6 +200,9 @@ def test_close_facet_captures_formal_and_all_shadow_policy_results(tmp_path: Pat
         "P3_opportunity_required": "review",
     }
     assert episode["p0_parity"]["recommendation_matches"] is True
+    assert episode["decision_economics"]["close_now_cost"] == 22.5
+    assert episode["replacement_evidence"]["entry_credit"] == 200
+    assert episode["replacement_evidence"]["fee_calc_status"] == "candidate_futu_fee"
     assert len(episode["episode_id"]) == 64
     assert len(episode["material_fact_fingerprint"]) == 64
 
@@ -194,6 +216,7 @@ def test_close_episode_identity_dedupes_exact_reruns_but_splits_material_changes
         _make_run(tmp_path, run_id="20260723T010000Z-a"),
         _make_run(tmp_path, run_id="20260723T020000Z-b"),
         _make_run(tmp_path, run_id="20260723T030000Z-c", tier="strong"),
+        _make_run(tmp_path, run_id="20260723T040000Z-f", contracts=2),
         _make_run(tmp_path, run_id="20260724T010000Z-d", context_as_of="2026-07-24T00:00:00Z"),
         _make_run(tmp_path, run_id="20260723T010500Z-e", account="sy"),
     ]
@@ -208,7 +231,7 @@ def test_close_episode_identity_dedupes_exact_reruns_but_splits_material_changes
     first_rows = _jsonl(Path(first["dataset_dir"]) / "close_decision_episodes.jsonl")
     second_rows = _jsonl(Path(second["dataset_dir"]) / "close_decision_episodes.jsonl")
 
-    assert len(first_rows) == 4
+    assert len(first_rows) == 5
     assert [row["episode_id"] for row in first_rows] == [row["episode_id"] for row in second_rows]
     deduped = next(
         row
@@ -216,10 +239,20 @@ def test_close_episode_identity_dedupes_exact_reruns_but_splits_material_changes
         if row["account"] == "lx"
         and row["episode_date"] == "2026-07-23"
         and row["normalized_decision_facts"]["tier"] == "medium"
+        and row["source_observation_count"] == 2
     )
     assert deduped["observed_at_utc"] == "2026-07-23T01:01:00Z"
     assert deduped["source_run_ids"] == ["20260723T010000Z-a", "20260723T020000Z-b"]
     assert deduped["source_observation_count"] == 2
+    assert len(
+        {
+            row["material_fact_fingerprint"]
+            for row in first_rows
+            if row["account"] == "lx"
+            and row["episode_date"] == "2026-07-23"
+            and row["normalized_decision_facts"]["tier"] == "medium"
+        }
+    ) == 2
 
 
 @pytest.mark.parametrize(
