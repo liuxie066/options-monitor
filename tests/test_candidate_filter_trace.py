@@ -183,6 +183,139 @@ def test_sell_put_cash_filter_writes_cash_reserve_trace(tmp_path: Path) -> None:
     assert trace_rows[0]["rule"] == "usd_cash_insufficient"
 
 
+def test_tcom_sell_put_cash_filter_accepts_lx_total_cny_capacity(tmp_path: Path) -> None:
+    from domain.domain.risk_capacity import compute_sell_put_cash_capacity
+    from src.application.sell_put_steps import _enrich_and_filter_sell_put_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "tcom_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    candidates = pd.DataFrame(
+        [
+            {
+                "symbol": "TCOM",
+                "contract_symbol": f"US.TCOM.2026-08-21.P{strike:g}",
+                "expiration": "2026-08-21",
+                "strike": strike,
+                "multiplier": 100,
+                "currency": "USD",
+            }
+            for strike in (35.0, 40.0)
+        ]
+    )
+    converter = CurrencyConverter(
+        ExchangeRates(
+            usd_per_cny=1.0 / 6.7711,
+            cny_per_hkd=0.863968206,
+        )
+    )
+
+    filtered = _enrich_and_filter_sell_put_cash(
+        df_labeled=candidates,
+        symbol="TCOM",
+        portfolio_ctx={
+            "cash_by_currency": {"HKD": 666787.5, "USD": 10177.48},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {"HKD": 386500.0, "USD": 8000.0},
+                "cash_secured_total_cny": 388092.51161900006,
+                "cash_secured_by_symbol_by_ccy": {"TCOM": {"USD": 8000.0}},
+            },
+        },
+        exchange_rate_converter=converter,
+        out_path=out_path,
+    )
+
+    assert filtered["strike"].tolist() == [35.0, 40.0]
+    capacities = [
+        compute_sell_put_cash_capacity(
+            cash_required_cny=row["cash_required_cny"],
+            cash_free_cny=row["cash_free_cny"],
+            cash_free_total_cny=row["cash_free_total_cny"],
+            cash_required_usd=row["cash_required_usd"],
+            cash_free_usd=row["cash_free_usd"],
+        )
+        for _, row in filtered.iterrows()
+    ]
+    assert [capacity.accepted for capacity in capacities] == [True, True]
+    assert [capacity.basis for capacity in capacities] == ["total_cny", "total_cny"]
+    assert [round(float(capacity.cash_required or 0.0), 2) for capacity in capacities] == [23698.85, 27084.4]
+    trace_path = out_path.parent / "candidate_filter_trace.jsonl"
+    assert not trace_path.exists()
+
+
+def test_tcom_sell_put_cash_filter_rejects_insufficient_total_cny(tmp_path: Path) -> None:
+    from src.application.sell_put_steps import _enrich_and_filter_sell_put_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "tcom_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    candidate = pd.DataFrame(
+        [
+            {
+                "symbol": "TCOM",
+                "contract_symbol": "US.TCOM.2026-08-21.P35",
+                "expiration": "2026-08-21",
+                "strike": 35.0,
+                "multiplier": 100,
+                "currency": "USD",
+            }
+        ]
+    )
+
+    filtered = _enrich_and_filter_sell_put_cash(
+        df_labeled=candidate,
+        symbol="TCOM",
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 1000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_total_cny": 0.0,
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=1.0 / 6.7711)),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    trace_rows = _read_jsonl(out_path.parent / "candidate_filter_trace.jsonl")
+    assert [row["rule"] for row in trace_rows] == ["total_cny_cash_insufficient"]
+    assert trace_rows[0]["config_values"] == {"basis": "total_cny"}
+
+
+def test_tcom_sell_put_cash_filter_rejects_missing_cash_basis(tmp_path: Path) -> None:
+    from src.application.sell_put_steps import _enrich_and_filter_sell_put_cash
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "tcom_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    candidate = pd.DataFrame(
+        [
+            {
+                "symbol": "TCOM",
+                "contract_symbol": "US.TCOM.2026-08-21.P35",
+                "expiration": "2026-08-21",
+                "strike": 35.0,
+                "multiplier": 100,
+                "currency": "USD",
+            }
+        ]
+    )
+
+    filtered = _enrich_and_filter_sell_put_cash(
+        df_labeled=candidate,
+        symbol="TCOM",
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=1.0 / 6.7711)),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    trace_rows = _read_jsonl(out_path.parent / "candidate_filter_trace.jsonl")
+    assert [row["rule"] for row in trace_rows] == ["cash_basis_missing"]
+    assert trace_rows[0]["config_values"] == {"basis": None}
+
+
 def test_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,

@@ -4,6 +4,9 @@ import shutil
 import sys
 from pathlib import Path
 
+import pandas as pd
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -767,6 +770,186 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
         mod.save_outputs = old_save  # type: ignore[assignment]
 
     assert len(called) == 1
+
+
+def _tcom_portfolio_context(account: str) -> dict[str, object]:
+    if account == "lx":
+        return {
+            "cash_by_currency": {"HKD": 666787.5, "USD": 10177.48},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 386500.0, "USD": 8000.0}},
+        }
+    return {
+        "cash_by_currency": {"HKD": 1104646.19},
+        "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 213000.0, "USD": 8500.0}},
+    }
+
+
+def _build_tcom_put_plan(*, required_data_dir: Path, account: str):  # type: ignore[no-untyped-def]
+    from src.application.prefilters import apply_prefilters
+    from src.application.required_data_planning import build_required_data_fetch_plan
+
+    sell_put = {
+        "enabled": True,
+        "strategy": "insurance_underwriting",
+        "min_dte": 7,
+        "max_dte": 60,
+        "max_strike": 45.0,
+    }
+    prefilters = apply_prefilters(
+        symbol="TCOM",
+        sp=sell_put,
+        cc={"enabled": False},
+        want_put=True,
+        want_call=False,
+        portfolio_ctx=_tcom_portfolio_context(account),
+    )
+    return build_required_data_fetch_plan(
+        base=required_data_dir.parent,
+        required_data_dir=required_data_dir,
+        symbol="TCOM",
+        limit_expirations=10,
+        want_put=prefilters.want_put,
+        want_call=False,
+        sell_put_cfg=prefilters.sp,
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+
+def _tcom_required_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for expiration, dte in (("2026-08-21", 30), ("2026-09-18", 58)):
+        for strike in (35.0, 40.0, 42.5):
+            rows.append(
+                {
+                    "symbol": "TCOM",
+                    "option_type": "put",
+                    "expiration": expiration,
+                    "dte": dte,
+                    "contract_symbol": f"US.TCOM.{expiration}.P{strike:g}",
+                    "strike": strike,
+                    "spot": 43.07,
+                    "bid": 1.0,
+                    "ask": 1.1,
+                    "last_price": 1.05,
+                    "mid": 1.05,
+                    "volume": 100,
+                    "open_interest": 1000,
+                    "implied_volatility": 0.4,
+                    "realized_volatility_estimate": 0.3,
+                    "currency": "USD",
+                    "multiplier": 100,
+                }
+            )
+    return rows
+
+
+@pytest.mark.parametrize("account_order", [("lx", "sy"), ("sy", "lx")])
+def test_tcom_shared_required_data_is_account_order_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    account_order: tuple[str, str],
+) -> None:
+    from datetime import date
+
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+    import src.application.required_data_steps as steps
+
+    monkeypatch.setattr(planning, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 43.07)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
+
+    fetch_requests: list[object] = []
+
+    def _fake_execute_required_data_opend(*, base: Path, request):  # type: ignore[no-untyped-def]
+        fetch_requests.append(request)
+        return {
+            "symbol": "TCOM",
+            "spot": 43.07,
+            "expirations": ["2026-08-21", "2026-09-18"],
+            "expiration_count": 2,
+            "rows": _tcom_required_rows(),
+            "meta": {"status": "ok"},
+        }
+
+    monkeypatch.setattr(steps, "execute_required_data_opend", _fake_execute_required_data_opend)
+    shared_required = tmp_path / "shared_required_data"
+    plans: dict[str, dict[str, object]] = {}
+    visible_contracts: dict[str, list[tuple[str, float]]] = {}
+
+    for account in account_order:
+        plan = _build_tcom_put_plan(required_data_dir=shared_required, account=account)
+        plans[account] = plan.to_debug_dict()
+        steps.ensure_required_data(
+            py="python3.12",
+            base=tmp_path,
+            symbol="TCOM",
+            required_data_dir=shared_required,
+            limit_expirations=10,
+            want_put=True,
+            want_call=False,
+            timeout_sec=5,
+            is_scheduled=True,
+            fetch_source="opend",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+            fetch_plan=plan,
+            report_dir=tmp_path / "reports" / account,
+        )
+        frame = pd.read_csv(shared_required / "parsed" / "TCOM_required_data.csv")
+        visible_contracts[account] = sorted(
+            (str(row.expiration), float(row.strike))
+            for row in frame.itertuples()
+            if str(row.option_type).lower() == "put"
+        )
+
+    assert plans["lx"] == plans["sy"]
+    assert plans["lx"]["side_plans"][0]["min_strike"] == 34.456
+    assert plans["lx"]["side_plans"][0]["max_strike"] == 43.07
+    assert visible_contracts["lx"] == visible_contracts["sy"] == [
+        ("2026-08-21", 35.0),
+        ("2026-08-21", 40.0),
+        ("2026-08-21", 42.5),
+        ("2026-09-18", 35.0),
+        ("2026-09-18", 40.0),
+        ("2026-09-18", 42.5),
+    ]
+    assert len(fetch_requests) == 1
+    request = fetch_requests[0]
+    assert request.option_types == "put"
+    assert request.explicit_expirations == ["2026-08-21", "2026-09-18"]
+    assert request.side_strike_windows == {"put": {"min_strike": 34.456, "max_strike": 43.07}}
+    assert request.include_realized_volatility is True
+
+
+def test_tcom_concurrent_plan_construction_is_account_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from datetime import date
+
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+    from src.application.tick_account_execution import run_account_outcomes
+
+    monkeypatch.setattr(planning, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 43.07)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
+
+    plans = run_account_outcomes(
+        account_ids=["lx", "sy"],
+        max_workers=2,
+        run_account_fn=lambda account: _build_tcom_put_plan(
+            required_data_dir=tmp_path / "shared_required_data",
+            account=account,
+        ).to_debug_dict(),
+    )
+
+    assert plans[0] == plans[1]
+    assert plans[0]["side_plans"][0]["min_strike"] == 34.456
+    assert plans[0]["side_plans"][0]["max_strike"] == 43.07
 
 
 def main() -> None:
