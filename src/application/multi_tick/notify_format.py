@@ -16,10 +16,6 @@ from .misc import (
 )
 
 
-def is_high_priority_notification(text: str) -> bool:
-    return bool(re.search(r"(?m)^重点:\s*$", text or ""))
-
-
 SELL_PUT_ACTION_LABEL = strategy_action_label(STRATEGY_SELL_PUT)
 SELL_PUT_SECTION_LABEL = strategy_section_label(STRATEGY_SELL_PUT)
 COVERED_CALL_ACTION_LABEL = strategy_action_label(STRATEGY_COVERED_CALL)
@@ -304,33 +300,6 @@ def _compact_candidate_counts(lines: list[str]) -> tuple[int, int, int]:
         elif section == "combo" and _is_yield_enhancement_line(s):
             counts["combo"] += 1
     return counts["put"], counts["call"], counts["combo"]
-
-
-def _compact_reject_lines(lines: list[str]) -> list[str]:
-    if not lines:
-        return []
-    total_line = ""
-    reason_line = ""
-    unavailable_line = ""
-    for raw in lines:
-        s = str(raw or "").strip()
-        if not s or s.startswith("###"):
-            continue
-        body = s[2:].strip() if s.startswith("- ") else s
-        if "拒绝摘要不可用" in body:
-            unavailable_line = body
-        elif body.startswith("主要原因："):
-            reason_line = "主要过滤：" + body.removeprefix("主要原因：").strip()
-        elif body.startswith("通过 ") and ("过滤" in body or "拒绝" in body):
-            total_line = body.replace("；", " · ")
-    if unavailable_line:
-        return [f"- {unavailable_line}"]
-    out: list[str] = []
-    if reason_line:
-        out.append(f"- {reason_line}")
-    if total_line:
-        out.append(f"- {total_line}")
-    return out
 
 
 def _is_close_action_line(line: str) -> bool:

@@ -10,12 +10,10 @@ Note:
 from __future__ import annotations
 
 import json
-import shutil
 import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, Callable
 
 import pandas as pd
@@ -52,29 +50,6 @@ def read_json(path: str | Path, default: Any = None, encoding: str = 'utf-8') ->
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def bj_now() -> str:
-    return datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
-
-
-def parse_last_json(text: str) -> dict[str, Any]:
-    """Parse the last JSON object printed to text (tolerant of logs above it)."""
-    lines = (text or '').splitlines()
-    buf = []
-    for ln in reversed(lines):
-        if not ln.strip():
-            continue
-        buf.append(ln)
-        if ln.strip().startswith('{'):
-            break
-    txt = '\n'.join(reversed(buf)).strip()
-    if not txt:
-        return {}
-    try:
-        return json.loads(txt)
-    except Exception:
-        return {}
 
 
 def parse_last_json_obj(text: str) -> dict:
@@ -153,21 +128,6 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
             return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
-
-
-def copy_if_exists(src: Path, dst: Path) -> bool:
-    """Copy file only when src exists and is non-empty.
-
-    Return True if copied, False otherwise.
-    """
-    try:
-        if src.exists() and src.stat().st_size > 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-            return True
-    except Exception:
-        return False
-    return False
 
 
 def is_fresh(path: Path, max_age_sec: int) -> bool:

@@ -3802,15 +3802,6 @@ def _upgrade_version_from_audit_rows(timeline: dict[str, Any], field: str) -> st
     return _first_nonempty_text(*candidates)
 
 
-def _nested_value(payload: Any, path: tuple[str, ...]) -> Any:
-    cur = payload
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
-
-
 def _first_nonempty_text(*values: Any) -> str | None:
     for value in values:
         text = str(value or "").strip()

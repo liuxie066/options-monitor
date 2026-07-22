@@ -6,9 +6,6 @@ from datetime import datetime, time
 from pathlib import Path
 from typing import Any
 
-from src.infrastructure.io_utils import read_json, atomic_write_json as write_json
-
-
 DEBUG = False
 
 
@@ -74,16 +71,3 @@ def _safe_runlog_data(data: dict[str, Any] | None, max_items: int = 16) -> dict[
         else:
             out[kk] = str(v)[:160]
     return out
-
-
-def append_json_list(path: Path, item: dict, max_items: int = 500) -> None:
-    try:
-        arr = read_json(path, [])
-        if not isinstance(arr, list):
-            arr = []
-        arr.append(item)
-        if max_items > 0:
-            arr = arr[-int(max_items):]
-        write_json(path, arr)
-    except Exception:
-        pass

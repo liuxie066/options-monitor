@@ -448,16 +448,6 @@ def _assistant_config_path_from_payload(payload: dict[str, Any]) -> tuple[Path |
     return None, False
 
 
-def _service_present(payload: dict[str, Any], *, names: tuple[str, ...]) -> bool:
-    expected = set(names)
-    for item in payload.get("services") or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("name") or "").strip() in expected:
-            return True
-    return False
-
-
 def _resolve_path(value: str | Path, *, base: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else (base / path).resolve()

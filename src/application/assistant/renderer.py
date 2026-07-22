@@ -714,14 +714,6 @@ def _string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-def _analysis_cell(value: Any) -> str:
-    if value is None:
-        return "-"
-    if isinstance(value, float):
-        return f"{value:,.6f}".rstrip("0").rstrip(".")
-    return str(value).replace("|", "\\|")
-
-
 def _format_config_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"

@@ -1019,20 +1019,6 @@ def _event_change_summary(change: Mapping[str, Any], *, market: str) -> str:
     return ""
 
 
-def _changed_position_symbols(diff: Mapping[str, Any]) -> set[str]:
-    out: set[str] = set()
-    for change in diff.get("changes") or []:
-        if not isinstance(change, Mapping):
-            continue
-        action = change.get("action") if isinstance(change.get("action"), Mapping) else {}
-        if _lower(action.get("action_type")) != "close_position":
-            continue
-        symbol = _upper(action.get("symbol"))
-        if symbol:
-            out.add(symbol)
-    return out
-
-
 def _change_contract_label(action: Mapping[str, Any], *, market: str) -> str:
     symbol = _upper(action.get("symbol"))
     contract = _human_contract(

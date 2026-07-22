@@ -355,10 +355,6 @@ def _config_path_for_market(
     return _absolute_path_preserve_symlink(configured, base=repo_root)
 
 
-def _json_arg(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
 def _systemd_quote_arg(value: str | Path) -> str:
     text = str(value)
     if not text:

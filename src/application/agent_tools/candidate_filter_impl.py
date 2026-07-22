@@ -108,10 +108,6 @@ def _symbol_for_match(value: Any, *, symbol_aliases: Mapping[str, Any] | None = 
     return canonical_symbol(raw, symbol_aliases=symbol_aliases) or raw.upper()
 
 
-def _trace_paths(payload: dict[str, Any], *, repo_base: Callable[[], Path]) -> list[Path]:
-    return list(discover_candidate_filter_trace_paths(payload, repo_base=repo_base).paths)
-
-
 def _trace_discovery_meta(
     discovery: CandidateFilterTraceDiscovery,
     *,

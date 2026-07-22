@@ -171,41 +171,6 @@ def _build_assigned_stock_sale_event(
     return payload
 
 
-def _build_manual_assigned_stock_sale_event(
-    lot: dict[str, Any],
-    *,
-    target_stock_lot_id: str,
-    shares: int,
-    price: float,
-    fees: float,
-    trade_time_ms: int,
-    account: str | None,
-    broker: str | None,
-    symbol: str | None,
-    currency: str | None,
-    source_deal_id: str | None,
-) -> dict[str, Any]:
-    return _build_assigned_stock_sale_event(
-        lot,
-        target_stock_lot_id=target_stock_lot_id,
-        shares=shares,
-        price=price,
-        fees=fees,
-        fee_provenance={
-            "basis": "actual",
-            "source": "manual_input",
-            "reason": "explicit_manual_fee",
-        },
-        trade_time_ms=trade_time_ms,
-        account=account,
-        broker=broker,
-        symbol=symbol,
-        currency=currency,
-        source_deal_id=source_deal_id,
-        source="manual",
-    )
-
-
 class BrokerAssignedStockSaleMatchError(ValueError):
     def __init__(
         self,

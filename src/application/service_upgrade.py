@@ -342,10 +342,6 @@ def _restart_command_policy(profile: dict[str, Any]) -> tuple[list[str], str]:
     return ["systemctl"], "root_systemctl_default"
 
 
-def _restart_command_prefix(profile: dict[str, Any]) -> list[str]:
-    return _restart_command_policy(profile)[0]
-
-
 def _restart_remediation(*, profile: dict[str, Any], service_names: list[str], command_by_service: dict[str, list[str]]) -> list[str]:
     deploy_user = str(profile.get("deploy_user") or "").strip()
     sudoers = _restart_profile(profile).get("sudoers")
