@@ -35,7 +35,7 @@ LEGACY_REFERENCE_ALLOWLIST: Mapping[str, str] = MappingProxyType(
         "application/sell_call_steps.py": "candidate_strategy_domain",
         "application/sell_put_steps.py": "candidate_strategy_domain",
         "application/sell_put_strategy_risk.py": "candidate_strategy_domain",
-        "application/shadow_replay/analysis.py": "candidate_strategy_domain",
+        "application/shadow_replay/candidate_analysis.py": "candidate_strategy_domain",
         "application/shadow_replay/candidate_impact.py": "candidate_strategy_domain",
         "application/shadow_replay/capture.py": "candidate_strategy_domain",
         "application/short_vol_risk_context.py": "candidate_strategy_domain",

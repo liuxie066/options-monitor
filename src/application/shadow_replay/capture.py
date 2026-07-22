@@ -16,7 +16,7 @@ from src.application.candidate_filter_trace import (
     infer_trace_scope_from_path,
     read_candidate_filter_trace,
 )
-from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.close_decision_policy import (
     close_decision_facts_from_row,
     evaluate_shadow_close_policy_variants,

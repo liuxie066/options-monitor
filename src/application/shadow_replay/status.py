@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.common import (
     DATASET_FILES,
     OPTIONAL_CLOSE_DATASET_FILES,

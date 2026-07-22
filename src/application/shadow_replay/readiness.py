@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.capture import (
     accepted_candidate_snapshots,
     candidate_snapshots_from_filter_decisions,
