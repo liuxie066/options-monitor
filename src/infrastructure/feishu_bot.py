@@ -143,6 +143,33 @@ FEISHU_POST_REQUEST_BUDGET_BYTES = 28 * 1024
 FEISHU_POST_TOO_LARGE = "FEISHU_POST_TOO_LARGE"
 
 
+def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
+    """Split canonical Markdown into Feishu post paragraphs.
+
+    Feishu collapses empty lines inside a single md node, while placeholder
+    spacer characters (for example the zero-width space the daily brief uses
+    as a visible blank line) leak into rendered lines on desktop and break
+    line-start ``**bold**`` markers. Mapping blank/spacer-only lines to
+    native post paragraph breaks keeps visible gaps without emitting any
+    placeholder characters.
+    """
+
+    paragraphs: list[list[dict[str, str]]] = []
+    current: list[str] = []
+    for line in markdown.split("\n"):
+        if not line.strip(" \t\u200b"):
+            if current:
+                paragraphs.append([{"tag": "md", "text": "\n".join(current)}])
+                current = []
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append([{"tag": "md", "text": "\n".join(current)}])
+    if not paragraphs:
+        paragraphs.append([{"tag": "md", "text": markdown}])
+    return paragraphs
+
+
 def send_post_message(
     *,
     app_id: str,
@@ -168,14 +195,7 @@ def send_post_message(
         "content": json.dumps(
             {
                 "zh_cn": {
-                    "content": [
-                        [
-                            {
-                                "tag": "md",
-                                "text": markdown_value,
-                            }
-                        ]
-                    ]
+                    "content": _post_md_paragraphs(markdown_value),
                 }
             },
             ensure_ascii=False,
