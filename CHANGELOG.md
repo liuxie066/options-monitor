@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.8 - 2026-07-23
+
+### Fixed
+- Feishu desktop rendering of proactive notifications: blank-line placeholder characters (zero-width spaces) no longer leak into rendered lines, which showed as leading spaces and broke line-start bold titles. The Feishu `post` projection now maps blank/spacer-only lines to native message paragraphs (one `md` node per paragraph); the canonical Markdown and the WeChat projection are unchanged.
+
 ## 1.4.7 - 2026-07-22
 
 ### Changed
