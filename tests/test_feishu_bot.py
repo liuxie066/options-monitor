@@ -167,7 +167,7 @@ def test_send_text_message_without_uuid_disables_ambiguous_retry(monkeypatch: py
     assert calls[0]["kwargs"]["retry_max_attempts"] == 1
 
 
-def test_send_post_message_posts_single_md_node_without_title(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_send_post_message_posts_md_paragraphs_without_title(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
     markdown = '# 决策简报\n\n> 中文 "quote" 🙂\n\n- **NVDA**\n  - 合约: 1'
 
@@ -196,10 +196,53 @@ def test_send_post_message_posts_single_md_node_without_title(monkeypatch: pytes
     assert payload["msg_type"] == "post"
     assert payload["uuid"] == "idem-1"
     assert json.loads(payload["content"]) == {
-        "zh_cn": {"content": [[{"tag": "md", "text": markdown}]]}
+        "zh_cn": {
+            "content": [
+                [{"tag": "md", "text": "# 决策简报"}],
+                [{"tag": "md", "text": '> 中文 "quote" 🙂'}],
+                [{"tag": "md", "text": "- **NVDA**\n  - 合约: 1"}],
+            ]
+        }
     }
     assert "title" not in json.loads(payload["content"])["zh_cn"]
     assert calls[0]["kwargs"]["retry_max_attempts"] == 3
+
+
+def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    markdown = "# OM · 决策简报 · lx\n\u200b\n状态｜扫描完成\n\u200b\n**1｜NVDA｜Sell Put**\n指标｜权利金 $5.25"
+
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda app_id, app_secret, fn: fn("tenant_token"),
+    )
+
+    def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
+        calls.append({"payload": payload})
+        return {"code": 0, "data": {"message_id": "om_1"}}
+
+    feishu_bot.send_post_message(
+        app_id="app_1",
+        app_secret="secret_1",
+        open_id="ou_1",
+        markdown=markdown,
+        http_json_fn=_http_json,
+    )
+
+    assert json.loads(calls[0]["payload"]["content"]) == {
+        "zh_cn": {
+            "content": [
+                [{"tag": "md", "text": "# OM · 决策简报 · lx"}],
+                [{"tag": "md", "text": "状态｜扫描完成"}],
+                [{"tag": "md", "text": "**1｜NVDA｜Sell Put**\n指标｜权利金 $5.25"}],
+            ]
+        }
+    }
+    for paragraph in json.loads(calls[0]["payload"]["content"])["zh_cn"]["content"]:
+        assert "\u200b" not in paragraph[0]["text"]
 
 
 def test_send_post_message_without_uuid_disables_ambiguous_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,7 +411,7 @@ def test_send_post_message_enforces_exact_final_request_boundary(
     assert len(http_calls) == 1
 
 
-def test_real_notification_renderers_are_embedded_unchanged_in_single_md_node(
+def test_real_notification_renderers_are_embedded_unchanged_in_md_paragraphs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
@@ -547,5 +590,11 @@ def test_real_notification_renderers_are_embedded_unchanged_in_single_md_node(
     assert len(payloads) == len(messages)
     for payload, expected in zip(payloads, messages.values(), strict=True):
         content = json.loads(payload["content"])
-        assert content == {"zh_cn": {"content": [[{"tag": "md", "text": expected.strip()}]]}}
+        paragraphs = content["zh_cn"]["content"]
+        assert content == {"zh_cn": {"content": feishu_bot._post_md_paragraphs(expected.strip())}}
+        # canonical Markdown is embedded unchanged: dropping blank/spacer-only
+        # lines and joining paragraph lines back reproduces the original text
+        flattened = [line for paragraph in paragraphs for node in paragraph for line in node["text"].split("\n")]
+        assert flattened == [line for line in expected.strip().split("\n") if line.strip(" \t\u200b")]
+        assert all("\u200b" not in line for line in flattened)
         assert "title" not in content["zh_cn"]
