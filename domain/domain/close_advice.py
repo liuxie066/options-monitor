@@ -69,6 +69,22 @@ DECISION_EVIDENCE_PARTIAL = "partial"
 DECISION_EVIDENCE_REVIEW_REQUIRED = "review_required"
 DECISION_EVIDENCE_NOT_EVALUABLE = "not_evaluable"
 
+POLICY_VARIANT_P0_CURRENT = "P0_current"
+POLICY_VARIANT_P1_SEMANTIC_SPLIT = "P1_semantic_split"
+POLICY_VARIANT_P2_PROFILE_AWARE = "P2_profile_aware"
+POLICY_VARIANT_P3_OPPORTUNITY_REQUIRED = "P3_opportunity_required"
+
+DOMAIN_CLOSE_POLICY_VARIANTS = frozenset(
+    {
+        POLICY_VARIANT_P0_CURRENT,
+        POLICY_VARIANT_P1_SEMANTIC_SPLIT,
+        POLICY_VARIANT_P2_PROFILE_AWARE,
+    }
+)
+
+RETURN_FIRST_POLICY_PROFILE = "return_first"
+UNDERWRITING_POLICY_PROFILES = frozenset({"insurance_underwriting", "short_vol"})
+
 PRICING_BLOCKING_FLAGS = {
     "missing_premium",
     "invalid_premium",
@@ -183,6 +199,39 @@ class LongCallConvexityConfig:
                 else LONG_CALL_CONVEXITY_DEFAULTS["salvage_min_mid"]
             ),
         )
+
+
+@dataclass(frozen=True)
+class CloseDecisionFacts:
+    tier: str
+    exit_state: str
+    side: str
+    option_type: str
+    strategy_family: str
+    strategy_profile: str
+    evaluation_status: str
+    fee_calc_status: str
+    estimated_pnl_if_close_net: float | None
+    thesis_status: str
+    continued_willingness: bool | None
+    close_calibration_status: str
+    combo_evidence_status: str = "not_applicable"
+
+
+@dataclass(frozen=True)
+class ClosePolicyResult:
+    policy_version: str
+    recommendation_state: str
+    decision_basis: tuple[str, ...]
+    decision_evidence_status: str
+
+    def to_fields(self) -> dict[str, Any]:
+        return {
+            "policy_version": self.policy_version,
+            "recommendation_state": self.recommendation_state,
+            "decision_basis": self.decision_basis,
+            "decision_evidence_status": self.decision_evidence_status,
+        }
 
 
 @dataclass(frozen=True)
@@ -946,6 +995,332 @@ def current_policy_decision_fields(
         "decision_basis": basis,
         "decision_evidence_status": evidence_status,
     }
+
+
+def evaluate_close_policy(facts: CloseDecisionFacts, variant: str) -> ClosePolicyResult:
+    """Evaluate a named P0/P1/P2 policy from immutable decision facts.
+
+    P3 is intentionally excluded: it composes post-run reallocation evidence in
+    the Shadow Replay application layer.
+    """
+
+    policy = _normalize_close_policy_variant(variant)
+    tier = _policy_text(facts.tier)
+    exit_state = _policy_text(facts.exit_state)
+    evaluation = _policy_text(facts.evaluation_status)
+    if (
+        evaluation != "priced"
+        or tier == "not_evaluable"
+        or exit_state == EXIT_STATE_NOT_EVALUABLE
+        or _policy_text(facts.close_calibration_status) == "not_evaluable"
+    ):
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            "execution_evidence_not_evaluable",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+
+    side = _policy_text(facts.side)
+    option_type = _policy_text(facts.option_type)
+    if side == "long" and option_type == "call":
+        projected = current_policy_decision_fields(
+            tier=tier,
+            exit_state=exit_state,
+            policy_version=policy,
+        )
+        result = _close_policy_result(
+            policy,
+            str(projected["recommendation_state"]),
+            *projected["decision_basis"],
+            evidence_status=str(projected["decision_evidence_status"]),
+        )
+        return _apply_close_execution_gate(facts, result, long_call=True)
+    if side != "short" or option_type not in {"put", "call"}:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            "unsupported_position",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    family = _policy_text(facts.strategy_family)
+    if policy == POLICY_VARIANT_P2_PROFILE_AWARE and (
+        (option_type == "put" and family not in {"sell_put", "combo_yield"})
+        or (option_type == "call" and family not in {"sell_call", "covered_call"})
+    ):
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            "strategy_family_mismatch",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+
+    signal = _profit_capture_signal(tier=tier, exit_state=exit_state)
+    if signal in {"strong", "medium"}:
+        execution_gate = _profit_capture_execution_gate(facts, policy=policy, signal=signal)
+        if execution_gate is not None:
+            return execution_gate
+
+    if policy == POLICY_VARIANT_P0_CURRENT:
+        projected = current_policy_decision_fields(
+            tier=tier,
+            exit_state=exit_state,
+            policy_version=policy,
+        )
+        result = _close_policy_result(
+            policy,
+            str(projected["recommendation_state"]),
+            *projected["decision_basis"],
+            evidence_status=str(projected["decision_evidence_status"]),
+        )
+    elif policy == POLICY_VARIANT_P1_SEMANTIC_SPLIT:
+        result = _semantic_split_policy_result(policy=policy, signal=signal, tier=tier)
+    else:
+        result = _profile_aware_policy_result(facts, policy=policy, signal=signal, tier=tier)
+
+    result = _apply_close_execution_gate(facts, result, long_call=False)
+    return _apply_combo_evidence_gate(facts, result)
+
+
+def _normalize_close_policy_variant(value: Any) -> str:
+    token = str(value or "").strip()
+    aliases = {item.lower(): item for item in DOMAIN_CLOSE_POLICY_VARIANTS}
+    normalized = aliases.get(token.lower())
+    if normalized is None:
+        supported = ", ".join(sorted(DOMAIN_CLOSE_POLICY_VARIANTS))
+        raise ValueError(f"unsupported domain close policy variant: {token or '<empty>'}; expected {supported}")
+    return normalized
+
+
+def _policy_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _close_policy_result(
+    policy: str,
+    recommendation: str,
+    *basis: str,
+    evidence_status: str = DECISION_EVIDENCE_COMPLETE,
+) -> ClosePolicyResult:
+    ordered_basis = tuple(
+        dict.fromkeys(token for token in (_policy_text(item) for item in basis) if token)
+    )
+    return ClosePolicyResult(
+        policy_version=policy,
+        recommendation_state=recommendation,
+        decision_basis=ordered_basis or ("unspecified",),
+        decision_evidence_status=evidence_status,
+    )
+
+
+def _profit_capture_signal(*, tier: str, exit_state: str) -> str:
+    if exit_state == EXIT_STATE_PROFIT_CAPTURE or not exit_state:
+        return tier if tier in {"strong", "medium", "weak", "optional"} else "none"
+    return "none"
+
+
+def _profit_capture_execution_gate(
+    facts: CloseDecisionFacts,
+    *,
+    policy: str,
+    signal: str,
+) -> ClosePolicyResult | None:
+    if _policy_text(facts.fee_calc_status) not in FEE_USABLE_STATUSES:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            f"profit_capture_{signal}",
+            "fee_evidence_unusable",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    net_pnl = safe_float(facts.estimated_pnl_if_close_net)
+    if net_pnl is None:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            f"profit_capture_{signal}",
+            "net_close_pnl_missing",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    if net_pnl <= 0:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_HOLD,
+            f"profit_capture_{signal}",
+            "net_close_pnl_non_positive",
+        )
+    return None
+
+
+def _semantic_split_policy_result(*, policy: str, signal: str, tier: str) -> ClosePolicyResult:
+    if signal == "strong":
+        return _close_policy_result(policy, RECOMMENDATION_CLOSE, "profit_capture_strong")
+    if signal == "medium":
+        return _close_policy_result(policy, RECOMMENDATION_REVIEW, "profit_capture_medium")
+    return _close_policy_result(policy, RECOMMENDATION_HOLD, _current_policy_hold_basis(exit_state="", tier=tier))
+
+
+def _profile_aware_policy_result(
+    facts: CloseDecisionFacts,
+    *,
+    policy: str,
+    signal: str,
+    tier: str,
+) -> ClosePolicyResult:
+    profile = _policy_text(facts.strategy_profile)
+    if profile == RETURN_FIRST_POLICY_PROFILE:
+        return _semantic_split_policy_result(policy=policy, signal=signal, tier=tier)
+    if profile not in UNDERWRITING_POLICY_PROFILES:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_NOT_EVALUABLE,
+            "strategy_profile_unsupported",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    return _underwriting_policy_result(facts, policy=policy, signal=signal, tier=tier)
+
+
+def _underwriting_policy_result(
+    facts: CloseDecisionFacts,
+    *,
+    policy: str,
+    signal: str,
+    tier: str,
+) -> ClosePolicyResult:
+    thesis = _policy_text(facts.thesis_status)
+    willingness = facts.continued_willingness
+    thesis_incomplete = thesis not in {"valid", "observe"}
+    willingness_incomplete = willingness is None
+    basis = [f"profit_capture_{signal}" if signal != "none" else _current_policy_hold_basis(exit_state="", tier=tier)]
+
+    if willingness is False:
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_REVIEW,
+            *basis,
+            "continued_willingness_revoked",
+            evidence_status=DECISION_EVIDENCE_REVIEW_REQUIRED,
+        )
+    if signal == "strong":
+        if thesis != "valid" or willingness_incomplete:
+            if thesis == "observe":
+                reason = "underwriting_thesis_observe"
+                evidence_status = DECISION_EVIDENCE_REVIEW_REQUIRED
+            else:
+                reason = "thesis_evidence_incomplete" if thesis_incomplete else "continued_willingness_missing"
+                evidence_status = DECISION_EVIDENCE_PARTIAL
+            return _close_policy_result(
+                policy,
+                RECOMMENDATION_REVIEW,
+                *basis,
+                reason,
+                evidence_status=evidence_status,
+            )
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_CLOSE,
+            *basis,
+            "underwriting_evidence_complete",
+        )
+    if signal == "medium":
+        if thesis == "valid" and willingness is True:
+            return _close_policy_result(
+                policy,
+                RECOMMENDATION_HOLD,
+                *basis,
+                "underwriting_thesis_valid",
+                "continued_willingness_accepted",
+            )
+        status = DECISION_EVIDENCE_PARTIAL if thesis_incomplete or willingness_incomplete else DECISION_EVIDENCE_REVIEW_REQUIRED
+        reason = (
+            "thesis_evidence_incomplete"
+            if thesis_incomplete
+            else "continued_willingness_missing"
+            if willingness_incomplete
+            else "underwriting_thesis_observe"
+        )
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_REVIEW,
+            *basis,
+            reason,
+            evidence_status=status,
+        )
+    if thesis == "observe":
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_REVIEW,
+            *basis,
+            "underwriting_thesis_observe",
+            evidence_status=DECISION_EVIDENCE_REVIEW_REQUIRED,
+        )
+    if willingness_incomplete and thesis == "valid":
+        return _close_policy_result(
+            policy,
+            RECOMMENDATION_REVIEW,
+            *basis,
+            "continued_willingness_missing",
+            evidence_status=DECISION_EVIDENCE_PARTIAL,
+        )
+    return _close_policy_result(
+        policy,
+        RECOMMENDATION_HOLD,
+        *basis,
+        "underwriting_thesis_valid" if thesis == "valid" else "thesis_evidence_incomplete",
+        evidence_status=(DECISION_EVIDENCE_COMPLETE if thesis == "valid" else DECISION_EVIDENCE_PARTIAL),
+    )
+
+
+def _apply_close_execution_gate(
+    facts: CloseDecisionFacts,
+    result: ClosePolicyResult,
+    *,
+    long_call: bool,
+) -> ClosePolicyResult:
+    if result.recommendation_state != RECOMMENDATION_CLOSE:
+        return result
+    if _policy_text(facts.fee_calc_status) not in FEE_USABLE_STATUSES:
+        return _close_policy_result(
+            result.policy_version,
+            RECOMMENDATION_NOT_EVALUABLE,
+            *result.decision_basis,
+            "fee_evidence_unusable",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    if long_call and _policy_text(facts.exit_state) == EXIT_STATE_SALVAGE:
+        return result
+    net_pnl = safe_float(facts.estimated_pnl_if_close_net)
+    if net_pnl is None:
+        return _close_policy_result(
+            result.policy_version,
+            RECOMMENDATION_NOT_EVALUABLE,
+            *result.decision_basis,
+            "net_close_pnl_missing",
+            evidence_status=DECISION_EVIDENCE_NOT_EVALUABLE,
+        )
+    if net_pnl <= 0:
+        return _close_policy_result(
+            result.policy_version,
+            RECOMMENDATION_HOLD,
+            *result.decision_basis,
+            "net_close_pnl_non_positive",
+        )
+    return result
+
+
+def _apply_combo_evidence_gate(facts: CloseDecisionFacts, result: ClosePolicyResult) -> ClosePolicyResult:
+    combo_status = _policy_text(facts.combo_evidence_status) or "not_applicable"
+    if result.recommendation_state != RECOMMENDATION_CLOSE or combo_status == "not_applicable":
+        return result
+    if combo_status == "complete":
+        return result
+    return _close_policy_result(
+        result.policy_version,
+        RECOMMENDATION_REVIEW,
+        *result.decision_basis,
+        "combo_evidence_incomplete",
+        evidence_status=DECISION_EVIDENCE_REVIEW_REQUIRED,
+    )
 
 
 def _current_policy_close_basis(*, exit_state: str, tier: str) -> str:

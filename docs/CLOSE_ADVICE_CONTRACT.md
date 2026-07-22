@@ -45,6 +45,31 @@ emitted by the current production policy. Older CSV artifacts are projected as
 `legacy_p0` by read surfaces only; that compatibility projection does not rewrite
 the artifact or make it executable.
 
+### Shadow policy variants
+
+Shadow Replay may evaluate immutable `CloseDecisionFacts` with these named
+variants; none is imported by the production runner or notification selector:
+
+- `P0_current`: exact current exit/tier baseline;
+- `P1_semantic_split`: strong closes, medium requests review, lower tiers hold;
+- `P2_profile_aware`: applies the approved return-first and underwriting truth
+  tables;
+- `P3_opportunity_required`: application-layer-only composition of P2 with the
+  post-run capital-reallocation shadow.
+
+For `insurance_underwriting` (and the legacy-equivalent `short_vol` profile), a
+medium profit-capture tier with valid thesis evidence and unchanged
+assignment/called-away willingness is `hold`, not `close`. An observed thesis
+condition or revoked willingness requests `review`; it never becomes an
+automatic loss/risk exit. Strong capture closes only with a valid thesis,
+complete willingness/execution evidence, usable fees, and positive net-close
+economics. Incomplete paired
+Combo Yield evidence downgrades an otherwise-close result to `review`.
+
+P3 cannot be selected by `evaluate_close_policy`; the Shadow Replay adapter
+composes it only after formal Close Advice and reallocation artifacts exist. A
+replacement opportunity cannot upgrade a P2 hold to close.
+
 ## Architecture
 
 ```text
