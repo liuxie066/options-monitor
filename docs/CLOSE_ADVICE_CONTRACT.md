@@ -67,6 +67,21 @@ not invalidate a priced `profit_capture` or `hold` decision. Event fields are
 merged from the run-level event snapshot; they are not a required_data CSV cache
 contract.
 
+## Position Lifecycle
+
+The runner obtains one business date per run and classifies every open lot from
+its canonical expiration before quote planning or strategy evaluation:
+
+| `position_lifecycle_state` | Rule | Runtime behavior |
+|---|---|---|
+| `active` | DTE is greater than zero | Existing quote, evaluation, action, and notification behavior is unchanged. |
+| `expiry_day` | DTE is zero | Emits the existing diagnostic `not_evaluable` contract and does not request or consume a quote for a decision. |
+| `expired_open` | DTE is negative | Emits diagnostic `not_evaluable` output and is excluded from required-data planning, OpenD fallback, and event enrichment. |
+| `unknown` | Canonical expiration is missing or malformed | Coverage diagnostics may run, but quote-provided DTE cannot promote the lot to active; the row remains `not_evaluable`. |
+
+Lifecycle classification does not infer exercise, assignment, called-away, or
+settlement state. Those outcomes remain ledger/reconciliation facts.
+
 ## Strategy Source
 
 Strategy resolution is deterministic:
