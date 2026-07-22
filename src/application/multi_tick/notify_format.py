@@ -16,10 +16,6 @@ from .misc import (
 )
 
 
-def is_high_priority_notification(text: str) -> bool:
-    return bool(re.search(r"(?m)^重点:\s*$", text or ""))
-
-
 SELL_PUT_ACTION_LABEL = strategy_action_label(STRATEGY_SELL_PUT)
 SELL_PUT_SECTION_LABEL = strategy_section_label(STRATEGY_SELL_PUT)
 COVERED_CALL_ACTION_LABEL = strategy_action_label(STRATEGY_COVERED_CALL)

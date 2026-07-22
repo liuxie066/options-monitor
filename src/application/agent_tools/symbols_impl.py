@@ -60,13 +60,6 @@ def require_int(payload: dict[str, Any], key: str) -> int:
     return int(value)
 
 
-def require_float(payload: dict[str, Any], key: str) -> float:
-    value = payload.get(key)
-    if value is None:
-        raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required")
-    return float(value)
-
-
 def optional_float(payload: dict[str, Any], key: str) -> float | None:
     value = payload.get(key)
     if value is None:

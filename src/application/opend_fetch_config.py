@@ -226,10 +226,6 @@ def resolve_option_chain_fetch_limit(config: dict[str, Any] | None) -> OpenDEndp
     )
 
 
-def resolve_option_chain_fetch_config(config: dict[str, Any] | None) -> dict[str, float | int]:
-    return resolve_option_chain_fetch_limit(config).as_config()
-
-
 def _endpoint_rate_limit(
     config: dict[str, Any] | None,
     *,
