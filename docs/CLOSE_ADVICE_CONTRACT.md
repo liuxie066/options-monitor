@@ -67,6 +67,21 @@ not invalidate a priced `profit_capture` or `hold` decision. Event fields are
 merged from the run-level event snapshot; they are not a required_data CSV cache
 contract.
 
+## Position Lifecycle
+
+The runner obtains one business date per run and classifies every open lot from
+its canonical expiration before quote planning or strategy evaluation:
+
+| `position_lifecycle_state` | Rule | Runtime behavior |
+|---|---|---|
+| `active` | DTE is greater than zero | Existing quote, evaluation, action, and notification behavior is unchanged. |
+| `expiry_day` | DTE is zero | Emits the existing diagnostic `not_evaluable` contract and does not request or consume a quote for a decision. |
+| `expired_open` | DTE is negative | Emits diagnostic `not_evaluable` output and is excluded from required-data planning, OpenD fallback, and event enrichment. |
+| `unknown` | Canonical expiration is missing or malformed | Coverage diagnostics may run, but quote-provided DTE cannot promote the lot to active; the row remains `not_evaluable`. |
+
+Lifecycle classification does not infer exercise, assignment, called-away, or
+settlement state. Those outcomes remain ledger/reconciliation facts.
+
 ## Strategy Source
 
 Strategy resolution is deterministic:
@@ -152,6 +167,33 @@ status, and evidence scope without replacing the leg tier, reason,
 This synthesis never infers assignment from a close type and never invents an
 assigned-stock sale, Call exercise, or future Call terminal value. Assignment
 semantics remain in the separate full-lifecycle reporting path.
+
+## Fee Evidence and Action Safety
+
+Close Advice uses `domain/domain/fee_calc.py` as its only option-fee authority.
+The dated assumptions are intentionally visible rather than presented as
+account-level exact fees:
+
+- USD uses Futu HK's fixed-package schedule and reports
+  `fee_calc_status=schedule_estimate` with
+  `fee_calc_basis=futu_us_fixed_package_2026-07-22`. The position contract does
+  not currently carry the account's fixed/tiered platform-package selection.
+- HKD uses the Tier-1 exchange tariff as an upper bound and reports
+  `fee_calc_status=conservative_estimate` with
+  `fee_calc_basis=futu_hk_tier1_upper_bound_2026-07-22`. The tariff is waived
+  when the option price is exactly HKD 0.01.
+- Missing or non-Futu broker evidence, unsupported currency, and invalid fee
+  inputs are explicit non-authoritative statuses; they never silently fall back
+  to USD.
+
+`estimated_pnl_if_close_gross`, `estimated_close_fee`, and
+`estimated_pnl_if_close_net` retain lifetime-P&L meaning. Long positions also
+expose `net_close_proceeds`, the sell-to-close value less the estimated fee.
+An existing actionable short close or long take-profit requires positive net
+lifetime P&L. A long-call salvage action instead requires positive
+`net_close_proceeds`, so a valid residual-value sale may still have negative
+lifetime P&L. Missing fee evidence makes only an otherwise-actionable row
+`not_evaluable`; it does not manufacture an action from an existing hold.
 
 ## Calibration Evidence
 

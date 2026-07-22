@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -30,6 +30,7 @@ def test_close_advice_input_uses_shared_account_and_currency_normalization() -> 
             "currency": "港币",
         },
         {"bid": 0.5, "ask": 0.6},
+        business_date=date(2026, 4, 16),
     )
 
     assert input_row.account == "lx"
@@ -52,6 +53,7 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
             {
                 "record_id": "lot-nvda-1",
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -123,6 +125,7 @@ def test_run_close_advice_keeps_distinct_lot_ids_for_same_contract(
     _freeze_close_advice_business_today(monkeypatch)
     position = {
         "account": "lx",
+        "broker": "富途",
         "symbol": "NVDA",
         "option_type": "put",
         "side": "short",
@@ -187,6 +190,7 @@ def test_run_close_advice_uses_underwriting_config_for_short_vol_close_thesis(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -267,6 +271,7 @@ def test_run_close_advice_refreshes_short_vol_quote_missing_rv(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -374,6 +379,7 @@ def test_run_close_advice_does_not_require_rv_for_return_first_position(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -446,6 +452,7 @@ def test_run_close_advice_uses_income_upside_mode_for_yield_enhancement_put(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -519,6 +526,7 @@ def test_run_close_advice_uses_vol_convexity_mode_for_yield_enhancement_put(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -616,6 +624,7 @@ def test_run_close_advice_merges_event_snapshot_for_short_vol_position(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "PDD",
                 "option_type": "put",
                 "side": "short",
@@ -683,6 +692,7 @@ def test_run_close_advice_reports_missing_event_snapshot_for_short_vol_position(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "PDD",
                 "option_type": "put",
                 "side": "short",
@@ -762,6 +772,7 @@ def test_run_close_advice_records_missing_event_snapshot_symbol_as_context(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "PDD",
                 "option_type": "put",
                 "side": "short",
@@ -835,6 +846,7 @@ def test_run_close_advice_rechecks_stale_quote_event_context(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "PDD",
                 "option_type": "put",
                 "side": "short",
@@ -907,6 +919,7 @@ def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -973,6 +986,7 @@ def test_run_close_advice_uses_yield_enhancement_put_exit_action(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -1044,6 +1058,7 @@ def test_run_close_advice_holds_yield_enhancement_put_when_threshold_not_met(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -1108,6 +1123,7 @@ def test_run_close_advice_uses_yield_enhancement_long_call_exit_action(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "call",
                 "side": "long",
@@ -1179,6 +1195,7 @@ def test_run_close_advice_reports_yield_enhancement_combo_economics(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -1196,6 +1213,7 @@ def test_run_close_advice_reports_yield_enhancement_combo_economics(
             },
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "call",
                 "side": "long",
@@ -1280,6 +1298,7 @@ def test_run_close_advice_preserves_domain_not_evaluable_status(tmp_path: Path) 
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -1347,6 +1366,7 @@ def test_run_close_advice_prefers_context_expiration_ymd_field(
         "open_positions_min": [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "NVDA",
                 "option_type": "put",
                 "side": "short",
@@ -1406,6 +1426,7 @@ def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(
         "open_positions_min": [
             {
                 "account": "sy",
+                "broker": "富途",
                 "symbol": "PDD",
                 "option_type": "put",
                 "side": "short",
@@ -1463,17 +1484,220 @@ def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(
 def test_close_advice_recalculates_dte_from_business_today(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.application import close_advice_runner as runner
 
-    monkeypatch.setattr(
-        runner,
-        "expiration_business_today",
-        lambda: datetime(2026, 5, 1, tzinfo=timezone.utc).date(),
+    business_date = datetime(2026, 5, 1, tzinfo=timezone.utc).date()
+    assert runner._calc_dte("2026-05-01", business_date=business_date) == 0
+    assert runner._calc_dte("2026-05-02", business_date=business_date) == 1
+
+
+@pytest.mark.parametrize("expiration", [None, "not-a-date"])
+def test_close_advice_never_uses_quote_dte_for_unknown_lifecycle(expiration: str | None) -> None:
+    from src.application import close_advice_runner as runner
+
+    inp, _flags = runner._position_to_input(
+        {
+            "account": "lx",
+            "symbol": "AAPL",
+            "option_type": "put",
+            "side": "short",
+            "expiration": expiration,
+            "strike": 100,
+            "contracts_open": 1,
+            "premium": 1.0,
+            "multiplier": 100,
+            "currency": "USD",
+        },
+        {"bid": 0.4, "ask": 0.5, "dte": 99},
+        business_date=date(2026, 4, 16),
     )
 
-    assert runner._calc_dte("2026-05-01", {"dte": 99}) == 0
-    assert runner._calc_dte("2026-05-02", {"dte": 99}) == 1
+    assert inp.dte is None
 
 
-def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Path) -> None:
+def test_run_close_advice_routes_non_active_lifecycle_before_quote_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application import close_advice_runner as runner
+
+    _freeze_close_advice_business_today(monkeypatch)
+    positions = [
+        {
+            "record_id": "expiry-day",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "AAPL",
+            "option_type": "put",
+            "side": "short",
+            "contracts_open": 1,
+            "currency": "USD",
+            "strike": 100,
+            "multiplier": 100,
+            "premium": 1.0,
+            "expiration": "2026-04-16",
+        },
+        {
+            "record_id": "expired-open",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "MSFT",
+            "option_type": "call",
+            "side": "short",
+            "contracts_open": 1,
+            "currency": "USD",
+            "strike": 200,
+            "multiplier": 100,
+            "premium": 1.0,
+            "expiration": "2026-04-15",
+        },
+        {
+            "record_id": "unknown",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "contracts_open": 1,
+            "currency": "USD",
+            "strike": 100,
+            "multiplier": 100,
+            "premium": 1.0,
+        },
+    ]
+    context_path = tmp_path / "option_positions_context.json"
+    context_path.write_text(
+        json.dumps({"open_positions_min": positions}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    (required_root / "parsed").mkdir(parents=True)
+    planned: dict[str, list[str]] = {}
+
+    def fake_ensure(**kwargs: object) -> tuple[dict, dict, dict]:
+        planned["required_data"] = [str(pos.get("record_id")) for pos in kwargs["positions"]]  # type: ignore[index,union-attr]
+        return {}, {}, {"attempted_symbols": 0, "fetched_symbols": 0, "errors": 0}
+
+    def fake_fetch(**kwargs: object) -> tuple[dict, dict]:
+        planned["opend_fallback"] = [str(pos.get("record_id")) for pos in kwargs["positions"]]  # type: ignore[index,union-attr]
+        return {}, {}
+
+    def fake_event_merge(**kwargs: object) -> None:
+        planned["event_enrichment"] = [str(pos.get("record_id")) for pos in kwargs["positions"]]  # type: ignore[index,union-attr]
+
+    monkeypatch.setattr(runner, "_ensure_required_data_coverage_for_positions", fake_ensure)
+    monkeypatch.setattr(runner, "_fetch_missing_quotes_via_opend", fake_fetch)
+    monkeypatch.setattr(runner, "_merge_event_snapshot_for_short_vol_positions", fake_event_merge)
+
+    output_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=context_path,
+        required_data_root=required_root,
+        output_dir=output_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(output_dir / "close_advice.csv").set_index("position_lot_id")
+    assert planned == {"required_data": [], "opend_fallback": [], "event_enrichment": []}
+    assert rows.loc["expiry-day", "position_lifecycle_state"] == "expiry_day"
+    assert rows.loc["expired-open", "position_lifecycle_state"] == "expired_open"
+    assert rows.loc["unknown", "position_lifecycle_state"] == "unknown"
+    assert set(rows["evaluation_status"]) == {"not_evaluable"}
+    assert set(rows["tier"]) == {"not_evaluable"}
+    assert set(rows["close_action"]) == {"not_evaluable"}
+    assert rows.loc["expiry-day", "quote_status"] == "not_required"
+    assert rows.loc["expired-open", "quote_status"] == "not_required"
+    assert rows.loc["unknown", "quote_status"] == "not_evaluable"
+    assert result["notify_rows"] == 0
+
+    from src.application.agent_tools.analysis import _close_advice_snapshot_row
+    from src.application.agent_tools.close_advice_read_impl import _public_row
+
+    lifecycle_row = {"position_lifecycle_state": "expired_open"}
+    assert _public_row(lifecycle_row)["position_lifecycle_state"] == "expired_open"
+    assert _close_advice_snapshot_row(lifecycle_row)["position_lifecycle_state"] == "expired_open"
+
+
+def test_run_close_advice_uses_one_business_date_for_active_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application import close_advice_runner as runner
+
+    calls = 0
+
+    def business_today_once() -> date:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("business date provider called more than once")
+        return date(2026, 4, 16)
+
+    monkeypatch.setattr(runner, "expiration_business_today", business_today_once)
+    context_path = tmp_path / "option_positions_context.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "record_id": "active-lot",
+                        "account": "lx",
+                        "broker": "富途",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.6,
+                        "expiration": "2026-05-15",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.2,
+                "bid": 0.19,
+                "ask": 0.21,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    output_dir = tmp_path / "reports"
+
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "quote_source": "required_data"}},
+        context_path=context_path,
+        required_data_root=required_root,
+        output_dir=output_dir,
+        base_dir=Path.cwd(),
+    )
+
+    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
+    assert calls == 1
+    assert row["position_lifecycle_state"] == "active"
+    assert row["dte"] == 29
+
+
+def test_run_close_advice_records_missing_quote_but_does_not_notify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1481,6 +1705,7 @@ def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Pa
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -1537,6 +1762,7 @@ def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Pa
 
 
 def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1544,6 +1770,7 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -1634,6 +1861,7 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
 
 
 def test_run_close_advice_uses_bid_ask_when_mid_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1641,6 +1869,7 @@ def test_run_close_advice_uses_bid_ask_when_mid_missing(tmp_path: Path, monkeypa
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -1712,6 +1941,7 @@ def test_run_close_advice_recalculates_dte_from_position_expiration(tmp_path: Pa
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -1773,6 +2003,7 @@ def test_run_close_advice_blocks_last_price_only_quote_from_notifications(tmp_pa
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -1831,6 +2062,7 @@ def test_run_close_advice_reports_quote_issue_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1838,6 +2070,7 @@ def test_run_close_advice_reports_quote_issue_summary(
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -1880,6 +2113,7 @@ def test_run_close_advice_reports_quote_issue_summary(
 
 
 def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1887,6 +2121,7 @@ def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetc
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "9992.HK",
                         "option_type": "put",
                         "side": "short",
@@ -1962,6 +2197,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                 "open_positions_min": [
                     {
                         "account": "sy",
+                        "broker": "富途",
                         "symbol": "9992.HK",
                         "option_type": "put",
                         "side": "short",
@@ -1975,6 +2211,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                     },
                     {
                         "account": "sy",
+                        "broker": "富途",
                         "symbol": "9992.HK",
                         "option_type": "call",
                         "side": "short",
@@ -2092,6 +2329,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
 
 
 def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2099,6 +2337,7 @@ def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tm
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -2167,6 +2406,7 @@ def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> N
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -2215,7 +2455,10 @@ def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> N
     csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
     assert result["notify_rows"] == 0
     assert "not_profitable_after_fee" in csv_text
-    assert "-0.41915000000000013" in csv_text
+    row = pd.read_csv(out_dir / "close_advice.csv").iloc[0].to_dict()
+    assert row["estimated_pnl_if_close_net"] == pytest.approx(-0.6033)
+    assert row["fee_calc_status"] == "schedule_estimate"
+    assert row["fee_calc_basis"] == "futu_us_fixed_package_2026-07-22"
     assert (out_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
 
 
@@ -2228,6 +2471,7 @@ def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> N
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -2274,11 +2518,11 @@ def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> N
     )
 
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
-    assert "$2.58" in text
+    assert "$2.40" in text
     assert "$0.10" in text
 
 
-def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_close_advice_fails_closed_when_fee_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
@@ -2287,6 +2531,7 @@ def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkey
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -2336,7 +2581,11 @@ def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkey
 
     csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
     assert "fee_calc_unavailable" in csv_text
-    assert "strong" in csv_text
+    assert "fee_evidence_unavailable" in csv_text
+    row = pd.read_csv(out_dir / "close_advice.csv").iloc[0].to_dict()
+    assert row["tier"] == "not_evaluable"
+    assert row["close_action"] == "not_evaluable"
+    assert row["evaluation_status"] == "not_evaluable"
 
 
 def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(
@@ -2351,6 +2600,7 @@ def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -2363,6 +2613,7 @@ def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(
                     },
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -2375,6 +2626,7 @@ def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(
                     },
                     {
                         "account": "sy",
+                        "broker": "富途",
                         "symbol": "TSLA",
                         "option_type": "put",
                         "side": "short",
@@ -2437,6 +2689,7 @@ def test_run_close_advice_max_items_zero_means_unlimited(tmp_path: Path) -> None
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -2450,6 +2703,7 @@ def test_run_close_advice_max_items_zero_means_unlimited(tmp_path: Path) -> None
                     },
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -2511,6 +2765,7 @@ def test_run_close_advice_filters_positions_to_current_markets(tmp_path: Path) -
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -2523,6 +2778,7 @@ def test_run_close_advice_filters_positions_to_current_markets(tmp_path: Path) -
                     },
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -2595,6 +2851,7 @@ def test_run_close_advice_filters_positions_to_current_markets(tmp_path: Path) -
 def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_price(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2602,6 +2859,7 @@ def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_pri
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -2674,7 +2932,11 @@ def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_pri
     assert "0.6" in csv_text
 
 
-def test_run_close_advice_counts_spread_block_as_quote_issue(tmp_path: Path) -> None:
+def test_run_close_advice_counts_spread_block_as_quote_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2682,6 +2944,7 @@ def test_run_close_advice_counts_spread_block_as_quote_issue(tmp_path: Path) -> 
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "NVDA",
                         "option_type": "put",
                         "side": "short",
@@ -2732,6 +2995,7 @@ def test_run_close_advice_counts_spread_block_as_quote_issue(tmp_path: Path) -> 
 
 
 def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2739,6 +3003,7 @@ def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Pat
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "POP",
                         "option_type": "put",
                         "side": "short",
@@ -2824,6 +3089,7 @@ def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Pat
 
 
 def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2831,6 +3097,7 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -2893,6 +3160,7 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
 
 
 def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2900,6 +3168,7 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "AAPL",
                         "option_type": "put",
                         "side": "short",
@@ -2963,6 +3232,7 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
 def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -2970,6 +3240,7 @@ def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -3031,6 +3302,7 @@ def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
 def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -3038,6 +3310,7 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "0700.HK",
                         "option_type": "put",
                         "side": "short",
@@ -3099,6 +3372,7 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
 def test_run_close_advice_surfaces_required_data_rate_limit_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -3106,6 +3380,7 @@ def test_run_close_advice_surfaces_required_data_rate_limit_payload(
                 "open_positions_min": [
                     {
                         "account": "lx",
+                        "broker": "富途",
                         "symbol": "PDD",
                         "option_type": "put",
                         "side": "short",
@@ -3211,6 +3486,7 @@ def test_compact_close_advice_renders_legacy_risk_exit_as_read_only_compatibilit
         [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "0700.HK",
                 "option_type": "put",
                 "expiration": "2026-07-30",
@@ -3247,6 +3523,7 @@ def test_compact_close_advice_does_not_render_short_vol_observation_as_close() -
         [
             {
                 "account": "lx",
+                "broker": "富途",
                 "symbol": "0700.HK",
                 "option_type": "put",
                 "expiration": "2026-07-30",
@@ -3280,6 +3557,7 @@ def test_buy_to_close_fee_exposes_explicit_close_economics(monkeypatch: pytest.M
     monkeypatch.setattr(close_advice_runner, "calc_futu_option_fee", lambda *_args, **_kwargs: 2.0)
     row = close_advice_runner._apply_buy_to_close_fee(
         {
+            "broker": "富途",
             "position_side": "short",
             "currency": "USD",
             "close_mid": 0.20,
@@ -3295,8 +3573,63 @@ def test_buy_to_close_fee_exposes_explicit_close_economics(monkeypatch: pytest.M
     assert row["close_fee_to_remaining_premium"] == pytest.approx(0.10)
     assert row["estimated_pnl_if_close_gross"] == 80.0
     assert row["estimated_close_fee"] == 2.0
+    assert row["fee_calc_status"] == "schedule_estimate"
+    assert row["fee_calc_basis"] == "futu_us_fixed_package_2026-07-22"
     assert row["estimated_pnl_if_close_net"] == 78.0
     assert row["realized_if_close"] == 78.0
+
+
+def test_sell_to_close_fee_exposes_net_proceeds_and_hk_upper_bound() -> None:
+    from src.application import close_advice_runner
+
+    row = close_advice_runner._apply_buy_to_close_fee(
+        {
+            "broker": "富途",
+            "position_side": "long",
+            "currency": "HKD",
+            "close_mid": 1.0,
+            "contracts_open": 1,
+            "multiplier": 100,
+            "estimated_pnl_if_close_gross": -20.0,
+        }
+    )
+
+    assert row["sell_to_close_fee"] == 21.0
+    assert row["net_close_proceeds"] == 79.0
+    assert row["fee_calc_status"] == "conservative_estimate"
+    assert row["fee_calc_basis"] == "futu_hk_tier1_upper_bound_2026-07-22"
+
+
+@pytest.mark.parametrize(
+    ("broker", "currency", "expected_status"),
+    [
+        (None, "USD", "unavailable"),
+        ("other", "USD", "unsupported_broker"),
+        ("富途", "CNY", "unsupported_currency"),
+    ],
+)
+def test_close_fee_evidence_rejects_unsupported_inputs(
+    broker: str | None,
+    currency: str,
+    expected_status: str,
+) -> None:
+    from src.application import close_advice_runner
+
+    row = close_advice_runner._apply_buy_to_close_fee(
+        {
+            "broker": broker,
+            "position_side": "short",
+            "currency": currency,
+            "close_mid": 0.2,
+            "contracts_open": 1,
+            "multiplier": 100,
+            "estimated_pnl_if_close_gross": 80.0,
+        }
+    )
+
+    assert row["fee_calc_status"] == expected_status
+    assert row["estimated_close_fee"] is None
+    assert "fee_calc_unavailable" in row["data_quality_flags"]
 
 
 def test_close_economics_do_not_claim_net_pnl_when_fee_is_unavailable() -> None:
@@ -3380,6 +3713,22 @@ def test_close_calibration_uses_only_explicit_replacement_and_willingness() -> N
     assert public["combo_group_classification"] == "residual_call"
     assert public["combo_group_action"] == "hold_residual_call"
 
+    fee_public = _public_row(
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "estimated_pnl_if_close_gross": 80.0,
+            "estimated_close_fee": 2.0,
+            "fee_calc_status": "schedule_estimate",
+            "fee_calc_basis": "futu_us_fixed_package_2026-07-22",
+            "estimated_pnl_if_close_net": 78.0,
+            "net_close_proceeds": 18.0,
+        }
+    )
+    assert fee_public["fee_calc_status"] == "schedule_estimate"
+    assert fee_public["estimated_pnl_if_close_net"] == 78.0
+    assert fee_public["net_close_proceeds"] == 18.0
+
 
 def _combo_advice_leg(
     *,
@@ -3396,6 +3745,7 @@ def _combo_advice_leg(
     is_put = option_type == "put"
     row: dict[str, object] = {
         "account": "lx",
+        "broker": "富途",
         "symbol": "NVDA",
         "option_type": option_type,
         "position_side": "short" if is_put else "long",
@@ -3430,6 +3780,7 @@ def _combo_position(
     return {
         "record_id": record_id,
         "account": "lx",
+        "broker": "富途",
         "symbol": "NVDA",
         "option_type": option_type,
         "side": side or ("short" if is_put else "long"),

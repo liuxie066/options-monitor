@@ -12,6 +12,8 @@ from domain.domain.option_position_identity import normalize_currency
 
 FUTU_US_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_283"
 FUTU_HK_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_335"
+FUTU_US_OPTION_FEE_BASIS = "futu_us_fixed_package_2026-07-22"
+FUTU_HK_OPTION_FEE_BASIS = "futu_hk_tier1_upper_bound_2026-07-22"
 
 _ACTUAL_FEE_TOTAL_KEYS = (
     "total_fee",
@@ -54,7 +56,7 @@ def calc_futu_us_option_fee(
     multiplier: int = 100,
     is_sell: bool = True,
 ) -> float:
-    """富途美股期权费用完整口径。"""
+    """Estimate Futu HK US-option fees using the dated fixed package."""
     price = _require_positive("order_price", float(order_price))
     qty = int(contracts)
     if qty <= 0:
@@ -67,10 +69,13 @@ def calc_futu_us_option_fee(
     commission_per_contract = 0.65 if price > 0.1 else 0.15
     commission = max(commission_per_contract * qty, 1.99)
     platform_fee = 0.30 * qty
-    orf = 0.02915 * qty
-    sec_fee = max(transaction_amount * 0.0000229, 0.01) if is_sell else 0.0
-    taf = max(0.00279 * qty, 0.01) if is_sell else 0.0
-    total = commission + platform_fee + orf + sec_fee + taf
+    orf = 0.013 * qty
+    occ_fee = min(0.02 * qty, 55.0)
+    settlement_fee = 0.18 * qty
+    cat_fee = 0.0003 * qty
+    sec_fee = max(transaction_amount * 0.0000206, 0.01) if is_sell else 0.0
+    taf = max(0.00329 * qty, 0.01) if is_sell else 0.0
+    total = commission + platform_fee + orf + occ_fee + settlement_fee + cat_fee + sec_fee + taf
     return round(total, 6)
 
 
@@ -81,7 +86,7 @@ def calc_futu_hk_option_fee(
     multiplier: int = 100,
     is_sell: bool = True,
 ) -> float:
-    """富途港股期权费用完整口径。"""
+    """Estimate Futu HK option fees with a conservative Tier-1 tariff."""
     del is_sell
     price = _require_positive("order_price", float(order_price))
     qty = int(contracts)
@@ -94,7 +99,7 @@ def calc_futu_hk_option_fee(
     transaction_amount = price * unit_multiplier * qty
     commission = max(transaction_amount * 0.002, 3.0)
     platform_fee = 15.0
-    system_fee = 3.0 * qty
+    system_fee = 0.0 if Decimal(str(price)) == Decimal("0.01") else 3.0 * qty
     total = commission + platform_fee + system_fee
     return round(total, 6)
 
@@ -107,7 +112,9 @@ def calc_futu_option_fee(
     multiplier: int = 100,
     is_sell: bool = True,
 ) -> float:
-    ccy = normalize_currency(currency) or "USD"
+    ccy = normalize_currency(currency)
+    if ccy not in {"USD", "HKD"}:
+        raise ValueError("currency must resolve to USD or HKD")
     if ccy == "HKD":
         return calc_futu_hk_option_fee(
             order_price,

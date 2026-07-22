@@ -51,6 +51,8 @@ EXIT_REASON_TYPE_TAKE_PROFIT = "take_profit"
 EXIT_REASON_TYPE_SALVAGE = "salvage"
 EXIT_REASON_TYPE_THESIS_EXPIRED = "thesis_expired"
 
+FEE_USABLE_STATUSES = {"schedule_estimate", "conservative_estimate"}
+
 HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE = "assignment_acceptable"
 HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE = "called_away_acceptable"
 
@@ -897,6 +899,76 @@ def _resolve_exit_contract(
     if tier_norm and tier_norm != "none":
         return EXIT_STATE_PROFIT_CAPTURE, exit_reason_type or EXIT_REASON_TYPE_PROFIT_CAPTURE
     return EXIT_STATE_HOLD, exit_reason_type or EXIT_REASON_TYPE_HOLD
+
+
+def apply_fee_economic_safety(row: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed only when an existing close action needs unusable economics."""
+
+    out = dict(row)
+    exit_state = str(out.get("exit_state") or "").strip().lower()
+    if exit_state not in {
+        EXIT_STATE_PROFIT_CAPTURE,
+        EXIT_STATE_TAKE_PROFIT,
+        EXIT_STATE_SALVAGE,
+    }:
+        return out
+
+    flags = [item for item in str(out.get("data_quality_flags") or "").split(";") if item]
+    fee_status = str(out.get("fee_calc_status") or "").strip().lower()
+    if fee_status not in FEE_USABLE_STATUSES:
+        flags.append("fee_evidence_unavailable")
+        out.update(
+            {
+                "tier": "not_evaluable",
+                "tier_label": TIER_LABELS["not_evaluable"],
+                "reason": "平仓手续费证据不可用，当前无法安全给出平仓建议",
+                "exit_state": EXIT_STATE_NOT_EVALUABLE,
+                "exit_reason_type": EXIT_REASON_TYPE_NOT_EVALUABLE,
+                "evaluation_status": "not_evaluable",
+                "data_quality_flags": ";".join(dict.fromkeys(flags)),
+            }
+        )
+        return out
+
+    if exit_state == EXIT_STATE_SALVAGE:
+        economic_value = safe_float(out.get("net_close_proceeds"))
+        failure_flag = "non_positive_net_close_proceeds"
+        failure_reason = "扣除卖出平仓手续费后已无可回收净残值，继续持有观察"
+    else:
+        economic_value = safe_float(out.get("estimated_pnl_if_close_net"))
+        failure_flag = "not_profitable_after_fee"
+        failure_reason = "扣除平仓手续费后已无正收益，不建议作为收益型平仓提醒"
+
+    if economic_value is None:
+        flags.append("fee_economics_unavailable")
+        out.update(
+            {
+                "tier": "not_evaluable",
+                "tier_label": TIER_LABELS["not_evaluable"],
+                "reason": "平仓手续费已估算，但净经济结果不可用，当前无法安全给出平仓建议",
+                "exit_state": EXIT_STATE_NOT_EVALUABLE,
+                "exit_reason_type": EXIT_REASON_TYPE_NOT_EVALUABLE,
+                "evaluation_status": "not_evaluable",
+                "data_quality_flags": ";".join(dict.fromkeys(flags)),
+            }
+        )
+        return out
+
+    if economic_value > 0:
+        return out
+
+    flags.append(failure_flag)
+    out.update(
+        {
+            "tier": "none",
+            "tier_label": TIER_LABELS["none"],
+            "reason": failure_reason,
+            "exit_state": EXIT_STATE_HOLD,
+            "exit_reason_type": EXIT_REASON_TYPE_HOLD,
+            "data_quality_flags": ";".join(dict.fromkeys(flags)),
+        }
+    )
+    return out
 
 
 
