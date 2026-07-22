@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.9 - 2026-07-23
+
+### Fixed
+- Made Sell Put market-data visibility account-invariant by removing the early native-currency cash strike cap; affordability remains enforced after candidates are visible through the canonical CNY capacity gate, preventing valid TCOM Put contracts from disappearing for `lx` while preserving fail-closed cash rejection.
+
 ## 1.4.8 - 2026-07-23
 
 ### Fixed
