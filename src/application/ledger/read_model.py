@@ -26,10 +26,8 @@ from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_data_config_path
 from src.application.settings import build_effective_env
-from src.application.positions.reporting import build_monthly_income_report
 from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.repository import require_option_positions_read_repo
-from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 
 
@@ -372,32 +370,6 @@ def _position_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
         strike is None,
         strike if strike is not None else float("inf"),
         str(row.get("record_id") or ""),
-    )
-
-
-def build_position_monthly_income_report(
-    repo: Any,
-    *,
-    base: Path,
-    broker: str,
-    account: str | None = None,
-    month: str | None = None,
-    assigned_stock_events: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    primary_repo = getattr(repo, "primary_repo", repo)
-    list_trade_events = getattr(primary_repo, "list_trade_events", None)
-    raw_trade_events = list_trade_events() if callable(list_trade_events) else None
-    trade_events = raw_trade_events if isinstance(raw_trade_events, list) else None
-    return build_monthly_income_report(
-        load_canonical_position_lot_records(repo, base=base),
-        account=account,
-        broker=broker,
-        month=month,
-        rates=get_exchange_rates_or_fetch_latest(
-            cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
-        ),
-        trade_events=trade_events,
-        assigned_stock_events=[dict(item) for item in assigned_stock_events or []],
     )
 
 

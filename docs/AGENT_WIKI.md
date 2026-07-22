@@ -325,7 +325,7 @@ Use the metric namespace that matches the question:
 
 `premium_collected_gross` is not additional profit. Assignment stock principal is cash movement and an asset conversion, not option PnL. Missing fee, mark, or FX evidence stays partial/null and must never be replaced with zero. A configured account scope with no events is a proven observed zero; an arbitrary unconfigured scope remains `not_observed`.
 
-`monthly_income_report`, `./om option-positions report monthly-income`, and `portfolio_capital_bridge` are deprecated rollback boundaries. Do not create new consumers of their ambiguous `net_income_cny` or generic return fields. See `docs/migrations/OPTION_PERFORMANCE_V1_MIGRATION.md` for reconciliation, rollback, and removal gates.
+The historical monthly-income adapters and mixed portfolio capital bridge have been removed. Archived output interpretation is documented in `docs/migrations/OPTION_PERFORMANCE_V1_MIGRATION.md`; it is not a runtime rollback path.
 
 ### Close Advice
 

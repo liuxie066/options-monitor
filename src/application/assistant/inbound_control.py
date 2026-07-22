@@ -255,12 +255,6 @@ def _tool_payload(
             if arguments.get(key) not in (None, ""):
                 payload[key] = arguments[key]
         return payload
-    if intent_name == "monthly_income_report":
-        payload = dict(base)
-        for key in ("account", "month"):
-            if arguments.get(key):
-                payload[key] = arguments[key]
-        return payload
     if intent_name == "runtime_runs":
         return {"limit": int(arguments.get("limit") or 10)}
     if intent_name == "runtime_logs":

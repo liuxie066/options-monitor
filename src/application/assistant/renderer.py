@@ -46,7 +46,6 @@ def render_inbound_text(*, intent: ControlCommand | None, tool_result: dict[str,
         "analysis_catalog": "analysis_catalog",
         "analysis_query": "analysis_result",
         "option_performance_report": "option_performance",
-        "monthly_income_report": "monthly_income",
         "position_query": "position_rows",
         "assigned_stock_position_query": "assigned_stock_lifecycle",
         "position_exit_analysis": "position_exit_analysis",
@@ -310,15 +309,18 @@ def _analysis_result_summary_line(*, rows: list[dict[str, Any]], columns: list[s
 def _analysis_result_comparison_line(*, rows: list[dict[str, Any]]) -> str:
     row = rows[0] if rows else {}
     higher = _analysis_first_value(rows, "higher_account")
-    diff_key = _analysis_first_existing_key(row, ("income_diff_cny", "diff_cny", "difference_cny", "pnl_diff", "amount_diff"))
+    diff_key = _analysis_first_existing_key(
+        row,
+        ("pnl_diff_cny", "cash_diff_cny", "diff_cny", "difference_cny", "pnl_diff", "amount_diff"),
+    )
     if not higher or not diff_key:
         return ""
     parts: list[str] = []
     month = _analysis_value(row.get("month"))
     if month != "-":
         parts.append(month)
-    left_key = _analysis_first_existing_key(row, ("lx_income_cny", "lx_net_income_cny", "lx_amount"))
-    right_key = _analysis_first_existing_key(row, ("sy_income_cny", "sy_net_income_cny", "sy_amount"))
+    left_key = _analysis_first_existing_key(row, ("lx_pnl_cny", "lx_cash_cny", "lx_amount"))
+    right_key = _analysis_first_existing_key(row, ("sy_pnl_cny", "sy_cash_cny", "sy_amount"))
     if left_key and right_key:
         parts.append(f"lx={_analysis_value(row.get(left_key))}")
         parts.append(f"sy={_analysis_value(row.get(right_key))}")
@@ -349,8 +351,8 @@ def _analysis_result_display_columns(*, rows: list[dict[str, Any]], columns: lis
         "status",
         "component",
         "summary",
-        "net_income_cny",
-        "net_return_rate",
+        "period_total_pnl_net_cny",
+        "total_cash_change_cny",
         "amount",
         "amount_gross",
         "avg_rate",
@@ -785,452 +787,6 @@ def _render_option_performance(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_monthly_income(data: dict[str, Any]) -> str:
-    detail_lines = _monthly_income_detail_lines(data)
-    assigned_stock_lines = _monthly_income_assigned_stock_lines(data)
-    combined_return_summary = data.get("combined_return_summary")
-    if isinstance(combined_return_summary, list) and combined_return_summary:
-        combined_rows = [row for row in combined_return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
-        if combined_rows:
-            mixed_currency = any(_return_row_has_multiple_currencies(row) for row in combined_rows)
-            lines = ["收益统计完成（OM 本地账本）："]
-            for idx, row in enumerate(combined_rows):
-                if idx > 0:
-                    lines.append("")
-                lines.extend(_monthly_income_return_row_lines(row))
-            return_summary = data.get("return_summary")
-            account_rows = (
-                [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
-                if isinstance(return_summary, list)
-                else []
-            )
-            if account_rows:
-                lines.append("")
-                lines.append("分账户：")
-                for row in account_rows:
-                    realized_by_ccy = _dict(row.get("realized_pnl_by_ccy"))
-                    realized_text = (
-                        _format_ccy_amounts(realized_by_ccy)
-                        if mixed_currency
-                        else _cny_with_original(row.get("realized_pnl_cny"), realized_by_ccy)
-                    )
-                    rate_text = (
-                        _format_ccy_rates(_dict(row.get("realized_return_rate_by_ccy")))
-                        if mixed_currency
-                        else _pct(row.get("realized_return_rate"))
-                    )
-                    lines.append(
-                        f"- {row.get('account') or '-'}：已实现期权 PnL（毛） {realized_text}"
-                        f" | 收益率 {rate_text}"
-                    )
-            if assigned_stock_lines:
-                lines.append("")
-                lines.extend(assigned_stock_lines)
-            if detail_lines:
-                lines.append("")
-                lines.extend(detail_lines)
-            lines.append("")
-            lines.append(_monthly_income_basis_line(mixed_currency=mixed_currency))
-            return "\n".join(lines)
-
-    return_summary = data.get("return_summary")
-    if isinstance(return_summary, list) and return_summary:
-        calculable_rows = [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
-        if not calculable_rows:
-            return _render_monthly_income_diagnostics(data)
-        lines = ["收益统计完成（OM 本地账本）："]
-        long_option_recovery_notes: list[str] = []
-        for idx, row in enumerate(calculable_rows):
-            if not isinstance(row, dict):
-                continue
-            if idx > 0:
-                lines.append("")
-            lines.extend(_monthly_income_return_row_lines(row))
-            recovery_note = _monthly_income_long_option_recovery_note(data, row)
-            if recovery_note:
-                long_option_recovery_notes.append(recovery_note)
-        if assigned_stock_lines:
-            lines.append("")
-            lines.extend(assigned_stock_lines)
-        if detail_lines:
-            lines.append("")
-            lines.extend(detail_lines)
-        lines.append("")
-        lines.append(
-            _monthly_income_basis_line(
-                mixed_currency=any(_return_row_has_multiple_currencies(row) for row in calculable_rows)
-            )
-        )
-        if long_option_recovery_notes:
-            lines.append("提示：" + "；".join(_unique(long_option_recovery_notes)))
-        return "\n".join(lines)
-
-    rows = data.get("summary")
-    if not isinstance(rows, list) or not rows:
-        return _render_monthly_income_diagnostics(data)
-    lines = ["收益统计完成（基于 OM 本地账本）："]
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        lines.append(
-            "- "
-            f"{row.get('month') or '-'} "
-            f"{row.get('account') or '-'} "
-            f"{row.get('currency') or '-'} "
-            f"cashflow={row.get('net_cashflow_gross', 0)} "
-            f"realized={row.get('realized_pnl_gross', 0)} "
-            f"open_basis={row.get('open_basis_lifecycle_pnl_gross', 0)}"
-        )
-    if detail_lines:
-        lines.append("")
-        lines.extend(detail_lines)
-    return "\n".join(lines)
-
-
-def _monthly_income_detail_lines(data: dict[str, Any]) -> list[str]:
-    detail_items: list[str] = []
-    for row_raw in _list(data.get("realized_rows"))[:8]:
-        row = _dict(row_raw)
-        if not row:
-            continue
-        detail_items.append(
-            "- 已实现 "
-            f"{_monthly_income_contract_label(row)} "
-            f"{_monthly_income_close_label(row.get('close_type'))} "
-            f"{_contracts_text(row.get('contracts_closed'))}"
-            f" | 实现 {_ccy_amount(row.get('currency'), row.get('realized_gross') if row.get('realized_gross') is not None else row.get('realized_pnl_gross'))}"
-            f" | {row.get('account') or '-'}"
-        )
-    for row_raw in _list(data.get("cashflow_rows"))[:8]:
-        row = _dict(row_raw)
-        if not row:
-            continue
-        detail_items.append(
-            "- 现金流 "
-            f"{_monthly_income_contract_label(row)} "
-            f"{_monthly_income_trade_action_label(row.get('trade_action'))} "
-            f"{_contracts_text(row.get('contracts'))}"
-            f" | 净现金流 {_ccy_amount(row.get('currency'), row.get('net_cashflow_gross'))}"
-            f" | {row.get('account') or '-'}"
-        )
-    if not detail_items:
-        return []
-    realized_count = len(_list(data.get("realized_rows")))
-    cashflow_count = len(_list(data.get("cashflow_rows")))
-    total_count = realized_count + cashflow_count
-    lines = ["组成明细：", *detail_items[:12]]
-    if total_count > len(detail_items[:12]):
-        lines.append(f"- 其余 {total_count - len(detail_items[:12])} 条明细已省略。")
-    return lines
-
-
-def _monthly_income_contract_label(row: dict[str, Any]) -> str:
-    symbol = _value(row.get("symbol"))
-    option_type_raw = str(row.get("option_type") or "").strip().lower()
-    option_type = {"put": "Put", "call": "Call"}.get(option_type_raw, _value(row.get("option_type")))
-    strike = _num(row.get("strike"))
-    suffix = {"put": "P", "call": "C"}.get(option_type_raw, "")
-    parts = [symbol, option_type]
-    if strike != "-" and suffix:
-        parts.append(f"{strike}{suffix}")
-    expiration = _value(row.get("expiration_ymd") or row.get("expiration"))
-    if expiration != "-":
-        parts.append(f"@ {expiration}")
-    return " ".join(part for part in parts if part and part != "-") or "-"
-
-
-def _monthly_income_close_label(value: Any) -> str:
-    key = str(value or "").strip().lower()
-    return {
-        "expire_auto_close": "到期作废",
-        "buy_to_close": "买回平仓",
-        "sell_to_close": "卖出平仓",
-        "assignment": "指派平仓",
-        "exercise": "行权平仓",
-    }.get(key, key or "平仓")
-
-
-def _monthly_income_trade_action_label(value: Any) -> str:
-    key = str(value or "").strip().lower()
-    return {
-        "sell_open": "卖出开仓",
-        "buy_open": "买入开仓",
-        "buy_close": "买回平仓",
-        "sell_close": "卖出平仓",
-        "expire": "到期作废",
-    }.get(key, key or "交易")
-
-
-def _contracts_text(value: Any) -> str:
-    text = _num(value)
-    return f"{text}张" if text != "-" else ""
-
-
-def _ccy_amount(currency: Any, amount: Any) -> str:
-    currency_text = str(currency or "").strip().upper() or "-"
-    value = _num(amount)
-    return f"{currency_text} {value}" if value != "-" else f"{currency_text} -"
-
-
-def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
-    annualized_days = int(row.get("annualized_basis_days") or 0)
-    annualized_suffix = f"{annualized_days} 天"
-    if 0 < annualized_days < 7:
-        annualized_suffix += "，短周期仅参考"
-    account_label = "全部账户" if row.get("account_scope") == "all" or row.get("account") == "all" else row.get("account") or "-"
-    if _return_row_has_multiple_currencies(row):
-        return [
-            f"{account_label} {row.get('month') or '-'} 收益摘要（按币种）",
-            f"- 已实现期权 PnL（毛）：{_format_ccy_amounts(_dict(row.get('realized_pnl_by_ccy')))} | 收益率 {_format_ccy_rates(_dict(row.get('realized_return_rate_by_ccy')))}",
-            f"- 开仓权利金（活动）：{_format_ccy_amounts(_dict(row.get('premium_income_by_ccy')))} | 活动率 {_format_ccy_rates(_dict(row.get('premium_return_rate_by_ccy')))}",
-            f"- 期权现金流（兼容口径）：{_format_ccy_amounts(_dict(row.get('net_income_by_ccy')))} | 现金流率 {_format_ccy_rates(_dict(row.get('net_return_rate_by_ccy')))}",
-        ]
-    realized_line = (
-        f"- 已实现期权 PnL（毛）："
-        f"{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))}"
-        f" | 收益率 {_pct(row.get('realized_return_rate'))}"
-    )
-    if annualized_days > 0:
-        realized_line += (
-            f" | 年化 {_pct(row.get('annualized_realized_return_rate'))}"
-            f"（{annualized_suffix}）"
-        )
-    return [
-        f"{account_label} {row.get('month') or '-'} 收益摘要",
-        realized_line,
-        f"- 开仓权利金（活动）：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))} | 活动率 {_pct(row.get('premium_return_rate'))}",
-        f"- 期权现金流（兼容口径）：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
-    ]
-
-
-def _monthly_income_assigned_stock_lines(data: dict[str, Any]) -> list[str]:
-    lifecycle_rows = _list(data.get("assignment_lifecycle_rows"))
-    sale_rows = _list(data.get("assigned_stock_sale_rows"))
-    review_rows = _list(data.get("assigned_stock_review_rows"))
-    if not lifecycle_rows and not sale_rows and not review_rows:
-        return []
-
-    realized_by_ccy: dict[str, float] = {}
-    for row_raw in sale_rows:
-        row = _dict(row_raw)
-        currency = str(row.get("currency") or "").upper().strip()
-        amount = _float_or_none(row.get("assigned_stock_realized_pnl"))
-        if currency and amount is not None:
-            realized_by_ccy[currency] = realized_by_ccy.get(currency, 0.0) + amount
-
-    unrealized_by_ccy: dict[str, float] = {}
-    for row_raw in lifecycle_rows:
-        row = _dict(row_raw)
-        currency = str(row.get("currency") or "").upper().strip()
-        amount = _float_or_none(row.get("assigned_stock_unrealized_pnl"))
-        if currency and amount is not None:
-            unrealized_by_ccy[currency] = unrealized_by_ccy.get(currency, 0.0) + amount
-
-    lines = ["指派正股（独立于期权 PnL）："]
-    if realized_by_ccy:
-        lines.append(f"- 本月正股卖出已实现：{_format_ccy_amounts(realized_by_ccy)}")
-    if unrealized_by_ccy:
-        lines.append(f"- 当前正股浮盈亏：{_format_ccy_amounts(unrealized_by_ccy)}")
-    missing_symbols = _assigned_stock_unusable_quote_symbols(data=data, rows=lifecycle_rows)
-    if missing_symbols:
-        lines.append(f"- 行情缺口：{'、'.join(missing_symbols)}，无法完整计算当前正股浮盈亏。")
-    if len(lines) == 1:
-        lines.append("- 已有接货记录；正股盈亏需按独立口径查看。")
-    return lines
-
-
-def _monthly_income_basis_line(*, mixed_currency: bool) -> str:
-    currency_note = "金额和收益率按原币分别列示，不跨币种合并；" if mixed_currency else ""
-    return (
-        f"口径：{currency_note}主指标为已实现期权 PnL（毛，未扣手续费，收益率按当前现金担保计算）；"
-        "开仓权利金是活动指标，期权现金流是兼容指标，均不能与 PnL 相加；"
-        "接货本金是现金转为正股，不是亏损，正股盈亏单独核算。"
-    )
-
-
-def _monthly_income_long_option_recovery_note(data: dict[str, Any], return_row: dict[str, Any]) -> str:
-    account = str(return_row.get("account") or "-")
-    month = str(return_row.get("month") or "-")
-    recovered_by_ccy: dict[str, float] = {}
-    for summary_row_raw in _list(data.get("summary")):
-        summary_row = _dict(summary_row_raw)
-        if str(summary_row.get("account") or "-") != account or str(summary_row.get("month") or "-") != month:
-            continue
-        currency = str(summary_row.get("currency") or "").upper().strip()
-        if not currency:
-            continue
-        realized_long = _float_or_none(summary_row.get("realized_long_pnl_gross"))
-        close_proceeds = _float_or_none(summary_row.get("close_proceeds_gross"))
-        if realized_long is None or close_proceeds is None or realized_long <= 0:
-            continue
-        recovered = close_proceeds - realized_long
-        if recovered > 0:
-            recovered_by_ccy[currency] = recovered_by_ccy.get(currency, 0.0) + recovered
-    if not recovered_by_ccy:
-        return ""
-    return (
-        "期权现金流（兼容口径）包含 long option 成本回收约 "
-        + _format_ccy_amounts(recovered_by_ccy)
-        + "，交易盈利看已实现期权 PnL（毛）"
-    )
-
-
-def _return_row_is_calculable(row: dict[str, Any]) -> bool:
-    try:
-        cash = row.get("cash_secured_cny")
-        if cash is None or float(cash) <= 0:
-            return False
-    except Exception:
-        return False
-    for key in (
-        "net_return_rate",
-        "premium_return_rate",
-        "realized_return_rate",
-        "net_income_cny",
-        "premium_income_cny",
-        "realized_pnl_cny",
-    ):
-        if row.get(key) is not None:
-            return True
-    return False
-
-
-def _return_row_has_multiple_currencies(row: dict[str, Any]) -> bool:
-    currencies: set[str] = set()
-    for key in ("net_income_by_ccy", "realized_pnl_by_ccy", "premium_income_by_ccy", "cash_secured_by_ccy"):
-        currencies.update(str(currency).upper() for currency in _dict(row.get(key)) if str(currency).strip())
-    return len(currencies) > 1
-
-
-def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:
-    diagnostics = data.get("diagnostics")
-    diag: dict[str, Any] = (
-        cast(dict[str, Any], diagnostics[0])
-        if isinstance(diagnostics, list) and diagnostics and isinstance(diagnostics[0], dict)
-        else {}
-    )
-    filters_raw = data.get("filters")
-    filters: dict[str, Any] = cast(dict[str, Any], filters_raw) if isinstance(filters_raw, dict) else {}
-    account = diag.get("account") or filters.get("account") or "-"
-    month = diag.get("month") or filters.get("month") or "-"
-    return_row = _find_return_summary_row(data, account=str(account), month=str(month))
-    raw_missing = diag.get("missing_fields")
-    missing: list[Any] = raw_missing if isinstance(raw_missing, list) else []
-    reasons = _income_missing_reasons(missing, diag=diag, return_row=return_row)
-    if not reasons:
-        reasons = ["没有可计算收益数据。"]
-    lines = [
-        f"{account} {month} 暂无可计算收益。",
-        "原因：" + "；".join(reasons),
-    ]
-    if diag:
-        lines.append(
-            "匹配事件："
-            f"{int(diag.get('matched_trade_events_count') or 0)}，"
-            f"持仓 lot：{int(diag.get('position_lot_snapshots_count', diag.get('matched_lots_count')) or 0)}，"
-            f"已平仓 lot：{int(diag.get('closed_lots_count') or 0)}，"
-            f"权利金行：{int(diag.get('premium_rows_count') or 0)}。"
-            )
-        if missing:
-            lines.append("缺失项：" + "、".join(str(item) for item in missing[:8]))
-    if return_row:
-        original_currency_lines = _original_currency_summary_lines(return_row)
-        if original_currency_lines:
-            lines.extend(original_currency_lines)
-    warnings = data.get("report_warnings")
-    if isinstance(warnings, list) and warnings:
-        lines.append("诊断：" + "；".join(str(item) for item in warnings[:3]))
-    return "\n".join(lines)
-
-
-def _income_missing_reasons(missing_fields: list[Any], *, diag: dict[str, Any], return_row: dict[str, Any]) -> list[str]:
-    missing = {str(item) for item in missing_fields}
-    reasons: list[str] = []
-    if "income_rows" in missing or "trade_events" in missing:
-        reasons.append("本月没有匹配到已完成收益事件")
-    premium_rows_count = int(diag.get("premium_rows_count") or 0) if isinstance(diag, dict) else 0
-    closed_lots_count = int(diag.get("closed_lots_count") or 0) if isinstance(diag, dict) else 0
-    if closed_lots_count == 0 and premium_rows_count > 0:
-        reasons.append("本月暂无平仓收益")
-    elif "closed_lots" in missing:
-        reasons.append("账本缺少已平仓/close 数据")
-    if "premium" in missing:
-        reasons.append("账本缺少开仓权利金数据")
-    if "cash_secured" in missing:
-        reasons.append("当前持仓缺少现金担保金额")
-    if "currency_conversion" in missing:
-        currencies = _missing_cny_currencies(diag, return_row)
-        if _dict(return_row.get("cash_secured_by_ccy")):
-            reasons.append(f"现金担保原币存在，但缺少 {_ccy_pair_text(currencies)} 汇率，无法折算 CNY")
-        else:
-            reasons.append(f"缺少 {_ccy_pair_text(currencies)} 汇率，无法折算 CNY")
-        if premium_rows_count > 0 and _dict(return_row.get("premium_income_by_ccy")):
-            reasons.append("本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率")
-    if "month_range" in missing:
-        reasons.append("部分事件缺少成交时间，无法归入查询月份")
-    return reasons
-
-
-def _find_return_summary_row(data: dict[str, Any], *, account: str, month: str) -> dict[str, Any]:
-    rows = data.get("return_summary")
-    if not isinstance(rows, list):
-        return {}
-    for row_raw in rows:
-        row = _dict(row_raw)
-        if str(row.get("account") or "-") == account and str(row.get("month") or "-") == month:
-            return row
-    return _dict(rows[0]) if rows else {}
-
-
-def _missing_cny_currencies(diag: dict[str, Any], return_row: dict[str, Any]) -> list[str]:
-    raw = diag.get("missing_cny_currencies") if isinstance(diag, dict) else None
-    if isinstance(raw, list) and raw:
-        return sorted({str(item).upper() for item in raw if str(item).strip()})
-    currencies: set[str] = set()
-    for key in ("cash_secured_by_ccy", "net_income_by_ccy", "premium_income_by_ccy", "realized_pnl_by_ccy"):
-        values = _dict(return_row.get(key))
-        currencies.update(str(currency).upper() for currency in values if str(currency).strip())
-    return sorted(currencies)
-
-
-def _ccy_pair_text(currencies: list[str]) -> str:
-    if not currencies:
-        return "币种到 CNY"
-    return "/".join(currencies) + " 到 CNY"
-
-
-def _original_currency_summary_lines(return_row: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    realized = _dict(return_row.get("realized_pnl_by_ccy"))
-    net = _dict(return_row.get("net_income_by_ccy"))
-    premium = _dict(return_row.get("premium_income_by_ccy"))
-    if realized:
-        lines.append("已实现期权 PnL（毛）：" + _format_ccy_amounts(realized))
-    if premium:
-        lines.append("开仓权利金（活动）：" + _format_ccy_amounts(premium))
-    if net:
-        lines.append("期权现金流（兼容口径）：" + _format_ccy_amounts(net))
-    cash = _dict(return_row.get("cash_secured_by_ccy"))
-    premium_rates = _dict(return_row.get("premium_return_rate_by_ccy"))
-    if not premium_rates and premium and cash:
-        premium_rates = _rate_by_ccy_for_render(premium, cash)
-    if premium_rates:
-        lines.append("原币权利金收益率：" + _format_ccy_rates(premium_rates))
-    return lines
-
-
-def _rate_by_ccy_for_render(numerator_by_ccy: dict[str, Any], denominator_by_ccy: dict[str, Any]) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for currency, numerator in numerator_by_ccy.items():
-        try:
-            denominator = float(denominator_by_ccy.get(currency) or 0.0)
-            if denominator > 0:
-                out[str(currency).upper()] = float(numerator or 0.0) / denominator
-        except Exception:
-            continue
-    return out
-
-
 def _format_ccy_amounts(values: dict[str, Any]) -> str:
     parts: list[str] = []
     for currency, amount in sorted(values.items()):
@@ -1241,32 +797,6 @@ def _format_ccy_amounts(values: dict[str, Any]) -> str:
     return " + ".join(parts) if parts else "-"
 
 
-def _format_ccy_rates(values: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for currency, value in sorted(values.items()):
-        pct = _pct(value)
-        if pct != "-":
-            parts.append(f"{str(currency).upper()} {pct}")
-    return "，".join(parts) if parts else "-"
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def _cny_with_original(cny_value: Any, by_ccy: dict[str, Any]) -> str:
-    cny_text = _cny(cny_value)
-    original = _format_ccy_amounts(by_ccy)
-    if original == "-":
-        return cny_text
-    return f"{cny_text}（{original}）"
-
-
 def _pct(value: Any) -> str:
     if value is None:
         return "-"
@@ -1274,15 +804,6 @@ def _pct(value: Any) -> str:
         return f"{float(value) * 100:.2f}%"
     except Exception:
         return "-"
-
-
-def _cny(value: Any) -> str:
-    if value is None:
-        return "CNY -"
-    try:
-        return f"CNY {float(value):,.0f}"
-    except Exception:
-        return "CNY -"
 
 
 def _render_positions(data: dict[str, Any]) -> str:
@@ -2083,7 +1604,6 @@ _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
     "analysis_catalog": _render_analysis_catalog,
     "analysis_result": _render_analysis_result,
     "option_performance": lambda data, _tool_result: _render_option_performance(data),
-    "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),
     "assigned_stock_lifecycle": lambda data, _tool_result: _render_assigned_stock_lifecycle(data),
     "position_exit_analysis": lambda data, _tool_result: _render_position_exit_analysis(data),

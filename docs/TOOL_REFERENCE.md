@@ -96,7 +96,6 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | Research / Shadow Replay | `om research collect` / `om research shadow-replay ...` (not an `om-agent` tool) |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
-| `monthly_income_report` | `om option-positions report monthly-income` |
 | `option_positions_read` | `src.application.ledger.read_model` / `src.application.positions.inspection` 的只读部分 |
 
 说明：
@@ -585,63 +584,24 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
 
 ---
 
-## 5.7 `monthly_income_report`
+## 5.7 `option_performance_report`
 
 用途：
-- 读取本地 option positions
-- 返回月度期权收益的三类统计口径
-- 默认只返回 summary；`include_rows=true` 时返回资金流、实现收益、开仓归因明细
-
-核心字段：
-- `net_cashflow_gross`：资金流口径，按交易发生月统计；short 开仓收款为正，
-  long 开仓成本和平仓买回支出为负，long 平仓卖出为正。
-- `realized_pnl_gross`：已实现口径，按平仓/到期月统计；short 为开仓权利金减平仓成本，
-  long 为平仓卖出减开仓成本。
-- `open_basis_lifecycle_pnl_gross`：开仓归因口径，按开仓月回填生命周期收益，
-  公式为：
-  `sell_open_premium - sell_close_cost_actual - enhancement_call_buy_cost + enhancement_call_sell_proceeds_actual`。
-- `yield_enhancement_realized_pnl_gross`：收益增强 call 腿按实现口径统计，
-  只有带 `yield_enhancement` / `enhancement_call` 标记的 long call 平仓收益进入该字段。
-- `premium_received_gross`：short 开仓收到的权利金。
-- `realized_gross`：平仓/到期实现收益，和 `realized_pnl_gross` 同口径。
-- `return_summary`：按 `month + account` 输出账户级收益率摘要，不按币种拆行。
-  分母为当前 open position lots 的 `cash_secured_amount` 折 CNY 后合计，
-  字段包括 `cash_secured_by_ccy`、`cash_secured_cny`、`net_income_cny`、
-  `premium_income_cny`、`net_return_rate`、`premium_return_rate`、
-  `annualized_*_return_rate` 和 `annualized_basis_days`。
-  `net_income_*` 会排除 Sell Put assignment 形成的正股交割本金现金流；
-  这类本金流出仍保留在 `summary.net_cashflow_gross` 和
-  `assignment_stock_net_cashflow_gross` 中。
-  `return_basis=current_cash_secured` 表示这不是账户总资产收益率。
-  如果缺少汇率，相关 CNY 和收益率字段为 `null`，并在 `warnings` 中说明。
-- `combined_return_summary`：当未指定 `account` 时按 `month` 输出全账户合并收益摘要。
-  合并收益率按 `sum(net_income_cny) / sum(cash_secured_cny)` 计算，不平均各账户收益率。
-  用户面向的多币种摘要按原币分别列示，不把 HKD、USD 合并成一个收入总数。
-- `diagnostics`：按 `month + account` 输出收益统计诊断，包括匹配到的
-  `trade_events`、position lots、已平仓行、premium 行、现金担保可用性和
-  `missing_fields`。入站 `收益` 命令会用它解释“暂无可计算收益”或数据不完整的原因。
-- `include_rows=true` 时，若存在 Sell Put assignment 的 `stock_settlement`，
-  额外返回 `stock_settlement_rows`、`assigned_stock_lots`、
-  `assignment_lifecycle_rows`、`lifecycle_efficiency_rows`、
-  `lifecycle_efficiency_summary`、`assigned_stock_sale_rows` 和
-  `assigned_stock_review_rows`。其中 `assignment_lifecycle_pnl` 是组合口径：
-  option premium attribution + assigned stock realized/unrealized PnL；正股成本
-  `stock_cost_per_share` 仍按真实交割价记录，不扣除权利金。缺 spot 时
-  `quote_status=missing_quote`，浮盈亏和 lifecycle PnL 为 `null`。
-  生命周期行还会明确返回 `assigned_at_ms` / `assigned_date` / `inventory_days`、实际/估算/缺失费用、
-  `fee_evidence`（component / basis / amount / source / reason）、
-  `spot_time` / `quote_source` / `quote_status`、
-  Covered Call lot 归因、`lifecycle_pnl_net`、`capital_days`、
-  `annualized_capital_efficiency` 和 `lifecycle_quality`。汇总使用
-  `sum(lifecycle_pnl_net) * 365 / sum(capital_days)`，不是逐行年化值的简单平均。
-  当前时点默认刷新开放 assigned-stock lot 的实时报价；显式传
-  `refresh_quotes=false` 才关闭。指定 `as_of_ms` 时不会用实时行情回填。
+- 从 canonical ledger 与显式估值/汇率证据生成 MTD、YTD、自然月、自然年或日期范围报告。
+- `pnl` 回答利润问题，`cash` 回答现金变化，`activity` 回答权利金和合约活动。
+- `capital` 只暴露命名明确、按 notional-days 计算的效率指标；缺费用、行情或汇率证据时保持 partial/null。
 
 示例：
 
 ```bash
-om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
+om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"month","month":"2026-06"}'
 ```
+
+注意：
+- `cash.option_trade_cash_gross` 是真实的期权交易现金变动，不代表利润或完整现金变化。
+- 指派/行权正股本金属于 `cash.stock_settlement_cash_gross`，是资产转换，不是期权亏损。
+- 权利金活动与 PnL 不可相加；净 PnL 以实际费用证据为前提。
 
 ---
 
@@ -718,7 +678,7 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 - 工具会限制用户可见输出行数，并返回 `truncated=true|false`；内部读取源数据时使用
   更高的物化上限，避免把分析源数据误截断到展示上限。
 - `analysis_query` 只懒加载 SQL 实际引用的 view；`select 1` 不会加载业务源。
-- 输出 schema 为 `analysis.query.output.v2`，保留旧字段兼容；新增
+- 输出 schema 为 `analysis.query.output.v2`，包含
   `query_explain`、`preflight`、`evidence.coverage`、`evidence.freshness`、
   `evidence.aggregation_policy`、`evidence.diagnostics` 等证据。
 - 输出包含 `columns`、`rows`、`cell_refs`、`views_used`、`source_label` 和
@@ -731,22 +691,18 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
   “没有问题”或确定 root cause。
 
 语义 view：
-- P0 收益/指派正股：
+- P0 performance / 指派正股：
   `option_period_performance`、`option_monthly_performance`、
   `option_activity_components`、`option_cash_components`、`option_pnl_components`、
-  `account_monthly_performance`、`account_monthly_income_components`、
   `assigned_stock_position_pnl`、`assigned_stock_sale_events`
 - P1 exposure/归因/配置：
   `open_option_exposure`、`expiration_risk_buckets`、
-  `symbol_income_attribution`、`strategy_config_by_symbol_account`、
+  `symbol_performance_attribution`、`strategy_config_by_symbol_account`、
   `option_trade_lifecycle`
 - P2 诊断：
   `candidate_filter_diagnostics`、`close_advice_snapshot`、
   `runtime_tick_status`、`quote_freshness`
-- 兼容 view：
-  `monthly_income_summary`、`monthly_income_return_summary`、
-  `monthly_income_combined_return_summary`、`monthly_income_cashflow_rows`、
-  `monthly_income_realized_rows`、`monthly_income_premium_rows`、
+- 结构别名 view：
   `assigned_stock_lifecycle`、`assigned_stock_sales`、`assigned_stock_review`、
   `position_lots`、`trade_events`、`symbol_strategy_config`
 
@@ -772,8 +728,8 @@ P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 
 
 ```bash
 om-agent run --tool analysis_catalog --input-json '{"config_key":"us"}'
-om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, net_income_cny, net_return_rate from account_monthly_performance order by month, account","limit":50}'
-om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, symbol, component, amount_cny from symbol_income_attribution order by month, account, amount_cny desc","limit":50}'
+om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, period_total_pnl_net_cny, total_cash_change_cny from option_monthly_performance order by month, account","limit":50}'
+om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, symbol, component, amount_gross from symbol_performance_attribution order by month, account, amount_gross desc","limit":50}'
 ```
 
 ---

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Removed the historical monthly-income reporting model and its public Agent/CLI/Assistant/analysis/portfolio compatibility surfaces. Option performance now has one public authority: explicit `activity`, `cash`, `pnl`, and `capital` namespaces; real option trade cash remains `cash.option_trade_cash_gross` and is never presented as income or profit.
+
 ## 1.4.10 - 2026-07-23
 
 ### Fixed
