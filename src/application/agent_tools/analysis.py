@@ -105,18 +105,28 @@ OPTION_PERFORMANCE_FIELDS: tuple[str, ...] = (
     "option_trade_cash_cny",
     "option_trade_cash_by_ccy",
     "option_trade_cash_status",
+    "option_trade_cash_missing",
+    "option_trade_cash_evidence_fact_ids",
     "option_fee_cash_cny",
     "option_fee_cash_by_ccy",
     "option_fee_cash_status",
+    "option_fee_cash_missing",
+    "option_fee_cash_evidence_fact_ids",
     "stock_settlement_cash_cny",
     "stock_settlement_cash_by_ccy",
     "stock_settlement_cash_status",
+    "stock_settlement_cash_missing",
+    "stock_settlement_cash_evidence_fact_ids",
     "assigned_stock_sale_cash_cny",
     "assigned_stock_sale_cash_by_ccy",
     "assigned_stock_sale_cash_status",
+    "assigned_stock_sale_cash_missing",
+    "assigned_stock_sale_cash_evidence_fact_ids",
     "total_cash_change_cny",
     "total_cash_change_by_ccy",
     "total_cash_change_status",
+    "total_cash_change_missing",
+    "total_cash_change_evidence_fact_ids",
     "realized_pnl_gross_cny",
     "realized_pnl_gross_by_ccy",
     "realized_pnl_gross_status",
@@ -148,6 +158,8 @@ PERFORMANCE_COMPONENT_FIELDS: tuple[str, ...] = (
     "amount_cny",
     "amount_by_ccy",
     "metric_status",
+    "missing",
+    "conversion_ids",
     "quantity",
     "source_namespace",
     "source_field",
@@ -759,7 +771,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "safe_join_keys": ("month", "account"),
     },
     "option_cash_components": {
-        "description": "complete cash-movement components including option cash, fees, settlement principal, and assigned-stock sale cash",
+        "description": "cash-movement components with native amounts and immutable event-booking CNY conversion evidence",
         "fields": PERFORMANCE_COMPONENT_FIELDS,
         "row_grain": "period or month + account + cash component",
         "primary_keys": ("period_start_date", "period_end_date", "month", "account", "component"),
@@ -1802,6 +1814,8 @@ def _metric_envelope(value: Any) -> dict[str, Any]:
 
 
 def _metric_status(value: Any) -> str | None:
+    if isinstance(value, dict) and value.get("status") not in (None, ""):
+        return str(value.get("status"))
     quality = value.get("quality") if isinstance(value, dict) and isinstance(value.get("quality"), dict) else {}
     return str(quality.get("status") or "") or None
 
@@ -1829,6 +1843,10 @@ def _put_metric(row: dict[str, Any], prefix: str, value: Any) -> None:
     row[f"{prefix}_cny"] = metric.get("cny")
     row[f"{prefix}_by_ccy"] = metric.get("by_currency") or {}
     row[f"{prefix}_status"] = _metric_status(metric)
+    row[f"{prefix}_missing"] = list(metric.get("missing") or [])
+    row[f"{prefix}_evidence_fact_ids"] = list(
+        metric.get("evidence_fact_ids") or metric.get("fx_fact_ids") or []
+    )
 
 
 def _performance_summary_row(
@@ -1937,6 +1955,10 @@ def _performance_component_rows(
                     "amount_cny": amount_cny,
                     "amount_by_ccy": amount_by_ccy or {},
                     "metric_status": source.get(status_field) if status_field else "observed",
+                    "missing": list(source.get(f"{component}_missing") or []) if namespace == "cash" else [],
+                    "conversion_ids": (
+                        list(source.get(f"{component}_evidence_fact_ids") or []) if namespace == "cash" else []
+                    ),
                     "quantity": quantity,
                     "source_namespace": namespace,
                     "source_field": component,

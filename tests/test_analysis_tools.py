@@ -447,12 +447,20 @@ def test_analysis_query_trade_events_empty_meaning_requires_month_filter(monkeyp
 
 def test_analysis_query_primary_option_performance_views_keep_namespaces_separate(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_performance_tool(*_args, **_kwargs):
-        return _performance_report(
+        report = _performance_report(
             month="2026-06",
             option_trade_cash_cny=1200.0,
             premium_cny=800.0,
             realized_cny=400.0,
-        ), [], {}
+        )
+        report["cash"]["option_trade_cash_gross"].update(
+            {
+                "status": "partial",
+                "missing": ["cash_conversion:option_trade_cash_gross:legacy"],
+                "fx_fact_ids": ["cashfx_test"],
+            }
+        )
+        return report, [], {}
 
     monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_performance_tool)
 
@@ -479,10 +487,15 @@ def test_analysis_query_primary_option_performance_views_keep_namespaces_separat
     assert {row["component"] for row in data["view_datasets"]["option_activity_components"]["rows"]} >= {
         "premium_collected"
     }
-    assert {row["component"] for row in data["view_datasets"]["option_cash_components"]["rows"]} >= {
+    cash_rows = data["view_datasets"]["option_cash_components"]["rows"]
+    assert {row["component"] for row in cash_rows} >= {
         "option_trade_cash",
         "total_cash_change",
     }
+    option_cash = next(row for row in cash_rows if row["component"] == "option_trade_cash")
+    assert option_cash["metric_status"] == "partial"
+    assert json.loads(option_cash["missing"]) == ["cash_conversion:option_trade_cash_gross:legacy"]
+    assert json.loads(option_cash["conversion_ids"]) == ["cashfx_test"]
     assert {row["component"] for row in data["view_datasets"]["option_pnl_components"]["rows"]} >= {
         "realized_gross",
         "period_total_net",
