@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 745 (`src`: 409, `domain`: 63, `scripts`: 7, `tests`: 266)
-- Internal import edges: 4354 total, 1933 production/script edges excluding tests
+- Internal import edges: 4352 total, 1931 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|298| domain
   application -->|2| domain_services
-  application -->|104| infrastructure
+  application -->|103| infrastructure
   application -->|36| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -58,7 +58,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 298 |
 | interfaces | application | 125 |
-| application | infrastructure | 104 |
+| application | infrastructure | 103 |
 | application | storage | 36 |
 | scripts | application | 7 |
 | domain_services | domain | 5 |
@@ -108,8 +108,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.domain.ledger | 11 |
 | domain.domain | domain.domain.ledger | 10 |
 | src.application.ledger | src.infrastructure | 8 |
-| src.application.multi_tick | src.infrastructure | 8 |
 | src.application.positions | src.infrastructure | 8 |
+| src.application.multi_tick | src.infrastructure | 7 |
 | src.application.positions | domain.storage | 7 |
 | src.application | domain.domain.ledger | 6 |
 | src.application.multi_tick | domain.domain | 6 |
@@ -176,7 +176,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tool_contracts | 85 |
 | src.application.agent_tool_config | 52 |
 | domain.domain.symbol_identity | 44 |
-| src.infrastructure.io_utils | 42 |
+| src.infrastructure.io_utils | 41 |
 | domain.domain.option_position_identity | 39 |
 | domain.domain.ledger.position_fields | 37 |
 | src.application.ledger.api | 34 |
