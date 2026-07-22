@@ -77,8 +77,8 @@
 | Canonical fact | 用户术语 | 规则 |
 |---|---|---|
 | Sell Put / Covered Call / Combo Yield opening row | 候选 / 备选 | 未形成 quantity + limit + allocation 的执行计划前，永不称为行动 |
-| `close_position` active P0/P1 | 持仓建议 | 可显示“建议平仓/调整/继续观察”等人类动作 |
-| position-specific not evaluable | 暂无法评估 | 只影响对应持仓，不把整个 brief 说成 blocked |
+| `close_position` active P0/P1 | 持仓建议 | 只显示指向实际动作的建议（平仓/止盈/复核）；“继续观察”不展示 |
+| position-specific observe / not evaluable | 不展示 | 无行动指向的持仓属于干扰信息，通知不逐条展示，但计入“另有 N 个持仓未展开”；只影响对应持仓，不把整个 brief 说成 blocked |
 | overall `actionability=blocked` | 本轮暂无法更新 | 不展示旧候选；系统下一轮自动重试 |
 | capacity | 条件容量 | Sell Put 按具体 strike 估算且共享现金；Covered Call 按具体标的持股覆盖；不同候选数量不可直接相加 |
 | `delivery_kind=delta` | 较上一轮有变化 | 只用于触发/审计；正文仍展示当前完整状态 |
@@ -250,11 +250,10 @@ Projection view 是**内存中的私有展示契约，不持久化**。仅允许
 ### 7.4 Position advice cards
 
 - active close advice：显示 symbol、人类可读合约、建议动作、最重要的一条理由/指标；
-- observe：显示“继续观察”；
-- not evaluable：显示“暂无法评估（价格不可用）”或“暂无法评估（行情覆盖不足）”；
+- observe（继续观察）与 not evaluable：通知持仓区均不逐条展示（不指向需要做出变化的行动，属于干扰信息），但计入“另有 N 个持仓未展开”以免用户以为持仓丢失；状态只保留在 brief artifact 中；全部持仓都无行动指向时显示“当前没有需要展示的期权持仓。”；
+- 需人工复核（tier strong/medium 但无明确平仓动作）仍展示为“建议复核持仓”；
 - 持仓策略归属必须保留：即使本轮 Combo Yield 候选为 0，已有 Combo Yield lot 仍显示为“组合增强”；候选是否为空不得改变持仓分类；
-- 只依据新增保留的 structured status 映射：`coverage_missing → 行情覆盖不足`，`quote_unusable / unavailable → 价格不可用`，`not_evaluable / error / blocked` 且无更具体状态时 → 数据暂不可用，`priced` 再使用 close tier/action；不得解析自由文本 reason 猜状态；
-- 未知 internal status 统一显示“暂无法评估（数据暂不可用）”；
+- 评估状态只依据 structured status 映射（`coverage_missing → 行情覆盖不足`，`quote_unusable / unavailable → 价格不可用`，`not_evaluable / error / blocked` 及未知状态 → 报价质量不足），该映射用于判断是否展示；不得解析自由文本 reason 猜状态；
 - 不透出 `position_lot_id`、`strategy_group_id`、`leg_role`、raw `close_action`。
 
 ### 7.5 Capacity
@@ -395,8 +394,8 @@ A+ 的产品语义锁定为：
    - 权利金 $… · 年化 … · Delta … · 32天
 
 ## 持仓
-- FUTU：暂无法评估（价格不可用）
-- PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）
+当前没有需要展示的期权持仓。
+补充｜另有 2 个持仓未展开
 
 ## 资金
 - TCOM 08-21 $40 Put：按当前现金最多 8 手
@@ -417,8 +416,8 @@ A+ 的产品语义锁定为：
    - 权利金 $… · 年化 … · Delta … · 32天
 
 ## 持仓
-- FUTU：暂无法评估（价格不可用）
-- PDD · 组合增强（Put 侧）：暂无法评估（行情覆盖不足）
+当前没有需要展示的期权持仓。
+补充｜另有 2 个持仓未展开
 
 ## 资金
 - TCOM 08-21 $40 Put：按当前现金最多 8 手
