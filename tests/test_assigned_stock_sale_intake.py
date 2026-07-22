@@ -7,7 +7,7 @@ import src.application.ledger.repository as ledger_repository
 
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.commands import record_manual_assignment
-from src.application.positions.reporting import build_monthly_income_report
+from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.positions.workflows import execute_manual_assigned_stock_sale
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import resolve_trade_deal
@@ -72,12 +72,8 @@ def _repo_with_assigned_stock(tmp_path: Path, *, opened_at_ms: int = 1000, assig
 
 
 def _assigned_stock_lifecycle(repo, stock_lot_id: str) -> dict:
-    report = build_monthly_income_report(
-        [],
-        trade_events=repo.list_trade_events(),
-        assigned_stock_events=repo.list_assigned_stock_events(),
-    )
-    return [row for row in report["assignment_lifecycle_rows"] if row["stock_lot_id"] == stock_lot_id][0]
+    report = build_assigned_stock_view(repo)
+    return [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == stock_lot_id][0]
 
 
 def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> None:

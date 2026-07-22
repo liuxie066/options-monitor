@@ -35,12 +35,12 @@ from src.application.ledger.api import (
     record_manual_position_open,
     resolve_manual_position_close_target,
 )
-from src.application.positions.reporting import build_monthly_income_report
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
     load_cash_fx_payload,
     utc_now_ms,
 )
+from src.application.positions.assigned_stock_view import build_assigned_stock_view
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -76,12 +76,6 @@ def _manual_open_record_id(result: dict[str, Any]) -> str:
     return f"lot_{event_id}"
 
 
-def _list_repo_trade_events(repo: Any) -> list[dict[str, Any]]:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    rows = list_trade_events() if callable(list_trade_events) else []
-    return rows if isinstance(rows, list) else []
-
-
 def _list_repo_assigned_stock_events(repo: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in assigned_stock_event_log(repo).events]
 
@@ -92,15 +86,14 @@ def _assigned_stock_report(
     account: str | None = None,
     broker: str | None = None,
     assigned_stock_events: list[dict[str, Any]] | None = None,
+    as_of_ms: int | None = None,
 ) -> dict[str, Any]:
-    return build_monthly_income_report(
-        [],
+    return build_assigned_stock_view(
+        repo,
         account=account,
         broker=broker,
-        trade_events=_list_repo_trade_events(repo),
-        assigned_stock_events=assigned_stock_events
-        if assigned_stock_events is not None
-        else _list_repo_assigned_stock_events(repo),
+        assigned_stock_events=assigned_stock_events,
+        as_of_ms=as_of_ms,
     )
 
 
@@ -270,6 +263,7 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
     broker = normalize_broker(getattr(deal, "broker", None))
     symbol = norm_symbol(getattr(deal, "symbol", None) or "")
     currency = normalize_currency(getattr(deal, "currency", None))
+    trade_time_ms = _safe_positive_int(getattr(deal, "trade_time_ms", None))
     selector = {
         "account": account,
         "broker": broker,
@@ -286,7 +280,13 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         )
 
     existing_events = _list_repo_assigned_stock_events(repo)
-    before_report = _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=existing_events)
+    before_report = _assigned_stock_report(
+        repo,
+        account=account,
+        broker=broker,
+        assigned_stock_events=existing_events,
+        as_of_ms=trade_time_ms,
+    )
     source_deal_id = str(getattr(deal, "deal_id", None) or "").strip()
     existing_by_source = next(
         (
@@ -309,7 +309,6 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
             )
         shares = _safe_positive_int(getattr(deal, "contracts", None))
         price = _safe_non_negative_float(getattr(deal, "price", None))
-        trade_time_ms = _safe_positive_int(getattr(deal, "trade_time_ms", None))
         required = {
             "deal_id": source_deal_id or None,
             "currency": currency,
@@ -378,7 +377,6 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
 
     shares = _safe_positive_int(getattr(deal, "contracts", None))
     price = _safe_non_negative_float(getattr(deal, "price", None))
-    trade_time_ms = _safe_positive_int(getattr(deal, "trade_time_ms", None))
     required = {
         "deal_id": source_deal_id or None,
         "currency": currency,
@@ -875,7 +873,13 @@ def _execute_assigned_stock_sale(
     before_report = (
         dict(before_report)
         if isinstance(before_report, dict)
-        else _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=existing_events)
+        else _assigned_stock_report(
+            repo,
+            account=account,
+            broker=broker,
+            assigned_stock_events=existing_events,
+            as_of_ms=trade_time_ms,
+        )
     )
     before_lot = _find_assigned_stock_lot(before_report, stock_lot_id)
     if before_lot is None:
@@ -932,7 +936,13 @@ def _execute_assigned_stock_sale(
         after_events = list(existing_events)
     else:
         after_events = [*existing_events, sale_event]
-    after_report = _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=after_events)
+    after_report = _assigned_stock_report(
+        repo,
+        account=account,
+        broker=broker,
+        assigned_stock_events=after_events,
+        as_of_ms=trade_time_ms,
+    )
     stock_event_id = str(sale_event.get("stock_event_id") or "")
     candidate_reviews = [
         row

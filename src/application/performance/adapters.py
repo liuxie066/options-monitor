@@ -301,6 +301,7 @@ def load_assigned_stock_projection(
     *,
     as_of_ms: int,
     valuation_marks: tuple[ValuationMarkFact, ...] | list[ValuationMarkFact] = (),
+    quote_snapshots: Any = None,
     account: str | None = None,
     broker: str | None = None,
     stock_holdings: list[dict[str, Any]] | None = None,
@@ -331,7 +332,10 @@ def load_assigned_stock_projection(
         )
         for item in projection.lots
     ]
-    quote_rows = _stock_quote_rows(valuation_marks, at_ms=instant)
+    quote_rows = [
+        *_stock_quote_rows(valuation_marks, at_ms=instant),
+        *_raw_stock_quote_rows(quote_snapshots),
+    ]
     return project_assigned_stock_lifecycle(
         event_rows,
         assignment_option_rows=allocation_rows,
@@ -508,6 +512,14 @@ def _stock_quote_rows(valuation_marks: tuple[ValuationMarkFact, ...] | list[Valu
             }
         )
     return rows
+
+
+def _raw_stock_quote_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        value = value.get("rows") or value.get("quote_snapshots") or [value]
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _assigned_stock_event_time_ms(item: dict[str, Any]) -> int:

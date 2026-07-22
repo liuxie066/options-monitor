@@ -367,28 +367,6 @@ def main(argv: list[str] | None = None) -> int:
     p_pair_combo.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_pair_combo, high_risk=True)
 
-    p_report = sub.add_parser('report', help='read-only reports for position lots')
-    report_sub = p_report.add_subparsers(dest='report_cmd', required=True)
-    p_monthly = report_sub.add_parser(
-        'monthly-income',
-        help='monthly option income report (cashflow, realized PnL, and open-basis attribution)',
-        description=(
-            'Monthly option income report.\n'
-            '- net_cashflow_gross: groups account cash movements by trade month.\n'
-            '- realized_pnl_gross: groups closed option PnL by close month.\n'
-            '- open_basis_lifecycle_pnl_gross: attributes lifecycle PnL back to open month.\n'
-            '- premium_received_gross: short open premium received; realized_gross: closed option realized PnL.\n'
-            '- *_cny columns are best-effort exchange-rate conversions from rate_cache.json.'
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    p_monthly.add_argument('--broker', default='富途')
-    _add_runtime_root_arg(p_monthly)
-    p_monthly.add_argument('--account', default=None)
-    p_monthly.add_argument('--month', default=None, help='YYYY-MM')
-    p_monthly.add_argument('--format', choices=['text', 'json'], default='text')
-    p_monthly.add_argument('--include-rows', action='store_true')
-
     p_auto_close = sub.add_parser('auto-close-expired', help='auto-close expired option position lots')
     p_auto_close.add_argument("--config", dest="auto_close_config", default=None, help="runtime config path; provides accounts and portfolio.data_config")
     p_auto_close.add_argument("--data-config", dest="auto_close_data_config", default=None, help="portfolio data config path; overrides runtime config when provided")
@@ -983,11 +961,6 @@ def main(argv: list[str] | None = None) -> int:
                     f"event_id={result_data.get('event_id') or item.get('event_id') or '-'}"
                 )
             return 0
-
-    if args.cmd == 'report':
-        from src.interfaces.cli.option_positions_report import run_report
-
-        return run_report(args, base=base, repo=repo)
 
     if args.cmd == 'verify-projection':
         try:

@@ -201,16 +201,6 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "scope_policy": "config_required",
         "renderer_key": "option_performance",
     },
-    "monthly_income_report": {
-        "commands": (),
-        "display_name": "月度收益（已弃用）",
-        "arguments": ("account", "month"),
-        "direct_executable": False,
-        "examples": ("monthly_income_report（deprecated）",),
-        "summary": "deprecated compatibility adapter; use option_performance_report",
-        "scope_policy": "config_required",
-        "primary_for_tool": False,
-    },
     "runtime_runs": {
         "commands": ("/runs",),
         "display_name": "运行记录",

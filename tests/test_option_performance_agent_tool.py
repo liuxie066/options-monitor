@@ -137,44 +137,8 @@ def test_option_performance_report_rejects_ambiguous_or_incomplete_periods(
         positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)
 
 
-def test_monthly_income_report_is_deprecated_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = _core_report()
-    report["breakdowns"]["monthly"] = [
-        {
-            "month": "2026-06",
-            "activity": {"premium_collected_gross": {"by_currency": {"USD": 200.0}, "cny": None}},
-            "cash": {"total_cash_change_net": {"by_currency": {"USD": 150.0}, "cny": None}},
-            "pnl": {"realized_gross": {"by_currency": {"USD": 150.0}, "cny": None}},
-        }
-    ]
-    _patch_dependencies(monkeypatch, report=report)
-
-    data, warnings, _meta = positions.MONTHLY_INCOME_REPORT_TOOL.call(
-        {"month": "2026-06", "account": "lx"}
-    )
-
-    assert data["deprecation"]["replacement"] == "option_performance_report"
-    assert data["return_summary"][0]["realized_pnl_by_ccy"] == {"USD": 150.0}
-    assert data["return_summary"][0]["realized_return_rate"] is None
-    assert any("DEPRECATED" in warning for warning in warnings)
 
 
-def test_monthly_income_report_maps_legacy_as_of_to_historical_mtd(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _patch_dependencies(monkeypatch, report=_core_report())
-    as_of_ms = int(
-        datetime(2026, 4, 30, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000
-    )
-
-    _data, warnings, _meta = positions.MONTHLY_INCOME_REPORT_TOOL.call(
-        {"account": "lx", "as_of_ms": as_of_ms, "refresh_quotes": True}
-    )
-
-    assert calls["period"].kind == "mtd"
-    assert calls["period"].requested_end_date == "2026-04-30"
-    assert calls["refresh_quotes"] is False
-    assert any("mapped to an MTD as_of_date" in warning for warning in warnings)
 
 
 def test_option_performance_report_does_not_prove_unconfigured_account_scope(

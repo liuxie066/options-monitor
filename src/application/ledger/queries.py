@@ -8,6 +8,7 @@ from src.application.ledger.publisher import project_stored_trade_events_to_posi
 from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.repository import (
+    require_option_positions_event_read_repo,
     require_option_positions_event_write_repo,
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
@@ -172,27 +173,6 @@ def position_lot_risk_view(
     return RiskPositionView.from_view(position_lot_context_view(item, as_of_date=as_of_date))
 
 
-def position_monthly_income_report(
-    repo: Any,
-    *,
-    base: Path,
-    broker: str,
-    account: str | None = None,
-    month: str | None = None,
-) -> dict[str, Any]:
-    from src.application.ledger.read_model import build_position_monthly_income_report as _impl
-
-    assigned_events = [dict(item) for item in assigned_stock_event_log(repo).events]
-    return _impl(
-        repo,
-        base=base,
-        broker=broker,
-        account=account,
-        month=month,
-        assigned_stock_events=assigned_events,
-    )
-
-
 def format_position_money(value: float | int | None, currency: str) -> str:
     from src.application.ledger.read_model import format_position_money as _impl
 
@@ -270,7 +250,7 @@ def assigned_stock_event_log(repo: Any) -> AssignedStockEventLog:
 
 
 def trade_event_log(repo: Any) -> list[dict[str, Any]]:
-    sqlite_repo = require_option_positions_event_write_repo(repo)
+    sqlite_repo = require_option_positions_event_read_repo(repo)
     events = sqlite_repo.list_trade_events()
     return events if isinstance(events, list) else []
 
@@ -361,7 +341,6 @@ __all__ = [
     "position_lot_context_view",
     "position_lot_risk_view",
     "position_lot_snapshot",
-    "position_monthly_income_report",
     "position_projection_verify_state",
     "project_trade_event_log",
     "resolve_position_data_config_path",

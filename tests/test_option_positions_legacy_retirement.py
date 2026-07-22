@@ -452,7 +452,8 @@ def test_position_read_reporting_lives_under_positions_namespace() -> None:
 
     assert (repo_root / "src" / "application" / "positions" / "context_builder.py").exists()
     assert (repo_root / "src" / "application" / "positions" / "inspection.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "reporting.py").exists()
+    assert not (repo_root / "src" / "application" / "positions" / "reporting.py").exists()
+    assert (repo_root / "src" / "application" / "positions" / "assigned_stock_view.py").exists()
     assert offenders == []
 
 

@@ -149,7 +149,6 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
         "run_futu_doctor": (diagnostics_tools,),
         "load_option_positions_repo": (diagnostics_tools,),
         "load_portfolio_context": (materialization_tools,),
-        "get_exchange_rates": (positions_tools,),
         "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
         "repo_base": (runtime_tools,),
         "check_version_update": (runtime_tools,),
@@ -833,123 +832,6 @@ def test_spec_exposes_broker_as_public_field() -> None:
     assert "market" not in query_tool["input_schema"]
     assert "data_config" in query_tool["input_schema"]
     assert "pm_config" not in query_tool["input_schema"]
-
-
-def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
-    from src.application.positions.assigned_stock_quotes import AssignedStockQuoteRefreshResult
-
-    def _ms(value: str) -> int:
-        out = parse_exp_to_ms(value)
-        assert out is not None
-        return out
-
-    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
-    data_cfg_path = tmp_path / "portfolio.runtime.json"
-    data_cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    data_cfg_path.write_text(
-        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu(str(data_cfg_path)), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="user1",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=_ms("2026-04-03"),
-        ),
-    )
-    lot = repo.list_position_lots()[0]
-    ledger_manual_trades.persist_manual_close_event(
-        repo,
-        record_id=lot["record_id"],
-        fields=lot["fields"],
-        contracts_to_close=1,
-        close_price=1.0,
-        close_reason="manual_buy_to_close",
-        as_of_ms=_ms("2026-04-20"),
-    )
-
-    rate_calls: list[dict[str, Any]] = []
-    refresh_calls: list[list[dict[str, Any]]] = []
-
-    def _fake_get_exchange_rates(**kwargs):
-        rate_calls.append(kwargs)
-        return {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}}
-
-    def _fake_refresh_quotes(rows, **_kwargs):
-        refresh_calls.append(list(rows))
-        return AssignedStockQuoteRefreshResult([], {"enabled": True, "status": "skipped_no_open_assigned_stock"}, [])
-
-    _patch_agent_tool_dependencies(
-        monkeypatch,
-        get_exchange_rates=_fake_get_exchange_rates,
-        refresh_assigned_stock_quotes=_fake_refresh_quotes,
-    )
-
-    out = run_tool(
-        "monthly_income_report",
-        {
-            "config_path": str(cfg_path),
-            "account": "user1",
-            "month": "2026-04",
-            "include_rows": True,
-        },
-    )
-
-    assert out["ok"] is True
-    assert rate_calls == []
-    assert refresh_calls == []
-    assert any("DEPRECATED" in warning for warning in out["warnings"])
-    assert out["data"]["summary_count"] == 1
-    assert out["data"]["scope"] == {
-        "config_key": "us",
-        "broker": None,
-        "account": "user1",
-        "month": "2026-04",
-    }
-    assert out["data"]["coverage"] == {
-        "diagnostic_scope_count": 1,
-        "reported_scope_count": 1,
-        "unreported_scope_count": 0,
-    }
-    assert out["data"]["freshness"]["market_quotes_included"] is False
-    assert out["data"]["premium_row_count"] == 1
-    assert out["data"]["calculation_method"] == "deprecated_adapter_over_option_performance_report_v1"
-    assert out["data"]["deprecation"]["replacement"] == "option_performance_report"
-    assert out["data"]["quote_refresh"]["status"] == "skipped_historical"
-    summary = out["data"]["summary"][0]
-    assert summary == {
-        "month": "2026-04",
-        "account": "user1",
-        "net_cashflow_gross": {"USD": 150.0},
-        "assignment_stock_net_cashflow_gross": {},
-    }
-    return_row = out["data"]["return_summary"][0]
-    assert return_row["realized_pnl_by_ccy"] == {"USD": 150.0}
-    assert return_row["premium_income_by_ccy"] == {"USD": 250.0}
-    assert return_row["net_income_by_ccy"] == {"USD": 150.0}
-    assert return_row["realized_return_rate"] is None
-    assert out["data"]["premium_rows"][0]["amount"] == 250.0
-    assert out["data"]["realized_rows"][0]["amount"] == 150.0
-    assert out["meta"]["data_config"] == ".../portfolio.runtime.json"
 
 
 def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:

@@ -80,7 +80,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"month","month":"2026-04"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
@@ -107,9 +107,8 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash
 FX 和实际费用覆盖对齐；缺失或不完整证据保持 `amount=null`，不会按 0 处理。
 输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
 
-`portfolio_capital_bridge` 仍可用于短期回滚，但已标记为 deprecated；它保留旧的
-`monthly_income_report.return_summary[].net_income_cny` 混合语义，不再是新集成的
-推荐入口。
+历史混合 capital bridge 已移除。Portfolio 集成必须明确选择 PnL 或 cash bridge，
+不能再把期权交易现金变动解释为总资产收益。
 
 Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
