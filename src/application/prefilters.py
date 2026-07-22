@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.application.pipeline_steps import derive_put_max_strike_from_cash
-
 
 @dataclass
 class PrefilterResult:
@@ -29,8 +27,6 @@ def apply_prefilters(
     want_put: bool,
     want_call: bool,
     portfolio_ctx: dict | None,
-    usd_per_cny_exchange_rate: float | None,
-    cny_per_hkd_exchange_rate: float | None,
 ) -> PrefilterResult:
     # Pre-filter (call): sell_call must be based on account-level portfolio context.
     # If portfolio_ctx is unavailable for this account, skip sell_call entirely.
@@ -45,24 +41,6 @@ def apply_prefilters(
                 stock = None
             if not stock:
                 want_call = False
-
-    # Pre-filter (put): derive a cash-based max_strike cap to reduce chain size.
-    if want_put:
-        try:
-            cash_cap = derive_put_max_strike_from_cash(
-                symbol,
-                portfolio_ctx,
-                usd_per_cny_exchange_rate,
-                cny_per_hkd_exchange_rate,
-            )
-            if cash_cap and cash_cap > 0:
-                if sp.get('max_strike') is None or float(sp.get('max_strike')) > float(cash_cap):
-                    sp = dict(sp)
-                    sp['max_strike'] = float(cash_cap)
-            if sp.get('max_strike') is not None and float(sp.get('max_strike')) <= 0:
-                want_put = False
-        except Exception:
-            pass
 
     return PrefilterResult(
         want_put=bool(want_put),
