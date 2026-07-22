@@ -340,10 +340,10 @@ def _render_user_view(
     else:
         for index, item in enumerate(candidates, start=1):
             lines.extend([_VISIBLE_BLANK_LINE, f"**{index}｜{_flat_title(item['title'])}**"])
-            for detail in item.get("details") or []:
-                lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
             for leg in item.get("legs") or []:
                 lines.append(_flat_field_line(leg))
+            for detail in item.get("details") or []:
+                lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
         for note in view.get("candidate_omissions") or []:
             lines.append(f"补充｜{note}")
 
@@ -438,11 +438,19 @@ def _candidate_views(
                     option_type="call",
                     market=market,
                 )
+                put_leg = f"Put：{put_contract}"
+                put_ref = _number(row.get("put_sell_reference"))
+                if put_ref is not None:
+                    put_leg += f" · 卖出参考 {_money(put_ref, market=market)}"
+                call_leg = f"Call：{call_contract}"
+                call_ref = _number(row.get("call_buy_reference"))
+                if call_ref is not None:
+                    call_leg += f" · 买入参考 {_money(call_ref, market=market)}"
                 out.append(
                     {
                         "family": family,
                         "title": f"{symbol} · 组合增强（{choice}）",
-                        "legs": [f"Put：{put_contract}", f"Call：{call_contract}"],
+                        "legs": [put_leg, call_leg],
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),
                             _candidate_event_line(row, family=family),
