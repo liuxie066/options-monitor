@@ -777,6 +777,9 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     brief["funds"] = {
         "cash_total_by_currency": {"USD": 180_000.0},
         "option_opening_available_by_currency": {"USD": 75_000.0},
+        "cash_total_cny": 1_260_000.0,
+        "cash_secured_total_cny": 735_000.0,
+        "option_opening_available_cny": 525_000.0,
         "available": True,
         "reason": "ok",
     }
@@ -802,7 +805,9 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "状态｜10:00 批次" in fixed
     assert "## 当前候选" in fixed
     assert "现金总额｜$180,000.00" in fixed
+    assert "现金总额（折CNY）｜¥1,260,000.00" in fixed
     assert "可用于期权开仓｜$75,000.00" in fixed
+    assert "可用于期权开仓（折CNY）｜¥525,000.00" in fixed
     assert all(label not in fixed for label in ("总资产", "NAV", "证券市值", "revision"))
 
     alert_context = {**_scheduled_context(), "scheduled_target_market": "10:30"}

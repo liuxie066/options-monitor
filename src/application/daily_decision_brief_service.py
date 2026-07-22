@@ -18,9 +18,11 @@ from domain.domain.daily_decision_brief import (
 from domain.domain.daily_decision_event_risk import build_candidate_event_risk
 from domain.domain.engine import rank_candidate_rows
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
+from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
+from src.application.cash_totals import sum_by_currency_to_cny
 from src.application.strategy_scan_failures import (
     ARTIFACT_NAME as STRATEGY_FAILURE_ARTIFACT_NAME,
     FAILURE_REASON as STRATEGY_FAILURE_REASON,
@@ -930,15 +932,10 @@ def _build_funds(
     reason = "ok"
     opening: dict[str, float] = {}
     if cash_total_reliable and secured_reliable:
-        extra_secured_currencies = set(secured or {}) - set(cash_total or {})
-        if extra_secured_currencies:
-            secured_reliable = False
-            reason = "secured_currency_without_cash_total"
-        else:
-            opening = {
-                currency: float(amount) - float((secured or {}).get(currency, 0.0))
-                for currency, amount in (cash_total or {}).items()
-            }
+        opening = {
+            currency: float(amount) - float((secured or {}).get(currency, 0.0))
+            for currency, amount in (cash_total or {}).items()
+        }
     if not secured_reliable:
         if reason == "ok":
             reason = "option_cash_secured_unavailable"
@@ -952,13 +949,43 @@ def _build_funds(
     if not cash_total_reliable:
         reason = "portfolio_cash_unavailable"
 
+    rate_payload = option_positions_context.get("exchange_rates")
+    rates = rate_payload.get("rates") if isinstance(rate_payload, Mapping) else None
+    rates = rates if isinstance(rates, Mapping) else {}
+    usdcny_rate = _number(rates.get("USDCNY"))
+    cny_per_hkd_rate = _number(rates.get("HKDCNY"))
+    cash_total_cny: float | None = None
+    if cash_total:
+        cash_total_cny = sum_by_currency_to_cny(
+            cash_total,
+            usdcny_exchange_rate=usdcny_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_rate,
+        )
+        if cash_total_cny is None:
+            data_gaps.append(
+                {
+                    "scope": "funds",
+                    "kind": "cash_total_cny",
+                    "reason": "cash_total_cny_unavailable",
+                }
+            )
+    secured_total_cny = read_cash_secured_total_cny(dict(option_positions_context)) if secured_reliable else None
+    opening_cny: float | None = None
+    if cash_total_cny is not None and secured_total_cny is not None:
+        opening_cny = cash_total_cny - secured_total_cny
+
     as_of_values = [item for item in (portfolio_as_of, option_as_of) if item is not None]
     return (
         {
             "as_of_utc": max(as_of_values).astimezone(timezone.utc).isoformat() if as_of_values else "",
             "cash_total_by_currency": cash_total or {},
             "option_opening_available_by_currency": opening,
-            "available": bool(cash_total_reliable and secured_reliable),
+            "cash_total_cny": cash_total_cny,
+            "cash_secured_total_cny": secured_total_cny,
+            "option_opening_available_cny": opening_cny,
+            "available": bool(
+                cash_total_reliable and secured_reliable and (opening or opening_cny is not None)
+            ),
             "reason": reason,
         },
         cash_total_reliable,
