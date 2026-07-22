@@ -36,6 +36,11 @@ from src.application.ledger.api import (
     resolve_manual_position_close_target,
 )
 from src.application.positions.reporting import build_monthly_income_report
+from src.application.cash_conversion import (
+    attach_assigned_stock_sale_cash_conversions,
+    load_cash_fx_payload,
+    utc_now_ms,
+)
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -909,6 +914,16 @@ def _execute_assigned_stock_sale(
         ),
         None,
     )
+    if existing_same is not None:
+        existing_conversions = existing_same.get("cash_conversions")
+        if isinstance(existing_conversions, dict):
+            sale_event["cash_conversions"] = dict(existing_conversions)
+    else:
+        sale_event = attach_assigned_stock_sale_cash_conversions(
+            sale_event,
+            fx_payload=load_cash_fx_payload(repo),
+            observed_at_ms=utc_now_ms(),
+        )
     if existing_same is not None:
         existing_json = json.dumps(dict(existing_same), ensure_ascii=False, sort_keys=True)
         candidate_json = json.dumps(dict(sale_event), ensure_ascii=False, sort_keys=True)

@@ -80,6 +80,7 @@ class PerformanceFact:
     evidence_fact_ids: tuple[str, ...] = ()
     attribution: StrategyAttribution | None = None
     attribution_issues: tuple[str, ...] = ()
+    cash_conversion: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         kind = str(self.fact_kind or "").strip()
@@ -124,6 +125,11 @@ class PerformanceFact:
             "attribution_issues",
             tuple(sorted({str(item) for item in self.attribution_issues if str(item)})),
         )
+        object.__setattr__(
+            self,
+            "cash_conversion",
+            dict(self.cash_conversion) if isinstance(self.cash_conversion, Mapping) else None,
+        )
 
     @property
     def fact_id(self) -> str:
@@ -147,6 +153,7 @@ class PerformanceFact:
             "evidence_fact_ids": list(self.evidence_fact_ids),
             "attribution": None if self.attribution is None else self.attribution.to_dict(),
             "attribution_issues": list(self.attribution_issues),
+            "cash_conversion": dict(self.cash_conversion) if self.cash_conversion is not None else None,
         }
 
 
@@ -233,11 +240,7 @@ def build_period_performance(
 
     facts: list[PerformanceFact] = []
     for event in period_events:
-        if event.event_type == "open":
-            facts.extend(_open_event_facts(event))
-        elif event.event_type in CLOSE_EVENT_TYPES:
-            facts.extend(_close_event_cash_facts(event))
-            facts.extend(_stock_settlement_facts(event))
+        facts.extend(cash_facts_for_trade_event(event))
 
     allocations_by_close = {allocation.close_event_id: allocation for allocation in scoped_allocations}
     for allocation in scoped_allocations:
@@ -843,6 +846,25 @@ def _open_event_facts(event: TradeEvent) -> list[PerformanceFact]:
     return facts
 
 
+def cash_facts_for_trade_event(event: TradeEvent) -> list[PerformanceFact]:
+    """Build canonical cash facts and attach immutable booking-time conversions."""
+    if event.event_type == "open":
+        facts = _open_event_facts(event)
+    elif event.event_type in CLOSE_EVENT_TYPES:
+        facts = [*_close_event_cash_facts(event), *_stock_settlement_facts(event)]
+    else:
+        return []
+    conversions = event.raw_payload.get("cash_conversions") if isinstance(event.raw_payload, dict) else None
+    if not isinstance(conversions, Mapping):
+        return facts
+    return [
+        replace(fact, cash_conversion=dict(conversions[fact.fact_kind]))
+        if fact.fact_kind in _CASH_NET_KINDS and isinstance(conversions.get(fact.fact_kind), Mapping)
+        else fact
+        for fact in facts
+    ]
+
+
 def _close_event_cash_facts(event: TradeEvent) -> list[PerformanceFact]:
     currency, currency_reason = _fact_currency(event.currency, context="option event currency")
     amount, reason = _event_option_amount(event)
@@ -1120,6 +1142,7 @@ def _assigned_stock_period_facts(
         gross_reason = None if gross is not None else "assigned-stock sale proceeds or cost basis is unavailable"
         net_reason = None if net is not None else gross_reason or _fee_missing_reason(fee)
         evidence_ids = tuple(str(row.get("evidence_fact_id") or "").split())
+        cash_conversions = row.get("cash_conversions") if isinstance(row.get("cash_conversions"), Mapping) else {}
         facts.extend(
             [
                 PerformanceFact(
@@ -1134,6 +1157,11 @@ def _assigned_stock_period_facts(
                     amount=proceeds,
                     missing_reason=None if proceeds is not None else "assigned-stock sale proceeds are unavailable",
                     evidence_fact_ids=evidence_ids,
+                    cash_conversion=(
+                        dict(cash_conversions["assigned_stock_sale_cash_gross"])
+                        if isinstance(cash_conversions.get("assigned_stock_sale_cash_gross"), Mapping)
+                        else None
+                    ),
                     **common,
                 ),
                 PerformanceFact(
@@ -1141,6 +1169,11 @@ def _assigned_stock_period_facts(
                     effective_at_ms=event_at,
                     amount=None if fee_amount is None else -fee_amount,
                     missing_reason=None if fee_amount is not None else _fee_missing_reason(fee),
+                    cash_conversion=(
+                        dict(cash_conversions["assigned_stock_sale_fee_cash"])
+                        if isinstance(cash_conversions.get("assigned_stock_sale_fee_cash"), Mapping)
+                        else None
+                    ),
                     **common,
                 ),
                 PerformanceFact(
@@ -1490,19 +1523,13 @@ def _summarize(
             ),
         },
         "cash": {
-            "option_trade_cash_gross": _metric(facts, {"option_trade_cash_gross"}, fx_rates=fx_rates).to_dict(),
-            "option_fee_cash": _metric(facts, {"option_fee_cash"}, fx_rates=fx_rates).to_dict(),
-            "stock_settlement_cash_gross": _metric(facts, {"stock_settlement_cash_gross"}, fx_rates=fx_rates).to_dict(),
-            "stock_settlement_fee_cash": _metric(
-                facts, {"stock_settlement_fee_cash"}, fx_rates=fx_rates
-            ).to_dict(),
-            "assigned_stock_sale_cash_gross": _metric(
-                facts, {"assigned_stock_sale_cash_gross"}, fx_rates=fx_rates
-            ).to_dict(),
-            "assigned_stock_sale_fee_cash": _metric(
-                facts, {"assigned_stock_sale_fee_cash"}, fx_rates=fx_rates
-            ).to_dict(),
-            "total_cash_change_net": _metric(facts, _CASH_NET_KINDS, fx_rates=fx_rates).to_dict(),
+            "option_trade_cash_gross": _cash_metric(facts, {"option_trade_cash_gross"}).to_dict(),
+            "option_fee_cash": _cash_metric(facts, {"option_fee_cash"}).to_dict(),
+            "stock_settlement_cash_gross": _cash_metric(facts, {"stock_settlement_cash_gross"}).to_dict(),
+            "stock_settlement_fee_cash": _cash_metric(facts, {"stock_settlement_fee_cash"}).to_dict(),
+            "assigned_stock_sale_cash_gross": _cash_metric(facts, {"assigned_stock_sale_cash_gross"}).to_dict(),
+            "assigned_stock_sale_fee_cash": _cash_metric(facts, {"assigned_stock_sale_fee_cash"}).to_dict(),
+            "total_cash_change_net": _cash_metric(facts, _CASH_NET_KINDS).to_dict(),
         },
         "pnl": {
             "realized_gross": _metric(facts, {"realized_gross"}, fx_rates=fx_rates).to_dict(),
@@ -1515,6 +1542,81 @@ def _summarize(
             "period_total_net": _period_total_metric(facts, net=True, fx_rates=fx_rates).to_dict(),
         },
     }
+
+
+def _cash_metric(
+    facts: Sequence[PerformanceFact],
+    kinds: set[str] | frozenset[str],
+) -> DecimalAmountEnvelope:
+    selected = [fact for fact in facts if fact.fact_kind in kinds]
+    if not selected:
+        return DecimalAmountEnvelope(quality=MetricQuality(MetricStatus.NOT_OBSERVED))
+    sums: dict[str, Decimal] = {}
+    incomplete_currencies: set[str] = set()
+    missing: list[str] = []
+    evidence_fact_ids: list[str] = []
+    cny_sum = Decimal(0)
+    cny_complete = True
+    for fact in selected:
+        currency = str(fact.currency or "")
+        if fact.amount is None:
+            incomplete_currencies.add(currency)
+            missing.append(fact.fact_id)
+            cny_complete = False
+            continue
+        sums[currency] = quantize_money(sums.get(currency, Decimal(0)) + fact.amount)
+        amount_cny, conversion_id, conversion_issue = _cash_conversion_value(fact)
+        if conversion_id:
+            evidence_fact_ids.append(conversion_id)
+        if conversion_issue is not None or amount_cny is None:
+            missing.append(conversion_issue or f"cash_conversion_invalid:{fact.fact_id}")
+            cny_complete = False
+            continue
+        cny_sum = quantize_money(cny_sum + amount_cny)
+    for currency in incomplete_currencies:
+        sums.pop(currency, None)
+    status = MetricStatus.PARTIAL if missing else MetricStatus.OBSERVED
+    return DecimalAmountEnvelope(
+        by_currency=sums,
+        cny=cny_sum if cny_complete else None,
+        quality=MetricQuality(
+            status=status,
+            missing=tuple(sorted(set(missing))),
+            evidence_fact_ids=tuple(dict.fromkeys(evidence_fact_ids)),
+        ),
+        fx_fact_ids=tuple(dict.fromkeys(evidence_fact_ids)),
+    )
+
+
+def _cash_conversion_value(fact: PerformanceFact) -> tuple[Decimal | None, str | None, str | None]:
+    conversion = fact.cash_conversion
+    if not isinstance(conversion, Mapping):
+        return None, None, f"cash_conversion:{fact.fact_id}"
+    conversion_id = str(conversion.get("conversion_id") or "").strip() or None
+    if (
+        conversion.get("schema_version") != "cash_conversion.v1"
+        or conversion_id is None
+        or str(conversion.get("cash_fact_id") or "") != fact.fact_id
+        or str(conversion.get("quote_currency") or "").upper() != "CNY"
+    ):
+        return None, conversion_id, f"cash_conversion_invalid:{fact.fact_id}"
+    status = str(conversion.get("status") or "").strip().lower()
+    if status != "observed":
+        if status == "pending":
+            reason = str(conversion.get("missing_reason") or "booking FX unavailable").strip()
+            return None, conversion_id, f"cash_conversion_pending:{fact.fact_id}:{reason}"
+        return None, conversion_id, f"cash_conversion_invalid:{fact.fact_id}"
+    try:
+        native_amount = to_decimal(conversion.get("native_amount"), field_name="cash conversion native_amount")
+        amount_cny = to_decimal(conversion.get("amount_cny"), field_name="cash conversion amount_cny")
+    except (TypeError, ValueError):
+        return None, conversion_id, f"cash_conversion_invalid:{fact.fact_id}"
+    if (
+        str(conversion.get("native_currency") or "").upper() != str(fact.currency or "")
+        or native_amount != fact.amount
+    ):
+        return None, conversion_id, f"cash_conversion_mismatch:{fact.fact_id}"
+    return amount_cny, conversion_id, None
 
 
 def _metric(
@@ -1627,6 +1729,13 @@ def _fx_quality_for_facts(
     selected_ids: list[str] = []
     for fact in facts:
         if fact.fact_kind not in _MONETARY_KINDS or fact.amount is None or not fact.currency:
+            continue
+        if fact.fact_kind in _CASH_NET_KINDS:
+            _amount_cny, conversion_id, conversion_issue = _cash_conversion_value(fact)
+            if conversion_id:
+                selected_ids.append(conversion_id)
+            if conversion_issue is not None:
+                missing.add(conversion_issue)
             continue
         if fact.currency == "CNY":
             continue
