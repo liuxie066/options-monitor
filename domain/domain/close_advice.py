@@ -56,6 +56,19 @@ FEE_USABLE_STATUSES = {"schedule_estimate", "conservative_estimate"}
 HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE = "assignment_acceptable"
 HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE = "called_away_acceptable"
 
+CURRENT_CLOSE_POLICY_VERSION = "p0_current.v1"
+LEGACY_CLOSE_POLICY_VERSION = "legacy_p0"
+
+RECOMMENDATION_HOLD = "hold"
+RECOMMENDATION_REVIEW = "review"
+RECOMMENDATION_CLOSE = "close"
+RECOMMENDATION_NOT_EVALUABLE = "not_evaluable"
+
+DECISION_EVIDENCE_COMPLETE = "complete"
+DECISION_EVIDENCE_PARTIAL = "partial"
+DECISION_EVIDENCE_REVIEW_REQUIRED = "review_required"
+DECISION_EVIDENCE_NOT_EVALUABLE = "not_evaluable"
+
 PRICING_BLOCKING_FLAGS = {
     "missing_premium",
     "invalid_premium",
@@ -899,6 +912,59 @@ def _resolve_exit_contract(
     if tier_norm and tier_norm != "none":
         return EXIT_STATE_PROFIT_CAPTURE, exit_reason_type or EXIT_REASON_TYPE_PROFIT_CAPTURE
     return EXIT_STATE_HOLD, exit_reason_type or EXIT_REASON_TYPE_HOLD
+
+
+def current_policy_decision_fields(
+    *,
+    tier: Any,
+    exit_state: Any,
+    policy_version: str = CURRENT_CLOSE_POLICY_VERSION,
+) -> dict[str, Any]:
+    """Project the existing P0 exit contract into the additive recommendation contract."""
+
+    tier_norm = str(tier or "").strip().lower()
+    exit_norm = str(exit_state or "").strip().lower()
+    if exit_norm == EXIT_STATE_NOT_EVALUABLE or tier_norm == "not_evaluable":
+        recommendation = RECOMMENDATION_NOT_EVALUABLE
+        basis = ("evidence_not_evaluable",)
+        evidence_status = DECISION_EVIDENCE_NOT_EVALUABLE
+    elif exit_norm in {
+        EXIT_STATE_PROFIT_CAPTURE,
+        EXIT_STATE_TAKE_PROFIT,
+        EXIT_STATE_SALVAGE,
+    } or (not exit_norm and tier_norm not in {"", "none"}):
+        recommendation = RECOMMENDATION_CLOSE
+        basis = (_current_policy_close_basis(exit_state=exit_norm, tier=tier_norm),)
+        evidence_status = DECISION_EVIDENCE_COMPLETE
+    else:
+        recommendation = RECOMMENDATION_HOLD
+        basis = (_current_policy_hold_basis(exit_state=exit_norm, tier=tier_norm),)
+        evidence_status = DECISION_EVIDENCE_COMPLETE
+    return {
+        "policy_version": str(policy_version or CURRENT_CLOSE_POLICY_VERSION),
+        "recommendation_state": recommendation,
+        "decision_basis": basis,
+        "decision_evidence_status": evidence_status,
+    }
+
+
+def _current_policy_close_basis(*, exit_state: str, tier: str) -> str:
+    if exit_state == EXIT_STATE_TAKE_PROFIT:
+        return "long_call_take_profit"
+    if exit_state == EXIT_STATE_SALVAGE:
+        return "long_call_salvage"
+    if exit_state == EXIT_STATE_PROFIT_CAPTURE or not exit_state:
+        suffix = tier if tier in {"strong", "medium", "weak", "optional"} else "matched"
+        return f"profit_capture_{suffix}"
+    return "legacy_close"
+
+
+def _current_policy_hold_basis(*, exit_state: str, tier: str) -> str:
+    if exit_state == EXIT_STATE_LET_EXPIRE:
+        return "long_call_let_expire"
+    if exit_state == EXIT_STATE_HOLD or not exit_state:
+        return f"hold_{tier}" if tier and tier != "none" else "hold_threshold_not_met"
+    return "legacy_non_authoritative_exit_state"
 
 
 def apply_fee_economic_safety(row: dict[str, Any]) -> dict[str, Any]:

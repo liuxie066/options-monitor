@@ -26,6 +26,25 @@ Historical reports may contain `risk_exit`. It remains readable and renderable
 for artifact compatibility, but current production evaluation does not emit it
 or map it to an executable close action.
 
+## Recommendation Contract
+
+`tier` describes how strongly the current threshold matched;
+`recommendation_state` is the action authority. They are deliberately separate.
+Every newly generated row exposes:
+
+- `policy_version`: policy that produced the recommendation;
+- `recommendation_state`: `hold`, `review`, `close`, or `not_evaluable`;
+- `decision_basis`: stable reason token(s) for the recommendation;
+- `decision_evidence_status`: completeness of the facts used by the policy.
+
+The current production policy is `p0_current.v1`. Its projection preserves the
+pre-existing behavior exactly: actionable profit-capture/take-profit/salvage
+states map to `close`, existing holds remain `hold`, and insufficient pricing
+remains `not_evaluable`. `review` is part of the additive contract but is not
+emitted by the current production policy. Older CSV artifacts are projected as
+`legacy_p0` by read surfaces only; that compatibility projection does not rewrite
+the artifact or make it executable.
+
 ## Architecture
 
 ```text
@@ -119,8 +138,11 @@ artifacts that do not contain a lot ID.
 | YE long call / `vol_convexity_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `yield_enhancement_long_call_leg` | `sell_call_take_profit` / `hold_call_as_convexity` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
 
 The action policy is resolved by a small registry in the runner. It maps an
-already-evaluated `exit_state` to a user-facing `close_action`; it must not
-change the thesis evaluation result.
+already-evaluated `recommendation_state` to a user-facing `close_action`, using
+`exit_state` only to select the strategy-specific long-call wording. It must not
+change the thesis evaluation result. During the P0 compatibility window, the
+runner first projects current exit/tier facts into `recommendation_state`, so
+selected rows and actions remain unchanged.
 
 ## Combo Economics
 

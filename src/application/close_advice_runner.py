@@ -23,7 +23,10 @@ from domain.domain.close_advice import (
     EXIT_STATE_PROFIT_CAPTURE,
     EXIT_STATE_SALVAGE,
     EXIT_STATE_TAKE_PROFIT,
+    RECOMMENDATION_CLOSE,
+    RECOMMENDATION_NOT_EVALUABLE,
     apply_fee_economic_safety,
+    current_policy_decision_fields,
     evaluate_close_advice,
     evaluate_long_call_convexity_advice,
     evaluate_short_vol_close_advice,
@@ -147,6 +150,10 @@ OUTPUT_COLUMNS = [
     "exit_state",
     "exit_reason_type",
     "hold_reason_type",
+    "policy_version",
+    "recommendation_state",
+    "decision_basis",
+    "decision_evidence_status",
     "close_action",
     "optional_combo_action",
     "strategy_exit_mode",
@@ -1395,6 +1402,9 @@ def _is_yield_enhancement_long_call(row: dict[str, Any]) -> bool:
 
 
 def _is_actionable_close(row: dict[str, Any]) -> bool:
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    if recommendation:
+        return recommendation == RECOMMENDATION_CLOSE
     exit_state = str(row.get("exit_state") or "").strip().lower()
     if exit_state:
         return exit_state == EXIT_STATE_PROFIT_CAPTURE
@@ -1414,7 +1424,12 @@ def _has_complete_yield_enhancement_combo_close(row: dict[str, Any]) -> bool:
 def _apply_yield_enhancement_put_action(row: dict[str, Any]) -> dict[str, Any]:
     tier = str(row.get("tier") or "").strip().lower()
     exit_state = str(row.get("exit_state") or "").strip().lower()
-    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    if (
+        recommendation == RECOMMENDATION_NOT_EVALUABLE
+        or exit_state == EXIT_STATE_NOT_EVALUABLE
+        or tier == "not_evaluable"
+    ):
         row["close_action"] = "not_evaluable"
         return row
     if _is_actionable_close(row):
@@ -1429,11 +1444,16 @@ def _apply_yield_enhancement_put_action(row: dict[str, Any]) -> dict[str, Any]:
 def _apply_yield_enhancement_long_call_action(row: dict[str, Any]) -> dict[str, Any]:
     tier = str(row.get("tier") or "").strip().lower()
     exit_state = str(row.get("exit_state") or "").strip().lower()
-    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    if (
+        recommendation == RECOMMENDATION_NOT_EVALUABLE
+        or exit_state == EXIT_STATE_NOT_EVALUABLE
+        or tier == "not_evaluable"
+    ):
         row["close_action"] = "not_evaluable"
-    elif exit_state == EXIT_STATE_TAKE_PROFIT:
+    elif recommendation == RECOMMENDATION_CLOSE and exit_state == EXIT_STATE_TAKE_PROFIT:
         row["close_action"] = "sell_call_take_profit"
-    elif exit_state == EXIT_STATE_SALVAGE:
+    elif recommendation == RECOMMENDATION_CLOSE and exit_state == EXIT_STATE_SALVAGE:
         row["close_action"] = "sell_call_salvage"
     elif exit_state == EXIT_STATE_LET_EXPIRE:
         row["close_action"] = "hold_to_expiry_or_expire"
@@ -1447,7 +1467,12 @@ def _apply_yield_enhancement_long_call_action(row: dict[str, Any]) -> dict[str, 
 def _apply_standard_short_option_action(row: dict[str, Any]) -> dict[str, Any]:
     tier = str(row.get("tier") or "").strip().lower()
     exit_state = str(row.get("exit_state") or "").strip().lower()
-    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    if (
+        recommendation == RECOMMENDATION_NOT_EVALUABLE
+        or exit_state == EXIT_STATE_NOT_EVALUABLE
+        or tier == "not_evaluable"
+    ):
         row["close_action"] = "not_evaluable"
         return row
     row["close_action"] = "close" if _is_actionable_close(row) else "hold"
@@ -1479,9 +1504,27 @@ def _resolve_close_action_policy(row: dict[str, Any]) -> _CloseActionPolicy:
 
 
 def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
+    _ensure_current_policy_decision(row)
     policy = _resolve_close_action_policy(row)
     row["strategy_exit_mode"] = policy.exit_mode
     return policy.apply(row)
+
+
+def _ensure_current_policy_decision(row: dict[str, Any]) -> dict[str, Any]:
+    recommendation = str(row.get("recommendation_state") or "").strip().lower()
+    if not recommendation:
+        row.update(
+            current_policy_decision_fields(
+                tier=row.get("tier"),
+                exit_state=row.get("exit_state"),
+            )
+        )
+    basis = row.get("decision_basis")
+    if isinstance(basis, (list, tuple)):
+        row["decision_basis"] = ";".join(
+            dict.fromkeys(str(item or "").strip() for item in basis if str(item or "").strip())
+        )
+    return row
 
 
 def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
