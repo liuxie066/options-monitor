@@ -405,7 +405,8 @@ Close evidence is an optional facet of the existing dataset, never candidate row
 
 ### 9.2 Point-in-time input rule
 
-- `observed_at_utc` is parsed from the canonical UTC timestamp prefix in the run ID; an unparseable run ID is a capture error, never filesystem mtime fallback.
+- The canonical UTC timestamp prefix in the run ID is the run-start anchor; an unparseable run ID is a capture error, never filesystem mtime fallback.
+- `observed_at_utc` is the unique successful account-scoped `close_advice` audit event timestamp from that run. This is the first persisted timestamp known to be no earlier than the generated decision. Missing or ambiguous audit events are capture errors. The run-start prefix cannot be used as the decision timestamp because position context is generated after the run starts.
 - A quote-native timestamp is preserved when present. If the quote row has no timestamp, `quote_time_basis=run_anchor` is allowed only when the required-data artifact is inside the same run directory; external or later artifacts fail the point-in-time check.
 - Position-context `as_of_utc` must be no later than `observed_at_utc`; otherwise the episode is rejected as mixed-time evidence.
 - Candidate replacement must come from the same or earlier run timestamp.

@@ -70,6 +70,31 @@ P3 cannot be selected by `evaluate_close_policy`; the Shadow Replay adapter
 composes it only after formal Close Advice and reallocation artifacts exist. A
 replacement opportunity cannot upgrade a P2 hold to close.
 
+### Shadow Replay close-decision facet
+
+Close decisions are captured into the existing `shadow_replay_dataset.v1` as
+an optional facet. Candidate replay remains unchanged when the facet is not
+explicitly requested. An enabled facet adds:
+
+- `close_decision_episodes.jsonl` (`shadow_replay_close_episode.v1`);
+- `close_decision_marks.jsonl` (`shadow_replay_close_mark.v1`);
+- `close_decision_outcomes.jsonl` (`shadow_replay_close_outcome.v1`).
+
+Capture joins `close_advice.csv`, `option_positions_context.json`, the optional
+reallocation shadow, and the run-scoped audit by account and stable
+`position_lot_id`. The canonical run-ID timestamp is the run-start anchor;
+`observed_at_utc` is the unique successful account-scoped `close_advice` audit
+timestamp, because the position context is created after the run starts. A
+missing or ambiguous audit timestamp, a future context/quote/replacement, or a
+non-unique lot match rejects capture. Filesystem mtime and contract-field lot
+inference are never fallbacks.
+
+The material fingerprint excludes run IDs, timestamps, and rendered reason
+text. Exact same-day reruns reuse the earliest episode and append source run
+IDs; a date, recommendation, tier, economic bucket, thesis/willingness, or
+replacement change creates a new episode. P0/P1/P2/P3 projections share the
+same immutable observation, and the facet remains local/offline only.
+
 ## Architecture
 
 ```text
