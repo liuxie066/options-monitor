@@ -228,7 +228,7 @@ def _execute_plan_row(
                 required_data_root=required_data_root,
                 source=source,
                 repo_root=repo_root,
-                as_of=generated_at,
+                as_of=None,
                 write=True,
                 replace=False,
                 settle=settle_after_collect,

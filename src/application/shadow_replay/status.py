@@ -8,11 +8,13 @@ from typing import Any
 from src.application.shadow_replay.analysis import analyze_rows
 from src.application.shadow_replay.common import (
     DATASET_FILES,
+    OPTIONAL_CLOSE_DATASET_FILES,
     read_jsonl,
     resolve_path,
     safety_payload,
     text,
 )
+from src.application.shadow_replay.readiness import summarize_close_decision_readiness
 from src.application.shadow_replay.settlement import is_usable_mark, outcome_gap_summary
 
 
@@ -65,7 +67,7 @@ def shadow_replay_dataset_status(
     plan_rows = _data_plan_rows(datasets)
     review_rows = _review_queue_rows(datasets)
     plan_counts = Counter(row["action"] for row in plan_rows)
-    return {
+    result = {
         "schema_version": STATUS_SCHEMA_VERSION,
         "dataset_root": str(root),
         "required_data_root": str(required_root),
@@ -88,6 +90,23 @@ def shadow_replay_dataset_status(
         "review_queue": review_rows,
         "safety": safety_payload(writes_local_dataset=False),
     }
+    close_datasets = [
+        row["close_decision_readiness"]
+        for row in datasets
+        if isinstance(row.get("close_decision_readiness"), dict)
+    ]
+    if close_datasets:
+        close_status_counts = Counter(row["status"] for row in close_datasets)
+        result["summary"].update(
+            {
+                "close_decision_dataset_count": len(close_datasets),
+                "close_decision_by_status": dict(sorted(close_status_counts.items())),
+                "close_decision_ready_for_paired_analysis_count": close_status_counts.get(
+                    "ready_for_paired_policy_analysis", 0
+                ),
+            }
+        )
+    return result
 
 
 def _discover_dataset_dirs(root: Path) -> list[Path]:
@@ -144,7 +163,7 @@ def _dataset_status(
         now=now,
     )
     next_action = sampling["action"]
-    return {
+    result = {
         "dataset_id": dataset_dir.name,
         "dataset_dir": str(dataset_dir),
         "status": status,
@@ -174,6 +193,58 @@ def _dataset_status(
             "survivorship_bias_risk": evidence_checks["survivorship_bias_risk"],
         },
     }
+    close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
+    if close_episode_path.is_file():
+        close_readiness = summarize_close_decision_readiness(
+            episodes=read_jsonl(close_episode_path),
+            marks=read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1]),
+            outcomes=read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[2]),
+            min_sample=30,
+        )
+        close_readiness["commands"] = _close_readiness_commands(
+            dataset_dir,
+            next_action=text(close_readiness.get("next_action")),
+            required_data_root=required_data_root,
+        )
+        result["close_decision_readiness"] = close_readiness
+    return result
+
+
+def _close_readiness_commands(
+    dataset_dir: Path,
+    *,
+    next_action: str,
+    required_data_root: Path | None,
+) -> dict[str, str | None]:
+    dataset = str(dataset_dir)
+    required_root = (
+        str(required_data_root)
+        if required_data_root is not None
+        else "output_shared/required_data"
+    )
+    if next_action == "collect_fresh_opend_marks":
+        return {
+            "suggested_command": (
+                f"./om research shadow-replay collect-marks --dataset {dataset} "
+                f"--source opend --required-data-root {required_root} --write"
+            ),
+            "requires_lifecycle_path": None,
+        }
+    if next_action == "settle_close_decision_outcomes":
+        return {
+            "suggested_command": (
+                f"./om research shadow-replay settle --dataset {dataset} --write"
+            ),
+            "requires_lifecycle_path": "repeat --lifecycle-path for canonical terminal evidence",
+        }
+    if next_action == "run_paired_policy_analysis":
+        return {
+            "suggested_command": (
+                f"./om research shadow-replay analyze --dataset {dataset} --min-sample 30"
+            ),
+            "requires_lifecycle_path": None,
+        }
+    return {"suggested_command": None, "requires_lifecycle_path": None}
 
 
 def _readiness_status(summary: dict[str, Any], outcome_gaps: dict[str, Any]) -> tuple[str, str]:

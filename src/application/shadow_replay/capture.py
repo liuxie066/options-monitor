@@ -373,6 +373,7 @@ def capture_close_decision_episodes(
                     observed_at=observed_at,
                     quote_time=quote_time,
                     quote_time_basis=quote_time_basis,
+                    strategy_context_at=text(context.get("as_of_utc")),
                     close_path=close_path,
                     context_path=context_path,
                     audit_path=audit_path,
@@ -447,6 +448,7 @@ def _close_episode_observation(
     observed_at: datetime,
     quote_time: str,
     quote_time_basis: str,
+    strategy_context_at: str,
     close_path: Path,
     context_path: Path,
     audit_path: Path,
@@ -497,6 +499,8 @@ def _close_episode_observation(
         "observed_at_utc": observed_text,
         "quote_at_utc": quote_time,
         "quote_time_basis": quote_time_basis,
+        "strategy_context_at_utc": strategy_context_at,
+        "strategy_time_basis": "position_context_as_of_utc",
         "material_fact_fingerprint": fingerprint,
         "normalized_decision_facts": asdict(facts),
         "formal_policy_result": formal,
@@ -510,6 +514,7 @@ def _close_episode_observation(
         "material_economic_buckets": material_facts["economic_buckets"],
         "decision_economics": decision_economics,
         "replacement_evidence": material_facts["replacement"],
+        "replacement_provenance": _replacement_provenance(reallocation_row),
         "position_identity": _position_identity(position, row=row),
         "source": {
             "close_advice_path": safe_rel(close_path, base=base),
@@ -585,6 +590,21 @@ def _material_replacement_facts(row: dict[str, Any] | None) -> dict[str, Any]:
         "fee_calc_status": text(source.get("replacement_fee_calc_status")).lower() or None,
         "open_fee": _rounded_number(source.get("replacement_open_fee"), digits=6),
         "entry_slippage": _rounded_number(source.get("replacement_spread_slippage"), digits=6),
+    }
+
+
+def _replacement_provenance(row: dict[str, Any] | None) -> dict[str, Any]:
+    source = row if isinstance(row, dict) else {}
+    if not source:
+        return {
+            "status": "not_applicable",
+            "source_run_id": None,
+            "source_run_at_utc": None,
+        }
+    return {
+        "status": "validated_same_decision_run",
+        "source_run_id": text(source.get("_source_run_id")) or None,
+        "source_run_at_utc": text(source.get("_source_run_at_utc")) or None,
     }
 
 
@@ -698,7 +718,7 @@ def _close_decision_time_index(
 def _reallocation_index(paths: list[Path]) -> dict[tuple[str, str], list[dict[str, Any]]]:
     out: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in paths:
-        run_id, _observed_at = _run_anchor(path)
+        run_id, run_at = _run_anchor(path)
         source_account = account_hint(path)
         for row_number, row in enumerate(read_csv_rows(path), start=1):
             account = text(row.get("account")).lower() or source_account
@@ -707,6 +727,8 @@ def _reallocation_index(paths: list[Path]) -> dict[tuple[str, str], list[dict[st
             item = dict(row)
             item["_source_path"] = str(path)
             item["_source_row_number"] = row_number
+            item["_source_run_id"] = run_id
+            item["_source_run_at_utc"] = _iso_utc(run_at)
             out.setdefault((run_id, account), []).append(item)
     return out
 

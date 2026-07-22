@@ -386,6 +386,35 @@ or missing fees/prices remain inconclusive.
 facet only with `--include-close-decisions`, and settlement accepts repeatable
 canonical projected lifecycle evidence through `--lifecycle-path`.
 
+### Close-decision replay readiness
+
+Readiness is mechanical evidence accounting, not a strategy-quality verdict.
+When the optional close facet exists, dataset status and replay readiness report
+the following independently:
+
+- unique decision episodes and repeated source observations;
+- verified 1d, 3d, 7d, 14d, and expiry mark-window coverage;
+- terminal lifecycle coverage and every inconclusive reason;
+- decision and future-close fee coverage;
+- complete P0/P1/P2/P3 projections and paired outcome coverage;
+- decision quote, strategy context, replacement, mark, and outcome point-in-time
+  provenance;
+- promotion-usable coverage by `(strategy_profile, strategy_family)`.
+
+An episode is promotion-usable only when it has a usable outcome, all four
+policy projections, the exact five-row outcome matrix, fee-complete economics,
+verified point-in-time evidence, and a complete profile/family segment. A P3
+`review_switch` episode additionally requires a replacement sourced from a
+validated same-decision run. Receipt time is never substituted for quote time.
+
+The mechanical floor is 30 settled unique episodes overall, at least 10
+promotion-usable episodes in an eligible profile/family segment, and at least
+80% promotion-usable coverage within that segment. A segment below either
+segment floor remains shadow-only; it does not borrow evidence from another
+profile or family. Meeting the floor permits paired policy analysis only. It
+does not select a winner, change production policy, or authorize notification
+changes. Candidate-only Shadow Replay datasets retain their prior status shape.
+
 ## Acceptance Matrix
 
 | Area | Acceptance standard |

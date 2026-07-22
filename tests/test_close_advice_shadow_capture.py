@@ -189,6 +189,8 @@ def test_close_facet_captures_formal_and_all_shadow_policy_results(tmp_path: Pat
     assert episode["schema_version"] == "shadow_replay_close_episode.v1"
     assert episode["observed_at_utc"] == "2026-07-23T01:01:00Z"
     assert episode["quote_time_basis"] == "run_anchor"
+    assert episode["strategy_context_at_utc"] == "2026-07-23T01:00:30Z"
+    assert episode["strategy_time_basis"] == "position_context_as_of_utc"
     assert episode["formal_policy_result"]["recommendation_state"] == "close"
     assert {
         key: value["recommendation_state"]
@@ -203,6 +205,11 @@ def test_close_facet_captures_formal_and_all_shadow_policy_results(tmp_path: Pat
     assert episode["decision_economics"]["close_now_cost"] == 22.5
     assert episode["replacement_evidence"]["entry_credit"] == 200
     assert episode["replacement_evidence"]["fee_calc_status"] == "candidate_futu_fee"
+    assert episode["replacement_provenance"] == {
+        "status": "validated_same_decision_run",
+        "source_run_id": "20260723T010000Z-run",
+        "source_run_at_utc": "2026-07-23T01:00:00Z",
+    }
     assert len(episode["episode_id"]) == 64
     assert len(episode["material_fact_fingerprint"]) == 64
 
