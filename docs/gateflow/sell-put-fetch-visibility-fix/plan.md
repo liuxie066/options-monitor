@@ -3,9 +3,9 @@
 ## Gate state
 
 - Work unit: `sell-put-fetch-visibility-fix`
-- Current gate: implementation S3
-- Next gate: aggregate deepreview
-- Status: S1 and S2 accepted; S3 budget/broad validation pending
+- Current gate: aggregate deepreview
+- Next gate: closeout
+- Status: S1, S2, and S3 accepted; aggregate review pending
 - Artifact path: `docs/gateflow/sell-put-fetch-visibility-fix/plan.md`
 
 ## Goal and motivation
