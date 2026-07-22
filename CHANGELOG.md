@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.7 - 2026-07-22
+
+### Changed
+- Daily Brief position sections now show only actionable close, take-profit, or manual-review advice; observe and not-evaluable positions remain in the structured brief artifact and contribute to the omitted-position count without adding notification noise.
+
 ## 1.4.6 - 2026-07-22
 
 ### Changed
