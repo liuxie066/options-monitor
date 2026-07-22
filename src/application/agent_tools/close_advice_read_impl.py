@@ -5,7 +5,16 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain.close_advice import TIER_PRIORITY
+from domain.domain.close_advice import (
+    DECISION_EVIDENCE_COMPLETE,
+    DECISION_EVIDENCE_NOT_EVALUABLE,
+    LEGACY_CLOSE_POLICY_VERSION,
+    RECOMMENDATION_CLOSE,
+    RECOMMENDATION_HOLD,
+    RECOMMENDATION_NOT_EVALUABLE,
+    TIER_PRIORITY,
+    current_policy_decision_fields,
+)
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
@@ -648,6 +657,7 @@ def _parse_date(value: Any) -> date | None:
 
 
 def _public_row(row: dict[str, Any]) -> dict[str, Any]:
+    decision_fields = _decision_fields_for_read(row)
     keys = (
         "account",
         "position_lot_id",
@@ -717,6 +727,10 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "exit_state",
         "exit_reason_type",
         "hold_reason_type",
+        "policy_version",
+        "recommendation_state",
+        "decision_basis",
+        "decision_evidence_status",
         "close_action",
         "optional_combo_action",
         "strategy_exit_mode",
@@ -742,7 +756,12 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "gamma",
         "data_quality_flags",
     )
-    out = {key: _normalize_public_value(key, row.get(key)) for key in keys if row.get(key) not in (None, "")}
+    source_row = {**row, **decision_fields}
+    out = {
+        key: _normalize_public_value(key, source_row.get(key))
+        for key in keys
+        if source_row.get(key) not in (None, "")
+    }
     canonical = _row_symbol(row)
     if canonical:
         out["symbol"] = canonical
@@ -760,20 +779,71 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in out.items() if value not in (None, "")}
 
 
+def _decision_fields_for_read(row: dict[str, Any]) -> dict[str, Any]:
+    recommendation = _lower(row.get("recommendation_state"))
+    if recommendation:
+        return {
+            "policy_version": row.get("policy_version") or LEGACY_CLOSE_POLICY_VERSION,
+            "recommendation_state": recommendation,
+            "decision_basis": row.get("decision_basis") or "unspecified",
+            "decision_evidence_status": (
+                row.get("decision_evidence_status")
+                or (
+                    DECISION_EVIDENCE_NOT_EVALUABLE
+                    if recommendation == RECOMMENDATION_NOT_EVALUABLE
+                    else DECISION_EVIDENCE_COMPLETE
+                )
+            ),
+        }
+
+    action = _lower(row.get("close_action"))
+    if action == "not_evaluable":
+        recommendation = RECOMMENDATION_NOT_EVALUABLE
+        basis = "legacy_close_action_not_evaluable"
+    elif action in {"close", "close_put_keep_call", "sell_call_take_profit", "sell_call_salvage"}:
+        recommendation = RECOMMENDATION_CLOSE
+        basis = "legacy_close_action"
+    elif action:
+        recommendation = RECOMMENDATION_HOLD
+        basis = "legacy_hold_action"
+    else:
+        projected = current_policy_decision_fields(
+            tier=row.get("tier"),
+            exit_state=row.get("exit_state"),
+            policy_version=LEGACY_CLOSE_POLICY_VERSION,
+        )
+        recommendation = str(projected["recommendation_state"])
+        basis = ";".join(projected["decision_basis"])
+    return {
+        "policy_version": LEGACY_CLOSE_POLICY_VERSION,
+        "recommendation_state": recommendation,
+        "decision_basis": basis,
+        "decision_evidence_status": (
+            DECISION_EVIDENCE_NOT_EVALUABLE
+            if recommendation == RECOMMENDATION_NOT_EVALUABLE
+            else DECISION_EVIDENCE_COMPLETE
+        ),
+    }
+
+
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     tier_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
+    recommendation_counts: dict[str, int] = {}
     evaluation_counts: dict[str, int] = {}
     for row in rows:
         tier = _lower(row.get("tier")) or "none"
         action = _lower(row.get("close_action")) or "-"
+        recommendation = _lower(row.get("recommendation_state")) or "-"
         evaluation = _lower(row.get("evaluation_status")) or "priced"
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
         action_counts[action] = action_counts.get(action, 0) + 1
+        recommendation_counts[recommendation] = recommendation_counts.get(recommendation, 0) + 1
         evaluation_counts[evaluation] = evaluation_counts.get(evaluation, 0) + 1
     return {
         "tier_counts": tier_counts,
         "action_counts": action_counts,
+        "recommendation_counts": recommendation_counts,
         "evaluation_counts": evaluation_counts,
         "not_evaluable_count": evaluation_counts.get("not_evaluable", 0),
     }

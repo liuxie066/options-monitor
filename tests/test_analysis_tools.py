@@ -941,6 +941,28 @@ def test_analysis_query_close_advice_snapshot_missing_artifact_returns_warning(
     assert meta["materialized_views"] == ["close_advice_snapshot"]
 
 
+def test_close_advice_snapshot_preserves_recommendation_contract() -> None:
+    row = analysis_module._close_advice_snapshot_row(
+        {
+            "account": "lx",
+            "position_lot_id": "lot-1",
+            "source_run_id": "run-1",
+            "symbol": "NVDA",
+            "tier": "medium",
+            "policy_version": "p0_current.v1",
+            "recommendation_state": "close",
+            "decision_basis": "profit_capture_medium",
+            "decision_evidence_status": "complete",
+            "close_action": "close",
+        }
+    )
+
+    assert row["policy_version"] == "p0_current.v1"
+    assert row["recommendation_state"] == "close"
+    assert row["decision_basis"] == "profit_capture_medium"
+    assert row["decision_evidence_status"] == "complete"
+
+
 def test_analysis_query_runtime_tick_status_uses_runtime_read_surface(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_runtime_status_tool(*_args, **_kwargs):
         return {

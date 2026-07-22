@@ -4,7 +4,6 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping
 
-
 def assess_replay_determinism(first_report: Mapping[str, Any], second_report: Mapping[str, Any]) -> dict[str, Any]:
     first_json = _canonical_json(first_report)
     second_json = _canonical_json(second_report)

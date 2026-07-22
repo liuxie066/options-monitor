@@ -8,6 +8,7 @@ from typing import Any
 from src.application.opend_symbol_outputs import save_outputs
 from src.application.required_data_fetching import RequiredDataFetchRequest, execute_required_data_opend
 from src.application.shadow_replay.common import (
+    OPTIONAL_CLOSE_DATASET_FILES,
     dataset_dir_from_arg,
     read_jsonl,
     resolve_output_path,
@@ -50,7 +51,10 @@ def collect_shadow_replay_marks(
         raise ValueError("--source must be local or opend")
 
     mark_at = text(as_of) or utc_now()
+    mark_time_basis = "operator_asserted_as_of" if text(as_of) else "collection_time"
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
+    close_episodes = read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0])
+    quote_subjects = candidate_snapshots + _close_quote_subjects(close_episodes)
     with ExitStack() as stack:
         effective_required_root = required_root
         fetch_base = base
@@ -58,10 +62,10 @@ def collect_shadow_replay_marks(
             effective_required_root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="shadow-replay-required-data-")))
             fetch_base = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="shadow-replay-opend-base-")))
 
-        fetch_summary = _empty_fetch_summary(source=source_norm, candidate_snapshots=candidate_snapshots)
+        fetch_summary = _empty_fetch_summary(source=source_norm, candidate_snapshots=quote_subjects)
         if source_norm == "opend":
             fetch_summary = _fetch_required_data_from_opend(
-                candidate_snapshots,
+                quote_subjects,
                 base=fetch_base,
                 required_data_root=effective_required_root,
                 host=opend_host,
@@ -80,6 +84,8 @@ def collect_shadow_replay_marks(
             repo_root=base,
             write=write,
             replace=replace,
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=source_norm,
         )
     settlement: dict[str, Any] | None = None
     if settle and write:
@@ -107,7 +113,9 @@ def collect_shadow_replay_marks(
         "summary": {
             "source": source_norm,
             "mark_as_of": mark_at,
+            "mark_time_basis": mark_time_basis,
             "candidate_snapshot_count": len(candidate_snapshots),
+            "close_decision_episode_count": len(close_episodes),
             "symbol_count": fetch_summary["summary"]["symbol_count"],
             "opend_fetch_attempted": source_norm == "opend",
             "opend_fetch_ok_count": fetch_summary["summary"]["ok_count"],
@@ -116,6 +124,8 @@ def collect_shadow_replay_marks(
             "generated_mark_snapshot_count": marking["summary"]["generated_mark_snapshot_count"],
             "usable_mark_snapshot_count": marking["summary"]["usable_mark_snapshot_count"],
             "missing_quote_count": marking["summary"]["missing_quote_count"],
+            "generated_close_mark_count": marking["summary"]["generated_close_mark_count"],
+            "usable_close_mark_count": marking["summary"]["usable_close_mark_count"],
             "written": bool(write),
             "settled": bool(settlement is not None),
             "generated_outcome_fact_count": (
@@ -130,6 +140,34 @@ def collect_shadow_replay_marks(
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+def _close_quote_subjects(episodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for episode in episodes:
+        identity = episode.get("position_identity")
+        if not isinstance(identity, dict):
+            continue
+        out.append(
+            {
+                **identity,
+                "account": episode.get("account"),
+                "position_lot_id": episode.get("position_lot_id"),
+            }
+        )
+        replacement = episode.get("replacement_evidence")
+        if isinstance(replacement, dict) and text(replacement.get("contract_symbol")):
+            out.append(
+                {
+                    "account": episode.get("account"),
+                    "symbol": replacement.get("symbol"),
+                    "contract_symbol": replacement.get("contract_symbol"),
+                    "option_type": replacement.get("option_type") or identity.get("option_type"),
+                    "expiration": replacement.get("expiration"),
+                    "strike": replacement.get("strike"),
+                }
+            )
+    return out
 
 
 def _persistent_write_targets(*, source: str, write: bool) -> list[str]:

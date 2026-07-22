@@ -4,7 +4,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.common import (
     normal_status,
     resolve_output_path,

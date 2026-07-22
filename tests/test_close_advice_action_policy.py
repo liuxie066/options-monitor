@@ -147,6 +147,62 @@ def test_close_action_policy_scenario_matrix(
 
     assert out["strategy_exit_mode"] == expected_mode, scenario
     assert out["close_action"] == expected_action, scenario
+    assert out["policy_version"] == "p0_current.v1", scenario
+    assert out["recommendation_state"] == (
+        "close" if expected_action in {"close", "close_put_keep_call"} else "hold"
+    ), scenario
+    assert out["decision_basis"], scenario
+    assert out["decision_evidence_status"] == "complete", scenario
+
+
+def test_close_action_policy_consumes_recommendation_state_as_authority() -> None:
+    out = runner._apply_close_action_semantics(
+        {
+            "option_type": "put",
+            "side": "short",
+            "strategy_family": "sell_put",
+            "exit_state": "profit_capture",
+            "tier": "medium",
+            "policy_version": "shadow_test",
+            "recommendation_state": "hold",
+            "decision_basis": "underwriting_edge_remains",
+            "decision_evidence_status": "complete",
+        }
+    )
+
+    assert out["close_action"] == "hold"
+    assert out["policy_version"] == "shadow_test"
+    assert out["decision_basis"] == "underwriting_edge_remains"
+
+
+def test_close_advice_read_projects_old_artifacts_without_mutating_action() -> None:
+    from src.application.agent_tools.close_advice_read_impl import _public_row, _summary
+
+    old_close = _public_row(
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "tier": "medium",
+            "exit_state": "profit_capture",
+            "close_action": "close",
+        }
+    )
+    old_hold = _public_row(
+        {
+            "account": "lx",
+            "symbol": "AAPL",
+            "tier": "none",
+            "exit_state": "hold",
+            "close_action": "hold",
+        }
+    )
+
+    assert old_close["policy_version"] == "legacy_p0"
+    assert old_close["recommendation_state"] == "close"
+    assert old_close["decision_basis"] == "legacy_close_action"
+    assert old_close["close_action"] == "close"
+    assert old_hold["recommendation_state"] == "hold"
+    assert _summary([old_close, old_hold])["recommendation_counts"] == {"close": 1, "hold": 1}
 
 
 def test_close_action_policy_registry_matches_declared_modes() -> None:
