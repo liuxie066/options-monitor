@@ -36,6 +36,11 @@ from src.application.ledger.api import (
     resolve_manual_position_close_target,
 )
 from src.application.positions.reporting import build_monthly_income_report
+from src.application.cash_conversion import (
+    attach_assigned_stock_sale_cash_conversions,
+    load_cash_fx_payload,
+    utc_now_ms,
+)
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -164,41 +169,6 @@ def _build_assigned_stock_sale_event(
         payload["fee_provenance"] = dict(fee_provenance)
     payload["stock_event_id"] = _assigned_stock_sale_event_id(payload)
     return payload
-
-
-def _build_manual_assigned_stock_sale_event(
-    lot: dict[str, Any],
-    *,
-    target_stock_lot_id: str,
-    shares: int,
-    price: float,
-    fees: float,
-    trade_time_ms: int,
-    account: str | None,
-    broker: str | None,
-    symbol: str | None,
-    currency: str | None,
-    source_deal_id: str | None,
-) -> dict[str, Any]:
-    return _build_assigned_stock_sale_event(
-        lot,
-        target_stock_lot_id=target_stock_lot_id,
-        shares=shares,
-        price=price,
-        fees=fees,
-        fee_provenance={
-            "basis": "actual",
-            "source": "manual_input",
-            "reason": "explicit_manual_fee",
-        },
-        trade_time_ms=trade_time_ms,
-        account=account,
-        broker=broker,
-        symbol=symbol,
-        currency=currency,
-        source_deal_id=source_deal_id,
-        source="manual",
-    )
 
 
 class BrokerAssignedStockSaleMatchError(ValueError):
@@ -944,6 +914,16 @@ def _execute_assigned_stock_sale(
         ),
         None,
     )
+    if existing_same is not None:
+        existing_conversions = existing_same.get("cash_conversions")
+        if isinstance(existing_conversions, dict):
+            sale_event["cash_conversions"] = dict(existing_conversions)
+    else:
+        sale_event = attach_assigned_stock_sale_cash_conversions(
+            sale_event,
+            fx_payload=load_cash_fx_payload(repo),
+            observed_at_ms=utc_now_ms(),
+        )
     if existing_same is not None:
         existing_json = json.dumps(dict(existing_same), ensure_ascii=False, sort_keys=True)
         candidate_json = json.dumps(dict(sale_event), ensure_ascii=False, sort_keys=True)

@@ -4,12 +4,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from src.application.symbol_calibration import (
-    SymbolCalibrationResult,
-    calibrate_symbol,
-    canonical_symbol_for_write,
-    require_calibrated_symbol,
-)
+from src.application.symbol_calibration import calibrate_symbol, require_calibrated_symbol
 
 
 @dataclass(frozen=True)
@@ -147,19 +142,6 @@ def edit_symbol_entry(
             changed_paths.append("use")
     ensure_symbols_list(cfg, error_factory=error_factory)[idx] = entry
     return SymbolMutationSummary("edit", str(symbol or "").strip(), canonical, calibration.public_payload(), str(existing.get("symbol") or canonical), changed_paths, dict(entry))
-
-
-def canonical_symbol_for_config_write(
-    cfg: dict[str, Any],
-    symbol: str,
-    *,
-    error_factory: Callable[[str], Exception] = ValueError,
-) -> str:
-    return canonical_symbol_for_write(symbol, config=cfg, error_factory=error_factory)
-
-
-def calibrate_symbol_for_config(cfg: dict[str, Any], symbol: str) -> SymbolCalibrationResult:
-    return calibrate_symbol(symbol, config=cfg)
 
 
 def set_path(

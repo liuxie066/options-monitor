@@ -397,27 +397,6 @@ def _category_only_has_risk_alerts(item: dict[str, Any]) -> bool:
     return bool(rules) and rules.issubset(RISK_ALERT_RULES)
 
 
-def _format_rule_counts(raw_counts: Any, raw_labels: Any) -> str:
-    if not isinstance(raw_counts, dict):
-        return ""
-    labels = raw_labels if isinstance(raw_labels, dict) else {}
-    parts: list[str] = []
-    for rule, count in list(raw_counts.items())[:3]:
-        label = str(labels.get(rule) or _rule_label(str(rule)))
-        parts.append(f"{label} {int(count or 0)}")
-    return "，".join(parts)
-
-
-def _format_function_counts(raw_counts: Any) -> str:
-    if not isinstance(raw_counts, dict):
-        return ""
-    parts: list[str] = []
-    for function, count in list(raw_counts.items())[:4]:
-        label = FUNCTION_LABELS.get(str(function), str(function))
-        parts.append(f"{label} {int(count or 0)}")
-    return " / ".join(parts)
-
-
 def _sample_symbols(rows: list[dict[str, Any]], *, limit: int = 3) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -430,13 +409,6 @@ def _sample_symbols(rows: list[dict[str, Any]], *, limit: int = 3) -> list[str]:
         if len(out) >= limit:
             break
     return out
-
-
-def _format_samples(raw_samples: Any) -> str:
-    if not isinstance(raw_samples, list):
-        return ""
-    samples = [str(item) for item in raw_samples if str(item).strip()]
-    return "、".join(samples[:3])
 
 
 def _matches_account(row: dict[str, Any], account: str) -> bool:

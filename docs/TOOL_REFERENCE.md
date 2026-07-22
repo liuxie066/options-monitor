@@ -732,6 +732,8 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 
 语义 view：
 - P0 收益/指派正股：
+  `option_period_performance`、`option_monthly_performance`、
+  `option_activity_components`、`option_cash_components`、`option_pnl_components`、
   `account_monthly_performance`、`account_monthly_income_components`、
   `assigned_stock_position_pnl`、`assigned_stock_sale_events`
 - P1 exposure/归因/配置：
@@ -750,6 +752,8 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 
 P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 时返回 warning
 和空结果，不启动 broker、OpenD、cron 或其他生产服务。
+
+`option_cash_components.amount_cny` 只读取交易事件写入时冻结的 CNY 换算快照，不在查询时用当前汇率反推。`amount_by_ccy` 始终保留原币现金；历史事件没有快照、成交附近 24 小时内没有可用汇率或快照校验失败时，`amount_cny` 为 `null`、`metric_status` 为 `partial`，并由 `missing` 和 `conversion_ids` 暴露缺口及已采用的换算证据。
 
 当前约束：
 - 显式工具调用仍必须遵守 SELECT-only、白名单 view、只读 artifact 读取和数据新鲜度

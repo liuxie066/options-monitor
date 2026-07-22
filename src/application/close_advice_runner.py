@@ -52,7 +52,6 @@ from src.application.opend_utils import normalize_underlier
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     contract_key,
-    contract_strike_key,
     normalize_contract_expiration,
     normalize_contract_option_type,
 )
@@ -271,10 +270,6 @@ def _market_for_symbol(symbol: Any) -> str:
 
 def normalize_expiration(value: Any) -> str | None:
     return normalize_contract_expiration(value, fallback_raw=True)
-
-
-def _strike_key(value: Any) -> str:
-    return contract_strike_key(value)
 
 
 def _row_account(value: Any, *, default: str = "当前账户") -> str:
