@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.4.2 - 2026-07-21
+
+### Added
+- Restored predictable full option-monitoring reports at the market-local `09:40`, valid whole hours, and `15:50`, and added half-hour immediate full reports only when new ordinary candidates are pending, all from the same canonical strategy scan.
+- Added read-only latest-report queries across enabled accounts and markets, backed by each account-market pair’s latest successful scan rather than its last notification.
+
+### Changed
+- Made fixed report points win when fixed-report and new-candidate conditions coincide, while manual or forced reliable scans may refresh the query snapshot without creating ordinary notification envelopes.
+- Limited funding presentation to cash total, funds available for option opening, and candidate capacity; total assets, NAV, and securities value are not shown.
+- Deprecated `notifications.daily_brief.enabled` as warning-only compatibility input with no authority to disable Daily Brief or restore Compact/Legacy scheduled routing.
+
+### Fixed
+- Prevented failed strategy pipelines from advancing the latest successful snapshot or being reported as a normal no-candidate result, and made unsupported combined multi-market execution fail before brief persistence or delivery work.
+- Persisted exact delivery messages, keys, and hashes with explicit failure, ambiguity, confirmation, and delivery-only retry semantics; delivery-only `--no-send` now leaves the original envelope pending.
+
 ## 1.4.1 - 2026-07-21
 
 ### Changed
