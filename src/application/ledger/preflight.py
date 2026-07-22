@@ -904,17 +904,6 @@ def _current_record_fields(repo: Any, *, record_id: str) -> dict[str, Any]:
     return dict(fields)
 
 
-def _list_position_lots(repo: Any) -> list[dict[str, Any]]:
-    candidate = getattr(repo, "primary_repo", repo)
-    list_position_lots = getattr(candidate, "list_position_lots", None)
-    if not callable(list_position_lots):
-        raise TypeError("option_positions repo does not expose list_position_lots")
-    rows = list_position_lots()
-    if not isinstance(rows, list):
-        raise TypeError("option_positions repo returned non-list position_lots")
-    return [item for item in rows if isinstance(item, dict)]
-
-
 def _list_trade_events(repo: Any) -> list[dict[str, Any]]:
     candidate = getattr(repo, "primary_repo", repo)
     list_trade_events = getattr(candidate, "list_trade_events", None)
