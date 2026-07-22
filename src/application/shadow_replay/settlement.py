@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 
 from src.application.shadow_replay.common import (
+    CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
+    OPTIONAL_CLOSE_DATASET_FILES,
     OUTCOME_FACT_SCHEMA_VERSION,
     dataset_dir_from_arg,
     first_float,
     instrument_key,
     parse_date,
+    read_csv_rows,
     read_jsonl,
     resolve_output_path,
     safety_payload,
@@ -27,6 +31,7 @@ def settle_shadow_replay_dataset(
     output: str | Path | None = None,
     write: bool = False,
     replace: bool = False,
+    lifecycle_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> dict[str, Any]:
     """Derive local outcome facts from candidate snapshots and mark paths."""
 
@@ -36,6 +41,26 @@ def settle_shadow_replay_dataset(
     existing_outcomes = [] if replace else read_jsonl(dataset_dir / "outcome_facts.jsonl")
     generated = derive_outcome_facts(candidate_snapshots, mark_snapshots, existing_outcomes=existing_outcomes)
     merged = generated if replace else existing_outcomes + generated
+    close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
+    close_facet_exists = close_episode_path.is_file()
+    close_episodes = read_jsonl(close_episode_path) if close_facet_exists else []
+    close_marks = read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1]) if close_facet_exists else []
+    existing_close_outcomes = (
+        []
+        if replace or not close_facet_exists
+        else read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[2])
+    )
+    lifecycle_facts = _read_close_lifecycle_facts(lifecycle_paths or [])
+    generated_close = derive_close_decision_outcomes(
+        close_episodes,
+        close_marks,
+        lifecycle_facts=lifecycle_facts,
+    )
+    merged_close = _merge_close_outcomes(
+        existing_close_outcomes,
+        generated_close,
+        replace=replace,
+    )
     result = {
         "schema_version": "shadow_replay_settlement.v1",
         "dataset_dir": str(dataset_dir),
@@ -47,15 +72,596 @@ def settle_shadow_replay_dataset(
             "generated_outcome_fact_count": len(generated),
             "written": bool(write),
             "replace": bool(replace),
+            "close_decision_episode_count": len(close_episodes),
+            "close_mark_count": len(close_marks),
+            "close_lifecycle_fact_count": len(lifecycle_facts),
+            "generated_close_outcome_count": len(generated_close),
+            "usable_close_outcome_count": sum(
+                1
+                for row in generated_close
+                if text(row.get("evidence_status")).lower() == "usable"
+            ),
+            "inconclusive_close_outcome_count": sum(
+                1
+                for row in generated_close
+                if text(row.get("evidence_status")).lower() == "inconclusive"
+            ),
         },
         "generated_outcome_facts": generated,
+        "generated_close_outcomes": generated_close,
         "safety": safety_payload(writes_local_dataset=bool(write)),
     }
     if write:
         write_jsonl(dataset_dir / "outcome_facts.jsonl", merged)
+        if close_facet_exists:
+            write_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[2], merged_close)
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+_CLOSE_HORIZONS = ("1d", "3d", "7d", "14d")
+_CLOSE_LIFECYCLE_EVENT_TYPES = {"close", "expire_close", "assignment", "exercise"}
+
+
+def derive_close_decision_outcomes(
+    episodes: list[dict[str, Any]],
+    marks: list[dict[str, Any]],
+    *,
+    lifecycle_facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    marks_by_episode: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for mark in marks:
+        episode_id = text(mark.get("episode_id"))
+        if episode_id:
+            marks_by_episode[episode_id].append(mark)
+    lifecycle_by_lot: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for fact in lifecycle_facts:
+        account = text(fact.get("account") or _nested(fact, "contract_key", "account")).lower()
+        lot_id = text(fact.get("target_lot_id") or fact.get("position_lot_id") or fact.get("lot_id"))
+        if account and lot_id:
+            lifecycle_by_lot[(account, lot_id)].append(fact)
+
+    out: list[dict[str, Any]] = []
+    for episode in episodes:
+        episode_id = text(episode.get("episode_id"))
+        if not episode_id:
+            continue
+        episode_marks = marks_by_episode.get(episode_id, [])
+        for horizon in _CLOSE_HORIZONS:
+            horizon_marks = [
+                mark
+                for mark in episode_marks
+                if text(mark.get("horizon")).lower() == horizon
+            ]
+            usable = [mark for mark in horizon_marks if _usable_horizon_close_mark(mark)]
+            mark = min(usable, key=_close_mark_time) if usable else None
+            out.append(
+                _horizon_close_outcome(
+                    episode,
+                    horizon=horizon,
+                    mark=mark,
+                    missing_reason=_missing_close_mark_reason(horizon_marks),
+                )
+            )
+        lifecycle = _eligible_lifecycle_facts(
+            episode,
+            lifecycle_by_lot.get(
+                (text(episode.get("account")).lower(), text(episode.get("position_lot_id"))),
+                [],
+            ),
+        )
+        expiry_candidates = [
+            mark
+            for mark in episode_marks
+            if text(mark.get("horizon")).lower() == "expiry"
+            and text(mark.get("quote_status")).lower() == "matched"
+        ]
+        expiry_marks = [mark for mark in expiry_candidates if _usable_expiry_close_mark(mark)]
+        expiry_mark = min(expiry_marks, key=_close_mark_time) if expiry_marks else None
+        out.append(
+            _terminal_close_outcome(
+                episode,
+                lifecycle_facts=lifecycle,
+                expiry_mark=expiry_mark,
+                missing_expiry_reason=(
+                    _missing_close_mark_reason(expiry_candidates)
+                    if expiry_candidates
+                    else "lifecycle_or_expiry_fact_missing"
+                ),
+            )
+        )
+    return out
+
+
+def _horizon_close_outcome(
+    episode: dict[str, Any],
+    *,
+    horizon: str,
+    mark: dict[str, Any] | None,
+    missing_reason: str = "no_usable_mark_in_window",
+) -> dict[str, Any]:
+    base = _close_outcome_base(episode, outcome_kind=f"horizon_{horizon}")
+    if mark is None:
+        return _inconclusive_close_outcome(base, missing_reason)
+    decision = _decision_close_inputs(episode)
+    if decision is None:
+        return _inconclusive_close_outcome(base, "decision_close_cost_incomplete", mark=mark)
+    ask = first_float(mark, "ask")
+    future_fee = first_float(mark, "future_close_fee")
+    if ask is None or ask < 0:
+        return _inconclusive_close_outcome(base, "future_ask_missing", mark=mark)
+    if future_fee is None or future_fee < 0:
+        return _inconclusive_close_outcome(base, "future_close_fee_missing", mark=mark)
+    close_now_cost, contracts, multiplier = decision
+    future_close_cost = ask * multiplier * contracts + future_fee
+    hold_incremental = close_now_cost - future_close_cost
+    result = {
+        **base,
+        "evidence_status": "usable",
+        "inconclusive_reason": None,
+        "outcome": "counterfactual_horizon_mark",
+        "marked_at_utc": mark.get("marked_at_utc"),
+        "close_now_cost": close_now_cost,
+        "future_option_close_cost": future_close_cost,
+        "future_close_fee": future_fee,
+        "hold_to_horizon_incremental": hold_incremental,
+        "close_now_incremental": 0.0,
+        "hold_vs_close_regret": hold_incremental,
+        "underlying_spot": first_float(mark, "spot"),
+        "option_ask": ask,
+        "source": "close_decision_mark",
+        "mark_time_basis": mark.get("mark_time_basis"),
+        "point_in_time_status": mark.get("point_in_time_status"),
+    }
+    result.update(
+        _replacement_horizon_outcome(
+            episode,
+            mark=mark,
+            hold_incremental=hold_incremental,
+        )
+    )
+    return result
+
+
+def _replacement_horizon_outcome(
+    episode: dict[str, Any],
+    *,
+    mark: dict[str, Any],
+    hold_incremental: float,
+) -> dict[str, Any]:
+    evidence = episode.get("replacement_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if text(evidence.get("status")).lower() != "review_switch":
+        return {
+            "replacement_outcome_status": "not_applicable",
+            "replacement_inconclusive_reason": "replacement_not_selected_at_decision",
+            "replacement_incremental": None,
+            "switch_vs_close_incremental": None,
+            "switch_vs_hold_incremental": None,
+        }
+    entry_credit = first_float(evidence, "entry_credit")
+    contracts = first_float(evidence, "contracts")
+    multiplier = first_float(evidence, "multiplier")
+    open_fee = first_float(evidence, "open_fee")
+    entry_slippage = first_float(evidence, "entry_slippage")
+    future_ask = first_float(mark, "replacement_ask")
+    exit_fee = first_float(mark, "replacement_future_close_fee")
+    if any(
+        value is None
+        for value in (
+            entry_credit,
+            contracts,
+            multiplier,
+            open_fee,
+            entry_slippage,
+            future_ask,
+            exit_fee,
+        )
+    ):
+        return {
+            "replacement_outcome_status": "inconclusive",
+            "replacement_inconclusive_reason": "replacement_entry_or_exit_evidence_incomplete",
+            "replacement_incremental": None,
+            "switch_vs_close_incremental": None,
+            "switch_vs_hold_incremental": None,
+        }
+    assert entry_credit is not None
+    assert contracts is not None
+    assert multiplier is not None
+    assert open_fee is not None
+    assert entry_slippage is not None
+    assert future_ask is not None
+    assert exit_fee is not None
+    replacement_incremental = (
+        entry_credit
+        - future_ask * multiplier * contracts
+        - open_fee
+        - exit_fee
+        - entry_slippage
+    )
+    return {
+        "replacement_outcome_status": "usable",
+        "replacement_inconclusive_reason": None,
+        "replacement_contract_symbol": evidence.get("contract_symbol"),
+        "replacement_future_ask": future_ask,
+        "replacement_future_close_fee": exit_fee,
+        "replacement_incremental": replacement_incremental,
+        "switch_vs_close_incremental": replacement_incremental,
+        "switch_vs_hold_incremental": replacement_incremental - hold_incremental,
+    }
+
+
+def _terminal_close_outcome(
+    episode: dict[str, Any],
+    *,
+    lifecycle_facts: list[dict[str, Any]],
+    expiry_mark: dict[str, Any] | None,
+    missing_expiry_reason: str = "lifecycle_or_expiry_fact_missing",
+) -> dict[str, Any]:
+    base = _close_outcome_base(episode, outcome_kind="terminal")
+    if len(lifecycle_facts) > 1:
+        return _inconclusive_close_outcome(base, "multiple_lifecycle_events_require_canonical_allocation")
+    if lifecycle_facts:
+        return _terminal_from_lifecycle(episode, base=base, event=lifecycle_facts[0])
+    if expiry_mark is None:
+        return _inconclusive_close_outcome(base, missing_expiry_reason)
+    decision = _decision_close_inputs(episode)
+    if decision is None:
+        return _inconclusive_close_outcome(base, "decision_close_cost_incomplete", mark=expiry_mark)
+    identity = episode.get("position_identity")
+    identity = identity if isinstance(identity, dict) else {}
+    strike = first_float(identity, "strike")
+    spot = first_float(expiry_mark, "spot")
+    option_type = text(identity.get("option_type")).lower()
+    if strike is None or spot is None or option_type not in {"put", "call"}:
+        return _inconclusive_close_outcome(base, "expiration_intrinsic_inputs_missing", mark=expiry_mark)
+    intrinsic = max(strike - spot, 0.0) if option_type == "put" else max(spot - strike, 0.0)
+    if intrinsic > 0:
+        return _inconclusive_close_outcome(
+            base,
+            "itm_expiration_requires_canonical_lifecycle_fact",
+            mark=expiry_mark,
+        )
+    close_now_cost, _contracts, _multiplier = decision
+    result = {
+        **base,
+        "evidence_status": "usable",
+        "inconclusive_reason": None,
+        "outcome": "expired_worthless",
+        "marked_at_utc": expiry_mark.get("marked_at_utc"),
+        "close_now_cost": close_now_cost,
+        "future_option_close_cost": 0.0,
+        "future_close_fee": 0.0,
+        "hold_to_horizon_incremental": close_now_cost,
+        "close_now_incremental": 0.0,
+        "hold_vs_close_regret": close_now_cost,
+        "underlying_spot": spot,
+        "source": "expiration_mark",
+        "mark_time_basis": expiry_mark.get("mark_time_basis"),
+        "point_in_time_status": expiry_mark.get("point_in_time_status"),
+    }
+    result.update(
+        _replacement_horizon_outcome(
+            episode,
+            mark=expiry_mark,
+            hold_incremental=close_now_cost,
+        )
+    )
+    return result
+
+
+def _terminal_from_lifecycle(
+    episode: dict[str, Any],
+    *,
+    base: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = text(event.get("event_type") or event.get("outcome")).lower()
+    event_at = _lifecycle_time(event)
+    identity = episode.get("position_identity")
+    identity = identity if isinstance(identity, dict) else {}
+    option_type = text(identity.get("option_type")).lower()
+    outcome = event_type
+    if event_type in {"assignment", "exercise"}:
+        outcome = "assigned" if option_type == "put" else "called_away" if option_type == "call" else event_type
+        incremental = first_float(
+            event,
+            "lifecycle_pnl_after_decision",
+            "incremental_pnl_after_decision",
+        )
+        incremental_binding_ok = _lifecycle_incremental_matches_episode(event, episode=episode)
+        economics = episode.get("decision_economics")
+        economics = economics if isinstance(economics, dict) else {}
+        required_contracts = first_float(economics, "contracts")
+        event_contracts = first_float(event, "contracts")
+        if (
+            required_contracts is None
+            or event_contracts is None
+            or abs(event_contracts - required_contracts) > 1e-9
+        ):
+            return {
+                **_inconclusive_close_outcome(base, "lifecycle_contract_quantity_incomplete"),
+                "outcome": outcome,
+                "lifecycle_at_utc": event_at,
+                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
+                "source": "canonical_lifecycle_fact",
+            }
+        if incremental is None:
+            return {
+                **_inconclusive_close_outcome(base, "lifecycle_incremental_pnl_missing"),
+                "outcome": outcome,
+                "lifecycle_at_utc": event_at,
+                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
+                "source": "canonical_lifecycle_fact",
+            }
+        if not incremental_binding_ok:
+            return {
+                **_inconclusive_close_outcome(base, "lifecycle_incremental_pnl_unbound"),
+                "outcome": outcome,
+                "lifecycle_at_utc": event_at,
+                "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
+                "source": "canonical_lifecycle_fact",
+            }
+        return {
+            **base,
+            "evidence_status": "usable",
+            "inconclusive_reason": None,
+            "outcome": outcome,
+            "lifecycle_at_utc": event_at,
+            "hold_to_horizon_incremental": incremental,
+            "close_now_incremental": 0.0,
+            "hold_vs_close_regret": incremental,
+            "willingness_alignment": _willingness_alignment(episode, outcome=outcome),
+            "source": "canonical_lifecycle_fact",
+        }
+
+    decision = _decision_close_inputs(episode)
+    if decision is None:
+        return _inconclusive_close_outcome(base, "decision_close_cost_incomplete")
+    close_now_cost, required_contracts, decision_multiplier = decision
+    event_contracts = first_float(event, "contracts")
+    if event_contracts is None or abs(event_contracts - required_contracts) > 1e-9:
+        return _inconclusive_close_outcome(base, "lifecycle_contract_quantity_incomplete")
+    price = first_float(event, "price", "close_price")
+    fees = first_float(event, "fees", "fee", "close_fee")
+    multiplier = first_float(event, "multiplier") or decision_multiplier
+    if price is None or price < 0 or fees is None or fees < 0:
+        return _inconclusive_close_outcome(base, "lifecycle_price_or_fee_missing")
+    future_close_cost = price * multiplier * required_contracts + fees
+    hold_incremental = close_now_cost - future_close_cost
+    resolved_outcome = "expired_worthless" if event_type == "expire_close" and price == 0 else "closed_later"
+    return {
+        **base,
+        "evidence_status": "usable",
+        "inconclusive_reason": None,
+        "outcome": resolved_outcome,
+        "lifecycle_at_utc": event_at,
+        "close_now_cost": close_now_cost,
+        "future_option_close_cost": future_close_cost,
+        "future_close_fee": fees,
+        "hold_to_horizon_incremental": hold_incremental,
+        "close_now_incremental": 0.0,
+        "hold_vs_close_regret": hold_incremental,
+        "source": "canonical_lifecycle_fact",
+    }
+
+
+def _close_outcome_base(episode: dict[str, Any], *, outcome_kind: str) -> dict[str, Any]:
+    shadow = episode.get("shadow_policy_results")
+    shadow = shadow if isinstance(shadow, dict) else {}
+    return {
+        "schema_version": CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
+        "episode_id": episode.get("episode_id"),
+        "outcome_kind": outcome_kind,
+        "account": episode.get("account"),
+        "position_lot_id": episode.get("position_lot_id"),
+        "observed_at_utc": episode.get("observed_at_utc"),
+        "policy_recommendations": {
+            policy: result.get("recommendation_state")
+            for policy, result in shadow.items()
+            if isinstance(result, dict)
+        },
+        "writes_runtime_config": False,
+        "writes_trade_state": False,
+    }
+
+
+def _inconclusive_close_outcome(
+    base: dict[str, Any],
+    reason: str,
+    *,
+    mark: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        **base,
+        "evidence_status": "inconclusive",
+        "inconclusive_reason": reason,
+        "outcome": "inconclusive",
+        "marked_at_utc": mark.get("marked_at_utc") if isinstance(mark, dict) else None,
+        "hold_to_horizon_incremental": None,
+        "close_now_incremental": 0.0,
+        "hold_vs_close_regret": None,
+        "source": "close_decision_mark" if isinstance(mark, dict) else None,
+    }
+
+
+def _decision_close_inputs(episode: dict[str, Any]) -> tuple[float, float, float] | None:
+    economics = episode.get("decision_economics")
+    economics = economics if isinstance(economics, dict) else {}
+    close_now_cost = first_float(economics, "close_now_cost")
+    contracts = first_float(economics, "contracts")
+    multiplier = first_float(economics, "multiplier")
+    if (
+        close_now_cost is None
+        or close_now_cost < 0
+        or contracts is None
+        or contracts <= 0
+        or multiplier is None
+        or multiplier <= 0
+    ):
+        return None
+    return close_now_cost, contracts, multiplier
+
+
+def _eligible_lifecycle_facts(
+    episode: dict[str, Any],
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    observed = _strict_utc(text(episode.get("observed_at_utc")))
+    out: list[dict[str, Any]] = []
+    for fact in facts:
+        event_type = text(fact.get("event_type") or fact.get("outcome")).lower()
+        if event_type not in _CLOSE_LIFECYCLE_EVENT_TYPES:
+            continue
+        event_at = _strict_utc(_lifecycle_time(fact))
+        if event_at > observed:
+            out.append(fact)
+    return sorted(out, key=_lifecycle_time)
+
+
+def _willingness_alignment(episode: dict[str, Any], *, outcome: str) -> str:
+    if outcome not in {"assigned", "called_away"}:
+        return "not_applicable"
+    facts = episode.get("normalized_decision_facts")
+    facts = facts if isinstance(facts, dict) else {}
+    willingness = facts.get("continued_willingness")
+    if willingness is True:
+        return "aligned"
+    if willingness is False:
+        return "misaligned"
+    return "unknown"
+
+
+def _lifecycle_incremental_matches_episode(
+    event: dict[str, Any],
+    *,
+    episode: dict[str, Any],
+) -> bool:
+    event_episode_id = text(event.get("episode_id"))
+    if event_episode_id:
+        return event_episode_id == text(episode.get("episode_id"))
+    event_observed_at = text(
+        event.get("decision_observed_at_utc")
+        or event.get("decision_time_utc")
+    )
+    if not event_observed_at:
+        return False
+    try:
+        return _strict_utc(event_observed_at) == _strict_utc(
+            text(episode.get("observed_at_utc"))
+        )
+    except ValueError:
+        return False
+
+
+def _usable_horizon_close_mark(mark: dict[str, Any]) -> bool:
+    return (
+        text(mark.get("quote_status")).lower() == "matched"
+        and first_float(mark, "ask") is not None
+        and text(mark.get("point_in_time_status")).lower() == "verified_fresh_collection"
+    )
+
+
+def _usable_expiry_close_mark(mark: dict[str, Any]) -> bool:
+    return (
+        text(mark.get("point_in_time_status")).lower() == "verified_fresh_collection"
+        and (first_float(mark, "spot") is not None or first_float(mark, "ask") is not None)
+    )
+
+
+def _missing_close_mark_reason(marks: list[dict[str, Any]]) -> str:
+    if any(
+        text(mark.get("point_in_time_status")).lower() != "verified_fresh_collection"
+        for mark in marks
+    ):
+        return "mark_point_in_time_unverified"
+    return "no_usable_mark_in_window"
+
+
+def _close_mark_time(mark: dict[str, Any]) -> str:
+    return text(mark.get("marked_at_utc"))
+
+
+def _lifecycle_time(fact: dict[str, Any]) -> str:
+    raw_ms = first_float(fact, "event_time_ms", "trade_time_ms")
+    if raw_ms is not None and raw_ms > 0:
+        return datetime.fromtimestamp(raw_ms / 1000.0, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return text(
+        fact.get("event_at_utc")
+        or fact.get("event_time_utc")
+        or fact.get("trade_time_utc")
+        or fact.get("closed_at_utc")
+    )
+
+
+def _strict_utc(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid lifecycle timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"timezone required for lifecycle timestamp: {value}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_close_lifecycle_facts(paths: list[str | Path] | tuple[str | Path, ...]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"close lifecycle source does not exist: {path}")
+        if path.suffix.lower() == ".csv":
+            rows = read_csv_rows(path)
+        elif path.suffix.lower() == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                rows = [item for item in payload if isinstance(item, dict)]
+            elif isinstance(payload, dict):
+                raw_rows = payload.get("events") or payload.get("rows") or payload.get("facts")
+                rows = [item for item in raw_rows if isinstance(item, dict)] if isinstance(raw_rows, list) else [payload]
+            else:
+                raise ValueError(f"close lifecycle JSON must contain objects: {path}")
+        else:
+            rows = read_jsonl(path)
+        out.extend(dict(row, _source_path=str(path)) for row in rows)
+    return out
+
+
+def _merge_close_outcomes(
+    existing: list[dict[str, Any]],
+    generated: list[dict[str, Any]],
+    *,
+    replace: bool,
+) -> list[dict[str, Any]]:
+    if replace:
+        return generated
+    by_key = {
+        (text(row.get("episode_id")), text(row.get("outcome_kind"))): row
+        for row in existing
+        if text(row.get("episode_id")) and text(row.get("outcome_kind"))
+    }
+    for row in generated:
+        key = (text(row.get("episode_id")), text(row.get("outcome_kind")))
+        existing_row = by_key.get(key)
+        if (
+            isinstance(existing_row, dict)
+            and text(existing_row.get("evidence_status")).lower() == "usable"
+            and text(row.get("inconclusive_reason")).lower()
+            in {"lifecycle_or_expiry_fact_missing", "no_usable_mark_in_window"}
+        ):
+            continue
+        by_key[key] = row
+    return [by_key[key] for key in sorted(by_key)]
+
+
+def _nested(source: dict[str, Any], *keys: str) -> Any:
+    current: Any = source
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def derive_outcome_facts(

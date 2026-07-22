@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from domain.domain.close_advice import FEE_USABLE_STATUSES
+from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.trade_contract_identity import contract_key
 
 from src.application.shadow_replay.common import (
+    CLOSE_DECISION_MARK_SCHEMA_VERSION,
     MARK_PATH_SCHEMA_VERSION,
+    OPTIONAL_CLOSE_DATASET_FILES,
     abs_first_float,
     dataset_dir_from_arg,
     first_float,
@@ -42,6 +47,8 @@ def mark_shadow_replay_dataset(
     output: str | Path | None = None,
     write: bool = False,
     replace: bool = False,
+    mark_time_basis: str | None = None,
+    quote_collection_source: str | None = None,
 ) -> dict[str, Any]:
     """Generate local mark path snapshots from required-data CSV quotes."""
 
@@ -50,9 +57,23 @@ def mark_shadow_replay_dataset(
     required_root = resolve_path(required_data_root, base=base)
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
     existing_marks = [] if replace else read_jsonl(dataset_dir / "mark_path_snapshots.jsonl")
+    close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
+    close_facet_exists = close_episode_path.is_file()
+    close_episodes = read_jsonl(close_episode_path) if close_facet_exists else []
+    existing_close_marks = (
+        []
+        if replace
+        else read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1])
+    )
     aliases = _load_symbol_aliases(base)
     quote_index = _load_required_data_quote_index(required_root, aliases=aliases, base=base)
     mark_at = text(as_of) or utc_now()
+    resolved_mark_time_basis = text(mark_time_basis).lower() or (
+        "operator_asserted_as_of" if text(as_of) else "collection_time"
+    )
+    if resolved_mark_time_basis not in {"collection_time", "operator_asserted_as_of"}:
+        raise ValueError("mark_time_basis must be collection_time or operator_asserted_as_of")
+    resolved_quote_source = text(quote_collection_source).lower() or "external_required_data"
     generated_all = [
         _mark_snapshot_from_required_data(candidate, quote_index=quote_index, aliases=aliases, mark_at=mark_at)
         for candidate in candidate_snapshots
@@ -61,6 +82,29 @@ def mark_shadow_replay_dataset(
     existing_identities.discard("")
     generated = [row for row in generated_all if replace or _mark_identity(row) not in existing_identities]
     merged = generated if replace else existing_marks + generated
+    generated_close_all = [
+        mark
+        for episode in close_episodes
+        if (
+            mark := _close_mark_snapshot_from_required_data(
+                episode,
+                quote_index=quote_index,
+                aliases=aliases,
+                mark_at=mark_at,
+                mark_time_basis=resolved_mark_time_basis,
+                quote_collection_source=resolved_quote_source,
+            )
+        )
+        is not None
+    ]
+    existing_close_identities = {_close_mark_identity(row) for row in existing_close_marks}
+    existing_close_identities.discard("")
+    generated_close = [
+        row
+        for row in generated_close_all
+        if replace or _close_mark_identity(row) not in existing_close_identities
+    ]
+    merged_close = generated_close if replace else existing_close_marks + generated_close
     usable_count = sum(1 for row in generated if is_usable_mark(row))
     missing_count = sum(1 for row in generated if str(row.get("quote_status") or "") == "missing_quote")
     result = {
@@ -77,17 +121,305 @@ def mark_shadow_replay_dataset(
             "missing_quote_count": missing_count,
             "matched_quote_count": len(generated) - missing_count,
             "as_of": mark_at,
+            "mark_time_basis": resolved_mark_time_basis,
+            "quote_collection_source": resolved_quote_source,
             "written": bool(write),
             "replace": bool(replace),
+            "close_decision_episode_count": len(close_episodes),
+            "generated_close_mark_count": len(generated_close),
+            "usable_close_mark_count": sum(
+                1 for row in generated_close if is_usable_close_mark(row)
+            ),
+            "close_mark_outside_window_count": len(close_episodes) - len(generated_close_all),
         },
         "generated_mark_snapshots": generated,
+        "generated_close_marks": generated_close,
         "safety": safety_payload(writes_local_dataset=bool(write)),
     }
     if write:
         write_jsonl(dataset_dir / "mark_path_snapshots.jsonl", merged)
+        if close_facet_exists:
+            write_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1], merged_close)
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+_CLOSE_HORIZON_WINDOWS = (
+    ("1d", 1, 2),
+    ("3d", 3, 4),
+    ("7d", 7, 9),
+    ("14d", 14, 17),
+)
+
+
+def _close_mark_snapshot_from_required_data(
+    episode: dict[str, Any],
+    *,
+    quote_index: dict[str, Any],
+    aliases: Mapping[str, Any] | None,
+    mark_at: str,
+    mark_time_basis: str,
+    quote_collection_source: str,
+) -> dict[str, Any] | None:
+    observed_at = _strict_utc_datetime(
+        text(episode.get("observed_at_utc")),
+        label="close episode observed_at_utc",
+    )
+    marked_at = _strict_utc_datetime(mark_at, label="close mark as_of")
+    if marked_at <= observed_at:
+        return None
+    identity = episode.get("position_identity")
+    identity = identity if isinstance(identity, dict) else {}
+    horizon = _close_mark_horizon(
+        observed_at=observed_at,
+        marked_at=marked_at,
+        expiration=text(identity.get("expiration")),
+    )
+    if horizon is None:
+        return None
+    quote, matched_by = _match_required_data_quote(
+        identity,
+        quote_index=quote_index,
+        aliases=aliases,
+    )
+    base = {
+        "schema_version": CLOSE_DECISION_MARK_SCHEMA_VERSION,
+        "episode_id": episode.get("episode_id"),
+        "horizon": horizon,
+        "marked_at_utc": marked_at.isoformat().replace("+00:00", "Z"),
+        "observed_at_utc": episode.get("observed_at_utc"),
+        "account": episode.get("account"),
+        "position_lot_id": episode.get("position_lot_id"),
+        "symbol": identity.get("symbol"),
+        "contract_symbol": identity.get("contract_symbol"),
+        "option_type": identity.get("option_type"),
+        "expiration": identity.get("expiration"),
+        "strike": identity.get("strike"),
+        "source_kind": "required_data_csv",
+        "mark_time_basis": mark_time_basis,
+        "quote_collection_source": quote_collection_source,
+        "point_in_time_status": _point_in_time_status(
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+        ),
+        "writes_runtime_config": False,
+        "writes_trade_state": False,
+    }
+    replacement_payload = _replacement_mark_payload(
+        episode,
+        quote_index=quote_index,
+        aliases=aliases,
+    )
+    if not quote:
+        return {
+            **base,
+            **replacement_payload,
+            "quote_status": "missing_quote",
+            "mark_quality": "missing_quote",
+            "matched_by": None,
+            "future_close_fee": None,
+            "future_fee_status": "not_evaluable",
+            "inconclusive_reason": "required_data_quote_missing",
+        }
+    mid, mid_flags = _quote_mid(quote)
+    ask = first_float(quote, "ask")
+    bid = first_float(quote, "bid")
+    spot = first_float(quote, "spot", "underlying_price")
+    future_fee, future_fee_status = _close_future_fee(episode, ask=ask)
+    return {
+        **base,
+        **replacement_payload,
+        "quote_status": "matched",
+        "mark_quality": "usable" if mid is not None else "missing_mid",
+        "matched_by": matched_by,
+        "required_data_source_path": quote.get("_source_path"),
+        "required_data_source_row_number": quote.get("_source_row_number"),
+        "bid": bid,
+        "ask": ask,
+        "option_mid": mid,
+        "spot": spot,
+        "dte": first_float(quote, "dte"),
+        "multiplier": first_float(quote, "multiplier"),
+        "currency": text(quote.get("currency")) or None,
+        "quote_flags": mid_flags,
+        "future_close_fee": future_fee,
+        "future_fee_status": future_fee_status,
+    }
+
+
+def _replacement_mark_payload(
+    episode: dict[str, Any],
+    *,
+    quote_index: dict[str, Any],
+    aliases: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    evidence = episode.get("replacement_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    contract_symbol = text(evidence.get("contract_symbol")).upper()
+    if not contract_symbol:
+        return {
+            "replacement_quote_status": "not_applicable",
+            "replacement_inconclusive_reason": "replacement_identity_missing",
+        }
+    current_identity = episode.get("position_identity")
+    current_identity = current_identity if isinstance(current_identity, dict) else {}
+    identity = {
+        "symbol": evidence.get("symbol"),
+        "contract_symbol": contract_symbol,
+        "option_type": evidence.get("option_type") or current_identity.get("option_type"),
+        "expiration": evidence.get("expiration"),
+        "strike": evidence.get("strike"),
+    }
+    quote, matched_by = _match_required_data_quote(
+        identity,
+        quote_index=quote_index,
+        aliases=aliases,
+    )
+    if not quote:
+        return {
+            "replacement_quote_status": "missing_quote",
+            "replacement_matched_by": None,
+            "replacement_inconclusive_reason": "replacement_quote_missing",
+        }
+    mid, flags = _quote_mid(quote)
+    ask = first_float(quote, "ask")
+    fee, fee_status = _replacement_future_fee(evidence, ask=ask)
+    return {
+        "replacement_quote_status": "matched",
+        "replacement_matched_by": matched_by,
+        "replacement_bid": first_float(quote, "bid"),
+        "replacement_ask": ask,
+        "replacement_option_mid": mid,
+        "replacement_spot": first_float(quote, "spot", "underlying_price"),
+        "replacement_quote_flags": flags,
+        "replacement_future_close_fee": fee,
+        "replacement_future_fee_status": fee_status,
+        "replacement_required_data_source_path": quote.get("_source_path"),
+        "replacement_required_data_source_row_number": quote.get("_source_row_number"),
+        "replacement_inconclusive_reason": None if ask is not None else "replacement_ask_missing",
+    }
+
+
+def _close_mark_horizon(
+    *,
+    observed_at: datetime,
+    marked_at: datetime,
+    expiration: str,
+) -> str | None:
+    expiration_date = _date_or_none(expiration)
+    if expiration_date is not None and marked_at.date() == expiration_date:
+        return "expiry"
+    if expiration_date is not None and marked_at.date() > expiration_date:
+        return None
+    elapsed_days = (marked_at.date() - observed_at.date()).days
+    for horizon, lower, upper in _CLOSE_HORIZON_WINDOWS:
+        if lower <= elapsed_days <= upper:
+            return horizon
+    return None
+
+
+def _point_in_time_status(*, mark_time_basis: str, quote_collection_source: str) -> str:
+    if mark_time_basis != "collection_time":
+        return "unverified_operator_as_of"
+    if quote_collection_source == "opend":
+        return "verified_fresh_collection"
+    return "unverified_required_data_time"
+
+
+def _close_future_fee(episode: dict[str, Any], *, ask: float | None) -> tuple[float | None, str]:
+    economics = episode.get("decision_economics")
+    economics = economics if isinstance(economics, dict) else {}
+    fee_status = text(economics.get("fee_calc_status")).lower()
+    currency = text(economics.get("currency")).upper()
+    contracts = first_float(economics, "contracts")
+    multiplier = first_float(economics, "multiplier")
+    if (
+        fee_status not in FEE_USABLE_STATUSES
+        or ask is None
+        or ask <= 0
+        or contracts is None
+        or contracts <= 0
+        or multiplier is None
+        or multiplier <= 0
+    ):
+        return None, "not_evaluable"
+    try:
+        fee = calc_futu_option_fee(
+            currency,
+            ask,
+            contracts=int(contracts),
+            multiplier=int(multiplier),
+            is_sell=False,
+        )
+    except ValueError:
+        return None, "not_evaluable"
+    return fee, "estimated_from_decision_fee_basis"
+
+
+def _replacement_future_fee(
+    evidence: dict[str, Any],
+    *,
+    ask: float | None,
+) -> tuple[float | None, str]:
+    contracts = first_float(evidence, "contracts")
+    multiplier = first_float(evidence, "multiplier")
+    currency = text(evidence.get("currency")).upper()
+    if (
+        text(evidence.get("fee_calc_status")).lower() != "candidate_futu_fee"
+        or ask is None
+        or ask <= 0
+        or contracts is None
+        or contracts <= 0
+        or multiplier is None
+        or multiplier <= 0
+    ):
+        return None, "not_evaluable"
+    try:
+        fee = calc_futu_option_fee(
+            currency,
+            ask,
+            contracts=int(contracts),
+            multiplier=int(multiplier),
+            is_sell=False,
+        )
+    except ValueError:
+        return None, "not_evaluable"
+    return fee, "estimated_from_replacement_candidate_fee"
+
+
+def is_usable_close_mark(row: dict[str, Any]) -> bool:
+    if text(row.get("point_in_time_status")).lower() != "verified_fresh_collection":
+        return False
+    if text(row.get("quote_status")).lower() != "matched":
+        return False
+    if text(row.get("horizon")).lower() == "expiry":
+        return first_float(row, "spot") is not None or first_float(row, "ask") is not None
+    return first_float(row, "ask") is not None
+
+
+def _close_mark_identity(row: dict[str, Any]) -> str:
+    episode_id = text(row.get("episode_id"))
+    horizon = text(row.get("horizon"))
+    marked_at = text(row.get("marked_at_utc"))
+    return "|".join((episode_id, horizon, marked_at)) if all((episode_id, horizon, marked_at)) else ""
+
+
+def _strict_utc_datetime(value: str, *, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid timestamp for {label}: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"timezone required for {label}: {value}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _date_or_none(value: str) -> Any:
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_symbol_aliases(base: Path) -> Mapping[str, Any] | None:

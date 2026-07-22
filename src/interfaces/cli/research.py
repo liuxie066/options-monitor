@@ -272,6 +272,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     shadow_build.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
     shadow_build.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
     shadow_build.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
+    shadow_build.add_argument(
+        "--include-close-decisions",
+        action="store_true",
+        help="explicitly add the local Close Advice episode/mark/outcome facet",
+    )
     shadow_build.add_argument("--output-dir", default=None, help="exact dataset output directory")
     shadow_build.add_argument(
         "--dataset-root",
@@ -452,6 +457,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     )
     shadow_settle.add_argument("--dataset", required=True)
     shadow_settle.add_argument("--output", default=None)
+    shadow_settle.add_argument(
+        "--lifecycle-path",
+        action="append",
+        dest="lifecycle_paths",
+        default=None,
+        help="canonical ledger lifecycle JSON/JSONL/CSV evidence; repeatable",
+    )
     shadow_settle.add_argument(
         "--write",
         action="store_true",
@@ -966,6 +978,7 @@ def handle_research_command(
                 reject_log_paths=args.reject_log_paths,
                 mark_paths=args.mark_paths,
                 outcome_paths=args.outcome_paths,
+                include_close_decisions=bool(args.include_close_decisions),
                 output_dir=args.output_dir,
                 dataset_root=dataset_root,
                 dataset_id=args.dataset_id,
@@ -1143,6 +1156,7 @@ def handle_research_command(
             output=args.output,
             write=bool(args.write),
             replace=bool(args.replace),
+            lifecycle_paths=args.lifecycle_paths,
         )
         return build_response(tool_name="research.shadow-replay.settle", ok=True, data=data)
 

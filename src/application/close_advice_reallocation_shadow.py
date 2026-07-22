@@ -28,10 +28,16 @@ OUTPUT_COLUMNS = [
     "reallocation_status",
     "reallocation_reason",
     "replacement_symbol",
+    "replacement_option_type",
     "replacement_contract_symbol",
     "replacement_expiration",
     "replacement_strike",
     "replacement_rank",
+    "replacement_entry_credit",
+    "replacement_contracts",
+    "replacement_multiplier",
+    "replacement_currency",
+    "replacement_fee_calc_status",
     "current_annualized_return",
     "replacement_annualized_return",
     "replacement_annualized_return_after_slippage",
@@ -188,6 +194,7 @@ def _finish(result: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
 def _replacement_identity(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "replacement_symbol": _text(row.get("symbol")),
+        "replacement_option_type": _option_type(row),
         "replacement_contract_symbol": _text(row.get("contract_symbol") or row.get("code")),
         "replacement_expiration": _text(row.get("expiration") or row.get("expiration_ymd")),
         "replacement_strike": _number(row.get("strike")),
@@ -282,6 +289,18 @@ def _switch_economics(current: dict[str, Any], replacement: dict[str, Any]) -> d
     mid = _number(replacement.get("mid"))
     bid = _number(replacement.get("bid"))
     multiplier = _number(replacement.get("multiplier"))
+    replacement_currency = _text(replacement.get("currency")).upper() or None
+    replacement_evidence = {
+        "replacement_entry_credit": (
+            gross_per_contract * contracts if gross_per_contract is not None else None
+        ),
+        "replacement_contracts": contracts,
+        "replacement_multiplier": multiplier,
+        "replacement_currency": replacement_currency,
+        "replacement_fee_calc_status": (
+            "candidate_futu_fee" if open_fee_per_contract is not None else "not_evaluable"
+        ),
+    }
     if (
         current_ann is None
         or replacement_ann is None
@@ -300,6 +319,7 @@ def _switch_economics(current: dict[str, Any], replacement: dict[str, Any]) -> d
         or multiplier is None
     ):
         return {
+            **replacement_evidence,
             "current_annualized_return": current_ann,
             "replacement_annualized_return": replacement_ann,
             "current_daily_yield": current_ann / 365.0 if current_ann is not None else None,
@@ -320,6 +340,7 @@ def _switch_economics(current: dict[str, Any], replacement: dict[str, Any]) -> d
     switch_cost = close_fee + open_fee + slippage
     recovery_days = switch_cost / gross_daily_advantage if gross_daily_advantage > 0 else None
     return {
+        **replacement_evidence,
         "current_annualized_return": current_ann,
         "replacement_annualized_return": replacement_ann,
         "replacement_annualized_return_after_slippage": adjusted_ann,

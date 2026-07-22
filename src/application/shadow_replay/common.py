@@ -15,6 +15,9 @@ FILTER_DECISION_SCHEMA_VERSION = "shadow_replay_filter_decision.v1"
 RANK_SNAPSHOT_SCHEMA_VERSION = "shadow_replay_rank_snapshot.v1"
 MARK_PATH_SCHEMA_VERSION = "shadow_replay_mark_path_snapshot.v1"
 OUTCOME_FACT_SCHEMA_VERSION = "shadow_replay_outcome_fact.v1"
+CLOSE_DECISION_EPISODE_SCHEMA_VERSION = "shadow_replay_close_episode.v1"
+CLOSE_DECISION_MARK_SCHEMA_VERSION = "shadow_replay_close_mark.v1"
+CLOSE_DECISION_OUTCOME_SCHEMA_VERSION = "shadow_replay_close_outcome.v1"
 
 DATASET_FILES = (
     "candidate_snapshots.jsonl",
@@ -22,6 +25,12 @@ DATASET_FILES = (
     "rank_snapshots.jsonl",
     "mark_path_snapshots.jsonl",
     "outcome_facts.jsonl",
+)
+
+OPTIONAL_CLOSE_DATASET_FILES = (
+    "close_decision_episodes.jsonl",
+    "close_decision_marks.jsonl",
+    "close_decision_outcomes.jsonl",
 )
 
 

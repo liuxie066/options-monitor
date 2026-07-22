@@ -26,6 +26,75 @@ Historical reports may contain `risk_exit`. It remains readable and renderable
 for artifact compatibility, but current production evaluation does not emit it
 or map it to an executable close action.
 
+## Recommendation Contract
+
+`tier` describes how strongly the current threshold matched;
+`recommendation_state` is the action authority. They are deliberately separate.
+Every newly generated row exposes:
+
+- `policy_version`: policy that produced the recommendation;
+- `recommendation_state`: `hold`, `review`, `close`, or `not_evaluable`;
+- `decision_basis`: stable reason token(s) for the recommendation;
+- `decision_evidence_status`: completeness of the facts used by the policy.
+
+The current production policy is `p0_current.v1`. Its projection preserves the
+pre-existing behavior exactly: actionable profit-capture/take-profit/salvage
+states map to `close`, existing holds remain `hold`, and insufficient pricing
+remains `not_evaluable`. `review` is part of the additive contract but is not
+emitted by the current production policy. Older CSV artifacts are projected as
+`legacy_p0` by read surfaces only; that compatibility projection does not rewrite
+the artifact or make it executable.
+
+### Shadow policy variants
+
+Shadow Replay may evaluate immutable `CloseDecisionFacts` with these named
+variants; none is imported by the production runner or notification selector:
+
+- `P0_current`: exact current exit/tier baseline;
+- `P1_semantic_split`: strong closes, medium requests review, lower tiers hold;
+- `P2_profile_aware`: applies the approved return-first and underwriting truth
+  tables;
+- `P3_opportunity_required`: application-layer-only composition of P2 with the
+  post-run capital-reallocation shadow.
+
+For `insurance_underwriting` (and the legacy-equivalent `short_vol` profile), a
+medium profit-capture tier with valid thesis evidence and unchanged
+assignment/called-away willingness is `hold`, not `close`. An observed thesis
+condition or revoked willingness requests `review`; it never becomes an
+automatic loss/risk exit. Strong capture closes only with a valid thesis,
+complete willingness/execution evidence, usable fees, and positive net-close
+economics. Incomplete paired
+Combo Yield evidence downgrades an otherwise-close result to `review`.
+
+P3 cannot be selected by `evaluate_close_policy`; the Shadow Replay adapter
+composes it only after formal Close Advice and reallocation artifacts exist. A
+replacement opportunity cannot upgrade a P2 hold to close.
+
+### Shadow Replay close-decision facet
+
+Close decisions are captured into the existing `shadow_replay_dataset.v1` as
+an optional facet. Candidate replay remains unchanged when the facet is not
+explicitly requested. An enabled facet adds:
+
+- `close_decision_episodes.jsonl` (`shadow_replay_close_episode.v1`);
+- `close_decision_marks.jsonl` (`shadow_replay_close_mark.v1`);
+- `close_decision_outcomes.jsonl` (`shadow_replay_close_outcome.v1`).
+
+Capture joins `close_advice.csv`, `option_positions_context.json`, the optional
+reallocation shadow, and the run-scoped audit by account and stable
+`position_lot_id`. The canonical run-ID timestamp is the run-start anchor;
+`observed_at_utc` is the unique successful account-scoped `close_advice` audit
+timestamp, because the position context is created after the run starts. A
+missing or ambiguous audit timestamp, a future context/quote/replacement, or a
+non-unique lot match rejects capture. Filesystem mtime and contract-field lot
+inference are never fallbacks.
+
+The material fingerprint excludes run IDs, timestamps, and rendered reason
+text. Exact same-day reruns reuse the earliest episode and append source run
+IDs; a date, recommendation, tier, economic bucket, thesis/willingness, or
+replacement change creates a new episode. P0/P1/P2/P3 projections share the
+same immutable observation, and the facet remains local/offline only.
+
 ## Architecture
 
 ```text
@@ -119,8 +188,11 @@ artifacts that do not contain a lot ID.
 | YE long call / `vol_convexity_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `yield_enhancement_long_call_leg` | `sell_call_take_profit` / `hold_call_as_convexity` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
 
 The action policy is resolved by a small registry in the runner. It maps an
-already-evaluated `exit_state` to a user-facing `close_action`; it must not
-change the thesis evaluation result.
+already-evaluated `recommendation_state` to a user-facing `close_action`, using
+`exit_state` only to select the strategy-specific long-call wording. It must not
+change the thesis evaluation result. During the P0 compatibility window, the
+runner first projects current exit/tier facts into `recommendation_state`, so
+selected rows and actions remain unchanged.
 
 ## Combo Economics
 
@@ -262,6 +334,118 @@ The shadow status is one of:
 `review_switch` is a manual-review signal, not an executable close/open pair.
 Promotion into production requires closed-lifecycle replay evidence and an
 explicit policy decision.
+
+### Close-decision replay marks and outcomes
+
+The optional Shadow Replay close facet keeps Close Advice evidence separate
+from candidate evidence:
+
+- `close_decision_episodes.jsonl` stores immutable decision-time facts and the
+  P0/P1/P2/P3 projections;
+- `close_decision_marks.jsonl` stores the current contract and, when P3 selected
+  one at decision time, its replacement on the same horizon row;
+- `close_decision_outcomes.jsonl` stores four horizon results plus one terminal
+  result per episode.
+
+Horizon windows are calendar-day windows relative to `observed_at_utc`:
+1d=[1,2], 3d=[3,4], 7d=[7,9], and 14d=[14,17]. The first verified mark in a
+window is used. An expiry quote is accepted only on the contract expiration
+date; a later spot cannot be relabeled as the expiry spot.
+
+Only a fresh OpenD fetch using its actual collection time has
+`point_in_time_status=verified_fresh_collection`. A manual `--as-of` value or a
+local required-data CSV without a native quote timestamp is retained with an
+unverified status and settlement fails closed with
+`mark_point_in_time_unverified`. This prevents a current quote from being
+backdated into historical evidence.
+
+Short-option outcomes use decision-time incremental value:
+
+```text
+close_now_cost = decision_ask * multiplier * contracts + decision_close_fee
+hold_to_horizon_incremental = close_now_cost
+                              - (future_ask * multiplier * contracts
+                                 + future_close_fee)
+close_now_incremental = 0
+```
+
+P3 replacement results use the same horizon and subtract replacement open and
+exit fees plus observed entry slippage. Missing entry, exit, fee, mark, or
+point-in-time evidence remains explicitly inconclusive.
+
+Terminal precedence is canonical lifecycle evidence first, then a verified
+expiration-date mark for an expired-worthless result. Assignment or
+called-away rows require an explicitly decision-time-sliced lifecycle P&L for a
+money outcome, bound to the episode by `episode_id` or the exact
+`decision_observed_at_utc`; full-lifecycle or unbound P&L is not substituted.
+Multiple lifecycle events, mismatched contract quantities, ITM expiry without canonical lifecycle,
+or missing fees/prices remain inconclusive.
+
+`om research shadow-replay mark` and `collect` remain dry-run by default;
+`--write` is required for local dataset mutation. Dataset build adds the close
+facet only with `--include-close-decisions`, and settlement accepts repeatable
+canonical projected lifecycle evidence through `--lifecycle-path`.
+
+### Close-decision replay readiness
+
+Readiness is mechanical evidence accounting, not a strategy-quality verdict.
+When the optional close facet exists, dataset status and replay readiness report
+the following independently:
+
+- unique decision episodes and repeated source observations;
+- verified 1d, 3d, 7d, 14d, and expiry mark-window coverage;
+- terminal lifecycle coverage and every inconclusive reason;
+- decision and future-close fee coverage;
+- complete P0/P1/P2/P3 projections and paired outcome coverage;
+- decision quote, strategy context, replacement, mark, and outcome point-in-time
+  provenance;
+- promotion-usable coverage by `(strategy_profile, strategy_family)`.
+
+An episode is promotion-usable only when it has a usable outcome, all four
+policy projections, the exact five-row outcome matrix, fee-complete economics,
+verified point-in-time evidence, and a complete profile/family segment. A P3
+`review_switch` episode additionally requires a replacement sourced from a
+validated same-decision run. Receipt time is never substituted for quote time.
+
+The mechanical floor is 30 settled unique episodes overall, at least 10
+promotion-usable episodes in an eligible profile/family segment, and at least
+80% promotion-usable coverage within that segment. A segment below either
+segment floor remains shadow-only; it does not borrow evidence from another
+profile or family. Meeting the floor permits paired policy analysis only. It
+does not select a winner, change production policy, or authorize notification
+changes. Candidate-only Shadow Replay datasets retain their prior status shape.
+
+### Paired close-policy analysis
+
+`om research shadow-replay analyze` adds a close-policy report only when the
+optional close facet exists. The report consumes the exact episode/outcome keys
+selected by mechanical readiness; it does not recreate a second eligibility
+rule. Under-sampled segments and mechanically incomplete outcomes remain in
+coverage and inconclusive counts but do not enter promotion metrics.
+
+Episode comparison uses terminal evidence when it is promotion-usable,
+otherwise the longest promotion-usable fixed horizon. Close precision follows
+its separate definition and uses the best promotion-usable hold horizon. P3
+always compares current and replacement contracts on the same outcome row; if
+that row is unavailable, switch metrics remain inconclusive.
+
+Policy metrics report P0/P1/P2/P3 action counts, net incremental outcomes for
+determinate close/hold actions, premature-close regret, avoided-loss benefit,
+close and switch transaction costs, close precision, path tails,
+assignment/called-away willingness alignment, repeated reminders, and action
+transitions. They are emitted at aggregate, profile/family, market, account,
+episode, and earliest-episode-per-unique-lot grains. Every metric includes its
+population, usable count, and inconclusive count. `review` is never imputed as
+either a close or a hold transaction.
+
+Threshold sensitivity is one-factor-at-a-time and descriptive only: strong
+remaining annualized maximum at 3%/4.5%/6%, medium at 5%/7%/9%, and every
+current capture threshold at minus five/current/plus five percentage points.
+It uses the decision-time DTE, capture ratio, and remaining annualized return
+persisted in the episode. Missing historical threshold inputs remain
+inconclusive; expiration and UTC timestamps are not used to reconstruct DTE.
+The analysis emits no policy winner or parameter recommendation and leaves
+production promotion false pending the durable CEO decision artifact.
 
 ## Acceptance Matrix
 

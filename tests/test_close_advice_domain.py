@@ -10,7 +10,11 @@ from domain.domain.close_advice import (
     EXIT_STATE_PROFIT_CAPTURE,
     EXIT_STATE_SALVAGE,
     EXIT_STATE_TAKE_PROFIT,
+    RECOMMENDATION_CLOSE,
+    RECOMMENDATION_HOLD,
+    RECOMMENDATION_NOT_EVALUABLE,
     apply_fee_economic_safety,
+    current_policy_decision_fields,
     evaluate_close_advice,
 )
 
@@ -82,6 +86,23 @@ def test_close_advice_metrics_for_put_and_call() -> None:
 
     call = evaluate_close_advice(_inp(premium=2.0, mid=0.4, dte=20, option_type="call"), CloseAdviceConfig())
     assert round(call["remaining_annualized_return"], 6) == 0.060833
+
+
+def test_current_policy_decision_contract_preserves_p0_action_semantics() -> None:
+    strong = current_policy_decision_fields(tier="strong", exit_state=EXIT_STATE_PROFIT_CAPTURE)
+    medium = current_policy_decision_fields(tier="medium", exit_state=EXIT_STATE_PROFIT_CAPTURE)
+    hold = current_policy_decision_fields(tier="none", exit_state=EXIT_STATE_HOLD)
+    not_evaluable = current_policy_decision_fields(
+        tier="not_evaluable",
+        exit_state=EXIT_STATE_NOT_EVALUABLE,
+    )
+
+    assert strong["recommendation_state"] == RECOMMENDATION_CLOSE
+    assert medium["recommendation_state"] == RECOMMENDATION_CLOSE
+    assert hold["recommendation_state"] == RECOMMENDATION_HOLD
+    assert not_evaluable["recommendation_state"] == RECOMMENDATION_NOT_EVALUABLE
+    assert strong["decision_basis"] == ("profit_capture_strong",)
+    assert not_evaluable["decision_evidence_status"] == "not_evaluable"
 
 
 def test_close_advice_data_quality_blocks_notifications() -> None:
