@@ -44,6 +44,20 @@ The read-only remote archive spans `20260601T014013Z-667d97` through `20260717T1
 
 These archives predate the S1 close-decision contract. They do not contain the required `policy_version`, `recommendation_state`, `decision_basis`, and `decision_evidence_status` fields. The close facet deliberately fails closed when those fields are absent because P0 parity cannot otherwise be demonstrated. The archive may remain useful as diagnostic context, but it is not admissible promotion evidence and will not be rewritten or silently backfilled.
 
+### Admissibility probe
+
+The newest archived run, `20260717T170016Z-c272b0`, was passed to the public
+dataset builder with `--include-close-decisions` and an isolated temporary
+output target. Capture stopped before creating the target and returned:
+
+```text
+formal close policy fields missing
+(policy_version,recommendation_state,decision_basis,decision_evidence_status)
+```
+
+The probe output directory remained absent. This confirms that the production
+capture path enforces the same no-backfill decision as this inventory.
+
 ## Dry-run data plan
 
 The public command was run with `--source local`, `--max-datasets 3`, and without `--write`.
