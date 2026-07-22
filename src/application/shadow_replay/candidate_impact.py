@@ -6,7 +6,7 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.capture import (
     ShadowReplaySourceSelection,
     accepted_candidate_snapshots,
