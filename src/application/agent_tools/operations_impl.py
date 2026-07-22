@@ -7,7 +7,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import assigned_stock_event_log, ledger_store_payload
-from src.application.positions.reporting import build_monthly_income_report
+from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trade_time_format import add_trade_time_beijing
 
 
@@ -399,11 +399,6 @@ def _assigned_stock_action(
     normalize_account: Callable[[Any], str],
     refresh_assigned_stock_quotes: Callable[..., Any],
 ) -> dict[str, Any]:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    raw_trade_events = list_trade_events() if callable(list_trade_events) else []
-    trade_events = raw_trade_events if isinstance(raw_trade_events, list) else []
-    assigned_stock_events = [dict(item) for item in assigned_stock_event_log(repo).events]
-
     broker = _optional_text(payload.get("broker"))
     broker = normalize_broker(broker) if broker else None
     account = normalize_account(payload.get("account")) if payload.get("account") else None
@@ -427,18 +422,16 @@ def _assigned_stock_action(
         else as_of_ms is None and "quote_snapshots" not in payload
     )
 
-    report = build_monthly_income_report(
-        [],
+    report = build_assigned_stock_view(
+        repo,
         account=account,
         broker=broker,
-        trade_events=trade_events,
-        assigned_stock_events=assigned_stock_events,
         quote_snapshots=quote_snapshots,
         as_of_ms=as_of_ms,
     )
     selected_report_rows = [
         row
-        for row in (report.get("assignment_lifecycle_rows") or [])
+        for row in (report.get("assigned_stock_lots") or [])
         if isinstance(row, dict)
         and _assigned_stock_row_matches(row, symbol=symbol, stock_lot_id=stock_lot_id, status=status)
     ]
@@ -489,18 +482,16 @@ def _assigned_stock_action(
                 refreshed_snapshots = list(getattr(refresh, "quote_snapshots", []) or [])
                 if refreshed_snapshots:
                     quote_snapshots = [*_quote_snapshot_rows(payload.get("quote_snapshots")), *refreshed_snapshots]
-                    report = build_monthly_income_report(
-                        [],
+                    report = build_assigned_stock_view(
+                        repo,
                         account=account,
                         broker=broker,
-                        trade_events=trade_events,
-                        assigned_stock_events=assigned_stock_events,
                         quote_snapshots=quote_snapshots,
                         as_of_ms=as_of_ms,
                     )
                     selected_report_rows = [
                         row
-                        for row in (report.get("assignment_lifecycle_rows") or [])
+                        for row in (report.get("assigned_stock_lots") or [])
                         if isinstance(row, dict)
                         and _assigned_stock_row_matches(
                             row,
@@ -529,7 +520,10 @@ def _assigned_stock_action(
             "refresh_quotes": refresh_quotes,
         },
         "quote_refresh": quote_refresh,
-        "warnings": quote_refresh_warnings,
+        "warnings": [
+            *[str(item) for item in report.get("warnings") or [] if str(item).strip()],
+            *quote_refresh_warnings,
+        ],
     }
 
 

@@ -145,15 +145,14 @@ def test_unified_cli_option_positions_management_command_exists_without_legacy_m
     assert "--market" not in proc.stdout
 
 
-def test_unified_cli_option_positions_report_command_exists_without_legacy_market_alias() -> None:
+def test_unified_cli_option_performance_report_is_the_public_performance_entrypoint() -> None:
     proc = subprocess.run(
         [
             str((ROOT / ".venv" / "bin" / "python").resolve()),
             "-m",
             "src.interfaces.cli.main",
-            "option-positions",
+            "option-performance",
             "report",
-            "monthly-income",
             "--help",
         ],
         cwd=str(ROOT),

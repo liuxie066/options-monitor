@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -13,7 +12,6 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.analysis import (
     ANALYSIS_CATALOG_TOOL,
     ANALYSIS_QUERY_TOOL,
-    _account_monthly_income_component_rows,
     _assigned_stock_position_pnl_rows,
     _assigned_stock_sale_event_rows,
     _expiration_risk_bucket_rows,
@@ -22,7 +20,7 @@ from src.application.agent_tools.analysis import (
     _option_trade_lifecycle_rows,
     _query_explain_and_evidence,
     _strategy_config_by_symbol_account_rows,
-    _symbol_income_attribution_rows,
+    _symbol_performance_attribution_rows,
 )
 
 
@@ -129,72 +127,47 @@ def _performance_report(
 
 def test_analysis_query_rejects_write_sql_before_context_access() -> None:
     with pytest.raises(AgentToolError) as exc:
-        _call_analysis_tool(ANALYSIS_QUERY_TOOL, object(), {"sql": "delete from monthly_income_return_summary"})
+        _call_analysis_tool(ANALYSIS_QUERY_TOOL, object(), {"sql": "delete from option_monthly_performance"})
 
     assert exc.value.code == "PERMISSION_DENIED"
 
 
 def test_analysis_catalog_rejects_non_string_view_filter_before_context_access() -> None:
     with pytest.raises(AgentToolError) as exc:
-        _call_analysis_tool(ANALYSIS_CATALOG_TOOL, object(), {"views": {"monthly_income_return_summary": True}})
+        _call_analysis_tool(ANALYSIS_CATALOG_TOOL, object(), {"views": {"option_monthly_performance": True}})
 
     assert exc.value.code == "INPUT_ERROR"
 
 
 def test_analysis_catalog_exposes_semantic_metadata_for_account_performance() -> None:
-    data, warnings, meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL, _CatalogContext(), {"views": "account_monthly_performance"})
+    data, warnings, meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL, _CatalogContext(), {"views": "option_monthly_performance"})
 
     assert warnings == []
     assert meta == {"config_path": ".../config.us.json"}
     assert data["schema_version"] == "analysis.catalog.v2"
 
-    view = data["views"]["account_monthly_performance"]
+    view = data["views"]["option_monthly_performance"]
     assert view["row_grain"] == "month + account"
-    assert view["alias_of"] == "option_monthly_performance"
-    assert view["primary_metric"] == "realized_pnl_cny"
+    assert view["primary_metric"] == "period_total_pnl_net_cny"
     assert view["safe_join_keys"] == ("month", "account")
-    assert "net_income_cny" in view["fields"]
-
-    realized_pnl = view["field_semantics"]["realized_pnl_cny"]
-    assert realized_pnl["metric_role"] == "primary_realized_option_pnl"
-    assert realized_pnl["gross_before_fees"] is True
-    assert realized_pnl["assigned_stock_pnl_included"] is False
-
-    premium_income = view["field_semantics"]["premium_income_cny"]
-    assert premium_income["metric_role"] == "premium_activity"
-    assert premium_income["profit_metric"] is False
-
-    net_income = view["field_semantics"]["net_income_cny"]
-    assert net_income["type"] == "money"
-    assert net_income["currency"] == "CNY"
-    assert net_income["aggregation"] == "sum"
-    assert net_income["metric_role"] == "legacy_option_cashflow"
-    assert net_income["profit_metric"] is False
-
-    net_return = view["field_semantics"]["net_return_rate"]
-    assert net_return["type"] == "rate"
-    assert net_return["aggregation"] == "weighted_recompute"
-    assert net_return["metric_role"] == "legacy_cashflow_ratio"
-    assert "avg" in net_return["do_not"]
+    assert "option_trade_cash_cny" in view["fields"]
+    assert "period_total_pnl_net_cny" in view["fields"]
 
     assert data["metric_policy"]["primary_profit"].startswith("pnl.period_total_net")
-    assert all("net_income_cny" not in item["sql"] for item in data["query_patterns"])
-    assert data["field_types"]["account_monthly_performance"]["net_return_rate"] == "rate"
-    assert data["aggregation_policies"]["account_monthly_performance"]["net_return_rate"] == "weighted_recompute"
-    assert data["join_policies"]["account_monthly_performance"]["safe_join_keys"] == ["month", "account"]
+    assert data["field_types"]["option_monthly_performance"]["period_total_pnl_net_cny"] == "money"
+    assert data["aggregation_policies"]["option_monthly_performance"]["period_total_pnl_net_cny"] == "sum"
+    assert data["join_policies"]["option_monthly_performance"]["safe_join_keys"] == ["month", "account"]
 
 
 def test_analysis_catalog_exposes_p0_semantic_views() -> None:
     data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
-        {"views": ["account_monthly_income_components", "assigned_stock_position_pnl", "assigned_stock_sale_events"]},
+        {"views": ["option_cash_components", "assigned_stock_position_pnl", "assigned_stock_sale_events"]},
     )
 
-    components = data["views"]["account_monthly_income_components"]
-    assert components["row_grain"] == "month + account + component"
-    assert components["status"] == "deprecated_alias"
-    assert components["additivity"] == "non_additive"
-    assert components["field_semantics"]["amount_cny"]["aggregation"] == "sum_within_same_component_only"
+    components = data["views"]["option_cash_components"]
+    assert components["row_grain"] == "period or month + account + cash component"
+    assert components["field_semantics"]["amount_cny"]["aggregation"] == "sum"
     assert data["views"]["assigned_stock_position_pnl"]["row_grain"] == "account + symbol + stock_lot_id"
     assert data["views"]["assigned_stock_sale_events"]["row_grain"] == "account + symbol + stock_lot_id + sale event"
     assert data["views"]["assigned_stock_position_pnl"]["alias_of"] == "assigned_stock_lifecycle"
@@ -204,14 +177,14 @@ def test_analysis_catalog_exposes_p0_semantic_views() -> None:
 def test_analysis_catalog_exposes_p1_semantic_views() -> None:
     data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
-        {"views": ["open_option_exposure", "expiration_risk_buckets", "symbol_income_attribution", "strategy_config_by_symbol_account"]},
+        {"views": ["open_option_exposure", "expiration_risk_buckets", "symbol_performance_attribution", "strategy_config_by_symbol_account"]},
     )
 
     assert data["views"]["open_option_exposure"]["row_grain"] == "account + symbol + option_type + side + strike + expiration"
     assert data["views"]["expiration_risk_buckets"]["row_grain"] == "account + expiration_bucket + currency"
     assert data["views"]["open_option_exposure"]["empty_result_meaning"] == "valid_current_negative_evidence"
     assert data["views"]["expiration_risk_buckets"]["empty_result_meaning"] == "valid_current_negative_evidence"
-    assert data["views"]["symbol_income_attribution"]["row_grain"] == "month + account + symbol + component + currency"
+    assert data["views"]["symbol_performance_attribution"]["row_grain"] == "month + account + symbol + component + currency"
     assert data["views"]["strategy_config_by_symbol_account"]["row_grain"] == "symbol + account + strategy_family"
 
 
@@ -252,11 +225,11 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
 def test_analysis_catalog_does_not_expose_task_recipes() -> None:
     data, _warnings, _meta = _call_analysis_tool(ANALYSIS_CATALOG_TOOL,
         _CatalogContext(),
-        {"views": ["account_monthly_performance", "symbol_income_attribution", "upgrade_operation_status"]},
+        {"views": ["option_monthly_performance", "symbol_performance_attribution", "upgrade_operation_status"]},
     )
 
     assert "investigation_recipes" not in data
-    assert "account_monthly_performance" in data["views"]
+    assert "option_monthly_performance" in data["views"]
     assert "sql_rules" in data
 
 
@@ -264,7 +237,7 @@ def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
     with pytest.raises(AgentToolError) as exc:
         _execute_select(
             "select name from sqlite_master",
-            {"monthly_income_return_summary": [{"month": "2026-05", "account": "lx"}]},
+            {"option_monthly_performance": [{"month": "2026-05", "account": "lx"}]},
             limit=10,
         )
 
@@ -275,8 +248,8 @@ def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
 def test_analysis_query_authorizer_rejects_non_whitelisted_functions() -> None:
     with pytest.raises(AgentToolError) as exc:
         _execute_select(
-            "select load_extension('x') as loaded from monthly_income_return_summary",
-            {"monthly_income_return_summary": [{"month": "2026-05", "account": "lx"}]},
+            "select load_extension('x') as loaded from option_monthly_performance",
+            {"option_monthly_performance": [{"month": "2026-05", "account": "lx"}]},
             limit=10,
         )
 
@@ -284,27 +257,9 @@ def test_analysis_query_authorizer_rejects_non_whitelisted_functions() -> None:
     assert "load_extension" in exc.value.message
 
 
-def test_analysis_query_account_monthly_performance_alias_executes() -> None:
-    rows, columns, views_used = _execute_select(
-        "select month, account, net_income_cny from account_monthly_performance order by account",
-        {
-            "account_monthly_performance": [
-                {"month": "2026-05", "account": "lx", "net_income_cny": 35842.0},
-                {"month": "2026-05", "account": "sy", "net_income_cny": 23973.0},
-            ]
-        },
-        limit=10,
-    )
-
-    assert columns == ["month", "account", "net_income_cny"]
-    assert rows == [
-        {"month": "2026-05", "account": "lx", "net_income_cny": 35842.0},
-        {"month": "2026-05", "account": "sy", "net_income_cny": 23973.0},
-    ]
-    assert views_used == ["account_monthly_performance"]
 
 
-def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_analysis_query_materializes_only_referenced_performance_views(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
     def fake_monthly_tool(*_args, **_kwargs):
@@ -320,22 +275,20 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
 
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
-        {"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 10},
+        {"sql": "select month, account, option_trade_cash_cny from option_monthly_performance", "limit": 10},
     )
 
-    assert len(warnings) == 2
-    assert any("migration-only" in warning for warning in warnings)
-    assert any("not profit or total cash change" in warning for warning in warnings)
+    assert warnings == []
     assert calls == ["monthly", "monthly"]
-    assert data["rows"] == [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]
+    assert data["rows"] == [{"month": "2026-05", "account": "lx", "option_trade_cash_cny": 1.0}]
     assert data["source"]["kind"] == "materialized_views"
-    assert data["scope"] == {"views": ["account_monthly_performance"], "limit": 10}
+    assert data["scope"] == {"views": ["option_monthly_performance"], "limit": 10}
     assert data["coverage"]["accounts"] == ["lx"]
-    assert data["freshness"][0]["view"] == "account_monthly_performance"
-    assert data["freshness"][0]["freshness"] == "snapshot"
+    assert data["freshness"][0]["view"] == "option_monthly_performance"
+    assert data["freshness"][0]["freshness"] == "ledger_and_evidence_snapshot"
     assert data["freshness"][0]["source"] == "option_performance_report.breakdowns.monthly"
-    assert meta["requested_views"] == ["account_monthly_performance"]
-    assert meta["materialized_views"] == ["account_monthly_performance"]
+    assert meta["requested_views"] == ["option_monthly_performance"]
+    assert meta["materialized_views"] == ["option_monthly_performance"]
 
 
 def test_analysis_query_views_mode_materializes_requested_views_without_sql(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,31 +308,33 @@ def test_analysis_query_views_mode_materializes_requested_views_without_sql(monk
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(),
         {
-            "views": ["account_monthly_performance", "open_option_exposure"],
+            "views": ["option_monthly_performance", "open_option_exposure"],
             "month": "2026-06",
             "limit": 10,
         },
     )
 
-    assert warnings == ["Deprecated monthly-income aliases are migration-only and project fields from option_performance_report."]
+    assert warnings == [
+        "Option performance uses parallel namespaces: profit questions use PnL, cash questions use cash, "
+        "and premium questions use activity; do not add or subtract them to manufacture a residual."
+    ]
     assert calls == ["monthly", "monthly", "positions"]
     assert data["query"]["mode"] == "views"
     assert data["query"]["filters"] == {"months": ["2026-06"]}
     assert data["preflight"]["warnings"] == warnings
-    assert data["views_used"] == ["account_monthly_performance", "open_option_exposure"]
-    legacy_rows = data["view_datasets"]["account_monthly_performance"]["rows"]
-    assert len(legacy_rows) == 1
-    assert legacy_rows[0]["month"] == "2026-06"
-    assert legacy_rows[0]["account"] == "lx"
-    assert legacy_rows[0]["net_income_cny"] == 1.0
-    assert legacy_rows[0]["return_basis"] == "deprecated_alias_no_generic_return"
+    assert data["views_used"] == ["open_option_exposure", "option_monthly_performance"]
+    performance_rows = data["view_datasets"]["option_monthly_performance"]["rows"]
+    assert len(performance_rows) == 1
+    assert performance_rows[0]["month"] == "2026-06"
+    assert performance_rows[0]["account"] == "lx"
+    assert performance_rows[0]["option_trade_cash_cny"] == 1.0
     exposure_dataset = data["view_datasets"]["open_option_exposure"]
     assert exposure_dataset["row_count"] == 1
     assert exposure_dataset["rows"][0]["symbol"] == "NVDA"
     assert exposure_dataset["empty_result_meaning"] == "valid_current_negative_evidence"
-    assert data["evidence"]["coverage"]["views"] == ["account_monthly_performance", "open_option_exposure"]
-    assert meta["requested_views"] == ["account_monthly_performance", "open_option_exposure"]
-    assert meta["materialized_views"] == ["account_monthly_performance", "open_option_exposure"]
+    assert data["evidence"]["coverage"]["views"] == ["open_option_exposure", "option_monthly_performance"]
+    assert meta["requested_views"] == ["open_option_exposure", "option_monthly_performance"]
+    assert meta["materialized_views"] == ["open_option_exposure", "option_monthly_performance"]
 
 
 def test_analysis_query_views_mode_filters_trade_events_by_trade_month(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1543,37 +1498,6 @@ def test_analysis_query_quote_freshness_gap_summary_includes_as_of(monkeypatch: 
     assert meta["materialized_views"] == ["quote_freshness"]
 
 
-def test_account_monthly_income_components_split_included_and_excluded_amounts() -> None:
-    rows = _account_monthly_income_component_rows(
-        [
-            {
-                "month": "2026-05",
-                "account": "lx",
-                "net_income_cny": 1500.0,
-                "premium_income_cny": 1200.0,
-                "premium_income_by_ccy": {"USD": 166.67},
-                "realized_pnl_cny": 250.0,
-                "realized_pnl_by_ccy": {"USD": 34.72},
-            }
-        ],
-        [
-            {
-                "month": "2026-05",
-                "account": "lx",
-                "currency": "USD",
-                "assignment_stock_net_cashflow_gross": -10000.0,
-                "assignment_stock_net_cashflow_gross_cny": -72000.0,
-            }
-        ],
-    )
-
-    assert [(row["component"], row["amount_cny"], row["included_in_net_income"]) for row in rows] == [
-        ("premium_activity", 1200.0, False),
-        ("option_trade_cash", 1500.0, False),
-        ("realized_pnl_gross", 250.0, False),
-        ("stock_settlement_cash", -72000.0, False),
-    ]
-    assert rows[-1]["amount_by_ccy"] == {"USD": -10000.0}
 
 
 def test_assigned_stock_semantic_views_shape_lifecycle_and_sale_rows() -> None:
@@ -1749,24 +1673,44 @@ def test_option_trade_lifecycle_matches_buy_open_with_sell_close() -> None:
     assert rows[0]["lifecycle_status"] == "closed"
 
 
-def test_symbol_income_attribution_groups_detail_rows_by_symbol_component() -> None:
-    rows = _symbol_income_attribution_rows(
-        cashflow_rows=[
-            {"month": "2026-05", "account": "lx", "symbol": "FUTU", "currency": "USD", "net_cashflow_gross": 100.0}
-        ],
-        realized_rows=[
-            {"month": "2026-05", "account": "lx", "symbol": "FUTU", "currency": "USD", "realized_gross": -20.0}
-        ],
-        premium_rows=[
-            {"month": "2026-05", "account": "lx", "symbol": "FUTU", "currency": "USD", "premium_received_gross": 120.0},
-            {"month": "2026-05", "account": "lx", "symbol": "FUTU", "currency": "USD", "premium_received_gross": 30.0},
-        ],
+def test_symbol_performance_attribution_groups_canonical_fact_rows() -> None:
+    rows = _symbol_performance_attribution_rows(
+        [
+            {
+                "rows": [
+                    {
+                        "effective_at_ms": 1777593600000,
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "fact_kind": "option_trade_cash_gross",
+                        "amount": 100.0,
+                    },
+                    {
+                        "effective_at_ms": 1777593600000,
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "fact_kind": "realized_gross",
+                        "amount": -20.0,
+                    },
+                    {
+                        "effective_at_ms": 1777593600000,
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "fact_kind": "premium_collected_gross",
+                        "amount": 150.0,
+                    },
+                ]
+            }
+        ]
     )
 
     assert [(row["component"], row["amount_gross"]) for row in rows] == [
-        ("net_cashflow", 100.0),
-        ("premium_income", 150.0),
-        ("realized_pnl", -20.0),
+        ("option_trade_cash", 100.0),
+        ("premium_activity", 150.0),
+        ("realized_pnl_gross", -20.0),
     ]
 
 
@@ -1800,10 +1744,10 @@ def test_strategy_config_by_symbol_account_expands_accounts_and_strategy_familie
 def test_analysis_query_unknown_column_returns_structured_suggestions() -> None:
     with pytest.raises(AgentToolError) as exc:
         _execute_select(
-            "select month, account, net_cashflow from account_monthly_performance",
+            "select month, account, net_cashflow from option_monthly_performance",
             {
-                "account_monthly_performance": [
-                    {"month": "2026-05", "account": "lx", "net_income_cny": 35842.0},
+                "option_monthly_performance": [
+                    {"month": "2026-05", "account": "lx", "option_trade_cash_cny": 35842.0},
                 ]
             },
             limit=10,
@@ -1816,146 +1760,82 @@ def test_analysis_query_unknown_column_returns_structured_suggestions() -> None:
     assert exc.value.details["preflight"]["ok"] is False
     assert exc.value.details["preflight"]["error_code"] == "UNKNOWN_COLUMN"
     assert exc.value.details["unknown_column"] == "net_cashflow"
-    assert exc.value.details["referenced_views"] == ["account_monthly_performance"]
-    assert "net_income_cny" in exc.value.details["suggestions"]
+    assert exc.value.details["referenced_views"] == ["option_monthly_performance"]
+    assert "option_trade_cash_cny" in exc.value.details["suggestions"]
 
 
 def test_analysis_query_executes_read_only_aggregates() -> None:
     rows, columns, views_used = _execute_select(
         (
             "select month, "
-            "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
-            "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
-            "sum(case when account = 'lx' then net_income_cny else 0 end) - "
-            "sum(case when account = 'sy' then net_income_cny else 0 end) as income_diff_cny "
-            "from monthly_income_return_summary group by month"
+            "sum(case when account = 'lx' then period_total_pnl_net_cny else 0 end) as lx_pnl_cny, "
+            "sum(case when account = 'sy' then period_total_pnl_net_cny else 0 end) as sy_pnl_cny, "
+            "sum(case when account = 'lx' then period_total_pnl_net_cny else 0 end) - "
+            "sum(case when account = 'sy' then period_total_pnl_net_cny else 0 end) as pnl_diff_cny "
+            "from option_monthly_performance group by month"
         ),
         {
-            "monthly_income_return_summary": [
-                {"month": "2026-05", "account": "lx", "net_income_cny": 35842.0},
-                {"month": "2026-05", "account": "sy", "net_income_cny": 23973.0},
+            "option_monthly_performance": [
+                {"month": "2026-05", "account": "lx", "period_total_pnl_net_cny": 35842.0},
+                {"month": "2026-05", "account": "sy", "period_total_pnl_net_cny": 23973.0},
             ]
         },
         limit=10,
     )
 
-    assert columns == ["month", "lx_income_cny", "sy_income_cny", "income_diff_cny"]
+    assert columns == ["month", "lx_pnl_cny", "sy_pnl_cny", "pnl_diff_cny"]
     assert rows == [
         {
             "month": "2026-05",
-            "lx_income_cny": 35842.0,
-            "sy_income_cny": 23973.0,
-            "income_diff_cny": 11869.0,
+            "lx_pnl_cny": 35842.0,
+            "sy_pnl_cny": 23973.0,
+            "pnl_diff_cny": 11869.0,
         }
     ]
-    assert views_used == ["monthly_income_return_summary"]
+    assert views_used == ["option_monthly_performance"]
 
 
 def test_analysis_query_explain_warns_on_invalid_rate_aggregation() -> None:
     query_explain, warnings, evidence = _query_explain_and_evidence(
-        sql="select month, avg(net_return_rate) as avg_rate from account_monthly_performance group by month",
+        sql=(
+            "select month, avg(period_total_net_annualized_efficiency) as avg_rate "
+            "from option_monthly_performance group by month"
+        ),
         rows=[{"month": "2026-05", "avg_rate": 0.12}],
         columns=["month", "avg_rate"],
-        views_used=["account_monthly_performance"],
+        views_used=["option_monthly_performance"],
     )
 
-    assert query_explain["views_used"] == ["account_monthly_performance"]
+    assert query_explain["views_used"] == ["option_monthly_performance"]
     assert query_explain["grain"] == ["month"]
     assert query_explain["coverage"]["months"] == ["2026-05"]
-    assert query_explain["aggregations"][0]["field"] == "net_return_rate"
+    assert query_explain["aggregations"][0]["field"] == "period_total_net_annualized_efficiency"
     assert query_explain["aggregations"][0]["policy"] == "invalid_rate_aggregation"
     assert warnings[0] == query_explain["aggregations"][0]["warning"]
-    assert any("Legacy generic return-rate aliases" in warning for warning in warnings)
+    assert len(warnings) == 1
     assert evidence["aggregation_policy"][0]["status"] == "warning"
 
 
-def test_analysis_query_explain_marks_legacy_cashflow_sum_and_warns_not_pnl() -> None:
-    query_explain, warnings, evidence = _query_explain_and_evidence(
-        sql="select month, sum(net_income_cny) as total_income from account_monthly_performance group by month",
-        rows=[{"month": "2026-05", "total_income": 59815.0}],
-        columns=["month", "total_income"],
-        views_used=["account_monthly_performance"],
-    )
-
-    assert len(warnings) == 2
-    assert any("migration-only" in warning for warning in warnings)
-    assert any("not profit or total cash change" in warning for warning in warnings)
-    assert query_explain["aggregations"][0]["field"] == "net_income_cny"
-    assert query_explain["aggregations"][0]["policy"] == "allowed"
-    assert evidence["coverage"]["views"] == ["account_monthly_performance"]
 
 
 def test_analysis_query_explain_warns_premium_and_realized_pnl_are_non_additive() -> None:
     query_explain, warnings, _evidence = _query_explain_and_evidence(
         sql=(
-            "select month, account, realized_pnl_cny, premium_income_cny "
-            "from account_monthly_performance"
+            "select month, account, realized_pnl_gross_cny, premium_collected_cny "
+            "from option_monthly_performance"
         ),
-        rows=[{"month": "2026-05", "account": "lx", "realized_pnl_cny": 250.0, "premium_income_cny": 1200.0}],
-        columns=["month", "account", "realized_pnl_cny", "premium_income_cny"],
-        views_used=["account_monthly_performance"],
+        rows=[{"month": "2026-05", "account": "lx", "realized_pnl_gross_cny": 250.0, "premium_collected_cny": 1200.0}],
+        columns=["month", "account", "realized_pnl_gross_cny", "premium_collected_cny"],
+        views_used=["option_monthly_performance"],
     )
 
-    assert len(warnings) == 2
-    assert any("migration-only" in warning for warning in warnings)
+    assert len(warnings) == 1
     assert any("must not be added" in warning for warning in warnings)
     assert query_explain["warnings"] == warnings
 
 
-def test_analysis_query_explain_warns_legacy_component_view_is_non_additive() -> None:
-    _query_explain, warnings, _evidence = _query_explain_and_evidence(
-        sql="select month, account, sum(amount_cny) from account_monthly_income_components group by month, account",
-        rows=[{"month": "2026-05", "account": "lx", "sum(amount_cny)": 1500.0}],
-        columns=["month", "account", "sum(amount_cny)"],
-        views_used=["account_monthly_income_components"],
-    )
-
-    assert any("deprecated non-additive compatibility view" in warning for warning in warnings)
 
 
-def _removed_legacy_answer_guard_tests() -> None:
-    bundle = build_evidence_bundle(
-        question="对比 lx 和 sy 的账户收益，有什么不同？",
-        plan={"goal": "对比账户收益", "steps": []},
-        observations=[
-            {
-                "index": 1,
-                "tool_name": "analysis_query",
-                "payload": {"sql": "select ..."},
-                "ok": True,
-                "error": None,
-                "output_contract": {
-                    "schema_version": "analysis_query.output.v1",
-                    "source_label": "OM read-only analysis workspace",
-                    "primary_rows": "rows",
-                    "row_count_field": "row_count",
-                    "fact_fields": ["rows[].month", "rows[].account"],
-                },
-                "data": {
-                    "rows": [
-                        {
-                            "month": "2026-05",
-                            "account": "lx",
-                            "symbol": "FUTU",
-                            "net_income_cny": 35842.0,
-                            "income_diff_cny": 11869.0,
-                        }
-                    ],
-                    "row_count": 1,
-                },
-            }
-        ],
-    )
-
-    payload = bundle.public_payload()
-    assert any(item["path"] == "rows[].income_diff_cny" and item["currency"] == "CNY" for item in payload["facts"])
-
-    result = verify_response_against_evidence(
-        "2026-05 lx 更高，净现金流 CNY 35,842，差额 CNY 11,869。HK 市场只是说明文字。",
-        evidence_bundle=bundle,
-    )
-
-    assert result.violations == ()
 
 
 def test_analysis_query_answer_guard_verifies_derived_currency_difference() -> None:
@@ -1980,21 +1860,21 @@ def test_analysis_query_answer_guard_verifies_derived_currency_difference() -> N
                     "rows": [
                         {
                             "month": "2026-05",
-                            "lx_income_cny": 35842.41,
-                            "sy_income_cny": 21453.29,
+                            "lx_pnl_cny": 35842.41,
+                            "sy_pnl_cny": 21453.29,
                         }
                     ],
                     "row_count": 1,
                     "evidence": {
                         "coverage": {
-                            "views": ["account_monthly_performance"],
+                            "views": ["option_monthly_performance"],
                             "months": ["2026-05"],
                             "accounts": ["lx", "sy"],
                             "symbols": [],
                         },
-                        "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                        "freshness": [{"view": "option_monthly_performance", "freshness": "snapshot"}],
                         "aggregation_policy": [
-                            {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                            {"field": "period_total_pnl_net_cny", "function": "sum", "policy": "allowed", "status": "ok"}
                         ],
                         "diagnostics": [
                             {
@@ -2047,21 +1927,21 @@ def test_analysis_query_answer_guard_verifies_derived_return_rate() -> None:
                         {
                             "month": "2026-06",
                             "account": "lx",
-                            "net_income_cny": 9000.0,
+                            "period_total_pnl_net_cny": 9000.0,
                             "cash_secured_cny": 300000.0,
                         }
                     ],
                     "row_count": 1,
                     "evidence": {
                         "coverage": {
-                            "views": ["account_monthly_performance"],
+                            "views": ["option_monthly_performance"],
                             "months": ["2026-06"],
                             "accounts": ["lx"],
                             "symbols": [],
                         },
-                        "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                        "freshness": [{"view": "option_monthly_performance", "freshness": "snapshot"}],
                         "aggregation_policy": [
-                            {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                            {"field": "period_total_pnl_net_cny", "function": "sum", "policy": "allowed", "status": "ok"}
                         ],
                         "diagnostics": [
                             {
@@ -2114,8 +1994,8 @@ def test_analysis_query_evidence_records_formula_templates_and_verifies_amount_s
                     "rows": [
                         {
                             "month": "2026-06",
-                            "lx_income_cny": 100.0,
-                            "sy_income_cny": 40.0,
+                            "lx_pnl_cny": 100.0,
+                            "sy_pnl_cny": 40.0,
                         }
                     ],
                     "row_count": 1,
@@ -2304,18 +2184,18 @@ def test_analysis_query_v2_evidence_promotes_coverage_into_evidence_bundle() -> 
                     "fact_fields": ["rows[].month", "rows[].account"],
                 },
                 "data": {
-                    "rows": [{"month": "2026-05", "account": "lx", "net_income_cny": 35842.0}],
+                    "rows": [{"month": "2026-05", "account": "lx", "period_total_pnl_net_cny": 35842.0}],
                     "row_count": 1,
                     "evidence": {
                         "coverage": {
-                            "views": ["account_monthly_performance"],
+                            "views": ["option_monthly_performance"],
                             "months": ["2026-05"],
                             "accounts": ["lx", "sy"],
                             "symbols": ["FUTU"],
                         },
-                        "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                        "freshness": [{"view": "option_monthly_performance", "freshness": "snapshot"}],
                         "aggregation_policy": [
-                            {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                            {"field": "period_total_pnl_net_cny", "function": "sum", "policy": "allowed", "status": "ok"}
                         ],
                         "diagnostics": [
                             {
@@ -2336,7 +2216,7 @@ def test_analysis_query_v2_evidence_promotes_coverage_into_evidence_bundle() -> 
     assert payload["scope"]["accounts"] == ["lx", "sy"]
     assert payload["scope"]["symbols"] == ["FUTU"]
     analysis_evidence = payload["datasets"][0]["analysis_evidence"]
-    assert analysis_evidence["coverage"]["views"] == ["account_monthly_performance"]
+    assert analysis_evidence["coverage"]["views"] == ["option_monthly_performance"]
     assert analysis_evidence["freshness"][0]["freshness"] == "snapshot"
     assert analysis_evidence["aggregation_policy"][0]["policy"] == "allowed"
     assert analysis_evidence["diagnostics"][0]["status"] == "diagnostic_missing"
@@ -2352,8 +2232,8 @@ def test_analysis_query_v2_evidence_guard_rejects_unsupported_semantic_claims() 
                 "tool_name": "analysis_query",
                 "payload": {
                     "sql": (
-                        "select avg(net_return_rate) as avg_rate "
-                        "from account_monthly_performance where account = 'lx'"
+                        "select avg(period_total_net_annualized_efficiency) as avg_rate "
+                        "from option_monthly_performance where account = 'lx'"
                     )
                 },
                 "ok": True,
@@ -2370,7 +2250,7 @@ def test_analysis_query_v2_evidence_guard_rejects_unsupported_semantic_claims() 
                     "row_count": 1,
                     "evidence": {
                         "coverage": {
-                            "views": ["account_monthly_performance"],
+                            "views": ["option_monthly_performance"],
                             "months": ["2026-06"],
                             "accounts": ["lx"],
                             "symbols": [],
@@ -2380,7 +2260,7 @@ def test_analysis_query_v2_evidence_guard_rejects_unsupported_semantic_claims() 
                         ],
                         "aggregation_policy": [
                             {
-                                "field": "net_return_rate",
+                                "field": "period_total_net_annualized_efficiency",
                                 "function": "avg",
                                 "policy": "invalid_rate_aggregation",
                                 "status": "warning",
@@ -2466,7 +2346,7 @@ def test_analysis_query_v2_evidence_guard_allows_supported_caveated_claims() -> 
             {
                 "index": 1,
                 "tool_name": "analysis_query",
-                "payload": {"sql": "select * from symbol_income_attribution where account = 'lx'"},
+                "payload": {"sql": "select * from symbol_performance_attribution where account = 'lx'"},
                 "ok": True,
                 "error": None,
                 "output_contract": {
@@ -2481,12 +2361,12 @@ def test_analysis_query_v2_evidence_guard_allows_supported_caveated_claims() -> 
                     "row_count": 1,
                     "evidence": {
                         "coverage": {
-                            "views": ["symbol_income_attribution"],
+                            "views": ["symbol_performance_attribution"],
                             "months": ["2026-06"],
                             "accounts": ["lx"],
                             "symbols": ["FUTU"],
                         },
-                        "freshness": [{"view": "symbol_income_attribution", "freshness": "snapshot"}],
+                        "freshness": [{"view": "symbol_performance_attribution", "freshness": "snapshot"}],
                         "aggregation_policy": [
                             {"field": "amount_cny", "function": "sum", "policy": "allowed", "status": "ok"}
                         ],

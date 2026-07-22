@@ -129,14 +129,14 @@
 ./om option-positions history --record-id <record_id>
 ./om option-positions list --broker 富途 --account lx --status all
 ./om option-positions verify-projection
-./om option-positions report monthly-income --broker 富途 --account lx --month 2026-04
+./om option-performance report --config-key us --broker 富途 --account lx --period month --month 2026-04
 ```
 
 你要确认三件事：
 - 事件链符合预期
 - 当前 lot 状态符合预期
 - replay projection 与当前 `position_lots` 一致
-- 月收益 / premium 收入没有被错误污染
+- canonical PnL / cash / premium activity 没有被错误污染
 
 ---
 

@@ -142,46 +142,42 @@ def test_scene_selects_canonical_read_only_toolsets() -> None:
         enabled_optional_toolsets=frozenset({"portfolio"}),
     )
     assert "portfolio_query" in enabled_manifest.allowed_tools
-    assert "portfolio_capital_bridge" in enabled_manifest.allowed_tools
+    assert "portfolio_capital_bridge" not in enabled_manifest.allowed_tools
 
 
 def test_agent_tool_view_exposes_result_contract() -> None:
-    view = next(item for item in copilot_tools.tool_descriptions(("monthly_income_report",)))
+    view = next(item for item in copilot_tools.tool_descriptions(("option_performance_report",)))
 
-    assert view["output_contract"]["primary_rows"] == "return_summary"
+    assert view["output_contract"]["primary_rows"] == "rows"
     assert "Key result fields:" in view["description"]
     observation = copilot_tools.compact_observation(
-        "monthly_income_report",
-        {"ok": True, "data": {"return_summary": [{"month": "2026-07"}], "row_count": 1}},
+        "option_performance_report",
+        {"ok": True, "data": {"rows": [{"fact_kind": "realized_net", "amount": 1.0}]}},
         {"month": "2026-07"},
     )
     assert "rows=1" in observation["summary"]
-    assert observation["result_contract"]["source_label"] == "OM 本地账本"
+    assert observation["result_contract"]["source_label"] == "OM 本地账本 + 显式估值/汇率证据"
     warning_observation = copilot_tools.compact_observation(
-        "monthly_income_report",
+        "option_performance_report",
         {
             "ok": True,
-            "data": {"summary": [], "row_count": 0},
+            "data": {"rows": []},
             "warnings": ["no source rows", ""],
         },
     )
     assert warning_observation["warnings"] == ["no source rows"]
     nested = copilot_tools.compact_observation(
-        "monthly_income_report",
+        "option_performance_report",
         {
             "ok": True,
             "data": {
-                "diagnostics": [
-                    {
-                        "month_range": {"month": "2026-07"},
-                        "missing_fields": ["trade_events"],
-                    }
-                ]
+                "period": {"kind": "month", "requested_start_date": "2026-07-01"},
+                "quality": {"missing": ["trade_events"]},
             },
         },
     )
-    assert nested["value"]["diagnostics"][0]["month_range"]["month"] == "2026-07"
-    assert nested["value"]["diagnostics"][0]["missing_fields"] == ["trade_events"]
+    assert nested["value"]["period"]["kind"] == "month"
+    assert nested["value"]["quality"]["missing"] == ["trade_events"]
 
 
 def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
@@ -237,24 +233,23 @@ def test_observation_projection_prioritizes_contract_facts_and_missing_boundarie
         "ok": True,
         "data": {
             **filler,
-            "summary": [{"metadata": "ignored", "month": "2026-07", "account": "lx"}],
-            "diagnostics": [{"income_amount_status": "available", "missing_fields": []}],
-            "row_count": 1,
+            "period": {"kind": "month", "requested_start_date": "2026-07-01"},
+            "scope": {"account": "lx", "accounts": ["lx"]},
+            "quality": {"status": "observed", "missing": []},
+            "rows": [{"fact_kind": "realized_net", "amount": 1.0}],
         },
     }
 
-    observation = copilot_tools.compact_observation("monthly_income_report", response)
+    observation = copilot_tools.compact_observation("option_performance_report", response)
 
     assert observation["status"] == "complete"
-    assert observation["value"]["summary"][0]["month"] == "2026-07"
+    assert observation["value"]["period"]["kind"] == "month"
     assert "missing_data" not in observation
 
-    response["data"]["diagnostics"] = [
-        {"income_amount_status": "unavailable", "missing_fields": ["trade_events"]}
-    ]
-    partial = copilot_tools.compact_observation("monthly_income_report", response)
+    response["data"]["quality"] = {"status": "partial", "missing": ["trade_events"]}
+    partial = copilot_tools.compact_observation("option_performance_report", response)
     assert partial["status"] == "partial"
-    assert partial["missing_data"]["diagnostics[].missing_fields"] == ["trade_events"]
+    assert partial["missing_data"]["quality.missing"] == ["trade_events"]
 
 
 def test_observation_projection_preserves_source_scope_and_coverage() -> None:
@@ -467,7 +462,7 @@ def test_model_arguments_are_not_dropped_by_tool_wrapper(monkeypatch) -> None:
                 tool_calls=(
                     _call(
                         "analysis_query",
-                        {"views": ["account_monthly_performance"], "month": "2026-07", "account": "lx"},
+                        {"views": ["option_monthly_performance"], "month": "2026-07", "account": "lx"},
                     ),
                 )
             ),
@@ -479,7 +474,7 @@ def test_model_arguments_are_not_dropped_by_tool_wrapper(monkeypatch) -> None:
     result = run_contract(_contract("7月收益"), model_runner=lambda _request: next(turns))
 
     assert result.user_response == "7月暂无可用收益行。"
-    assert calls[0]["views"] == ["account_monthly_performance"]
+    assert calls[0]["views"] == ["option_monthly_performance"]
     assert calls[0]["month"] == "2026-07"
     assert calls[0]["account"] == "lx"
 
@@ -488,7 +483,7 @@ def test_explicit_scope_cannot_be_overridden_by_model_tool_arguments(monkeypatch
     calls: list[dict] = []
     turns = iter(
         (
-            ModelTurn(tool_calls=(_call("monthly_income_report", {"config_key": "hk", "month": "2026-07"}),)),
+            ModelTurn(tool_calls=(_call("option_performance_report", {"config_key": "hk", "month": "2026-07"}),)),
             ModelTurn(text="结论：已按明确的 us 范围查询。"),
         )
     )
@@ -516,7 +511,7 @@ def test_budget_exhaustion_returns_tool_results_for_entire_native_batch(monkeypa
             return ModelTurn(
                 tool_calls=(
                     _call("runtime_status", {"config_key": "us"}, "batch_1"),
-                    _call("monthly_income_report", {"month": "2026-07"}, "batch_2"),
+                    _call("option_performance_report", {"month": "2026-07"}, "batch_2"),
                 )
             )
         return ModelTurn(text="只完成了运行状态检查，收益工具因预算限制未执行。")
@@ -645,7 +640,7 @@ def test_context_compaction_preserves_financial_identity_fields() -> None:
     def model(request: ModelRequest) -> ModelTurn:
         requests.append(request)
         if not any(item.get("role") == "tool" for item in request.messages):
-            return ModelTurn(tool_calls=(_call("monthly_income_report", {"month": "2026-07"}, "identity_1"),))
+            return ModelTurn(tool_calls=(_call("option_performance_report", {"month": "2026-07"}, "identity_1"),))
         return ModelTurn(text="结论：lx 账户 7 月美元收益为正。", finish_reason="stop")
 
     from src.application.copilot.engine import run_engine
@@ -658,10 +653,10 @@ def test_context_compaction_preserves_financial_identity_fields() -> None:
         call_read_tool=lambda _name, _payload: {
             "ok": True,
             "data": {
-                "account": "lx",
-                "currency": "USD",
-                "month": "2026-07",
-                "source": "ledger",
+                "period": {"kind": "month", "requested_start_date": "2026-07-01"},
+                "scope": {"account": "lx", "accounts": ["lx"]},
+                "pnl": {"period_total_net": {"by_currency": {"USD": 1.0}, "status": "observed"}},
+                "quality": {"status": "observed", "missing": []},
                 "notes": "x" * 20_000,
                 "rows": [{"symbol": f"SYM{index}", "premium": index} for index in range(500)],
             },
@@ -673,10 +668,9 @@ def test_context_compaction_preserves_financial_identity_fields() -> None:
 
     tool_message = next(item for item in requests[-1].messages if item.get("role") == "tool")
     projected = json.loads(tool_message["content"])
-    assert projected["account"] == "lx"
-    assert projected["currency"] == "USD"
-    assert projected["month"] == "2026-07"
-    assert projected["source"] == "ledger"
+    assert projected["scope"]["account"] == "lx"
+    assert projected["pnl"]["period_total_net"]["by_currency"] == {"USD": "1.0"}
+    assert projected["period"]["requested_start_date"] == "2026-07-01"
     assert projected["context_compacted"] is True
     assert result.status == "answered"
 

@@ -26,7 +26,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "prepare_close_advice_inputs" in tool_names
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
-    assert "monthly_income_report" in tool_names
+    assert "monthly_income_report" not in tool_names
     assert "option_performance_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
@@ -35,7 +35,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
     assert "portfolio_query" in tool_names
-    assert "portfolio_capital_bridge" in tool_names
+    assert "portfolio_capital_bridge" not in tool_names
     assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
@@ -83,13 +83,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert portfolio_query["safe_default_input"] == {"view": "health"}
     assert "view" in portfolio_query["input_schema"]
     assert "url" not in portfolio_query["input_schema"]
-    portfolio_bridge = next(item for item in spec["tools"] if item["name"] == "portfolio_capital_bridge")
-    assert portfolio_bridge["risk_level"] == "read_only"
-    assert portfolio_bridge["requires_confirm"] is False
-    assert portfolio_bridge["side_effects"] == []
-    assert portfolio_bridge["safe_default_input"] == {}
-    assert set(portfolio_bridge["input_json_schema"]["required"]) == {"period", "as_of_month", "accounts"}
-    assert "url" not in portfolio_bridge["input_schema"]
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -97,10 +90,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
-    income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
-    assert income_report["risk_level"] == "read_only"
-    assert income_report["requires_confirm"] is False
-    assert "month" in income_report["input_schema"]
     performance_report = next(item for item in spec["tools"] if item["name"] == "option_performance_report")
     assert performance_report["risk_level"] == "read_only"
     assert performance_report["requires_confirm"] is False
@@ -197,7 +186,7 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "get_close_advice",
         "candidate_rank_explain",
         "candidate_filter_explain",
-        "monthly_income_report",
+        "option_performance_report",
         "option_positions_read",
         "close_advice_read",
         "preview_notification",
@@ -222,10 +211,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     spec = build_spec()
     tools = {str(item.get("name")): item for item in spec.get("tools", [])}
 
-    assert tools["monthly_income_report"]["output_contract"] == {
-        "schema_version": "monthly_income_report.output",
-        "payload_dependent": True,
-    }
     assert tools["option_positions_read"]["output_contract"] == {
         "schema_version": "option_positions_read.output",
         "payload_dependent": True,
@@ -241,9 +226,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
         "freshness.status",
         "freshness.observed_at",
     ]
-    assert tools["portfolio_capital_bridge"]["output_contract"]["schema_version"] == "portfolio.capital_bridge.v1"
-    assert "accounts[].steps" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
-    assert "fallback_text" in tools["portfolio_capital_bridge"]["output_contract"]["fact_fields"]
     assert tools["preview_notification"]["input_schema"]["render_style"]["enum"] == ["compact", "legacy"]
     assert "renderer" in tools["preview_notification"]["output_contract"]["fact_fields"]
     assert "authority" in tools["preview_notification"]["output_contract"]["fact_fields"]
@@ -258,23 +240,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert positions_contract["stable_order"] == "expiration_asc_missing_last"
     assert "rows[].contracts_open" in positions_contract["fact_fields"]
 
-    income = get_tool_definition("monthly_income_report")
-    assert income is not None
-    income_contract = income.resolve_output_contract({})
-    assert income_contract["schema_version"] == "monthly_income_report.output.v2"
-    assert income_contract["primary_rows"] == "return_summary"
-    assert "row_count_field" not in income_contract
-    assert income_contract["fact_fields"].index("return_summary[].realized_pnl_cny") < income_contract[
-        "fact_fields"
-    ].index("return_summary[].premium_income_cny")
-    assert income_contract["fact_fields"].index("return_summary[].premium_income_cny") < income_contract[
-        "fact_fields"
-    ].index("return_summary[].net_income_cny")
-    assert "legacy option-cashflow metric" in income.description
-    assert "must not be added" in income.description
-    assert "diagnostics[].income_amount_status" in income_contract["fact_fields"]
-    assert "diagnostics[].position_lot_snapshots_count" in income_contract["fact_fields"]
-    assert "diagnostics[].missing_fields" in income_contract["missing_data_fields"]
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
     assert assigned_stock_contract["schema_version"] == "option_positions_read.assigned_stock_output.v2"
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
@@ -289,16 +254,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
     assert list_wrapped_assigned_stock_contract == assigned_stock_contract
 
-    income = get_tool_definition("monthly_income_report")
-    assert income is not None
-    detail_contract = income.resolve_output_contract({"include_rows": True})
-    assert detail_contract["schema_version"] == "monthly_income_report.detail_output.v3"
-    assert detail_contract["primary_rows"] == "return_summary"
-    assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
-    assert "assignment_lifecycle_rows[].lifecycle_pnl_net" in detail_contract["fact_fields"]
-    assert "assignment_lifecycle_rows[].capital_days" in detail_contract["fact_fields"]
-    assert "assignment_lifecycle_rows[].fee_evidence" in detail_contract["fact_fields"]
-    assert "lifecycle_efficiency_summary[].annualized_capital_efficiency" in detail_contract["fact_fields"]
 
     close_advice = get_tool_definition("close_advice_read")
     assert close_advice is not None
@@ -368,7 +323,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "portfolio_query" in PURE_READ_TOOLS
-    assert "portfolio_capital_bridge" in PURE_READ_TOOLS
+    assert "portfolio_capital_bridge" not in PURE_READ_TOOLS
     assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
@@ -611,7 +566,8 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     payload = json.loads(p.stdout)
     assert payload["name"] == "options-monitor-local-tools"
     assert any(str(x.get("name")) == "query_cash_headroom" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "monthly_income_report" for x in payload.get("tools", []))
+    assert not any(str(x.get("name")) == "monthly_income_report" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "option_performance_report" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "option_positions_read" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "config_validate" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "runtime_runs" for x in payload.get("tools", []))

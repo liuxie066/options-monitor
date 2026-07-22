@@ -54,7 +54,6 @@ def test_portfolio_tools_share_one_pure_read_toolset() -> None:
         "portfolio_query",
         "portfolio_pnl_bridge",
         "portfolio_cash_bridge",
-        "portfolio_capital_bridge",
     )
 
 
@@ -249,152 +248,14 @@ def _option_performance(account: str, *, end_date: str = "2026-07-16") -> dict:
     }
 
 
-def test_portfolio_capital_bridge_reads_capital_facts_endpoint(monkeypatch) -> None:
-    seen = {}
-
-    def fake_urlopen(request, timeout):
-        seen["request"] = request
-        seen["timeout"] = timeout
-        return _Response(_bridge_facts("lx"))
-
-    monkeypatch.delenv(portfolio.SERVICE_URL_ENV, raising=False)
-    monkeypatch.setattr(portfolio.urllib.request, "urlopen", fake_urlopen)
-
-    result = portfolio._read_capital_facts(account="lx", period="mtd", as_of_month="2026-07")
-
-    parsed = urlsplit(seen["request"].full_url)
-    assert parsed.path == "/analysis/capital-facts"
-    assert parse_qs(parsed.query) == {"account": ["lx"], "period": ["mtd"], "as_of_month": ["2026-07"]}
-    assert seen["request"].get_method() == "GET"
-    assert seen["timeout"] == 30.0
-    assert result["status"] == "ok"
 
 
-def test_portfolio_capital_bridge_is_pure_read_and_requires_explicit_scope() -> None:
-    definition = get_tool_definition("portfolio_capital_bridge")
-
-    assert definition is not None
-    assert definition.is_pure_read() is True
-    assert definition.side_effects == ()
-    assert definition.requires_confirm is False
-    assert definition.safe_default_input == {}
-    schema = definition.input_json_schema()
-    assert schema["required"] == ["period", "as_of_month", "accounts"]
-    assert "url" not in schema["properties"]
 
 
-def test_portfolio_capital_bridge_loads_shared_ledger_once_and_reports_once_per_end_date(monkeypatch) -> None:
-    definition = get_tool_definition("portfolio_capital_bridge")
-    assert definition is not None
-    calls: list[tuple] = []
-    inputs = {
-        "records": [{"fields": {"account": "lx"}}, {"fields": {"account": "sy"}}],
-        "trade_events": [{"account": "lx"}, {"account": "sy"}],
-        "assigned_stock_events": None,
-        "broker": "futu",
-        "rates": {"rates": {"USDCNY": 7.2}},
-    }
-
-    def fake_load(payload, **_kwargs):
-        calls.append(("load", payload))
-        return inputs, ["loader warning"], {"data_config": ".../portfolio.runtime.json"}
-
-    def fake_facts(*, account, period, as_of_month):
-        calls.append(("facts", account, period, as_of_month))
-        return _bridge_facts(account)
-
-    def fake_report(records, **kwargs):
-        calls.append(("report", records, kwargs))
-        return {
-            "return_summary": [
-                {"month": "2026-07", "account": "lx", "net_income_cny": 40.0},
-                {"month": "2026-07", "account": "sy", "net_income_cny": 10.0},
-            ],
-            "warnings": ["report warning"],
-        }
-
-    monkeypatch.setattr(portfolio, "load_monthly_income_inputs", fake_load)
-    monkeypatch.setattr(portfolio, "_read_capital_facts", fake_facts)
-    monkeypatch.setattr(portfolio, "build_monthly_income_report", fake_report)
-
-    data, warnings, meta = definition.call(
-        {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx", "sy"]}
-    )
-
-    assert calls[0] == ("load", {"config_key": "us"})
-    assert [item for item in calls if item[0] == "facts"] == [
-        ("facts", "lx", "mtd", "2026-07"),
-        ("facts", "sy", "mtd", "2026-07"),
-    ]
-    report_calls = [item for item in calls if item[0] == "report"]
-    assert len(report_calls) == 1
-    assert report_calls[0][2]["as_of_ms"] == portfolio.beijing_end_of_day_ms("2026-07-16")
-    assert report_calls[0][2]["trade_events"] is inputs["trade_events"]
-    assert data["status"] == "ok"
-    assert data["source"]["option_cash"]["runtime_config_key"] == "us"
-    assert data["source"]["option_cash"]["shared_ledger_loads"] == 1
-    assert warnings == ["loader warning", "2026-07-16: report warning"]
-    assert meta == {"data_config": ".../portfolio.runtime.json"}
 
 
-def test_portfolio_capital_bridge_runs_separate_in_memory_reports_for_mismatched_end_dates(monkeypatch) -> None:
-    definition = get_tool_definition("portfolio_capital_bridge")
-    assert definition is not None
-    cutoffs: list[int] = []
-
-    monkeypatch.setattr(
-        portfolio,
-        "load_monthly_income_inputs",
-        lambda payload, **_kwargs: (
-            {
-                "records": [],
-                "trade_events": [{"account": "lx"}, {"account": "sy"}],
-                "assigned_stock_events": None,
-                "broker": "futu",
-                "rates": {},
-            },
-            [],
-            {},
-        ),
-    )
-    monkeypatch.setattr(
-        portfolio,
-        "_read_capital_facts",
-        lambda *, account, **_kwargs: _bridge_facts(account, end_date="2026-07-16" if account == "lx" else "2026-07-15"),
-    )
-
-    def fake_report(_records, **kwargs):
-        cutoffs.append(kwargs["as_of_ms"])
-        return {"return_summary": [], "warnings": []}
-
-    monkeypatch.setattr(portfolio, "build_monthly_income_report", fake_report)
-
-    data, _, _ = definition.call(
-        {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx", "sy"]}
-    )
-
-    assert sorted(cutoffs) == sorted(
-        [portfolio.beijing_end_of_day_ms("2026-07-15"), portfolio.beijing_end_of_day_ms("2026-07-16")]
-    )
-    assert data["combined"]["status"] == "unavailable"
-    assert data["combined"]["reason"] == "account_end_date_mismatch"
 
 
-def test_portfolio_capital_bridge_rejects_endpoint_fields_and_missing_required_input() -> None:
-    definition = get_tool_definition("portfolio_capital_bridge")
-    assert definition is not None
-
-    with pytest.raises(AgentToolError, match="required property"):
-        definition.call({"period": "mtd", "as_of_month": "2026-07"})
-    with pytest.raises(AgentToolError, match="endpoint fields"):
-        definition.call(
-            {
-                "period": "mtd",
-                "as_of_month": "2026-07",
-                "accounts": ["lx"],
-                "service_url": "http://127.0.0.1:9999",
-            }
-        )
 
 
 def test_portfolio_cash_bridge_reads_cash_facts_endpoint(monkeypatch) -> None:
@@ -501,11 +362,3 @@ def test_cash_facts_404_returns_structured_unavailable_without_option_fallback(m
     assert data["combined"]["reason"] == "account_bridge_unavailable"
     assert warnings == []
     assert meta == {}
-
-
-def test_legacy_capital_bridge_is_explicitly_deprecated() -> None:
-    definition = get_tool_definition("portfolio_capital_bridge")
-
-    assert definition is not None
-    assert "DEPRECATED" in definition.description
-    assert "deprecated" in definition.capabilities

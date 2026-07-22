@@ -166,67 +166,6 @@ PERFORMANCE_COMPONENT_FIELDS: tuple[str, ...] = (
 )
 
 
-RETURN_SUMMARY_FIELDS: tuple[str, ...] = (
-    "month",
-    "account",
-    "realized_pnl_cny",
-    "realized_pnl_by_ccy",
-    "realized_return_rate",
-    "annualized_realized_return_rate",
-    "premium_income_cny",
-    "premium_income_by_ccy",
-    "premium_return_rate",
-    "cash_secured_cny",
-    "cash_secured_by_ccy",
-    "net_income_cny",
-    "net_income_by_ccy",
-    "net_return_rate",
-    "annualized_net_return_rate",
-    "annualized_basis_days",
-    "return_basis",
-    "calculation_method",
-)
-
-
-COMBINED_RETURN_SUMMARY_FIELDS: tuple[str, ...] = (
-    "month",
-    "account",
-    "account_scope",
-    "accounts",
-    "realized_pnl_cny",
-    "realized_pnl_by_ccy",
-    "realized_return_rate",
-    "annualized_realized_return_rate",
-    "premium_income_cny",
-    "premium_income_by_ccy",
-    "premium_return_rate",
-    "cash_secured_cny",
-    "cash_secured_by_ccy",
-    "net_income_cny",
-    "net_income_by_ccy",
-    "net_return_rate",
-    "annualized_net_return_rate",
-    "annualized_basis_days",
-    "return_basis",
-    "calculation_method",
-)
-
-
-ACCOUNT_MONTHLY_COMPONENT_FIELDS: tuple[str, ...] = (
-    "month",
-    "account",
-    "component",
-    "component_label",
-    "component_order",
-    "amount_cny",
-    "amount_by_ccy",
-    "source_view",
-    "source_field",
-    "included_in_net_income",
-    "calculation_method",
-)
-
-
 ASSIGNED_STOCK_POSITION_PNL_FIELDS: tuple[str, ...] = (
     "account",
     "symbol",
@@ -317,7 +256,7 @@ EXPIRATION_RISK_BUCKET_FIELDS: tuple[str, ...] = (
 )
 
 
-SYMBOL_INCOME_ATTRIBUTION_FIELDS: tuple[str, ...] = (
+SYMBOL_PERFORMANCE_ATTRIBUTION_FIELDS: tuple[str, ...] = (
     "month",
     "account",
     "symbol",
@@ -582,7 +521,6 @@ def _default_field_meta(field: str, *, source: str, freshness: str) -> dict[str,
         or name.endswith("_amount")
         or name.endswith("_pnl")
         or name.endswith("_premium")
-        or "income" in name
         or "cashflow" in name
         or name in {"cash_secured_cny"}
     ):
@@ -604,7 +542,7 @@ def _default_field_meta(field: str, *, source: str, freshness: str) -> dict[str,
         "sell_call_min_strike",
     }:
         return _field_meta("money", aggregation="none", source=source, freshness=freshness, currency="currency field")
-    if name.endswith("_enabled") or name == "included_in_net_income":
+    if name.endswith("_enabled"):
         return _field_meta("status", aggregation="group_only", source=source, freshness=freshness)
     if name in {
         "status",
@@ -660,79 +598,6 @@ def _build_view_specs(raw_specs: dict[str, dict[str, Any]]) -> dict[str, dict[st
         spec["field_semantics"] = field_semantics
         specs[name] = spec
     return specs
-
-
-_RETURN_FIELD_OVERRIDES: dict[str, dict[str, Any]] = {
-    "cash_secured_cny": {
-        "formula": "current_open_cash_secured converted to CNY",
-        "aggregation": "sum",
-        "currency": "CNY",
-        "metric_role": "collateral_basis",
-        "profit_metric": False,
-    },
-    "net_income_cny": {
-        "formula": "period net cashflow less assignment-stock settlement cashflow, converted to CNY",
-        "aggregation": "sum",
-        "currency": "CNY",
-        "metric_role": "legacy_option_cashflow",
-        "legacy": True,
-        "profit_metric": False,
-        "do_not": ["describe as profit or PnL"],
-    },
-    "realized_pnl_cny": {
-        "formula": "realized option lifecycle PnL before fees, converted to CNY",
-        "aggregation": "sum",
-        "currency": "CNY",
-        "metric_role": "primary_realized_option_pnl",
-        "gross_before_fees": True,
-        "assigned_stock_pnl_included": False,
-    },
-    "premium_income_cny": {
-        "formula": "sell-open option premium converted to CNY",
-        "aggregation": "sum",
-        "currency": "CNY",
-        "metric_role": "premium_activity",
-        "profit_metric": False,
-        "do_not": ["add to realized_pnl_cny"],
-    },
-    "net_return_rate": {
-        "formula": "net_income_cny / cash_secured_cny",
-        "aggregation": "weighted_recompute",
-        "metric_role": "legacy_cashflow_ratio",
-        "legacy": True,
-        "profit_metric": False,
-        "do_not": ["avg", "sum", "describe as monthly investment return"],
-    },
-    "realized_return_rate": {
-        "formula": "realized_pnl_cny / cash_secured_cny",
-        "aggregation": "weighted_recompute",
-        "metric_role": "primary_realized_option_return",
-        "gross_before_fees": True,
-        "do_not": ["avg", "sum"],
-    },
-    "premium_return_rate": {
-        "formula": "premium_income_cny / cash_secured_cny",
-        "aggregation": "weighted_recompute",
-        "metric_role": "premium_activity_ratio",
-        "profit_metric": False,
-        "do_not": ["avg", "sum"],
-    },
-    "annualized_net_return_rate": {
-        "formula": "net_return_rate * 365 / annualized_basis_days",
-        "aggregation": "weighted_recompute",
-        "metric_role": "legacy_cashflow_ratio",
-        "legacy": True,
-        "profit_metric": False,
-        "do_not": ["avg", "sum", "describe as annualized investment return"],
-    },
-    "annualized_realized_return_rate": {
-        "formula": "realized_return_rate * 365 / annualized_basis_days",
-        "aggregation": "weighted_recompute",
-        "metric_role": "primary_realized_option_return",
-        "gross_before_fees": True,
-        "do_not": ["avg", "sum"],
-    },
-}
 
 
 VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
@@ -798,169 +663,6 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "freshness": "ledger_and_evidence_snapshot",
         "recommended_filters": ("month", "account", "component", "metric_status"),
         "safe_join_keys": ("month", "account"),
-    },
-    "account_monthly_performance": {
-        "description": "account-level monthly option performance: realized_pnl is the primary gross profit metric, premium is activity, and net_income is legacy cashflow",
-        "fields": RETURN_SUMMARY_FIELDS,
-        "primary_metric": "realized_pnl_cny",
-        "row_grain": "month + account",
-        "primary_keys": ("month", "account"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.breakdowns.monthly",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account"),
-        "safe_join_keys": ("month", "account"),
-        "alias_of": "option_monthly_performance",
-        "_field_semantics": _RETURN_FIELD_OVERRIDES,
-    },
-    "account_monthly_income_components": {
-        "description": "deprecated compatibility rows projected from the new activity, cash, and PnL namespaces; components are parallel and non-additive",
-        "fields": ACCOUNT_MONTHLY_COMPONENT_FIELDS,
-        "status": "deprecated_alias",
-        "additivity": "non_additive",
-        "row_grain": "month + account + component",
-        "primary_keys": ("month", "account", "component"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report activity/cash/PnL namespaces",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "component"),
-        "safe_join_keys": ("month", "account"),
-        "_field_semantics": {
-            "amount_cny": {
-                "type": "money",
-                "currency": "CNY",
-                "aggregation": "sum_within_same_component_only",
-                "source": "option_performance_report",
-                "freshness": "snapshot",
-                "do_not": ["sum across component values"],
-            },
-            "included_in_net_income": {
-                "type": "status",
-                "aggregation": "group_only",
-                "source": "option_performance_report",
-                "freshness": "snapshot",
-                "legacy": True,
-                "do_not": ["use as proof that components are additive"],
-            },
-        },
-    },
-    "monthly_income_summary": {
-        "description": "monthly raw cashflow, gross realized option PnL, and premium activity by month/account/currency",
-        "fields": (
-            "month",
-            "account",
-            "currency",
-            "net_cashflow_gross",
-            "realized_pnl_gross",
-            "premium_received_gross",
-            "assignment_stock_net_cashflow_gross",
-        ),
-        "row_grain": "month + account + currency",
-        "primary_keys": ("month", "account", "currency"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.breakdowns.monthly",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "currency"),
-        "safe_join_keys": ("month", "account", "currency"),
-    },
-    "monthly_income_return_summary": {
-        "description": "account-level monthly option performance with primary gross realized PnL, premium activity, collateral basis, and legacy cashflow fields",
-        "fields": RETURN_SUMMARY_FIELDS,
-        "primary_metric": "realized_pnl_cny",
-        "row_grain": "month + account",
-        "primary_keys": ("month", "account"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.breakdowns.monthly",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account"),
-        "safe_join_keys": ("month", "account"),
-        "_field_semantics": _RETURN_FIELD_OVERRIDES,
-    },
-    "monthly_income_combined_return_summary": {
-        "description": "all-account monthly option performance aggregated by month; realized PnL is primary and net_income remains legacy cashflow",
-        "fields": COMBINED_RETURN_SUMMARY_FIELDS,
-        "primary_metric": "realized_pnl_cny",
-        "row_grain": "month + account_scope",
-        "primary_keys": ("month", "account_scope"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.combined_return_summary",
-        "freshness": "snapshot",
-        "recommended_filters": ("month",),
-        "safe_join_keys": ("month",),
-        "_field_semantics": _RETURN_FIELD_OVERRIDES,
-    },
-    "monthly_income_cashflow_rows": {
-        "description": "cashflow detail rows from trade events",
-        "fields": (
-            "month",
-            "account",
-            "symbol",
-            "option_type",
-            "trade_action",
-            "contracts",
-            "currency",
-            "net_cashflow_gross",
-            "strike",
-            "expiration_ymd",
-        ),
-        "row_grain": "month + account + trade event",
-        "primary_keys": ("month", "account", "symbol", "option_type", "trade_action", "expiration_ymd", "strike"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.cashflow_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "symbol", "currency"),
-        "safe_join_keys": ("month", "account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
-    },
-    "monthly_income_realized_rows": {
-        "description": "realized PnL detail rows by close/expiry/assignment/exercise",
-        "fields": (
-            "month",
-            "account",
-            "symbol",
-            "option_type",
-            "close_type",
-            "contracts_closed",
-            "currency",
-            "realized_gross",
-            "strike",
-            "expiration_ymd",
-        ),
-        "row_grain": "month + account + realized event",
-        "primary_keys": ("month", "account", "symbol", "option_type", "close_type", "expiration_ymd", "strike"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.realized_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "symbol", "currency"),
-        "safe_join_keys": ("month", "account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
-    },
-    "monthly_income_premium_rows": {
-        "description": "premium attribution rows from sell-open option events",
-        "fields": (
-            "month",
-            "account",
-            "symbol",
-            "option_type",
-            "contracts",
-            "currency",
-            "premium_received_gross",
-            "strike",
-            "expiration_ymd",
-        ),
-        "row_grain": "month + account + premium event",
-        "primary_keys": ("month", "account", "symbol", "option_type", "expiration_ymd", "strike"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.premium_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "symbol", "currency"),
-        "safe_join_keys": ("month", "account", "symbol", "currency", "option_type", "strike", "expiration_ymd"),
     },
     "assigned_stock_position_pnl": {
         "description": "semantic assigned-stock lot PnL view for current holding, realized sale, and lifecycle PnL analysis",
@@ -1067,9 +769,9 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "recommended_filters": ("account", "expiration_bucket", "currency"),
         "safe_join_keys": ("account", "currency"),
     },
-    "symbol_income_attribution": {
-        "description": "symbol-level income attribution rows by month/account/component",
-        "fields": SYMBOL_INCOME_ATTRIBUTION_FIELDS,
+    "symbol_performance_attribution": {
+        "description": "symbol-level performance attribution rows by month/account/component",
+        "fields": SYMBOL_PERFORMANCE_ATTRIBUTION_FIELDS,
         "row_grain": "month + account + symbol + component + currency",
         "primary_keys": ("month", "account", "symbol", "component", "currency"),
         "time_grain": "month",
@@ -1256,20 +958,12 @@ _PERFORMANCE_SOURCE_VIEWS: set[str] = {
     "option_activity_components",
     "option_cash_components",
     "option_pnl_components",
-    "account_monthly_performance",
-    "account_monthly_income_components",
-    "monthly_income_summary",
-    "monthly_income_return_summary",
-    "monthly_income_combined_return_summary",
-    "monthly_income_cashflow_rows",
-    "monthly_income_realized_rows",
-    "monthly_income_premium_rows",
     "assigned_stock_position_pnl",
     "assigned_stock_sale_events",
     "assigned_stock_lifecycle",
     "assigned_stock_sales",
     "assigned_stock_review",
-    "symbol_income_attribution",
+    "symbol_performance_attribution",
 }
 _POSITION_SOURCE_VIEWS: set[str] = {
     "position_lots",
@@ -1374,7 +1068,6 @@ def _analysis_catalog_tool(
             "primary_profit": "pnl.period_total_net for period profit; pnl.realized_net for realized-only questions",
             "cash_movement": "cash.total_cash_change_net and option_cash_components; never infer cash as PnL residual",
             "premium_activity": "activity.premium_collected_gross; activity only, never add to PnL",
-            "legacy_aliases": "monthly_income_* and net_income_* remain deprecated compatibility names",
             "assigned_stock": "assignment economics are already included in supported PnL/cash facts; inspect lifecycle views for lot detail",
         },
         "sql_rules": {
@@ -1389,10 +1082,6 @@ def _analysis_catalog_tool(
         "anti_patterns": [
             "Do not invent unlisted columns such as net_cashflow, total_return, return_rate, or open_basis_pnl.",
             "Do not subtract premium or realized PnL from cash to manufacture a residual component.",
-            "Do not average or sum *_return_rate fields directly; recompute weighted rates from money numerator and cash_secured_cny.",
-            "Do not describe net_income_* or net_return_rate as profit or investment return; they are legacy cashflow metrics.",
-            "Do not add premium_income_* to realized_pnl_*; premium is activity attribution, not extra profit.",
-            "Do not sum account_monthly_income_components across component values; that view is legacy and non-additive.",
             "Do not join views unless the join fields are listed in each view's safe_join_keys.",
         ],
     }, [], {"config_path": mask_path(config_path)}
@@ -1497,7 +1186,7 @@ def _analysis_views_mode_result(
     limit: int,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     view_names = sorted(views)
-    semantic_warnings = _income_metric_semantic_warnings(sql="", views_used=view_names)
+    semantic_warnings = _performance_metric_semantic_warnings(sql="", views_used=view_names)
     warnings.extend(warning for warning in semantic_warnings if warning not in warnings)
     view_datasets: dict[str, dict[str, Any]] = {}
     preview_rows: list[dict[str, Any]] = []
@@ -1979,72 +1668,6 @@ def _performance_component_rows(
     return rows
 
 
-def _legacy_monthly_performance_alias_rows(
-    monthly_rows: list[dict[str, Any]],
-    *,
-    combined: bool = False,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in monthly_rows:
-        row = {
-            "month": item.get("month"),
-            "account": item.get("account"),
-            "realized_pnl_cny": item.get("realized_pnl_gross_cny"),
-            "realized_pnl_by_ccy": item.get("realized_pnl_gross_by_ccy") or {},
-            "realized_return_rate": None,
-            "annualized_realized_return_rate": None,
-            "premium_income_cny": item.get("premium_collected_cny"),
-            "premium_income_by_ccy": item.get("premium_collected_by_ccy") or {},
-            "premium_return_rate": None,
-            "cash_secured_cny": None,
-            "cash_secured_by_ccy": {},
-            "net_income_cny": item.get("option_trade_cash_cny"),
-            "net_income_by_ccy": item.get("option_trade_cash_by_ccy") or {},
-            "net_return_rate": None,
-            "annualized_net_return_rate": None,
-            "annualized_basis_days": None,
-            "return_basis": "deprecated_alias_no_generic_return",
-            "calculation_method": "deprecated_alias_over_option_performance_report_v1",
-        }
-        if combined:
-            row.update(
-                {
-                    "account": "all",
-                    "account_scope": "all",
-                    "accounts": item.get("accounts") or [],
-                }
-            )
-        rows.append(row)
-    return rows
-
-
-def _legacy_monthly_summary_rows(monthly_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in monthly_rows:
-        currencies = sorted(
-            {
-                *[str(key) for key in (item.get("option_trade_cash_by_ccy") or {})],
-                *[str(key) for key in (item.get("realized_pnl_gross_by_ccy") or {})],
-                *[str(key) for key in (item.get("premium_collected_by_ccy") or {})],
-                *[str(key) for key in (item.get("stock_settlement_cash_by_ccy") or {})],
-            }
-        )
-        for currency in currencies:
-            rows.append(
-                {
-                    "month": item.get("month"),
-                    "account": item.get("account"),
-                    "currency": currency,
-                    "net_cashflow_gross": (item.get("option_trade_cash_by_ccy") or {}).get(currency),
-                    "realized_pnl_gross": (item.get("realized_pnl_gross_by_ccy") or {}).get(currency),
-                    "premium_received_gross": (item.get("premium_collected_by_ccy") or {}).get(currency),
-                    "assignment_stock_net_cashflow_gross": (item.get("stock_settlement_cash_by_ccy") or {}).get(currency),
-                    "deprecated": True,
-                }
-            )
-    return rows
-
-
 def _fact_month(row: dict[str, Any]) -> str:
     try:
         timestamp_ms = int(row.get("effective_at_ms") or 0)
@@ -2053,63 +1676,6 @@ def _fact_month(row: dict[str, Any]) -> str:
     if timestamp_ms <= 0:
         return ""
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
-
-
-def _legacy_fact_rows(reports: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {"cashflow": [], "realized": [], "premium": []}
-    quantity_by_event: dict[tuple[str, str], int] = {}
-    all_rows = [row for report in reports for row in report.get("rows") or [] if isinstance(row, dict)]
-    for row in all_rows:
-        kind = str(row.get("fact_kind") or "")
-        if kind in {"contracts_opened", "contracts_closed"}:
-            quantity_by_event[(str(row.get("source_event_id") or ""), kind)] = int(row.get("quantity") or 0)
-    for row in all_rows:
-        kind = str(row.get("fact_kind") or "")
-        common = {
-            "month": _fact_month(row),
-            "account": row.get("account"),
-            "symbol": row.get("symbol"),
-            "currency": row.get("currency"),
-            "record_id": row.get("source_event_id"),
-            "deprecated": True,
-        }
-        event_id = str(row.get("source_event_id") or "")
-        if kind == "option_trade_cash_gross":
-            out["cashflow"].append(
-                {
-                    **common,
-                    "option_type": None,
-                    "trade_action": None,
-                    "contracts": quantity_by_event.get((event_id, "contracts_opened")) or quantity_by_event.get((event_id, "contracts_closed")),
-                    "net_cashflow_gross": row.get("amount"),
-                    "strike": None,
-                    "expiration_ymd": None,
-                }
-            )
-        elif kind == "realized_gross":
-            out["realized"].append(
-                {
-                    **common,
-                    "option_type": None,
-                    "close_type": None,
-                    "contracts_closed": quantity_by_event.get((event_id, "contracts_closed")),
-                    "realized_gross": row.get("amount"),
-                    "strike": None,
-                    "expiration_ymd": None,
-                }
-            )
-        elif kind == "premium_collected_gross":
-            out["premium"].append(
-                {
-                    **common,
-                    "option_type": None,
-                    "contracts": quantity_by_event.get((event_id, "contracts_opened")),
-                    "premium_received_gross": row.get("amount"),
-                    "strike": None,
-                    "expiration_ymd": None,
-                }
-            )
-    return out
 
 
 def _symbol_performance_attribution_rows(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2256,14 +1822,9 @@ def _materialize_views(
 
     period_rows = [_performance_summary_row(performance_report)] if performance_report else []
     monthly_rows = _performance_monthly_rows(account_performance_reports)
-    aggregate_monthly_rows = _performance_monthly_rows([performance_report], aggregate=True) if performance_report else []
     activity_rows = _performance_component_rows(period_rows, monthly_rows, namespace="activity")
     cash_rows = _performance_component_rows(period_rows, monthly_rows, namespace="cash")
     pnl_rows = _performance_component_rows(period_rows, monthly_rows, namespace="pnl")
-    legacy_monthly_rows = _legacy_monthly_performance_alias_rows(monthly_rows)
-    legacy_combined_rows = _legacy_monthly_performance_alias_rows(aggregate_monthly_rows, combined=True)
-    legacy_summary_rows = _legacy_monthly_summary_rows(monthly_rows)
-    legacy_fact_views = _legacy_fact_rows(account_performance_reports)
     lifecycle = performance_report.get("assignment_lifecycle") if isinstance(performance_report.get("assignment_lifecycle"), dict) else {}
     open_option_exposure_rows = _open_option_exposure_rows(position_data.get("rows"))
     quote_rows = _quote_freshness_rows(
@@ -2276,16 +1837,6 @@ def _materialize_views(
         "option_activity_components": _normalize_rows(activity_rows),
         "option_cash_components": _normalize_rows(cash_rows),
         "option_pnl_components": _normalize_rows(pnl_rows),
-        "account_monthly_performance": _normalize_rows(legacy_monthly_rows),
-        "account_monthly_income_components": _normalize_rows(
-            _account_monthly_income_component_rows(legacy_monthly_rows, legacy_summary_rows)
-        ),
-        "monthly_income_summary": _normalize_rows(legacy_summary_rows),
-        "monthly_income_return_summary": _normalize_rows(legacy_monthly_rows),
-        "monthly_income_combined_return_summary": _normalize_rows(legacy_combined_rows),
-        "monthly_income_cashflow_rows": _normalize_rows(legacy_fact_views["cashflow"]),
-        "monthly_income_realized_rows": _normalize_rows(legacy_fact_views["realized"]),
-        "monthly_income_premium_rows": _normalize_rows(legacy_fact_views["premium"]),
         "assigned_stock_position_pnl": _normalize_rows(
             _assigned_stock_position_pnl_rows(lifecycle.get("ending_lots"))
         ),
@@ -2297,7 +1848,7 @@ def _materialize_views(
         "assigned_stock_review": _normalize_rows(lifecycle.get("review")),
         "open_option_exposure": _normalize_rows(open_option_exposure_rows),
         "expiration_risk_buckets": _normalize_rows(_expiration_risk_bucket_rows(open_option_exposure_rows)),
-        "symbol_income_attribution": _normalize_rows(
+        "symbol_performance_attribution": _normalize_rows(
             _symbol_performance_attribution_rows(account_performance_reports)
         ),
         "strategy_config_by_symbol_account": _normalize_rows(_strategy_config_by_symbol_account_rows(symbol_rows)),
@@ -2313,136 +1864,6 @@ def _materialize_views(
         "symbol_strategy_config": _normalize_rows(symbol_rows),
     }
     return {view_name: rows for view_name, rows in materialized.items() if view_name in requested}
-
-
-def _account_monthly_income_component_rows(return_rows: Any, summary_rows: Any) -> list[dict[str, Any]]:
-    if not isinstance(return_rows, list):
-        return []
-    settlement_cash = _assignment_stock_cashflow_by_month_account(summary_rows)
-    rows: list[dict[str, Any]] = []
-    for raw_row in return_rows:
-        if not isinstance(raw_row, dict):
-            continue
-        month = str(raw_row.get("month") or "").strip()
-        account = str(raw_row.get("account") or "").strip()
-        if not month or not account:
-            continue
-        component_inputs = [
-            (
-                "premium_activity",
-                "premium activity",
-                10,
-                raw_row.get("premium_income_cny"),
-                raw_row.get("premium_income_by_ccy"),
-                "activity.premium_collected_gross",
-                "premium activity from the option-performance activity namespace",
-            ),
-            (
-                "option_trade_cash",
-                "option trade cash",
-                20,
-                raw_row.get("net_income_cny"),
-                raw_row.get("net_income_by_ccy"),
-                "cash.option_trade_cash_gross",
-                "option trade cash from the option-performance cash namespace",
-            ),
-            (
-                "realized_pnl_gross",
-                "realized PnL gross",
-                30,
-                raw_row.get("realized_pnl_cny"),
-                raw_row.get("realized_pnl_by_ccy"),
-                "pnl.realized_gross",
-                "realized gross PnL from the option-performance PnL namespace",
-            ),
-        ]
-        for component, label, order, amount_cny, amount_by_ccy, source_field, method in component_inputs:
-            if amount_cny is None and not _dict_has_amount(amount_by_ccy):
-                continue
-            rows.append(
-                _income_component_row(
-                    month=month,
-                    account=account,
-                    component=component,
-                    label=label,
-                    order=order,
-                    amount_cny=amount_cny,
-                    amount_by_ccy=amount_by_ccy,
-                    source_field=source_field,
-                    included_in_net_income=False,
-                    calculation_method=method,
-                )
-            )
-        settlement = settlement_cash.get((month, account))
-        if settlement:
-            rows.append(
-                _income_component_row(
-                    month=month,
-                    account=account,
-                    component="stock_settlement_cash",
-                    label="stock settlement principal cash",
-                    order=40,
-                    amount_cny=settlement.get("amount_cny"),
-                    amount_by_ccy=settlement.get("amount_by_ccy"),
-                    source_field="cash.stock_settlement_cash_gross",
-                    included_in_net_income=False,
-                    calculation_method="assignment/exercise settlement principal is cash movement, not PnL",
-                )
-            )
-    return rows
-
-
-def _income_component_row(
-    *,
-    month: str,
-    account: str,
-    component: str,
-    label: str,
-    order: int,
-    amount_cny: Any,
-    amount_by_ccy: Any,
-    source_field: str,
-    included_in_net_income: bool,
-    calculation_method: str,
-) -> dict[str, Any]:
-    return {
-        "month": month,
-        "account": account,
-        "component": component,
-        "component_label": label,
-        "component_order": order,
-        "amount_cny": _rounded_float_or_none(amount_cny),
-        "amount_by_ccy": amount_by_ccy if isinstance(amount_by_ccy, dict) else {},
-        "source_view": "option_performance_report",
-        "source_field": source_field,
-        "included_in_net_income": included_in_net_income,
-        "calculation_method": calculation_method,
-    }
-
-
-def _assignment_stock_cashflow_by_month_account(summary_rows: Any) -> dict[tuple[str, str], dict[str, Any]]:
-    if not isinstance(summary_rows, list):
-        return {}
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in summary_rows:
-        if not isinstance(row, dict):
-            continue
-        month = str(row.get("month") or "").strip()
-        account = str(row.get("account") or "").strip()
-        currency = str(row.get("currency") or "").strip()
-        if not month or not account:
-            continue
-        amount = _float_or_none(row.get("assignment_stock_net_cashflow_gross"))
-        amount_cny = _float_or_none(row.get("assignment_stock_net_cashflow_gross_cny"))
-        if (amount is None or abs(amount) < 0.000001) and (amount_cny is None or abs(amount_cny) < 0.000001):
-            continue
-        bucket = grouped.setdefault((month, account), {"amount_cny": 0.0, "amount_by_ccy": {}})
-        if amount_cny is not None:
-            bucket["amount_cny"] = _round_public_float(float(bucket.get("amount_cny") or 0.0) + amount_cny)
-        if currency and amount is not None:
-            amount_by_ccy = bucket.setdefault("amount_by_ccy", {})
-            amount_by_ccy[currency] = _round_public_float(float(amount_by_ccy.get(currency) or 0.0) + amount)
-    return grouped
 
 
 def _assigned_stock_position_pnl_rows(value: Any) -> list[dict[str, Any]]:
@@ -2684,83 +2105,6 @@ def _expiration_bucket_sort(bucket: str) -> int:
         "61d+": 4,
         "unknown": 5,
     }.get(bucket, 99)
-
-
-def _symbol_income_attribution_rows(*, cashflow_rows: Any, realized_rows: Any, premium_rows: Any) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    rows.extend(
-        _symbol_component_rows(
-            premium_rows,
-            component="premium_income",
-            amount_field="premium_received_gross",
-            source_view="monthly_income_premium_rows",
-        )
-    )
-    rows.extend(
-        _symbol_component_rows(
-            realized_rows,
-            component="realized_pnl",
-            amount_field="realized_gross",
-            source_view="monthly_income_realized_rows",
-        )
-    )
-    rows.extend(
-        _symbol_component_rows(
-            cashflow_rows,
-            component="net_cashflow",
-            amount_field="net_cashflow_gross",
-            source_view="monthly_income_cashflow_rows",
-        )
-    )
-    grouped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = (
-            str(row.get("month") or ""),
-            str(row.get("account") or ""),
-            str(row.get("symbol") or ""),
-            str(row.get("component") or ""),
-            str(row.get("currency") or ""),
-        )
-        bucket = grouped.setdefault(
-            key,
-            {
-                "month": key[0],
-                "account": key[1],
-                "symbol": key[2],
-                "component": key[3],
-                "currency": key[4],
-                "amount_gross": 0.0,
-                "source_view": row.get("source_view"),
-            },
-        )
-        bucket["amount_gross"] = _round_public_float(
-            float(bucket.get("amount_gross") or 0.0) + float(_float_or_none(row.get("amount_gross")) or 0.0)
-        )
-    return sorted(grouped.values(), key=lambda item: (str(item.get("month")), str(item.get("account")), str(item.get("symbol")), str(item.get("component")), str(item.get("currency"))))
-
-
-def _symbol_component_rows(value: Any, *, component: str, amount_field: str, source_view: str) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for row in value:
-        if not isinstance(row, dict):
-            continue
-        amount = _float_or_none(row.get(amount_field))
-        if amount is None:
-            continue
-        rows.append(
-            {
-                "month": row.get("month"),
-                "account": row.get("account"),
-                "symbol": row.get("symbol"),
-                "component": component,
-                "currency": row.get("currency"),
-                "amount_gross": amount,
-                "source_view": source_view,
-            }
-        )
-    return rows
 
 
 def _strategy_config_by_symbol_account_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3919,7 +3263,7 @@ def _query_explain_and_evidence(
     materialization_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     aggregations, aggregation_warnings = _query_aggregation_explain(sql=sql, views_used=views_used)
-    semantic_warnings = _income_metric_semantic_warnings(sql=sql, views_used=views_used)
+    semantic_warnings = _performance_metric_semantic_warnings(sql=sql, views_used=views_used)
     query_warnings = [*aggregation_warnings, *semantic_warnings]
     coverage = _query_coverage(rows)
     freshness = _query_freshness(views_used)
@@ -4591,7 +3935,7 @@ def _query_aggregation_explain(*, sql: str, views_used: list[str]) -> tuple[list
     return aggregations, warnings
 
 
-def _income_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list[str]:
+def _performance_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list[str]:
     def mentions(*fields: str) -> bool:
         return any(re.search(rf"(?i)\b{re.escape(field)}\b", sql) for field in fields)
 
@@ -4610,19 +3954,6 @@ def _income_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list
             "Option performance uses parallel namespaces: profit questions use PnL, cash questions use cash, "
             "and premium questions use activity; do not add or subtract them to manufacture a residual."
         )
-    if any(view.startswith("monthly_income_") or view == "account_monthly_performance" for view in views_used):
-        warnings.append(
-            "Deprecated monthly-income aliases are migration-only and project fields from option_performance_report."
-        )
-    if mentions("net_income_cny", "net_income_by_ccy"):
-        warnings.append(
-            "net_income_* is a deprecated alias for gross option trade cash; it is not profit or total cash change."
-        )
-    if mentions("net_return_rate", "annualized_net_return_rate", "realized_return_rate"):
-        warnings.append(
-            "Legacy generic return-rate aliases are unavailable under option-performance v1; use explicit "
-            "notional-days capital efficiency where present."
-        )
     if mentions("premium_income_cny", "premium_collected_cny") and mentions(
         "realized_pnl_cny",
         "realized_pnl_gross_cny",
@@ -4631,11 +3962,6 @@ def _income_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list
     ):
         warnings.append(
             "Premium is activity and PnL is profit; they overlap in lifecycle timing and must not be added."
-        )
-    if "account_monthly_income_components" in views_used:
-        warnings.append(
-            "account_monthly_income_components is a deprecated non-additive compatibility view; compare each "
-            "component separately and do not sum components into profit."
         )
     return warnings
 
@@ -4820,7 +4146,6 @@ def _preferred_unknown_column_replacements(unknown_column: str) -> list[str]:
             "total_cash_change_by_ccy",
             "option_trade_cash_cny",
             "option_trade_cash_by_ccy",
-            "net_income_cny",
         ]
     if normalized in {"returnrate", "totalreturnrate"}:
         return ["period_total_net_annualized_efficiency"]
@@ -4956,7 +4281,7 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     description=(
         "List the read-only analysis views, their fields, metric roles, source semantics, and allowed SQL rules. "
         "For profit use option PnL views, for cash use option_cash_components, and for premium use "
-        "option_activity_components. Deprecated monthly_income_* aliases remain queryable only for migration. "
+        "option_activity_components. "
         "Use this before analysis_query when the correct view or field names are not already known."
     ),
     requires=("runtime_config",),
@@ -4987,7 +4312,6 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
             "metric_policy.primary_profit",
             "metric_policy.cash_movement",
             "metric_policy.premium_activity",
-            "metric_policy.legacy_aliases",
             "sql_rules.allowed_statements[]",
             "sql_rules.writes_allowed",
         ],
@@ -5004,7 +4328,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         "or field names are uncertain. Route profit questions to option_pnl_components or "
         "option_monthly_performance, cash questions to option_cash_components, and premium questions to "
         "option_activity_components. These namespaces are parallel and must not be added or subtracted to "
-        "manufacture a residual. Deprecated monthly_income_* aliases are migration-only."
+        "manufacture a residual."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("analysis_query", "read_only", "analysis_workspace"),
