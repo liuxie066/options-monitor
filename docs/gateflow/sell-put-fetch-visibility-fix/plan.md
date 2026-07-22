@@ -3,9 +3,9 @@
 ## Gate state
 
 - Work unit: `sell-put-fetch-visibility-fix`
-- Current gate: ready-to-open-draft-PR
-- Next gate: draft PR and PR deepreview
-- Status: S1, S2, S3, and aggregate deepreview accepted; external publication pending
+- Current gate: VERSION-driven release publication
+- Next gate: remote upgrade and verification
+- Status: S1, S2, S3, and aggregate deepreview accepted; direct main publication and remote upgrade authorized by the operator on 2026-07-23
 - Artifact path: `docs/gateflow/sell-put-fetch-visibility-fix/plan.md`
 
 ## Goal and motivation
