@@ -664,6 +664,7 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "bid",
         "ask",
         "dte",
+        "position_lifecycle_state",
         "capture_ratio",
         "remaining_premium",
         "estimated_pnl_if_close_gross",

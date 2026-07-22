@@ -386,6 +386,7 @@ CLOSE_ADVICE_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "close_calibration_status",
     "close_calibration_missing",
     "dte",
+    "position_lifecycle_state",
     "strategy_family",
     "risk_model",
 )
@@ -2973,6 +2974,7 @@ def _close_advice_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
         "close_calibration_status": row.get("close_calibration_status"),
         "close_calibration_missing": row.get("close_calibration_missing"),
         "dte": row.get("dte"),
+        "position_lifecycle_state": row.get("position_lifecycle_state"),
         "strategy_family": row.get("strategy_family"),
         "risk_model": row.get("risk_model"),
     }
