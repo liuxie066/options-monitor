@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.4.4 - 2026-07-22
+
+### Changed
+- Combo Yield candidates now render their Put/Call legs directly under the title, adjacent to the premium metrics line, instead of below the event line.
+
+### Added
+- Each Combo Yield leg line shows its executable reference price when the source quote exists: the Put leg carries its bid as the sell reference and the Call leg carries its ask as the buy reference; legs without per-leg quotes stay unchanged instead of inventing prices.
+
 ## 1.4.3 - 2026-07-22
 
 ### Fixed
