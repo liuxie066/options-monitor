@@ -33,13 +33,22 @@ def test_calc_futu_hk_option_fee_scales_system_fee_by_contracts() -> None:
     assert out == 27.0
 
 
+def test_calc_futu_hk_option_fee_waives_tariff_at_exact_one_cent() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import calc_futu_hk_option_fee
+
+    out = calc_futu_hk_option_fee(0.01, contracts=3, multiplier=100, is_sell=True)
+
+    assert out == 18.0
+
+
 def test_calc_futu_us_option_fee_uses_standard_commission_and_sell_regulatory_fees() -> None:
     _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(0.5, contracts=2, multiplier=100, is_sell=True)
 
-    assert round(out, 6) == round(1.99 + 0.6 + 0.0583 + 0.01 + 0.01, 6)
+    assert round(out, 6) == round(1.99 + 0.6 + 0.026 + 0.04 + 0.36 + 0.0006 + 0.01 + 0.01, 6)
 
 
 def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_fees() -> None:
@@ -48,7 +57,16 @@ def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_
 
     out = calc_futu_us_option_fee(0.05, contracts=1, multiplier=100, is_sell=False)
 
-    assert round(out, 6) == round(1.99 + 0.3 + 0.02915, 6)
+    assert round(out, 6) == round(1.99 + 0.3 + 0.013 + 0.02 + 0.18 + 0.0003, 6)
+
+
+def test_calc_futu_us_option_fee_caps_occ_fee_per_order() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import calc_futu_us_option_fee
+
+    out = calc_futu_us_option_fee(1.0, contracts=3000, multiplier=100, is_sell=False)
+
+    assert out == round(1950.0 + 900.0 + 39.0 + 55.0 + 540.0 + 0.9, 6)
 
 
 def test_calc_futu_option_fee_requires_positive_multiplier() -> None:
@@ -70,6 +88,19 @@ def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
     out = calc_futu_option_fee("港币", 1.0, contracts=1, multiplier=100, is_sell=True)
 
     assert out == 21.0
+
+
+def test_calc_futu_option_fee_rejects_missing_or_unsupported_currency() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.fee_calc import calc_futu_option_fee
+
+    for currency in (None, "", "CNY", "EUR"):
+        try:
+            calc_futu_option_fee(currency, 1.0, contracts=1, multiplier=100, is_sell=True)
+        except ValueError as exc:
+            assert "USD or HKD" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for currency={currency!r}")
 
 
 def test_extract_actual_fees_prefers_explicit_total_then_components() -> None:
@@ -175,7 +206,7 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     out = compute_metrics(row)
 
     assert out is not None
-    assert round(out["futu_fee"], 6) == round(1.99 + 0.3 + 0.02915 + 0.01 + 0.01, 6)
+    assert round(out["futu_fee"], 6) == round(1.99 + 0.3 + 0.013 + 0.02 + 0.18 + 0.0003 + 0.01 + 0.01, 6)
     assert round(out["net_income"], 6) == round(50.0 - out["futu_fee"], 6)
 
 
