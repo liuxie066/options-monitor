@@ -5,7 +5,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import json
 import math
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
@@ -91,6 +91,7 @@ OUTPUT_COLUMNS = [
     "bid",
     "ask",
     "dte",
+    "position_lifecycle_state",
     "multiplier",
     "capture_ratio",
     "remaining_premium",
@@ -1044,14 +1045,34 @@ def _position_premium(pos: dict[str, Any]) -> float | None:
     return None
 
 
-def _calc_dte(expiration: str | None, quote: dict[str, Any] | None) -> int | None:
+def _position_lifecycle(
+    pos: dict[str, Any],
+    *,
+    business_date: date,
+) -> tuple[str, int | None]:
+    expiration = _position_expiration(pos)
+    if not expiration:
+        return "unknown", None
     try:
-        if not expiration:
-            raise ValueError("missing expiration")
         exp_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
-        return (exp_date - expiration_business_today()).days
-    except Exception:
-        return safe_int((quote or {}).get("dte"))
+    except ValueError:
+        return "unknown", None
+    dte = (exp_date - business_date).days
+    if dte < 0:
+        return "expired_open", dte
+    if dte == 0:
+        return "expiry_day", dte
+    return "active", dte
+
+
+def _calc_dte(expiration: str | None, *, business_date: date) -> int | None:
+    if not expiration:
+        return None
+    try:
+        exp_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (exp_date - business_date).days
 
 
 def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[str]]:
@@ -1075,7 +1096,12 @@ def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[st
     return None, ["missing_mid"]
 
 
-def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tuple[CloseAdviceInput, list[str]]:
+def _position_to_input(
+    pos: dict[str, Any],
+    quote: dict[str, Any] | None,
+    *,
+    business_date: date,
+) -> tuple[CloseAdviceInput, list[str]]:
     expiration = _position_expiration(pos)
     mid, quote_flags = _mid_from_quote(quote)
     return (
@@ -1091,7 +1117,7 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
             close_mid=mid,
             bid=safe_float((quote or {}).get("bid")),
             ask=safe_float((quote or {}).get("ask")),
-            dte=_calc_dte(expiration, quote),
+            dte=_calc_dte(expiration, business_date=business_date),
             multiplier=effective_multiplier(pos) or safe_float((quote or {}).get("multiplier")),
             spot=safe_float((quote or {}).get("spot")),
             currency=normalize_currency(pos.get("currency") or (quote or {}).get("currency")),
@@ -1099,6 +1125,25 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
         ),
         quote_flags,
     )
+
+
+def _yield_enhancement_long_call_metadata(pos: dict[str, Any]) -> dict[str, Any]:
+    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
+    out = {
+        "strategy_family": "combo_yield",
+        "strategy_profile": str(
+            pos.get("yield_enhancement_mode")
+            or strategy_snapshot.get("yield_enhancement_mode")
+            or ""
+        ).strip(),
+        "strategy_source": "position_snapshot",
+        "strategy_config_path": None,
+        "risk_model": "long_call_convexity",
+        "close_advice_profile": "combo_yield_long_call",
+        "close_requires_rv": False,
+    }
+    out.update(_position_strategy_metadata(pos))
+    return out
 
 
 def _evaluate_position_close_advice(
@@ -1110,7 +1155,6 @@ def _evaluate_position_close_advice(
     close_cfg: CloseAdviceConfig,
 ) -> dict[str, Any]:
     if _is_yield_enhancement_long_call_position(pos):
-        strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
         long_call_cfg_raw = (
             ((config.get("close_advice") or {}).get("long_call") if isinstance(config.get("close_advice"), dict) else None)
             if isinstance(config, dict)
@@ -1122,22 +1166,7 @@ def _evaluate_position_close_advice(
                 long_call_cfg_raw if isinstance(long_call_cfg_raw, dict) else None
             ),
         )
-        row.update(
-            {
-                "strategy_family": "combo_yield",
-                "strategy_profile": str(
-                    pos.get("yield_enhancement_mode")
-                    or strategy_snapshot.get("yield_enhancement_mode")
-                    or ""
-                ).strip(),
-                "strategy_source": "position_snapshot",
-                "strategy_config_path": None,
-                "risk_model": "long_call_convexity",
-                "close_advice_profile": "combo_yield_long_call",
-                "close_requires_rv": False,
-            }
-        )
-        row.update(_position_strategy_metadata(pos))
+        row.update(_yield_enhancement_long_call_metadata(pos))
         return row
 
     resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
@@ -1200,6 +1229,74 @@ def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _lifecycle_not_evaluable_row(
+    *,
+    inp: CloseAdviceInput,
+    pos: dict[str, Any],
+    config: dict[str, Any],
+    lifecycle_state: str,
+) -> dict[str, Any]:
+    reasons = {
+        "expiry_day": "持仓已到到期日，当前不运行常规剩余年化或凸性平仓评估",
+        "expired_open": "持仓到期日已过但仍标记为 open，需要先核对持仓生命周期；当前不请求行情",
+        "unknown": "持仓缺少可解析到期日，当前无法确定生命周期或评估平仓建议",
+    }
+    flags = {
+        "expiry_day": "expiry_day_lifecycle",
+        "expired_open": "expired_position_marked_open",
+        "unknown": "missing_expiration",
+    }
+    row: dict[str, Any] = {
+        "account": str(inp.account or "").strip().lower(),
+        "symbol": str(inp.symbol or "").strip().upper(),
+        "option_type": str(inp.option_type or "").strip().lower(),
+        "expiration": inp.expiration,
+        "strike": safe_float(inp.strike),
+        "contracts_open": safe_int(inp.contracts_open),
+        "premium": safe_float(inp.premium),
+        "close_mid": None,
+        "bid": None,
+        "ask": None,
+        "dte": safe_int(inp.dte),
+        "position_lifecycle_state": lifecycle_state,
+        "multiplier": safe_float(inp.multiplier),
+        "capture_ratio": None,
+        "remaining_premium": None,
+        "estimated_pnl_if_close_gross": None,
+        "estimated_close_fee": None,
+        "fee_calc_status": "not_required",
+        "fee_calc_basis": None,
+        "estimated_pnl_if_close_net": None,
+        "net_close_proceeds": None,
+        "realized_if_close": None,
+        "remaining_annualized_return": None,
+        "spread_ratio": None,
+        "tier": "not_evaluable",
+        "tier_label": "无法评估",
+        "reason": reasons[lifecycle_state],
+        "exit_state": EXIT_STATE_NOT_EVALUABLE,
+        "exit_reason_type": EXIT_STATE_NOT_EVALUABLE,
+        "evaluation_status": "not_evaluable",
+        "quote_status": "not_required" if lifecycle_state != "unknown" else "not_evaluable",
+        "data_quality_flags": flags[lifecycle_state],
+        "currency": str(inp.currency or "").strip().upper() or None,
+        "spot": safe_float(inp.spot),
+    }
+    if _is_yield_enhancement_long_call_position(pos):
+        row.update(_yield_enhancement_long_call_metadata(pos))
+    else:
+        resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
+        row.update(resolution.to_fields())
+        row.update(
+            {
+                "close_advice_profile": semantics.close_advice_profile,
+                "close_requires_rv": bool(semantics.close_requires_rv),
+            }
+        )
+        row.update(_position_strategy_metadata(pos))
+    return row
+
+
 def _resolve_event_snapshot_path(
     *,
     config: dict[str, Any],
@@ -1258,6 +1355,7 @@ def _merge_event_snapshot_for_short_vol_positions(
     quotes: dict[tuple[str, str, str, str], dict[str, Any]],
     base_dir: Path,
     output_dir: Path,
+    business_date: date,
 ) -> None:
     snapshot_path = _resolve_event_snapshot_path(config=config, base_dir=base_dir, output_dir=output_dir)
     snapshot = load_event_snapshot(snapshot_path)
@@ -1278,7 +1376,7 @@ def _merge_event_snapshot_for_short_vol_positions(
             pd.DataFrame([quote]),
             snapshot=snapshot,
             event_risk_cfg=_event_risk_cfg_for_position(pos=pos, config=config),
-            as_of_date=expiration_business_today(),
+            as_of_date=business_date,
         )
         if annotated.empty:
             continue
@@ -2398,39 +2496,60 @@ def run_close_advice(
         atomic_write_text(text_path, "", encoding="utf-8")
         return {"enabled": False, "rows": 0, "notify_rows": 0, "csv": str(csv_path), "text": str(text_path)}
 
+    business_date = expiration_business_today()
     ctx = _load_context(context_path)
     positions = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     positions = positions if isinstance(positions, list) else []
     positions = _filter_positions_by_markets(positions, markets_to_run)
+    position_entries = [
+        (pos, *_position_lifecycle(pos, business_date=business_date))
+        for pos in positions
+        if isinstance(pos, dict)
+    ]
+    coverage_positions = [
+        pos
+        for pos, lifecycle_state, _dte in position_entries
+        if lifecycle_state in {"active", "unknown"}
+    ]
+    quote_positions = [
+        pos
+        for pos, lifecycle_state, _dte in position_entries
+        if lifecycle_state == "active"
+    ]
     coverage_fetch_reasons, coverage_fetch_details, coverage_fetch_summary = _ensure_required_data_coverage_for_positions(
         config=config,
-        positions=positions,
+        positions=quote_positions,
         required_data_root=Path(required_data_root),
         base_dir=Path(base_dir),
         gateway=gateway,
     )
-    symbols = {_norm_symbol(p.get("symbol"), base_dir=Path(base_dir)) for p in positions if isinstance(p, dict) and p.get("symbol")}
+    symbols = {
+        _norm_symbol(p.get("symbol"), base_dir=Path(base_dir))
+        for p in quote_positions
+        if p.get("symbol")
+    }
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
     covered_keys, expirations_by_symbol = load_required_data_coverage(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
     coverage_reasons, coverage_details = _classify_required_data_coverage(
-        positions,
+        coverage_positions,
         covered_keys,
         expirations_by_symbol,
         base_dir=Path(base_dir),
     )
     attempted_fetch_reasons, attempted_fetch_details = _fetch_missing_quotes_via_opend(
         config=config,
-        positions=positions,
+        positions=quote_positions,
         quotes=quotes,
         covered_keys=covered_keys,
         base_dir=Path(base_dir),
     )
     _merge_event_snapshot_for_short_vol_positions(
         config=config,
-        positions=positions,
+        positions=quote_positions,
         quotes=quotes,
         base_dir=Path(base_dir),
         output_dir=output_dir,
+        business_date=business_date,
     )
     issue_reasons = {**coverage_reasons, **coverage_fetch_reasons, **attempted_fetch_reasons}
     issue_details = {**coverage_details, **coverage_fetch_details, **attempted_fetch_details}
@@ -2438,13 +2557,34 @@ def run_close_advice(
     cfg = CloseAdviceConfig.from_mapping(advice_cfg)
     rows: list[dict[str, Any]] = []
     evaluation_status_counts: dict[str, int] = {}
-    for pos0 in positions:
-        if not isinstance(pos0, dict):
-            continue
+    for pos0, lifecycle_state, _lifecycle_dte in position_entries:
         exp = _position_expiration(pos0)
+        if lifecycle_state != "active":
+            inp, _quote_flags = _position_to_input(
+                pos0,
+                None,
+                business_date=business_date,
+            )
+            row = _lifecycle_not_evaluable_row(
+                inp=inp,
+                pos=pos0,
+                config=config,
+                lifecycle_state=lifecycle_state,
+            )
+            row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
+            row = _apply_close_calibration_context(row, pos0)
+            status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
+            evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
+            rows.append(row)
+            continue
+
         key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"), base_dir=Path(base_dir))
         quote = quotes.get(key)
-        inp, quote_flags = _position_to_input(pos0, quote)
+        inp, quote_flags = _position_to_input(
+            pos0,
+            quote,
+            business_date=business_date,
+        )
         row = _evaluate_position_close_advice(
             inp=inp,
             pos=pos0,
@@ -2452,6 +2592,7 @@ def run_close_advice(
             config=config,
             close_cfg=cfg,
         )
+        row["position_lifecycle_state"] = lifecycle_state
         row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
@@ -2537,7 +2678,7 @@ def run_close_advice(
         pass
     atomic_write_text(text_path, text, encoding="utf-8")
     quote_issue_samples = _build_quote_issue_samples(
-        positions,
+        coverage_positions,
         issue_reasons,
         issue_details,
         base_dir=Path(base_dir),
