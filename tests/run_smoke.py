@@ -66,20 +66,6 @@ def test_scanners_require_multiplier() -> None:
     assert call_metrics(call_row, avg_cost=80.0) is None
 
 
-def test_cash_cap_is_best_effort() -> None:
-    _ensure_repo_on_path()
-
-    from src.application.pipeline_steps import derive_put_max_strike_from_cash
-
-    # This is best-effort and depends on a local multiplier cache.
-    ctx = {
-        'cash_by_currency': {'HKD': 100000.0},
-        'option_ctx': {'cash_secured_total_by_ccy': {'HKD': 0.0}},
-    }
-    out = derive_put_max_strike_from_cash('0700.HK', ctx, None, None)
-    assert (out is None) or (float(out) >= 0.0)
-
-
 def test_agent_launcher_spec_contract() -> None:
     base = _ensure_repo_on_path()
     om_agent = (base / "om-agent").resolve()
@@ -598,7 +584,6 @@ def test_agent_launcher_spec_prefers_broker_field() -> None:
 
 def main() -> None:
     test_scanners_require_multiplier()
-    test_cash_cap_is_best_effort()
     test_agent_launcher_spec_contract()
     test_installed_global_wrappers_work_outside_release_cwd()
     test_support_bundle_cli_writes_redacted_bundle()

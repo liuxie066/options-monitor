@@ -9,6 +9,84 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
+def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
+    from src.application.prefilters import apply_prefilters
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 43.07)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
+
+    sell_put = {"enabled": True, "min_dte": 7, "max_dte": 60, "max_strike": 45.0}
+    account_contexts = {
+        "lx": {
+            "cash_by_currency": {"HKD": 666787.5, "USD": 10177.48},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 386500.0, "USD": 8000.0}},
+        },
+        "sy": {
+            "cash_by_currency": {"HKD": 1104646.19},
+            "option_ctx": {"cash_secured_total_by_ccy": {"HKD": 213000.0, "USD": 8500.0}},
+        },
+    }
+
+    resolved: dict[str, dict[str, object]] = {}
+    for account, portfolio_ctx in account_contexts.items():
+        prefilters = apply_prefilters(
+            symbol="TCOM",
+            sp=dict(sell_put),
+            cc={"enabled": False},
+            want_put=True,
+            want_call=False,
+            portfolio_ctx=portfolio_ctx,
+        )
+        plan = mod.build_required_data_fetch_plan(
+            base=tmp_path,
+            required_data_dir=tmp_path / "required_data",
+            symbol="TCOM",
+            limit_expirations=10,
+            want_put=prefilters.want_put,
+            want_call=False,
+            sell_put_cfg=prefilters.sp,
+            sell_call_cfg={"enabled": False},
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+        )
+        put_plan = next(item for item in plan.side_plans if item.option_type == "put")
+        resolved[account] = put_plan.to_debug_dict()
+
+    assert resolved["lx"] == resolved["sy"]
+    assert resolved["lx"]["min_strike"] == 34.456
+    assert resolved["lx"]["max_strike"] == 43.07
+    assert resolved["lx"]["explicit_expirations"] == ["2026-08-21", "2026-09-18"]
+
+
+def test_tcom_put_fetch_window_falls_back_to_configured_max_without_spot(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path / "required_data",
+        symbol="TCOM",
+        limit_expirations=10,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 60, "max_strike": 45.0},
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    put_plan = next(item for item in plan.side_plans if item.option_type == "put")
+    assert put_plan.strike_window.min_strike == 36.0
+    assert put_plan.strike_window.max_strike == 45.0
+
+
 def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 

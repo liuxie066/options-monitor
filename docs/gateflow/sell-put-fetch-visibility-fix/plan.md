@@ -3,9 +3,9 @@
 ## Gate state
 
 - Work unit: `sell-put-fetch-visibility-fix`
-- Current gate: accepted plan
-- Next gate: implementation S1
-- Status: `pass-with-risks` after `docs/reviews/plan-review-20260722-233358.md`; implementation has not started
+- Current gate: implementation S2
+- Next gate: S2 deepreview
+- Status: S1 accepted after `docs/reviews/code-review-20260722-235801.md`; S2 pending
 - Artifact path: `docs/gateflow/sell-put-fetch-visibility-fix/plan.md`
 
 ## Goal and motivation
