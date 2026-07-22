@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.6 - 2026-07-22
+
+### Changed
+- Daily Brief funds section now shows only the CNY-total lines (`现金总额（折CNY）` / `可用于期权开仓（折CNY）`) when the totals are available; per-currency cash and opening lines are kept as fallback for missing exchange-rate data instead of always being displayed.
+
 ## 1.4.5 - 2026-07-22
 
 ### Fixed
