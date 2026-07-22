@@ -1583,79 +1583,13 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     assert rows[4]["void_target_event_id"] == adjust_result.event_id
 
 
-def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.option_positions as cli_mod
-    import src.application.ledger.read_model as read_model
-    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.data_config_path = data_config  # type: ignore[attr-defined]
-
-    opened_at = parse_exp_to_ms("2026-04-03")
-    assert opened_at is not None
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=opened_at,
-        ),
-    )
-
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "report",
-            "monthly-income",
-            "--broker",
-            "富途",
-            "--account",
-            "lx",
-            "--month",
-            "2026-04",
-            "--format",
-            "json",
-        ],
-    )
-
-    cli_mod.main()
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["filters"]["account"] == "lx"
-    assert payload["filters"]["broker"] == "富途"
-    assert payload["filters"]["month"] == "2026-04"
-    assert payload["schema_version"] == "option_performance_report.output.v1"
-    assert payload["deprecation"]["status"] == "deprecated_alias"
-    assert payload["period"]["kind"] == "month"
-    assert payload["scope"]["account"] == "lx"
-    assert payload["activity"]["premium_collected_gross"]["by_currency"] == {"USD": 250.0}
-    assert payload["cash"]["option_trade_cash_gross"]["by_currency"] == {"USD": 250.0}
-    assert payload["pnl"]["realized_gross"]["by_currency"] == {}
-    assert "summary" not in payload
-    assert "return_summary" not in payload
 
 
 def test_option_positions_cli_assigned_stock_sale_records_independent_event(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.ledger.read_model as read_model
     from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import record_manual_assignment
+    from src.application.positions.assigned_stock_view import build_assigned_stock_view
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -1691,7 +1625,6 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1765,68 +1698,14 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert len(repo.list_assigned_stock_events()) == 1
     assert repo.list_assigned_stock_events()[0]["fee_provenance"]["basis"] == "estimated"
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "report",
-            "monthly-income",
-            "--broker",
-            "富途",
-            "--account",
-            "lx",
-            "--format",
-            "json",
-        ],
-    )
-
-    cli_mod.main()
-
-    report = json.loads(capsys.readouterr().out)
-    lifecycle = [row for row in report["assignment_lifecycle"]["ending_lots"] if row["stock_lot_id"] == stock_lot_id][0]
+    report = build_assigned_stock_view(repo, broker="富途", account="lx", as_of_ms=3000)
+    lifecycle = [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == stock_lot_id][0]
     assert lifecycle["status"] == "closed"
     assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
     assert lifecycle["option_premium_attribution"] == 250.0
     assert lifecycle["assignment_lifecycle_pnl"] == 747.4739
 
 
-def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.option_positions as cli_mod
-    import src.application.ledger.read_model as read_model
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-
-    empty_repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, empty_repo))
-    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "om option-positions",
-            "--data-config",
-            str(data_config),
-            "report",
-            "monthly-income",
-            "--account",
-            "lx",
-            "--month",
-            "2026-04",
-        ],
-    )
-
-    cli_mod.main()
-
-    out = capsys.readouterr().out
-    assert "# Option Performance (monthly-income deprecated alias)" in out
-    assert "filters: month=2026-04 | account=lx | broker=富途" in out
-    assert "## PnL" in out
-    assert "## Cash" in out
-    assert "## Activity" in out
-    assert "parallel namespaces" in out
 
 
 def test_option_positions_cli_pair_combo_yield_dry_run_outputs_both_patches(

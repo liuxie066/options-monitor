@@ -8,7 +8,7 @@
 
 - Sell Put 被指派后，系统记录接货正股的真实成本。例如 strike 100、权利金 2.5、被指派买入 100 股，正股成本记为 100。
 - 不记录扣除权利金后的正股成本。它只是 `option premium + stock PnL` 的等价展示，不应成为持仓事实字段。
-- 收益统计不能重复计算权利金。权利金作为 option income，正股盈亏按真实正股成本计算，组合收益在报表层合并。
+- 收益统计不能重复计算权利金。权利金作为 option activity，正股盈亏按真实正股成本计算，组合收益在 performance 层合并。
 - 被指派的 option close、正股交割、后续卖出、实时 spot 和历史 mark 都有明确数据来源。
 - 缺失数据必须显式暴露，不用当前 spot、当前持仓或推测值回填历史事实。
 
@@ -24,11 +24,11 @@ trade_events
 
 `assignment` 是关闭 short option lot 的事件，不是普通买平，也不是到期归零。它必须解析到确定 `target_lot_id`。
 
-当前 monthly income report 已有三类相关输出：
+当前 canonical performance / assigned-stock projection 有三类相关输出：
 
-- `premium_rows`：short open 收到的权利金。
-- `realized_rows`：option lot 平仓、到期、指派或行权的 option 侧已实现收益。
-- `stock_settlement_rows` / `assignment_stock_*`：assignment event 里记录的正股交割现金流。
+- `activity.premium_collected_gross`：short open 收到的权利金活动。
+- `pnl.realized_gross` / `pnl.realized_net`：option lot 平仓、到期、指派或行权的 option 侧已实现收益。
+- `cash.stock_settlement_cash_gross`：assignment event 里记录的正股交割现金流。
 
 这些字段表达“发生了指派交割”。接货后的正股 lot、实时浮盈亏、后续卖出后的生命周期收益由
 `assigned_stock_lots` / `assigned_stock_events` 和查询时的 quote snapshot
@@ -360,7 +360,7 @@ lifecycle_pnl =
 
 - 交易事实使用成交币种保存。
 - CNY 汇总优先使用交易日或 mark as-of 日对应汇率。
-- 若没有对应日期汇率，可以使用当前 `monthly_income_report` 的汇率能力作为临时转换，但必须标记 `fx_status=converted_with_current_rate`。
+- 若没有对应日期汇率，只能使用 canonical performance evidence 中显式标注时点和来源的汇率；否则 CNY 保持缺失。
 - 缺汇率时 CNY 字段为 `null`，原币字段仍保留。
 
 时间归属：
@@ -370,14 +370,12 @@ lifecycle_pnl =
 - stock sale realized PnL 归属 sale event 月。
 - assignment lifecycle PnL 可以按 query as-of 展示，不应强行塞进单个月度已实现收益，除非 stock lot 已完全关闭。
 
-### 7.4 与现有 monthly income 的关系
+### 7.4 与 canonical option performance 的关系
 
-现有 `monthly_income_report` 可以继续保留当前 option cashflow / realized / open-basis 口径。
+被指派正股收益作为组合口径加入，不改写 canonical namespace 的字段含义：
 
-被指派正股收益作为组合口径加入，不改写已有字段含义：
-
-- `assignment_stock_net_cashflow_gross` 继续表示交割现金流。
-- `premium_received_gross` 继续表示 short open 权利金。
+- `cash.stock_settlement_cash_gross` 表示交割现金流。
+- `activity.premium_collected_gross` 表示 short open 权利金活动。
 - assignment lifecycle 字段必须标明它是组合口径，已经包含 option premium 与 stock PnL 两部分。
 
 字段命名：
@@ -392,12 +390,12 @@ lifecycle_pnl =
 
 ### 7.5 查询入口
 
-当前保留 `monthly_income_report` 既有语义，避免破坏 `/income` 和报表调用方：
+- `/income` 和其他报表调用方统一使用 `option_performance_report`：
 
-- `monthly_income_report` 默认输出现有 option income / cashflow / realized / open-basis 口径。
-- `monthly_income_report(include_rows=true)` 输出 `assignment_lifecycle_rows`，但不改变既有字段含义。
+- `option_performance_report` 分开输出 activity、cash、PnL、capital 和 assignment lifecycle。
+- 只读查询能力 `option_positions_read action=assigned-stock` 与 performance service 共用 canonical assigned-stock projection。
 - 只读查询能力 `option_positions_read action=assigned-stock` 专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；当前时点默认补实时估值，`refresh_quotes=false` 显式关闭。
-- Inbound `/income` 默认不把 `assignment_stock_net_cashflow_gross=-10000` 解释为亏损；用户问“被指派股票收益”“接货后盈亏”“assigned stock”时才调用 assignment lifecycle 口径。
+- Inbound `/income` 不把 `cash.stock_settlement_cash_gross=-10000` 解释为亏损；用户问“被指派股票收益”“接货后盈亏”“assigned stock”时才调用 assignment lifecycle 口径。
 - 自然语言入口由 Agent Composer 基于工具 evidence 表达；LLM 不能自己合成 spot、卖出价、
   missing sale、金额或股数。若 guard 不通过，回退到 deterministic renderer。
 
@@ -468,7 +466,7 @@ lifecycle_pnl =
 4. 当前时点默认获取开放 assigned-stock lot 的实时 spot；`refresh_quotes=false` 关闭，历史 `as_of_ms` 不用实时 spot 回填。
 5. `om option-positions assigned-stock-sale` 支持人工录入 sale，默认 dry-run / confirm，并要求显式目标 stock lot；省略费用时估算，显式 `--fees 0` 才是 actual zero。
 6. Broker stock sell intake 可以在唯一匹配开放 assigned-stock lot 时写入 sale fact；无法安全归属时等待人工确认。
-7. `monthly_income_report(include_rows=true)` 保留既有字段语义，并输出 assignment lifecycle rows。
+7. `option_performance_report` 和 assigned-stock read surface 共用 canonical projection，并输出一致的 assignment lifecycle facts。
 
 ## 10. 验收用例
 

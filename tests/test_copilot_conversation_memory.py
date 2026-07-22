@@ -99,13 +99,13 @@ def test_session_turn_keeps_multiple_tool_results_by_call_id(tmp_path) -> None:
         "结论：收益为正，风险集中。",
         max_messages=20,
         tool_uses=(
-            {"name": "monthly_income_report", "ok": True},
+            {"name": "option_performance_report", "ok": True},
             {"name": "option_positions_read", "ok": True},
         ),
     )
 
     assert [item["name"] for item in store.session_turns("wechat:chat")[0]["tool_uses"]] == [
-        "monthly_income_report",
+        "option_performance_report",
         "option_positions_read",
     ]
 

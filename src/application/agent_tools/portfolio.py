@@ -13,18 +13,15 @@ from typing import Any
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tools.base import AgentTool, build_agent_tool
-from src.application.agent_tools.materialization_impl import load_monthly_income_inputs, option_performance_report_tool
+from src.application.agent_tools.materialization_impl import option_performance_report_tool
 from src.application.agent_tools.runtime_helpers import normalize_broker, resolve_public_data_config_path
 from src.application.ledger.api import (
     open_performance_evidence_repository,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
 )
-from src.application.portfolio_capital_bridge import beijing_end_of_day_ms, build_portfolio_capital_bridge
 from src.application.portfolio_cash_bridge import build_portfolio_cash_bridge
 from src.application.portfolio_pnl_bridge import build_portfolio_pnl_bridge
 from src.application.performance.service import build_option_period_performance
-from src.application.positions.reporting import build_monthly_income_report
-from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as get_exchange_rates
 
 
 DEFAULT_SERVICE_URL = "http://127.0.0.1:8765"
@@ -362,80 +359,6 @@ def _bridge_scope(payload: dict[str, Any]) -> tuple[str, str, list[str]]:
         list(dict.fromkeys(str(item).strip() for item in payload.get("accounts") or [] if str(item).strip())),
     )
 
-def _option_scope_accounts(inputs: dict[str, Any]) -> set[str]:
-    out: set[str] = set()
-    for event in inputs.get("trade_events") or []:
-        if isinstance(event, dict) and str(event.get("account") or "").strip():
-            out.add(str(event.get("account")).strip())
-    for record in inputs.get("records") or []:
-        if not isinstance(record, dict):
-            continue
-        fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
-        if str(fields.get("account") or "").strip():
-            out.add(str(fields.get("account")).strip())
-    for event in inputs.get("assigned_stock_events") or []:
-        if isinstance(event, dict) and str(event.get("account") or "").strip():
-            out.add(str(event.get("account")).strip())
-    return out
-
-
-def _portfolio_capital_bridge(payload: dict[str, Any]):
-    period = str(payload.get("period") or "").strip().lower()
-    as_of_month = str(payload.get("as_of_month") or "").strip()
-    accounts = list(dict.fromkeys(str(item).strip() for item in payload.get("accounts") or [] if str(item).strip()))
-
-    inputs, warnings, meta = load_monthly_income_inputs(
-        {"config_key": "us"},
-        load_runtime_config=load_runtime_config,
-        resolve_public_data_config_path=resolve_public_data_config_path,
-        normalize_broker=normalize_broker,
-        resolve_option_positions_repo=resolve_option_positions_repo,
-        get_exchange_rates=get_exchange_rates,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-    facts_by_account = {
-        account: _read_capital_facts(account=account, period=period, as_of_month=as_of_month)
-        for account in accounts
-    }
-    end_dates = sorted(
-        {
-            str((facts.get("period") or {}).get("end_date") or "")
-            for facts in facts_by_account.values()
-            if str(facts.get("status") or "") == "ok"
-            and str((facts.get("period") or {}).get("end_date") or "")
-        }
-    )
-    reports_by_end_date: dict[str, dict[str, Any]] = {}
-    for end_date in end_dates:
-        report = build_monthly_income_report(
-            inputs["records"],
-            broker=str(inputs["broker"]),
-            rates=inputs["rates"],
-            trade_events=inputs["trade_events"],
-            assigned_stock_events=inputs["assigned_stock_events"],
-            as_of_ms=beijing_end_of_day_ms(end_date),
-        )
-        reports_by_end_date[end_date] = report
-        warnings.extend(
-            f"{end_date}: {item}"
-            for item in report.get("warnings") or []
-            if str(item).strip()
-        )
-
-    data = build_portfolio_capital_bridge(
-        period=period,
-        as_of_month=as_of_month,
-        accounts=accounts,
-        capital_facts_by_account=facts_by_account,
-        option_reports_by_end_date=reports_by_end_date,
-        option_scope_accounts=_option_scope_accounts(inputs),
-        observed_at=datetime.now(timezone.utc).isoformat(),
-    )
-    data["source"]["option_cash"]["runtime_config_key"] = "us"
-    return data, list(dict.fromkeys(warnings)), meta
-
-
 def _validate_bridge_input(payload: dict[str, Any]) -> None:
     supplied_endpoint_fields = sorted(_FORBIDDEN_ENDPOINT_FIELDS.intersection(payload))
     if supplied_endpoint_fields:
@@ -503,87 +426,6 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
         "group_cash",
     ),
 )
-
-PORTFOLIO_CAPITAL_BRIDGE_TOOL = build_agent_tool(
-    name="portfolio_capital_bridge",
-    description=(
-        "DEPRECATED compatibility bridge. Build an MTD or YTD total-assets bridge for selected accounts from portfolio-management NAV/cash-flow "
-        "facts plus OM option cash evidence. Returns structured waterfall steps and Markdown fallback_text; it "
-        "does not render an image. Option cash uses return_summary.net_income_cny (gross before fees, excluding "
-        "assignment-stock principal). Missing option evidence remains null/not_observed, never zero. "
-        "as_of_month is required for both MTD and YTD."
-    ),
-    requires=("portfolio-management loopback HTTP API", "runtime_config", "sqlite_data_config"),
-    capabilities=("portfolio_read", "capital_bridge", "deprecated", "cross_product_read", "read_only"),
-    input_schema={
-        "period": {
-            "type": "string",
-            "enum": ["mtd", "ytd"],
-            "required": True,
-            "description": "Bridge period",
-        },
-        "as_of_month": {
-            "type": "string",
-            "pattern": r"^\d{4}-(0[1-9]|1[0-2])$",
-            "required": True,
-            "description": "Required data month in YYYY-MM format",
-        },
-        "accounts": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "minItems": 1,
-            "maxItems": 20,
-            "required": True,
-            "description": "Portfolio account labels",
-        },
-    },
-    handler=_portfolio_capital_bridge,
-    pure_read=True,
-    safe_default_input={},
-    input_validator=_validate_bridge_input,
-    examples=(
-        {"input": {"period": "mtd", "as_of_month": "2026-07", "accounts": ["lx", "sy"]}},
-        {"input": {"period": "ytd", "as_of_month": "2026-07", "accounts": ["lx", "sy"]}},
-    ),
-    output_contract={
-        "schema_version": "portfolio.capital_bridge.v1",
-        "source_label": "portfolio-management capital facts + OM local option ledger",
-        "primary_rows": "accounts",
-        "fact_fields": [
-            "status",
-            "period.kind",
-            "period.as_of_month",
-            "accounts[].account",
-            "accounts[].status",
-            "accounts[].currency",
-            "accounts[].period.end_date",
-            "accounts[].steps",
-            "accounts[].option_cash_evidence.status",
-            "accounts[].reconciliation.status",
-            "combined.status",
-            "combined.currency",
-            "combined.reason",
-            "combined.steps",
-            "fallback_text",
-        ],
-        "freshness_fields": [
-            "freshness.observed_at",
-            "freshness.portfolio",
-            "freshness.option_ledger",
-            "freshness.option_cutoffs",
-        ],
-        "missing_data_fields": [
-            "accounts[].status",
-            "accounts[].option_cash_evidence.status",
-            "accounts[].option_cash_evidence.reason",
-            "combined.status",
-            "combined.reason",
-        ],
-        "model_preview_fields": ["period", "accounts", "combined", "coverage", "fallback_text"],
-    },
-    copilot_input_fields=("period", "as_of_month", "accounts"),
-)
-
 
 def _bridge_tool(*, name: str, description: str, handler, schema_version: str, evidence_field: str) -> AgentTool:
     return build_agent_tool(
@@ -658,11 +500,9 @@ TOOLS: tuple[AgentTool, ...] = (
     PORTFOLIO_QUERY_TOOL,
     PORTFOLIO_PNL_BRIDGE_TOOL,
     PORTFOLIO_CASH_BRIDGE_TOOL,
-    PORTFOLIO_CAPITAL_BRIDGE_TOOL,
 )
 
 __all__ = [
-    "PORTFOLIO_CAPITAL_BRIDGE_TOOL",
     "PORTFOLIO_CASH_BRIDGE_TOOL",
     "PORTFOLIO_PNL_BRIDGE_TOOL",
     "PORTFOLIO_QUERY_TOOL",

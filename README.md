@@ -479,7 +479,7 @@ Tool Gateway 只读列出：
 
 现金的 CNY 金额在交易事件写入时按成交附近的汇率快照冻结，查询时不再拿当前汇率反推。原币金额始终保留；旧事件没有换算快照或成交附近没有可用汇率时，CNY 保持 `null/partial`，并在 `missing` 中给出原因。
 
-旧的 `./om option-positions report monthly-income` 和 `monthly_income_report` 仍可用于回滚，但已废弃，不再作为新消费者入口。
+历史月度收入适配器已经移除；所有收益、现金和交易活动查询统一使用上述 canonical performance 入口。
 
 ### 通知预览
 
@@ -688,7 +688,7 @@ bash scripts/install_agent_plugin.sh
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool analysis_catalog --input-json '{"config_key":"us"}'
-./om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, realized_pnl_cny from monthly_income_return_summary order by month, account"}'
+./om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, period_total_pnl_net_cny from option_monthly_performance order by month, account"}'
 ./om-agent run --tool close_advice_read --input-json '{"config_key":"us","query":{"option_type":"call","side":"long"}}'
 ```
 

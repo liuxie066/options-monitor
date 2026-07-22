@@ -2,16 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from domain.domain.ledger import ContractKey, TradeEvent
-from src.application.ledger.event_codec import trade_event_application_payload
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.positions.reporting import build_monthly_income_report
 from src.application.performance.reconciliation import (
-    LEGACY_REFERENCE_ALLOWLIST,
     assess_replay_determinism,
     assess_report_coverage,
-    reconcile_legacy_monthly_report,
-    scan_legacy_references,
 )
 from src.application.performance.service import build_option_period_performance
 
@@ -93,166 +87,16 @@ def _v1_report() -> dict[str, object]:
     }
 
 
-def _legacy_report() -> dict[str, object]:
-    return {
-        "summary": [
-            {
-                "month": "2026-05",
-                "account": "lx",
-                "currency": "USD",
-                "premium_received_gross": 250.0,
-                "premium_received_gross_cny": 1800.0,
-                "net_cashflow_gross": -9750.0,
-                "net_cashflow_gross_cny": -70200.0,
-                "assignment_stock_net_cashflow_gross": -10000.0,
-                "assignment_stock_net_cashflow_gross_cny": -72000.0,
-                "realized_pnl_gross": 250.0,
-                "realized_pnl_gross_cny": 1800.0,
-            }
-        ],
-        "rows": [
-            {
-                "event_id": "assign-put",
-                "currency": "USD",
-                "realized_pnl_gross": 250.0,
-            }
-        ],
-        "cashflow_rows": [
-            {"trade_action": "sell_open", "contracts": 1},
-            {"trade_action": "assignment_option_close", "contracts": 1},
-            {"trade_action": "assignment_stock_buy", "contracts": 0},
-        ],
-        "return_summary": [
-            {
-                "realized_return_rate": 0.01,
-                "net_return_rate": 0.0,
-                "premium_return_rate": 0.01,
-            }
-        ],
-    }
 
 
-def test_reconciliation_accepts_current_legacy_and_v1_builders_over_the_same_events(tmp_path: Path) -> None:
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
-        strike=100,
-        expiration_ymd="2026-06-19",
-    )
-    open_event = TradeEvent(
-        event_id="open-put",
-        event_type="open",
-        event_time_ms=1777773600000,
-        contract_key=key,
-        contracts=1,
-        price=2.5,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        fees=0,
-        lot_id="lot-open-put",
-        raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
-    )
-    close_event = TradeEvent(
-        event_id="close-put",
-        event_type="close",
-        event_time_ms=1779242400000,
-        contract_key=key,
-        contracts=1,
-        price=1.0,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        fees=0,
-        target_lot_id="lot-open-put",
-        raw_payload={"fee_provenance": {"basis": "actual", "source": "test"}},
-    )
-    repo = SQLiteOptionPositionsRepository(tmp_path / "reconciliation.sqlite3")
-    repo.upsert_trade_event(open_event)
-    repo.upsert_trade_event(close_event)
-    legacy = build_monthly_income_report(
-        [],
-        account="lx",
-        broker="futu",
-        month="2026-05",
-        rates={"USDCNY": 7.2},
-        trade_events=[trade_event_application_payload(open_event), trade_event_application_payload(close_event)],
-    )
-    v1 = build_option_period_performance(
-        repo,
-        period={"period": "month", "month": "2026-05"},
-        account="lx",
-        broker="futu",
-        now_ms=1784300000000,
-        include_rows=True,
-        scope_proven=True,
-    )
-
-    result = reconcile_legacy_monthly_report(legacy, v1, scope_proven=True)
-
-    assert result["status"] == "pass"
-    assert all(item["status"] == "pass" for item in result["exact_checks"])
-    assert all(item["status"] == "pass" for item in result["quantity_checks"])
 
 
-def test_reconciliation_separates_exact_native_metrics_from_expected_semantic_deltas() -> None:
-    result = reconcile_legacy_monthly_report(_legacy_report(), _v1_report(), scope_proven=True)
-
-    assert result["status"] == "pass"
-    exact = {item["name"]: item for item in result["exact_checks"]}
-    assert exact["premium_collected_gross.native"]["status"] == "pass"
-    assert exact["option_trade_cash_gross.native"]["status"] == "pass"
-    assert exact["option_trade_cash_gross.native"]["legacy"] == {"USD": 250.0}
-    assert exact["option_realized_gross.by_close_event"]["status"] == "pass"
-    deltas = {item["name"]: item for item in result["expected_deltas"]}
-    assert deltas["realized_net_vs_legacy_gross"]["code"] == "actual_fee_delta"
-    assert deltas["realized_net_vs_legacy_gross"]["delta_by_currency"] == {"USD": -10.0}
-    assert deltas["premium_cny"]["status"] == "classified"
-    assert deltas["premium_cny"]["code"] == "effective_time_fx_vs_legacy_static_fx"
-    assert deltas["period_total_gross_vs_legacy_option_realized"]["status"] == "classified"
-    assert deltas["generic_return_rates"]["code"] == "intentional_removal_use_explicit_capital_efficiency"
 
 
-def test_reconciliation_requires_realized_detail_rows_and_fails_one_sided_identity() -> None:
-    missing_rows = _v1_report()
-    missing_rows.pop("rows")
-    omitted = reconcile_legacy_monthly_report(_legacy_report(), missing_rows, scope_proven=True)
-
-    one_sided = _v1_report()
-    one_sided["rows"] = []
-    lost = reconcile_legacy_monthly_report(_legacy_report(), one_sided, scope_proven=True)
-
-    assert omitted["status"] == "fail"
-    assert omitted["exact_checks"][2]["missing"] == ["v1.rows"]
-    assert lost["status"] == "fail"
-    assert lost["exact_checks"][2]["delta"] == {"assign-put|USD": -250.0}
 
 
-def test_reconciliation_accepts_explicitly_empty_realized_detail_sets() -> None:
-    legacy = _legacy_report()
-    legacy["rows"] = []
-    report = _v1_report()
-    report["rows"] = [row for row in report["rows"] if not row.get("allocation_id")]
-
-    result = reconcile_legacy_monthly_report(legacy, report, scope_proven=True)
-
-    assert result["exact_checks"][2]["status"] == "pass"
-    assert result["exact_checks"][2]["delta"] == {}
 
 
-def test_reconciliation_fails_if_assignment_principal_leaks_into_option_cash() -> None:
-    report = _v1_report()
-    report["cash"]["option_trade_cash_gross"] = _amount({"USD": -9750.0}, cny=-70200.0)
-
-    result = reconcile_legacy_monthly_report(_legacy_report(), report, scope_proven=True)
-
-    assert result["status"] == "fail"
-    cash = next(item for item in result["exact_checks"] if item["name"] == "option_trade_cash_gross.native")
-    assert cash["status"] == "fail"
-    assert cash["delta"] == {"USD": -10000.0}
 
 
 def test_replay_gate_hashes_canonical_json_and_detects_changes() -> None:
@@ -328,20 +172,6 @@ def test_coverage_gate_rejects_observed_non_cny_metric_without_fx_evidence() -> 
     ]
 
 
-def test_reconciliation_classifies_missing_fee_as_incomplete_not_actual_delta() -> None:
-    report = _v1_report()
-    report["pnl"]["realized_net"] = _amount(
-        {},
-        cny=None,
-        status="partial",
-        missing=["fee:close-event"],
-    )
-
-    result = reconcile_legacy_monthly_report(_legacy_report(), report, scope_proven=True)
-
-    delta = next(item for item in result["expected_deltas"] if item["name"] == "realized_net_vs_legacy_gross")
-    assert delta["code"] == "fee_coverage_incomplete"
-    assert delta["delta_by_currency"] is None
 
 
 def test_coverage_gate_rejects_missing_evidence_encoded_as_zero() -> None:
@@ -418,19 +248,3 @@ def test_proven_empty_scope_is_observed_zero_but_unproven_scope_remains_not_obse
     assert proven["pnl"]["period_total_net"]["status"] == "observed"
     assert proven["quality"]["status"] == "observed"
     assert assess_report_coverage(proven, scope_proven=True)["status"] == "pass"
-
-
-def test_legacy_reference_inventory_matches_explicit_allowlist() -> None:
-    root = Path(__file__).resolve().parents[1] / "src"
-
-    result = scan_legacy_references(root)
-
-    assert result["status"] == "pass"
-    assert result["unowned"] == []
-    assert result["stale_allowlist"] == []
-    assert set(result["matches"]) == set(LEGACY_REFERENCE_ALLOWLIST)
-    assert {item["category"] for item in result["matches"].values()} == {
-        "deprecated_adapter_rollback",
-        "deprecated_compatibility_projection",
-        "candidate_strategy_domain",
-    }

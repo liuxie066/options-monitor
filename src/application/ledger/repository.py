@@ -18,8 +18,11 @@ class OptionPositionsReadRepo(Protocol):
     def list_position_lots(self) -> list[dict[str, Any]]: ...
 
 
-class OptionPositionsEventWriteRepo(OptionPositionsReadRepo, Protocol):
+class OptionPositionsEventReadRepo(OptionPositionsReadRepo, Protocol):
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]: ...
+
+
+class OptionPositionsEventWriteRepo(OptionPositionsEventReadRepo, Protocol):
     def upsert_trade_event(self, event: Any, *, conn: sqlite3.Connection | None = None) -> bool: ...
     def replace_position_lots(
         self,
@@ -714,10 +717,16 @@ def require_option_positions_read_repo(repo: Any) -> OptionPositionsReadRepo:
     raise TypeError("option_positions repo does not satisfy read repository interface")
 
 
-def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEventWriteRepo:
+def require_option_positions_event_read_repo(repo: Any) -> OptionPositionsEventReadRepo:
     candidate = require_option_positions_read_repo(repo)
+    if callable(getattr(candidate, "list_trade_events", None)):
+        return cast(OptionPositionsEventReadRepo, candidate)
+    raise TypeError("option_positions repo does not satisfy event read repository interface")
+
+
+def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEventWriteRepo:
+    candidate = require_option_positions_event_read_repo(repo)
     required = (
-        "list_trade_events",
         "upsert_trade_event",
         "replace_position_lots",
     )
