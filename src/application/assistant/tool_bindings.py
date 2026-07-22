@@ -316,33 +316,9 @@ def binding_for_intent(intent_name: str) -> AssistantToolBinding | None:
     return binding_by_intent().get(str(intent_name or ""))
 
 
-def primary_intent_name_for_tool(tool_name: str) -> str | None:
-    normalized = str(tool_name or "")
-    for binding in assistant_tool_bindings():
-        if binding.tool_name == normalized and binding.primary_for_tool:
-            return binding.intent_name
-    for binding in assistant_tool_bindings():
-        if binding.tool_name == normalized:
-            return binding.intent_name
-    return None
-
-
-def tool_name_for_intent(intent_name: str) -> str | None:
-    binding = binding_for_intent(intent_name)
-    return binding.tool_name if binding is not None else None
-
-
 def config_required_intent_names() -> frozenset[str]:
     return frozenset(
         binding.intent_name
         for binding in assistant_tool_bindings()
         if binding.scope_policy in {"config_required", "symbol_market_config_required"}
-    )
-
-
-def symbol_market_config_tool_names() -> frozenset[str]:
-    return frozenset(
-        str(binding.tool_name)
-        for binding in assistant_tool_bindings()
-        if binding.tool_name is not None and binding.scope_policy.startswith("symbol_market_config")
     )

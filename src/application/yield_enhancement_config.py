@@ -171,14 +171,6 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
     return out
 
 
-def _normalize_sell_put_strategy(sell_put_cfg: dict[str, Any] | None) -> str:
-    cfg = _as_dict(sell_put_cfg)
-    return strategy_semantics_for_profile(
-        family=SELL_PUT_FAMILY,
-        profile=cfg.get("strategy") or cfg.get("strategy_profile"),
-    ).strategy_profile
-
-
 def yield_enhancement_mode_for_sell_put_strategy(strategy: Any) -> str:
     return str(
         strategy_semantics_for_profile(

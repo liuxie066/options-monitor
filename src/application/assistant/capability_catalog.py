@@ -28,7 +28,6 @@ class AssistantCommandSpec:
     required_information: tuple[str, ...] = ()
 
 
-AssistantCapabilitySpec = AssistantCommandSpec
 AgentCommandSpec = AssistantCommandSpec
 
 
@@ -379,10 +378,6 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
 
 
 def command_specs() -> tuple[AssistantCommandSpec, ...]:
-    return COMMAND_SPECS
-
-
-def capability_specs() -> tuple[AssistantCapabilitySpec, ...]:
     return COMMAND_SPECS
 
 
