@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.application.multi_tick.misc import AccountResult
 
@@ -29,6 +30,11 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
                 "as_of_utc": "2026-07-17T13:59:30+00:00",
                 "cash_secured_total_by_ccy": {"HKD": 255_000, "USD": 3_000},
                 "cash_secured_unavailable_by_symbol": {},
+                "cash_secured_total_cny": 250_500.0,
+                "exchange_rates": {
+                    "rates": {"USDCNY": 7.0, "HKDCNY": 0.9},
+                    "timestamp": "2026-07-17T13:59:30+00:00",
+                },
             }
         ),
         encoding="utf-8",
@@ -182,9 +188,56 @@ def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path
         "as_of_utc": "2026-07-17T13:59:30+00:00",
         "cash_total_by_currency": {"HKD": 480_000.0, "USD": 18_000.0},
         "option_opening_available_by_currency": {"HKD": 225_000.0, "USD": 15_000.0},
+        "cash_total_cny": 558_000.0,
+        "cash_secured_total_cny": 250_500.0,
+        "option_opening_available_cny": 307_500.0,
         "available": True,
         "reason": "ok",
     }
+
+
+def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "portfolio_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:00+00:00",
+                "cash_by_currency": {"HKD": 1_104_060.32},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-17T13:59:30+00:00",
+                "cash_secured_total_by_ccy": {"HKD": 171_000, "USD": 8_500},
+                "cash_secured_unavailable_by_symbol": {},
+                "cash_secured_total_cny": 213_400.0,
+                "exchange_rates": {
+                    "rates": {"USDCNY": 7.0, "HKDCNY": 0.9},
+                    "timestamp": "2026-07-17T13:59:30+00:00",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    funds = brief["funds"]
+    assert funds["cash_total_by_currency"] == {"HKD": 1_104_060.32}
+    assert funds["option_opening_available_by_currency"]["HKD"] == pytest.approx(933_060.32)
+    assert funds["cash_total_cny"] == pytest.approx(1_104_060.32 * 0.9)
+    assert funds["cash_secured_total_cny"] == 213_400.0
+    assert funds["option_opening_available_cny"] == pytest.approx(1_104_060.32 * 0.9 - 213_400.0)
+    assert funds["available"] is True
+    assert funds["reason"] == "ok"
+    assert not any(item.get("scope") == "funds" for item in brief["data_gaps"])
 
 
 def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(

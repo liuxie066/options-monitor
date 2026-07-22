@@ -241,7 +241,7 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
         }
     funds = _mapping(value, field="funds")
     available = bool(funds.get("available"))
-    return {
+    out = {
         "as_of_utc": _iso_or_empty(funds.get("as_of_utc")),
         "cash_total_by_currency": _normalize_currency_amounts(
             funds.get("cash_total_by_currency"),
@@ -254,6 +254,17 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
         "available": available,
         "reason": str(funds.get("reason") or ("ok" if available else "unavailable")).strip(),
     }
+    for key in ("cash_total_cny", "cash_secured_total_cny", "option_opening_available_cny"):
+        raw = funds.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, bool):
+            raise ValueError(f"funds.{key} must be a number")
+        try:
+            out[key] = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"funds.{key} must be a number") from None
+    return out
 
 
 def _normalize_currency_amounts(value: Any, *, field: str) -> dict[str, float]:

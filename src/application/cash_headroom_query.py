@@ -13,6 +13,7 @@ from domain.domain.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
+from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 from src.application.positions.context_builder import build_context as build_option_positions_context
@@ -35,40 +36,6 @@ def money(v: float | None, currency: str = "USD") -> str:
     if currency.upper() in ("CNY", "RMB"):
         return f"¥{v:,.2f}"
     return f"{v:,.2f} {currency.upper()}"
-
-
-def _sum_by_currency_to_cny(
-    by_currency: dict,
-    *,
-    usdcny_exchange_rate: float | None,
-    cny_per_hkd_exchange_rate: float | None,
-) -> float | None:
-    total = 0.0
-    ok = True
-    for ccy, v in (by_currency or {}).items():
-        try:
-            fv = float(v)
-        except Exception:
-            continue
-        if not fv:
-            continue
-        c = str(ccy).strip().upper()
-        if c in ('CNY', 'RMB'):
-            total += fv
-        elif c == 'USD':
-            if not usdcny_exchange_rate:
-                ok = False
-                break
-            total += fv * float(usdcny_exchange_rate)
-        elif c == 'HKD':
-            if not cny_per_hkd_exchange_rate:
-                ok = False
-                break
-            total += fv * float(cny_per_hkd_exchange_rate)
-        else:
-            ok = False
-            break
-    return total if ok else None
 
 
 def _resolve_runtime_config_path(*, base: Path, config: str | Path | None) -> Path | None:
