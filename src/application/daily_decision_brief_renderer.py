@@ -13,6 +13,10 @@ _DEFAULT_MAX_REJECTIONS = 5
 _MAX_TOTAL_ITEMS = 40
 _MAX_MESSAGE_CHARS = 12_000
 
+# 飞书 post 消息的 md 标签会把纯空行折叠掉，段落之间没有可视间距；
+# 用零宽空格撑出可见空行（不是空白字符，不会被渲染端或 str.strip() 移除）。
+_VISIBLE_BLANK_LINE = "\u200b"
+
 _MARKET_LABELS = {"US": "美股", "HK": "港股", "CN": "A股"}
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
 _MARKET_TIME_LABELS = {"US": "美东", "HK": "香港", "CN": "北京时间"}
@@ -178,7 +182,7 @@ def render_fixed_failure(
     return _bounded_markdown(
         [
             f"# OM · 决策简报 · {account}",
-            "",
+            _VISIBLE_BLANK_LINE,
             f"状态｜{phase}",
             f"市场｜{_MARKET_LABELS.get(market, '市场')}",
             "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
@@ -302,7 +306,7 @@ def _render_user_view(
     section_mark = "#" * (heading_level + 1)
     lines = [
         f"{title_mark} OM · 决策简报 · {view['account']}",
-        "",
+        _VISIBLE_BLANK_LINE,
         f"状态｜{view['phase_line']}",
         f"市场｜{view['market_label']}",
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
@@ -310,12 +314,12 @@ def _render_user_view(
     lines.extend(_flat_field_line(item) for item in query_status if str(item).strip())
     planning_notice = str(view.get("planning_notice") or "")
     if planning_notice:
-        lines.extend(["", f"提示｜{planning_notice}"])
+        lines.extend([_VISIBLE_BLANK_LINE, f"提示｜{planning_notice}"])
 
     if bool(view.get("blocked")):
         lines.extend(
             [
-                "",
+                _VISIBLE_BLANK_LINE,
                 f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
                 "后续｜系统将在后续批次自动重新评估。",
             ]
@@ -324,18 +328,18 @@ def _render_user_view(
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
     if changes:
-        lines.extend(["", "变化｜" + "；".join(changes) + "。"])
+        lines.extend([_VISIBLE_BLANK_LINE, "变化｜" + "；".join(changes) + "。"])
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
     candidate_heading = "新增候选" if projection == "candidate_alert" else "当前候选"
     if projection == "legacy":
         candidate_heading = "候选"
-    lines.extend(["", f"{section_mark} {candidate_heading}"])
+    lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
     if not candidates:
         lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     else:
         for index, item in enumerate(candidates, start=1):
-            lines.extend(["", f"**{index}｜{_flat_title(item['title'])}**"])
+            lines.extend([_VISIBLE_BLANK_LINE, f"**{index}｜{_flat_title(item['title'])}**"])
             for detail in item.get("details") or []:
                 lines.append(f"{_candidate_detail_label(detail)}｜{detail}")
             for leg in item.get("legs") or []:
@@ -345,11 +349,11 @@ def _render_user_view(
 
     positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
     if projection != "candidate_alert":
-        lines.extend(["", f"{section_mark} 持仓"])
+        lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 持仓"])
         if not positions:
             lines.append("当前没有需要展示的期权持仓。")
         for item in positions:
-            lines.extend(["", f"**{_flat_title(item['title'])}｜{item['status']}**"])
+            lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
                 lines.append(f"参考｜{detail}")
         position_omitted = _whole_number(view.get("position_omitted")) or 0
@@ -358,12 +362,12 @@ def _render_user_view(
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
-    lines.extend(["", f"{section_mark} 资金"])
+    lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 资金"])
     lines.extend(_flat_field_line(item) for item in [*funds, *capacity])
 
     reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
     if reminders:
-        lines.extend(["", f"{section_mark} 提醒"])
+        lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 提醒"])
         lines.extend(_flat_field_line(item) for item in reminders)
 
     return _bounded_markdown(lines)
