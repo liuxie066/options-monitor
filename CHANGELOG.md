@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.4.10 - 2026-07-23
+
+### Fixed
+- Frozen CNY cash conversions when option trade, assignment settlement, and assigned-stock sale events are written, preserving the original native amount, booking FX evidence, and idempotent retry semantics instead of re-pricing historical cash during report reads.
+- Kept legacy or newly written cash facts without a valid event-time FX snapshot explicitly `partial` with `amount_cny=null`, while exposing the missing reason and conversion evidence through `option_cash_components`.
+
 ## 1.4.9 - 2026-07-23
 
 ### Fixed

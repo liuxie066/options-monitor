@@ -206,7 +206,7 @@ def test_stock_settlement_fee_cash_requires_actual_provenance_and_preserves_actu
     assert estimated["cash"]["total_cash_change_net"]["status"] == "partial"
     assert zero["cash"]["stock_settlement_fee_cash"]["by_currency"] == {"USD": 0.0}
     assert zero["cash"]["stock_settlement_fee_cash"]["missing"] == [
-        "fx:USD:stock_settlement_fee_cash:assign-put"
+        "cash_conversion:stock_settlement_fee_cash:assign-put"
     ]
 
 

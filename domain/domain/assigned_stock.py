@@ -1154,6 +1154,8 @@ def project_assigned_stock_lifecycle(
             "source": str(sale.get("source") or "").strip() or None,
             "source_deal_id": str(sale.get("source_deal_id") or "").strip() or None,
         }
+        if isinstance(sale.get("cash_conversions"), dict):
+            sale_row["cash_conversions"] = dict(sale["cash_conversions"])
         for key in (
             "strategy",
             "leg_role",

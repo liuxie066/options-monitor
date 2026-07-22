@@ -15,10 +15,16 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
+from src.application.ledger.event_codec import encode_trade_event_for_storage
 from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
+from src.application.cash_conversion import (
+    attach_trade_event_cash_conversions,
+    load_cash_fx_payload,
+    utc_now_ms,
+)
 
 
 def projection_diagnostics_summary(diagnostics: Sequence[Any]) -> dict[str, Any]:
@@ -77,7 +83,28 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
 
 def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> LedgerWriteResult:
-        storage_events = _events_for_storage(sqlite_repo, event)
+        storage_events = [
+            _canonical_storage_event(item)
+            for item in _events_for_storage(sqlite_repo, event)
+        ]
+        existing_events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
+        existing_by_id = {
+            str(item.get("event_id") or ""): item
+            for item in existing_events
+            if isinstance(item, dict) and str(item.get("event_id") or "")
+        }
+        fx_payload = load_cash_fx_payload(sqlite_repo)
+        observed_at_ms = utc_now_ms()
+        storage_events = [
+            _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
+            if item.event_id in existing_by_id
+            else attach_trade_event_cash_conversions(
+                item,
+                fx_payload=fx_payload,
+                observed_at_ms=observed_at_ms,
+            )
+            for item in storage_events
+        ]
         if conn is not None:
             created_flags = [sqlite_repo.upsert_trade_event(item, conn=conn) for item in storage_events]
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
@@ -108,6 +135,25 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         return LedgerWriteResult.from_payload(result)
 
     return with_sqlite_repo_transaction(repo, _run)
+
+
+def _canonical_storage_event(item: Any) -> TradeEvent:
+    encoded = encode_trade_event_for_storage(item)
+    if encoded.event is None:  # pragma: no cover - encoder raises before this branch
+        raise ValueError("trade event could not be canonicalized for storage")
+    return encoded.event
+
+
+def _event_with_existing_cash_conversions(event: TradeEvent, existing: dict[str, Any]) -> TradeEvent:
+    existing_raw_payload = existing.get("raw_payload")
+    if not isinstance(existing_raw_payload, dict):
+        return event
+    conversions = existing_raw_payload.get("cash_conversions")
+    if not isinstance(conversions, dict):
+        return event
+    raw_payload = dict(event.raw_payload or {})
+    raw_payload["cash_conversions"] = dict(conversions)
+    return replace(event, raw_payload=raw_payload)
 
 
 def persist_trade_event(repo: Any, deal: Any) -> LedgerWriteResult:

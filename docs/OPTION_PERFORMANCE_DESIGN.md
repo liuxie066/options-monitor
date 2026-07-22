@@ -61,7 +61,9 @@ The pure period engine consumes effective canonical trade events plus canonical 
 - Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
 - An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
 
-All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal. S4 adds evidence-backed CNY derivation without replacing those native amounts.
+All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal.
+
+Cash CNY is booked once at the event-write boundary. Canonical option trade/assignment events store a `cash_conversion.v1` snapshot under `raw_payload.cash_conversions`; assigned-stock sale events store the same snapshot beside the sale fact. The snapshot records the native amount, CNY rate and result, rate timestamp, event timestamp, and stable conversion ID in the same transaction as the event. A nonzero foreign-currency cash fact is converted only when the cached rate is within 24 hours of the event; otherwise the event stores `status=pending` and `amount_cny=null`. Zero and CNY cash use explicit identity conversions. Idempotent retries retain the original snapshot. Report reads never re-price cash from later FX evidence, and legacy events without a snapshot remain native-only/partial until an explicit evidence-preserving migration exists.
 
 Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
 
@@ -82,7 +84,7 @@ Selection is deterministic at the requested valuation or event instant:
 5. then choose the highest revision and stable fact ID;
 6. reject evidence older than seven days.
 
-The selected mark and FX fact IDs are returned in metric/report quality. Native-currency amounts remain available when FX is missing, while the CNY amount and affected quality become partial.
+The selected mark and FX fact IDs are returned in metric/report quality for valuation and PnL translation. Native-currency amounts remain available when FX is missing, while the CNY amount and affected quality become partial. Direct cash metrics instead use their immutable event-level booking conversion described above.
 
 Opening and ending option inventory are projected only through the ledger application API. Boundary projection is restated using all valid canonical voids, including a later void of an earlier event, then applies economic state only through the requested boundary. This keeps historical realized activity and opening/ending inventory on the same canonical replay semantics. Remaining actual opening fee is derived from canonical close allocations rather than rematching lots.
 
