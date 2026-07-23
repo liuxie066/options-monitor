@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.4.12 - 2026-07-23
+
+### Added
+- Added a formal Close Advice recommendation contract with stable policy version, recommendation state, decision basis, and evidence status fields while preserving `P0_current` as the only production authority and keeping P1/P2/P3 variants shadow-only.
+- Added prospective Close Advice Shadow Replay episode capture, point-in-time marking, lifecycle settlement, paired policy analysis, and readiness gates without mutating production recommendations, notifications, position state, or runtime configuration.
+
+### Changed
+- Daily Brief position sections now summarize total positions and positions that need action; when actionable rows exceed the message limit, the summary reports how many are shown instead of describing non-actionable rows as folded or unexpanded.
+
+### Fixed
+- Restored visible blank lines between Feishu `post` sections and items without injecting zero-width characters into Markdown nodes: blank separators now become dedicated plain-text spacer paragraphs, keeping desktop bold titles at the start of their own Markdown paragraphs.
+
 ## 1.4.11 - 2026-07-23
 
 ### Changed
