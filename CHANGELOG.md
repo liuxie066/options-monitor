@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.4.14 - 2026-07-23
+
+### Fixed
+- Preserved the existing P0 Close Advice tier wording in Daily Brief notifications so strong, medium, weak, and optional standard close rows render as “强烈建议平仓”, “建议平仓”, “可观察平仓”, and “低价买回可选” instead of flattening every row to “建议平仓”; missing or unknown tiers retain the generic fallback and existing actionable counts.
+- Renamed the displayed `remaining_annualized_return` metric to “剩余权利金毛年化” without changing its calculation, value, strategy policy, notification selection, or runtime configuration.
+
 ## 1.4.13 - 2026-07-23
 
 ### Added
