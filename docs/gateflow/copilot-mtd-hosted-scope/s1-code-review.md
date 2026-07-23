@@ -8,4 +8,3 @@
 - Residual risk: production hosted-model wording remains assigned to the mandatory live P1 gate
 - Status: pass
 - Next entry point: `accepted slice commit`
-

@@ -58,4 +58,3 @@ None. The production trace identifies the exact values and owning boundary.
 
 - Hosted wording may still drift after correct data reaches the model. This remains covered by the
   existing deterministic P1 evaluator and must be re-run against production after deployment.
-

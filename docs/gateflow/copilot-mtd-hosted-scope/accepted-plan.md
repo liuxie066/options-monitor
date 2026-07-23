@@ -8,4 +8,3 @@
 - Findings: none
 - Residual risks: hosted wording remains guarded by the mandatory production P1 validation
 - Next entry point: `implementation`
-

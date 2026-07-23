@@ -110,4 +110,3 @@ entity, workflow, config key, persistence, or accounting branch.
 
 Report the normalized contract, tests/reviews, patch release/commit, remote active version,
 service health, direct MTD scope, production P1 result, and any remaining model-quality risk.
-
