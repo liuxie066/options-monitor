@@ -53,4 +53,3 @@ passed
 
 The clean worktree has no local `.venv`; validation therefore used the host's supported Python 3.12 environment
 while loading source and tests from this worktree.
-
