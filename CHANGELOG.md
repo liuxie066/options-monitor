@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.4.13 - 2026-07-23
+
+### Added
+- Added idempotent Close Advice decision-facet capture to Strategy Lab datasets so prospective replay evidence can be collected from the latest non-empty Close Advice run without changing production recommendations.
+
+### Changed
+- Enabled the existing Strategy Lab recorder to include complete Close Advice decision artifacts, while preserving candidate-only fallback, collision safety, and `P0_current` as the only production authority; P1/P2/P3 remain shadow-only.
+
 ## 1.4.12 - 2026-07-23
 
 ### Added
