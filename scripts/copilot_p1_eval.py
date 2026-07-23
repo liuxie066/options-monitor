@@ -30,11 +30,35 @@ class EvalCase:
     question: str
     requires_read_observation: bool
     conversation_id: str
+    required_primary_tool: str | None = None
+    primary_tool_optional: bool = False
+    required_primary_input: tuple[tuple[str, Any], ...] = ()
+    forbidden_primary_input_fields: tuple[str, ...] = ()
+    required_response_terms: tuple[str, ...] = ()
 
 
 CASES = (
-    EvalCase("july_income", "7月收益", True, "income"),
-    EvalCase("income_attribution_follow_up", "主要来自哪里", False, "income"),
+    EvalCase(
+        "july_mtd_option_income",
+        "7月 mtd 的期权收益",
+        True,
+        "income",
+        required_primary_tool="option_performance_report",
+        required_primary_input=(("period", "mtd"),),
+        forbidden_primary_input_fields=("account",),
+        required_response_terms=("mtd", "全部账户", "已实现", "现金", "指派"),
+    ),
+    EvalCase(
+        "mtd_correction_follow_up",
+        "我写的是mtd",
+        False,
+        "income",
+        required_primary_tool="option_performance_report",
+        primary_tool_optional=True,
+        required_primary_input=(("period", "mtd"),),
+        forbidden_primary_input_fields=("account",),
+        required_response_terms=("mtd", "全部账户", "已实现", "现金", "指派"),
+    ),
     EvalCase(
         "risk_concentration",
         "当前期权风险主要集中在哪里",
@@ -216,6 +240,18 @@ def run_eval(
             "answered_or_safe_control": (result.status == "answered" and bool(response)) or valid_control_preview,
             "read_observation_used": not case.requires_read_observation or read_observation_used,
             "pure_read_only": all(tool in allowed or tool in HOST_READ_ACTIONS for tool in tool_names),
+            "required_primary_tool_used": (
+                case.required_primary_tool is None
+                or case.primary_tool_optional
+                and not tool_names
+                or bool(tool_names)
+                and tool_names[0] == case.required_primary_tool
+            ),
+            "required_primary_tool_input": _required_primary_tool_input(case, events),
+            "required_response_terms_present": (
+                valid_control_preview
+                or all(term.lower() in response.lower() for term in case.required_response_terms)
+            ),
             "scope_preserved": _scope_preserved(events, config_key),
             "conclusion_first": valid_control_preview or _conclusion_first(response),
             "no_tool_protocol_leak": not _contains_tool_protocol(response),
@@ -276,6 +312,13 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
         "answered_or_safe_control": False,
         "read_observation_used": not case.requires_read_observation,
         "pure_read_only": True,
+        "required_primary_tool_used": (
+            case.required_primary_tool is None or case.primary_tool_optional
+        ),
+        "required_primary_tool_input": not (
+            case.required_primary_input or case.forbidden_primary_input_fields
+        ),
+        "required_response_terms_present": not case.required_response_terms,
         "scope_preserved": True,
         "conclusion_first": False,
         "no_tool_protocol_leak": True,
@@ -392,6 +435,20 @@ def _tool_metrics(events: list[dict[str, Any]]) -> dict[str, int]:
         "tool_result_count": len(results),
         "failed_tool_result_count": sum(event["payload"].get("ok") is False for event in results),
     }
+
+
+def _required_primary_tool_input(case: EvalCase, events: list[dict[str, Any]]) -> bool:
+    if not case.required_primary_input and not case.forbidden_primary_input_fields:
+        return True
+    first_call = next((event for event in events if event["type"] == "tool_call"), None)
+    if first_call is None:
+        return case.primary_tool_optional
+    tool_input = first_call["payload"].get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    return all(tool_input.get(key) == expected for key, expected in case.required_primary_input) and all(
+        field not in tool_input for field in case.forbidden_primary_input_fields
+    )
 
 
 def _evidence_checks(case: EvalCase, events: list[dict[str, Any]], response: str) -> dict[str, bool]:
