@@ -46,6 +46,12 @@ _CLOSE_ACTION_LABELS = {
     "hold_call": "继续持有 Call",
     "hold": "继续观察",
 }
+_STANDARD_CLOSE_TIER_LABELS = {
+    "strong": "强烈建议平仓",
+    "medium": "建议平仓",
+    "weak": "可观察平仓",
+    "optional": "低价买回可选",
+}
 _CLOSE_DETAIL_ACTIONS = {
     "close",
     "close_put_keep_call",
@@ -624,6 +630,11 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     action = _lower(row.get("close_action"))
     if action == "not_evaluable":
         return "暂无法评估（报价质量不足）"
+    if action == "close":
+        return _STANDARD_CLOSE_TIER_LABELS.get(
+            _lower(row.get("tier")),
+            _CLOSE_ACTION_LABELS[action],
+        )
     if action in _CLOSE_ACTION_LABELS:
         return _CLOSE_ACTION_LABELS[action]
     tier = _lower(row.get("tier"))
@@ -635,7 +646,11 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
 
 
 _POSITION_ACTIONABLE_LABELS = frozenset(
-    [_CLOSE_ACTION_LABELS[action] for action in _CLOSE_DETAIL_ACTIONS] + ["建议复核持仓"]
+    [
+        *(_CLOSE_ACTION_LABELS[action] for action in _CLOSE_DETAIL_ACTIONS),
+        *_STANDARD_CLOSE_TIER_LABELS.values(),
+        "建议复核持仓",
+    ]
 )
 
 
@@ -659,7 +674,7 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
         parts.append(f"{label} {_money(realized, market=market)}")
     remaining_annualized = _number(metrics.get("remaining_annualized_return"))
     if remaining_annualized is not None:
-        parts.append(f"剩余年化 {_percent(remaining_annualized)}")
+        parts.append(f"剩余权利金毛年化 {_percent(remaining_annualized)}")
     return [" · ".join(parts)] if parts else []
 
 
