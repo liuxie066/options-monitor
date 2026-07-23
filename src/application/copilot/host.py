@@ -206,10 +206,11 @@ def run_contract(
         manifest,
         scene_input=contract.input,
         record_event=event_log.record,
-        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
             name,
             payload,
             static_payloads=manifest.tool_static_payloads,
+            fixed_input=fixed_input,
         ),
         call_read_tool=lambda name, payload: copilot_tools.call_read_tool(
             name,

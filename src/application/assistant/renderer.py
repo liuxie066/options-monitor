@@ -739,13 +739,22 @@ def _performance_metric_text(value: Any) -> str:
     cny = _float_or_none(metric.get("cny"))
     parts: list[str] = []
     if by_ccy:
-        parts.append(_format_ccy_amounts(by_ccy))
+        parts.append(_format_performance_ccy_amounts(by_ccy))
     if cny is not None:
         parts.append(f"CNY {cny:,.2f}")
     quality = _dict(metric.get("quality"))
-    status = str(quality.get("status") or "").strip()
+    status = str(metric.get("status") or quality.get("status") or "").strip()
     text = " / ".join(parts) if parts else "-"
-    return f"{text}（{status}）" if status and status != "observed" else text
+    status_label = {
+        "partial": "证据不完整",
+        "not_observed": "未观测",
+        "not_applicable": "不适用",
+    }.get(status)
+    return f"{text}（{status_label}）" if status_label else text
+
+
+def _performance_metric_pair_text(gross: Any, net: Any) -> str:
+    return f"毛 {_performance_metric_text(gross)}；净 {_performance_metric_text(net)}"
 
 
 def _render_option_performance(data: dict[str, Any]) -> str:
@@ -756,35 +765,73 @@ def _render_option_performance(data: dict[str, Any]) -> str:
     pnl = _dict(data.get("pnl"))
     quality = _dict(data.get("quality"))
     lifecycle = _dict(data.get("assignment_lifecycle"))
-    account = scope.get("account") or "全部账户"
+    account = str(scope.get("account") or "").strip()
+    accounts = [str(item).strip() for item in _list(scope.get("accounts")) if str(item).strip()]
+    scope_label = account or (f"全部账户（{'、'.join(accounts)}）" if accounts else "全部账户")
+    period_kind = str(period.get("kind") or "-").strip()
+    period_kind_label = {
+        "mtd": "MTD",
+        "ytd": "YTD",
+        "month": "自然月",
+        "year": "自然年",
+        "range": "日期范围",
+    }.get(period_kind, period_kind)
+    period_status_label = {
+        "partial_current": "截至当前",
+        "partial_cutoff": "截至指定时点",
+        "complete_past": "完整历史期间",
+    }.get(str(period.get("status") or "").strip(), "期间状态未知")
     period_label = f"{period.get('requested_start_date') or '-'} 至 {period.get('requested_end_date') or '-'}"
     lines = [
-        f"期权收益统计完成（{account}，{period.get('kind') or '-'}，{period_label}）：",
-        "利润口径：",
-        f"- 期间总 PnL（净）：{_performance_metric_text(pnl.get('period_total_net'))}",
-        f"- 期间总 PnL（毛）：{_performance_metric_text(pnl.get('period_total_gross'))}",
-        f"- 已实现 PnL（净）：{_performance_metric_text(pnl.get('realized_net'))}",
-        f"- 已实现 PnL（毛）：{_performance_metric_text(pnl.get('realized_gross'))}",
+        f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}，{period_status_label}）：",
+        "收益口径（期间总 PnL = 已实现 + 期末未实现 - 期初未实现，为期权与指派股票合计）：",
+        f"- 期间总 PnL：{_performance_metric_pair_text(pnl.get('period_total_gross'), pnl.get('period_total_net'))}",
+        f"- 已实现 PnL（合计）：{_performance_metric_pair_text(pnl.get('realized_gross'), pnl.get('realized_net'))}",
+        f"- 纯期权已实现 PnL（净值含实际期权费用）：{_performance_metric_pair_text(pnl.get('option_realized_gross'), pnl.get('option_realized_net'))}",
+        f"- 指派股票已实现 PnL（股票价差；净值含实际结算/卖出费用）：{_performance_metric_pair_text(pnl.get('assigned_stock_realized_gross'), pnl.get('assigned_stock_realized_net'))}",
         "现金口径：",
         f"- 总现金变动（净）：{_performance_metric_text(cash.get('total_cash_change_net'))}",
         f"- 期权交易现金：{_performance_metric_text(cash.get('option_trade_cash_gross'))}",
+        f"- 期权费用现金：{_performance_metric_text(cash.get('option_fee_cash'))}",
         f"- 指派/行权正股结算本金：{_performance_metric_text(cash.get('stock_settlement_cash_gross'))}",
+        f"- 指派/行权正股结算费用：{_performance_metric_text(cash.get('stock_settlement_fee_cash'))}",
+        f"- 指派股票卖出回款：{_performance_metric_text(cash.get('assigned_stock_sale_cash_gross'))}",
+        f"- 指派股票卖出费用：{_performance_metric_text(cash.get('assigned_stock_sale_fee_cash'))}",
         "活动口径：",
         f"- 收到权利金：{_performance_metric_text(activity.get('premium_collected_gross'))}",
         f"- 支付权利金：{_performance_metric_text(activity.get('premium_paid_gross'))}",
+        f"- 期权合约：开仓 {activity.get('contracts_opened', 0)} 张；平仓 {activity.get('contracts_closed', 0)} 张。",
+        f"- 指派股票：本期形成 {activity.get('assigned_stock_shares_opened', 0)} 股；卖出 {activity.get('assigned_stock_shares_sold', 0)} 股。",
     ]
     ending_lots = _list(lifecycle.get("ending_lots"))
+    sales = _list(lifecycle.get("sales"))
     review = _list(lifecycle.get("review"))
-    if ending_lots or review:
-        lines.append(f"指派正股：期末 lot {len(ending_lots)} 个，数据复核项 {len(review)} 条。")
+    unsupported = _list(lifecycle.get("unsupported_inventory"))
+    lines.append(
+        f"指派状态：期末 lot {len(ending_lots)} 个，卖出记录 {len(sales)} 条，"
+        f"复核项 {len(review)} 条，不支持库存 {len(unsupported)} 条。"
+    )
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
     warnings = [str(item) for item in _list(quality.get("warnings")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
     if warnings:
         lines.append("提示：" + "；".join(warnings[:6]))
-    lines.append("口径：利润、现金和权利金活动是平行命名空间，不能相加或相减制造残差；指派本金是资产转换，不是亏损。")
+    lines.append(
+        "口径：权利金是交易活动；期权/股票已实现 PnL 才是实现利润；"
+        "指派结算本金和卖股回款是现金流，不直接等于 PnL，也不能与权利金重复相加。"
+    )
     return "\n".join(lines)
+
+
+def _format_performance_ccy_amounts(values: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for currency, amount in sorted(values.items()):
+        try:
+            parts.append(f"{str(currency).upper()} {float(amount):,.2f}")
+        except Exception:
+            continue
+    return " + ".join(parts) if parts else "-"
 
 
 def _format_ccy_amounts(values: dict[str, Any]) -> str:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from src.application.agent_tools.operations_impl import option_positions_read_tool
 from src.application.agent_tools.materialization_impl import option_performance_report_tool
@@ -32,9 +32,21 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "scope.brokers",
         "activity.premium_collected_gross",
         "activity.premium_paid_gross",
+        "activity.assigned_stock_shares_opened",
+        "activity.assigned_stock_shares_sold",
+        "cash.option_trade_cash_gross",
+        "cash.option_fee_cash",
+        "cash.stock_settlement_cash_gross",
+        "cash.stock_settlement_fee_cash",
+        "cash.assigned_stock_sale_cash_gross",
+        "cash.assigned_stock_sale_fee_cash",
         "cash.total_cash_change_net",
         "pnl.realized_gross",
         "pnl.realized_net",
+        "pnl.option_realized_gross",
+        "pnl.option_realized_net",
+        "pnl.assigned_stock_realized_gross",
+        "pnl.assigned_stock_realized_net",
         "pnl.period_total_gross",
         "pnl.period_total_net",
         "capital.period_realized_net_annualized_efficiency",
@@ -213,6 +225,37 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
     return None
 
 
+_OPTION_PERFORMANCE_PERIOD_FIELDS = frozenset(
+    {"as_of_date", "month", "year", "start_date", "end_date"}
+)
+_OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND = {
+    "mtd": frozenset({"as_of_date"}),
+    "ytd": frozenset({"as_of_date"}),
+    "month": frozenset({"month"}),
+    "year": frozenset({"year"}),
+    "range": frozenset({"start_date", "end_date"}),
+}
+
+
+def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    for name in ("account", "broker"):
+        value = normalized.get(name)
+        if name in normalized and isinstance(value, str) and not value.strip():
+            raise ValueError(f"{name} must be non-empty when provided")
+    period_value = normalized.get("period")
+    if not isinstance(period_value, str) or period_value not in _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND:
+        return normalized
+    relevant = _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND[period_value]
+    for name in _OPTION_PERFORMANCE_PERIOD_FIELDS - relevant:
+        normalized.pop(name, None)
+    for name in relevant:
+        value = normalized.get(name)
+        if name in normalized and isinstance(value, str) and not value.strip():
+            raise ValueError(f"{name} must be non-empty when provided")
+    return normalized
+
+
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
     description=(
@@ -245,16 +288,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={
         "config_key": "us",
-        "config_path": None,
-        "data_config": None,
-        "account": None,
-        "broker": None,
         "period": "mtd",
-        "as_of_date": None,
-        "month": None,
-        "year": None,
-        "start_date": None,
-        "end_date": None,
         "include_rows": False,
         "refresh_quotes": True,
     },
@@ -293,6 +327,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         },
         "additionalProperties": False,
     },
+    copilot_input_normalizer=_normalize_option_performance_copilot_input,
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(

@@ -9,7 +9,10 @@ from src.application.copilot.agent import AgentRunResult, AgentState, ModelReque
 from src.application.copilot.contracts import SceneManifest, new_id
 
 
-ToolPayloadBuilder = Callable[[str, dict[str, Any]], tuple[dict[str, Any] | None, str | None]]
+ToolPayloadBuilder = Callable[
+    [str, dict[str, Any], dict[str, Any]],
+    tuple[dict[str, Any] | None, str | None],
+]
 ReadToolCaller = Callable[[str, dict[str, Any]], dict[str, Any]]
 ObservationCompactor = Callable[[str, dict[str, Any], dict[str, Any] | None], dict[str, Any]]
 FixtureLoader = Callable[[str | None], list[dict[str, Any]]]
@@ -601,7 +604,7 @@ def _execute_tool_call(
             ),
             record_event,
         )
-    payload, payload_error = build_tool_payload(call.name, _tool_input(call.arguments, scene_input))
+    payload, payload_error = build_tool_payload(call.name, dict(call.arguments), scene_input)
     if payload_error or payload is None:
         return _append_tool_observation(
             state,
@@ -688,15 +691,6 @@ def _execute_tool_call(
     if appended.get("ok"):
         state.successful_observations[signature] = dict(appended)
     return appended
-
-
-def _tool_input(arguments: dict[str, Any], scene_input: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(arguments)
-    for key in ("config_key", "symbol", "month", "reference_year"):
-        value = scene_input.get(key)
-        if value not in (None, ""):
-            payload[key] = value
-    return payload
 
 
 def _append_tool_observation(
