@@ -118,6 +118,17 @@ def test_option_performance_report_omitted_account_is_aggregate(monkeypatch: pyt
     assert "rows" not in data
 
 
+def test_option_performance_output_contract_exposes_assignment_components() -> None:
+    contract = positions.OPTION_PERFORMANCE_REPORT_TOOL.output_contract
+
+    assert "pnl.option_realized_gross" in contract["fact_fields"]
+    assert "pnl.option_realized_net" in contract["fact_fields"]
+    assert "pnl.assigned_stock_realized_gross" in contract["fact_fields"]
+    assert "pnl.assigned_stock_realized_net" in contract["fact_fields"]
+    assert "cash.assigned_stock_sale_cash_gross" in contract["fact_fields"]
+    assert "cash.stock_settlement_cash_gross" in contract["fact_fields"]
+
+
 def test_copilot_mtd_payload_prunes_conflicts_and_executes_first_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
