@@ -985,6 +985,7 @@ def render_service_bundle(
                 "--profile-path",
                 profile_path,
                 "--build-dataset",
+                "--include-close-decisions",
                 "--write",
                 "--source",
                 "local",
@@ -1418,6 +1419,7 @@ def render_service_bundle(
                 "--profile-path",
                 profile_path,
                 "--build-dataset",
+                "--include-close-decisions",
                 "--write",
                 "--source",
                 "local",
@@ -1659,6 +1661,7 @@ def render_service_bundle(
         } if include_wechat_clawbot else None,
         strategy_lab_recorder={
             "enabled": True,
+            "include_close_decisions": True,
             "source": recorder_source,
             "max_datasets": recorder_max_datasets,
             "mark_stale_hours": recorder_mark_stale_hours,

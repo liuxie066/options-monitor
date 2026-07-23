@@ -6,12 +6,70 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
+import pytest
+
 
 class _ToolKwargs(TypedDict):
     load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
     repo_base: Callable[[], Path]
     mask_path: Callable[[Any], str | None]
     now_fn: Callable[[], datetime]
+
+
+def test_strategy_lab_update_cli_forwards_close_decision_build_flag(monkeypatch, tmp_path: Path) -> None:
+    import src.application.strategy_lab as strategy_lab
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    calls: list[dict[str, Any]] = []
+
+    def _run_strategy_lab_update(**kwargs):
+        calls.append(kwargs)
+        return {"schema_version": "strategy_lab_update.v1", "summary": {}, "safety": {}}
+
+    monkeypatch.setattr(strategy_lab, "run_strategy_lab_update", _run_strategy_lab_update)
+    args = parse_args(
+        [
+            "research",
+            "strategy-lab",
+            "update",
+            "--build-dataset",
+            "--include-close-decisions",
+            "--write",
+        ]
+    )
+
+    response = handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+    assert response["ok"] is True
+    assert calls[0]["build_dataset"] is True
+    assert calls[0]["include_close_decisions"] is True
+    assert calls[0]["write"] is True
+
+
+@pytest.mark.parametrize(
+    "extra_args, expected_message",
+    [
+        (["--include-close-decisions"], "requires build_dataset"),
+        (
+            ["--build-dataset", "--include-close-decisions", "--dataset-id", "explicit"],
+            "cannot be combined with dataset_id",
+        ),
+    ],
+)
+def test_strategy_lab_update_cli_rejects_invalid_close_build_combinations(
+    tmp_path: Path,
+    extra_args: list[str],
+    expected_message: str,
+) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    args = parse_args(["research", "strategy-lab", "update", *extra_args])
+
+    with pytest.raises(AgentToolError, match=expected_message):
+        handle_research_command(args, repo_base_fn=lambda: tmp_path)
 
 
 def _runtime_status_data(*, tick_metrics: dict[str, Any] | None = None) -> dict[str, Any]:
