@@ -270,14 +270,56 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
 
     assert "3690.HK｜Sell Put｜08-28 HK$65 Put｜建议平仓" in message
     assert (
-        "参考｜参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · 剩余年化 4.2%"
+        "参考｜参考平仓价 HK$0.52（mid） · 预计锁定收益 HK$474.50 · "
+        "剩余权利金毛年化 4.2%"
         in message
     )
 
     brief["market"] = "US"
     brief["positions"][0]["symbol"] = "NVDA"
     us_message = render_full_brief(brief)
-    assert "参考平仓价 $0.52（mid） · 预计锁定收益 $474.50 · 剩余年化 4.2%" in us_message
+    assert (
+        "参考平仓价 $0.52（mid） · 预计锁定收益 $474.50 · 剩余权利金毛年化 4.2%"
+        in us_message
+    )
+
+
+def test_standard_close_uses_tier_wording_and_preserves_actionable_fallbacks() -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "symbol": symbol,
+            "strategy_family": "sell_put",
+            "close_action": "close",
+            "tier": tier,
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+        }
+        for symbol, tier in (
+            ("STRONG", "strong"),
+            ("MEDIUM", "medium"),
+            ("WEAK", "weak"),
+            ("OPTIONAL", "optional"),
+            ("UNKNOWN", "future_tier"),
+            ("MISSING", None),
+        )
+    ]
+    brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
+
+    message = render_full_brief(
+        brief,
+        limits={"max_actions_per_priority": 10},
+    )
+
+    assert "STRONG｜Sell Put｜强烈建议平仓" in message
+    assert "MEDIUM｜Sell Put｜建议平仓" in message
+    assert "WEAK｜Sell Put｜可观察平仓" in message
+    assert "OPTIONAL｜Sell Put｜低价买回可选" in message
+    assert "UNKNOWN｜Sell Put｜建议平仓" in message
+    assert "MISSING｜Sell Put｜建议平仓" in message
+    assert "汇总｜共 6 条，需处理 6 条。" in message
 
 
 def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> None:
