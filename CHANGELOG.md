@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.4.15 - 2026-07-23
+
+### Fixed
+- Made Feishu Copilot MTD option-performance questions execute the canonical `option_performance_report` on the first call by removing hidden null defaults, normalizing period-specific input, preserving channel-owned scope, and keeping omitted account scope as all accounts.
+- Split combined realized PnL into auditable pure-option and assigned-stock gross/net components while separately showing premium activity, option cash, fees, assignment settlement principal, assigned-stock sale proceeds, assignment state, and evidence gaps without changing ledger or accounting semantics.
+- Added deterministic regressions and P1 quality gates for the exact “7月 mtd 的期权收益” and “我写的是mtd” conversations so generic-analysis fallback, natural-month substitution, and silent narrowing to one account are rejected.
+
 ## 1.4.14 - 2026-07-23
 
 ### Fixed
