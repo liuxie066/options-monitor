@@ -7,6 +7,31 @@ from src.application.copilot.contracts import AppEvent, AppResult
 from scripts import copilot_p1_eval
 
 
+_MTD_QUESTION = "7月 mtd 的期权收益"
+_MTD_CORRECTION = "我写的是mtd"
+_MTD_RESPONSE = "结论：MTD 全部账户的已实现 PnL、现金流和指派股票均已列明。"
+
+
+def _expected_tool(question: str) -> str | None:
+    return {
+        _MTD_QUESTION: "option_performance_report",
+        "当前期权风险主要集中在哪里": "option_positions_read",
+        "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
+        "为什么 NVDA 没进候选": "candidate_filter_explain",
+        "最近 close advice 为什么没有通知": "close_advice_read",
+    }.get(question)
+
+
+def _response(question: str) -> str:
+    return _MTD_RESPONSE if question in {_MTD_QUESTION, _MTD_CORRECTION} else "结论：测试回答"
+
+
+def _tool_input(question: str, tool: str | None) -> dict[str, str]:
+    if question in {_MTD_QUESTION, _MTD_CORRECTION} and tool == "option_performance_report":
+        return {"period": "mtd"}
+    return {}
+
+
 def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
     runtime_root = tmp_path / "runtime"
     observed: dict[str, str | None] = {}
@@ -38,18 +63,19 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
     calls: list[tuple[str, str]] = []
 
     def run_channel_request(**kwargs):
-        calls.append((kwargs["user_message"], kwargs["conversation_id"]))
-        tool = {
-            "7月收益": "option_performance_report",
-            "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
-            "为什么 NVDA 没进候选": "candidate_filter_explain",
-            "最近 close advice 为什么没有通知": "close_advice_read",
-        }.get(kwargs["user_message"])
+        question = kwargs["user_message"]
+        calls.append((question, kwargs["conversation_id"]))
+        tool = _expected_tool(question)
         events = [] if tool is None else [
-            AppEvent("evt_1", "run_1", "tool_call", "2026-07-11T00:00:00+00:00", {"tool_name": tool, "tool_input": {}})
+            AppEvent(
+                "evt_1",
+                "run_1",
+                "tool_call",
+                "2026-07-11T00:00:00+00:00",
+                {"tool_name": tool, "tool_input": _tool_input(question, tool)},
+            )
         ]
-        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+        return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
     payload = copilot_p1_eval.run_eval(
@@ -59,7 +85,8 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
     )
 
     assert payload["structural_pass"] is True
-    assert calls[:2] == [("7月收益", "income"), ("主要来自哪里", "income")]
+    assert calls[:2] == [(_MTD_QUESTION, "income"), (_MTD_CORRECTION, "income")]
+    assert payload["cases"][1]["tool_names"] == []
     assert ("分析6月的期权操作有没有不合理，需要优化的地方", "review") in calls
     assert ("只看lx账户，结论是什么", "review") in calls
     assert calls[-1] == ("结论呢", "review")
@@ -68,13 +95,8 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
 
 def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, tmp_path) -> None:
     def run_channel_request(**kwargs):
-        tool = {
-            "7月收益": "option_performance_report",
-            "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
-            "为什么 NVDA 没进候选": "candidate_filter_explain",
-            "最近 close advice 为什么没有通知": "close_advice_read",
-        }.get(kwargs["user_message"])
+        question = kwargs["user_message"]
+        tool = _expected_tool(question)
         tools = [tool, "__read_observation__"] if tool else []
         events = [
             AppEvent(
@@ -82,11 +104,11 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
                 "run_1",
                 "tool_call",
                 "2026-07-11T00:00:00+00:00",
-                {"tool_name": name, "tool_input": {}},
+                {"tool_name": name, "tool_input": _tool_input(question, name)},
             )
             for index, name in enumerate(tools, start=1)
         ]
-        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+        return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
     payload = copilot_p1_eval.run_eval(
@@ -98,7 +120,7 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
     assert payload["structural_pass"] is True
 
 
-def test_p1_eval_accepts_any_pure_read_evidence_tool(monkeypatch, tmp_path) -> None:
+def test_p1_eval_rejects_generic_analysis_for_primary_mtd_performance(monkeypatch, tmp_path) -> None:
     def run_channel_request(**kwargs):
         question = kwargs["user_message"]
         needs_read = next(
@@ -115,7 +137,7 @@ def test_p1_eval_accepts_any_pure_read_evidence_tool(monkeypatch, tmp_path) -> N
                 {"tool_name": "analysis_query", "tool_input": {"config_key": "us"}},
             )
         ]
-        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+        return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
     payload = copilot_p1_eval.run_eval(
@@ -125,9 +147,52 @@ def test_p1_eval_accepts_any_pure_read_evidence_tool(monkeypatch, tmp_path) -> N
     )
 
     operation_review = next(item for item in payload["cases"] if item["name"] == "operation_review")
+    mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
     assert operation_review["tool_names"] == ["analysis_query"]
     assert operation_review["checks"]["read_observation_used"] is True
-    assert payload["structural_pass"] is True
+    assert operation_review["checks"]["required_primary_tool_used"] is True
+    assert mtd_income["checks"]["required_primary_tool_used"] is False
+    assert payload["structural_pass"] is False
+
+
+def test_p1_eval_rejects_wrong_mtd_period_and_narrowed_account(monkeypatch, tmp_path) -> None:
+    def run_channel_request(**kwargs):
+        question = kwargs["user_message"]
+        if question in {_MTD_QUESTION, _MTD_CORRECTION}:
+            return AppResult(
+                status="answered",
+                user_response="结论：MTD lx账户的已实现 PnL、现金流和指派股票均已列明。",
+                events=[
+                    AppEvent(
+                        "evt_wrong_scope",
+                        "run_1",
+                        "tool_call",
+                        "2026-07-11T00:00:00+00:00",
+                        {
+                            "tool_name": "option_performance_report",
+                            "tool_input": {
+                                "period": "month",
+                                "month": "2026-07",
+                                "account": "lx",
+                            },
+                        },
+                    )
+                ],
+            )
+        return AppResult(status="answered", user_response="结论：测试回答")
+
+    monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
+    payload = copilot_p1_eval.run_eval(
+        assistant_config="config.yaml",
+        config_key="us",
+        host_db=str(tmp_path / "host.sqlite3"),
+    )
+
+    mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
+    assert mtd_income["checks"]["required_primary_tool_used"] is True
+    assert mtd_income["checks"]["required_primary_tool_input"] is False
+    assert mtd_income["checks"]["required_response_terms_present"] is False
+    assert payload["structural_pass"] is False
 
 
 def test_p1_eval_records_one_case_failure_and_continues(monkeypatch, tmp_path) -> None:
@@ -136,7 +201,7 @@ def test_p1_eval_records_one_case_failure_and_continues(monkeypatch, tmp_path) -
     def run_channel_request(**kwargs):
         question = kwargs["user_message"]
         calls.append(question)
-        if question == "7月收益":
+        if question == _MTD_QUESTION:
             raise SystemExit("invalid runtime config")
         return AppResult(status="answered", user_response="结论：测试回答")
 
@@ -155,20 +220,14 @@ def test_p1_eval_records_one_case_failure_and_continues(monkeypatch, tmp_path) -
 def test_p1_eval_checks_scope_conclusion_and_protocol(monkeypatch, tmp_path) -> None:
     def run_channel_request(**kwargs):
         question = kwargs["user_message"]
-        tool = {
-            "7月收益": "option_performance_report",
-            "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
-            "为什么 NVDA 没进候选": "candidate_filter_explain",
-            "最近 close advice 为什么没有通知": "close_advice_read",
-        }.get(question)
+        tool = _expected_tool(question)
         events = [] if tool is None else [
             AppEvent(
                 "evt_1",
                 "run_1",
                 "tool_call",
                 "2026-07-11T00:00:00+00:00",
-                {"tool_name": tool, "tool_input": {"config_key": "hk"}},
+                {"tool_name": tool, "tool_input": {**_tool_input(question, tool), "config_key": "hk"}},
             )
         ]
         return AppResult(
@@ -197,13 +256,7 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
     def run_channel_request(**kwargs):
         preview_intents.update(str(item.get("intent_name") or "") for item in kwargs["control_preview_specs"])
         question = kwargs["user_message"]
-        tool = {
-            "7月收益": "option_performance_report",
-            "当前期权风险主要集中在哪里": "option_positions_read",
-            "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
-            "为什么 NVDA 没进候选": "candidate_filter_explain",
-            "最近 close advice 为什么没有通知": "close_advice_read",
-        }.get(question)
+        tool = _expected_tool(question)
         if question == "把 NVDA put 加进开仓记录":
             return AppResult(
                 status="control_requested",
@@ -215,10 +268,10 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
                 "run_1",
                 "tool_call",
                 "2026-07-11T00:00:00+00:00",
-                {"tool_name": tool, "tool_input": {}},
+                {"tool_name": tool, "tool_input": _tool_input(question, tool)},
             )
         ]
-        return AppResult(status="answered", user_response="结论：测试回答", events=events)
+        return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(copilot_p1_eval, "run_channel_request", run_channel_request)
     payload = copilot_p1_eval.run_eval(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from src.application.tool_input_schema import build_tool_input_json_schema, validate_tool_input_payload
 
@@ -11,6 +11,7 @@ ToolHandler = Callable[[dict[str, Any]], ToolHandlerResult]
 InputValidator = Callable[[dict[str, Any]], None]
 WriteRequestPredicate = Callable[[dict[str, Any]], bool]
 OutputContractResolver = Callable[[dict[str, Any]], dict[str, Any] | None]
+CopilotInputNormalizer = Callable[[Mapping[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class AgentTool:
     output_contract_resolver: OutputContractResolver | None = field(default=None, repr=False, compare=False)
     copilot_input_fields: tuple[str, ...] = ()
     copilot_input_schema: dict[str, Any] = field(default_factory=dict)
+    copilot_input_normalizer: CopilotInputNormalizer | None = field(default=None, repr=False, compare=False)
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -76,6 +78,8 @@ class AgentTool:
         properties = schema.get("properties")
         if isinstance(properties, dict):
             for name, value in self.safe_default_input.items():
+                if value is None:
+                    continue
                 if name in properties and isinstance(properties[name], dict):
                     properties[name].setdefault("default", deepcopy(value))
         return schema
@@ -150,6 +154,7 @@ def build_agent_tool(
     output_contract_resolver: OutputContractResolver | None = None,
     copilot_input_fields: tuple[str, ...] = (),
     copilot_input_schema: dict[str, Any] | None = None,
+    copilot_input_normalizer: CopilotInputNormalizer | None = None,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -177,4 +182,5 @@ def build_agent_tool(
         output_contract_resolver=output_contract_resolver,
         copilot_input_fields=tuple(copilot_input_fields),
         copilot_input_schema=deepcopy(copilot_input_schema or {}),
+        copilot_input_normalizer=copilot_input_normalizer,
     )

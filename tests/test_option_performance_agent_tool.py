@@ -9,6 +9,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
+from src.application.copilot import tools as copilot_tools
 
 
 def _core_report(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -117,10 +118,53 @@ def test_option_performance_report_omitted_account_is_aggregate(monkeypatch: pyt
     assert "rows" not in data
 
 
+def test_option_performance_output_contract_exposes_assignment_components() -> None:
+    contract = positions.OPTION_PERFORMANCE_REPORT_TOOL.output_contract
+
+    assert "pnl.option_realized_gross" in contract["fact_fields"]
+    assert "pnl.option_realized_net" in contract["fact_fields"]
+    assert "pnl.assigned_stock_realized_gross" in contract["fact_fields"]
+    assert "pnl.assigned_stock_realized_net" in contract["fact_fields"]
+    assert "cash.assigned_stock_sale_cash_gross" in contract["fact_fields"]
+    assert "cash.stock_settlement_cash_gross" in contract["fact_fields"]
+
+
+def test_copilot_mtd_payload_prunes_conflicts_and_executes_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_dependencies(monkeypatch, report=_core_report())
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {
+            "config_key": "us",
+            "period": "mtd",
+            "as_of_date": "2026-07-23",
+            "month": "2026-07",
+            "year": 2026,
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-23",
+        },
+    )
+
+    assert error is None
+    assert payload == {
+        "config_key": "us",
+        "period": "mtd",
+        "as_of_date": "2026-07-23",
+        "include_rows": False,
+        "refresh_quotes": True,
+    }
+    _data, warnings, _meta = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)
+
+    assert warnings == []
+    assert calls["period"].kind == "mtd"
+
+
 @pytest.mark.parametrize(
     "payload, message",
     [
         ({"period": "mtd", "month": "2026-06"}, "period=mtd does not accept: month"),
+        ({"month": "2026-06"}, "period=mtd does not accept: month"),
         ({"period": "month"}, "month must be YYYY-MM"),
         ({"period": "year", "start_date": "2026-01-01"}, "period=year does not accept: start_date"),
         ({"period": "range", "start_date": "2026-01-01"}, "end_date is required"),

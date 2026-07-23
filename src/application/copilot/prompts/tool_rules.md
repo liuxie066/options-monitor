@@ -6,6 +6,9 @@
 - Choose tool names and arguments from the user's question, conversation, tool
   schemas, and explicit runtime context. The Host does not classify OM business
   intent for you.
+- Option income/performance, including corrections: call
+  `option_performance_report` first, never generic analysis. One period only:
+  MTD means `period=mtd` without month/year/range; no account means all.
 - Treat non-empty runtime context fields as fixed scope supplied by the UI. Do
   not broaden or replace them with another market, symbol, month, or year.
 - Use the smallest useful sequence of calls. Stop when the available facts can
@@ -25,8 +28,6 @@
   explain the remaining gap.
 - If the tool-call budget is exhausted, do not print tool-call syntax as text.
   Finish with the supported conclusion and name the checks that remain undone.
-When the user explicitly asks to change state, use `request_control_preview` with the matching preview capability.
-This requests only a deterministic preview; it never applies the change. Do not use it for confirmation or cancellation replies.
-Do not describe a write as completed until a later Control receipt reports successful apply and readback.
-Treat the injected pending Control snapshot as authoritative over older conversation text.
-Use its operation IDs and summaries to resolve follow-up edits; an empty snapshot means no operation is awaiting confirmation.
+For state change use `request_control_preview` only; never confirm/apply/cancel.
+Claim completion only after successful apply/readback. The pending Control
+snapshot is authoritative; empty means none.

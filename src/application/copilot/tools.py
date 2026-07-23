@@ -31,24 +31,41 @@ def available_read_tools(toolsets: list[str] | tuple[str, ...] | None = None) ->
 
 def build_tool_payload(
     tool_name: str,
-    scene_input: dict[str, Any],
+    explicit_input: dict[str, Any],
     *,
     static_payloads: dict[str, dict[str, Any]] | None = None,
+    fixed_input: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     definition = get_tool_definition(tool_name)
     if definition is None or not definition.is_pure_read():
         return None, f"unsupported read-only tool: {tool_name}"
-    payload = dict(definition.safe_default_input)
+    explicit_payload: dict[str, Any] = {}
     static = (static_payloads or {}).get(tool_name)
     if isinstance(static, dict):
-        payload.update(static)
+        explicit_payload.update(static)
     properties = definition.input_json_schema().get("properties")
     fields = set(properties) if isinstance(properties, dict) else set()
     for name in fields:
-        if name not in scene_input:
+        if name not in explicit_input:
             continue
-        value = scene_input.get(name)
-        if value is None:
+        value = explicit_input.get(name)
+        explicit_payload[name] = value.strip() if isinstance(value, str) else value
+    if definition.copilot_input_normalizer is not None:
+        try:
+            explicit_payload = definition.copilot_input_normalizer(explicit_payload)
+        except (TypeError, ValueError) as exc:
+            return None, str(exc)
+    payload = {
+        name: value
+        for name, value in definition.safe_default_input.items()
+        if value is not None
+    }
+    payload.update(explicit_payload)
+    for name in fields:
+        if name not in (fixed_input or {}):
+            continue
+        value = (fixed_input or {}).get(name)
+        if value in (None, ""):
             continue
         payload[name] = value.strip() if isinstance(value, str) else value
     return payload, None
@@ -76,9 +93,11 @@ def tool_descriptions(
         if definition is None or not definition.is_pure_read():
             continue
         default_input = {
-            **dict(definition.safe_default_input),
-            **dict((static_payloads or {}).get(name) or {}),
+            key: value
+            for key, value in definition.safe_default_input.items()
+            if value is not None
         }
+        default_input.update(dict((static_payloads or {}).get(name) or {}))
         output_contract = definition.resolve_output_contract(default_input)
         descriptions.append(
             {
@@ -154,6 +173,8 @@ def _copilot_input_schema(definition) -> dict[str, Any]:
     properties = schema.get("properties")
     if isinstance(properties, dict):
         for name, value in definition.safe_default_input.items():
+            if value is None:
+                continue
             if name in properties and isinstance(properties[name], dict):
                 properties[name].setdefault("default", deepcopy(value))
     if not isinstance(properties, dict):

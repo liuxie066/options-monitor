@@ -167,11 +167,17 @@ def test_assignment_period_pnl_does_not_double_count_put_premium_or_stock_fee(tm
     )
 
     assert report["pnl"]["realized_gross"]["by_currency"] == {"USD": 250.0}
+    assert report["pnl"]["option_realized_gross"]["by_currency"] == {"USD": 250.0}
+    assert report["pnl"]["option_realized_net"]["by_currency"] == {"USD": 250.0}
+    assert report["pnl"]["assigned_stock_realized_gross"]["status"] == "not_observed"
+    assert report["pnl"]["assigned_stock_realized_net"]["by_currency"] == {"USD": -1.0}
     assert report["pnl"]["ending_unrealized_gross"]["by_currency"] == {"USD": 200.0}
     assert report["pnl"]["period_total_gross"]["by_currency"] == {"USD": 450.0}
     assert report["pnl"]["period_total_net"]["by_currency"] == {"USD": 449.0}
     assert report["cash"]["stock_settlement_fee_cash"]["by_currency"] == {"USD": -1.0}
     assert report["activity"]["assigned_stock_shares_opened"] == 100
+    assert report["assigned_stock"]["period"]["pnl"]["realized_gross"]["status"] == "not_observed"
+    assert report["assigned_stock"]["period"]["pnl"]["realized_net"]["by_currency"] == {"USD": -1.0}
     assert report["evidence"]["collection"]["status"] == "skipped_historical"
 
 
@@ -251,11 +257,52 @@ def test_partial_assigned_stock_sale_conserves_period_pnl_and_actual_fee(tmp_pat
     assert report["cash"]["assigned_stock_sale_fee_cash"]["by_currency"] == {"USD": -2.0}
     assert report["pnl"]["realized_gross"]["by_currency"] == {"USD": 500.0}
     assert report["pnl"]["realized_net"]["by_currency"] == {"USD": 498.0}
+    assert report["pnl"]["option_realized_gross"]["status"] == "not_observed"
+    assert report["pnl"]["option_realized_net"]["status"] == "not_observed"
+    assert report["pnl"]["assigned_stock_realized_gross"]["by_currency"] == {"USD": 500.0}
+    assert report["pnl"]["assigned_stock_realized_net"]["by_currency"] == {"USD": 498.0}
     assert report["pnl"]["opening_unrealized_gross"]["by_currency"] == {"USD": 0.0}
     assert report["pnl"]["ending_unrealized_gross"]["by_currency"] == {"USD": 250.0}
     assert report["pnl"]["period_total_gross"]["by_currency"] == {"USD": 750.0}
     assert report["pnl"]["period_total_net"]["by_currency"] == {"USD": 748.0}
     assert report["assigned_stock"]["ending_lots"][0]["shares_remaining"] == 50
+
+
+def test_assignment_and_stock_sale_reconcile_option_and_stock_realized_components(tmp_path) -> None:
+    repo = _repo_with_assignment(tmp_path, assignment_stock_fee=1)
+    repo.upsert_assigned_stock_event(
+        {
+            "event_type": "sale",
+            "stock_event_id": "sale-in-assignment-month",
+            "target_stock_lot_id": "assigned-stock-assign-put",
+            "account": "lx",
+            "broker": "futu",
+            "symbol": "NVDA",
+            "side": "sell",
+            "shares": 50,
+            "price": 110,
+            "currency": "USD",
+            "fees": 2,
+            "fee_provenance": {"basis": "actual", "source": "test"},
+            "trade_time_ms": _ms("2026-05-15T10:00:00"),
+        }
+    )
+
+    report = build_option_period_performance(
+        repo,
+        period={"period": "month", "month": "2026-05"},
+        account="lx",
+        now_ms=NOW_MS,
+    )
+
+    assert report["pnl"]["realized_gross"]["by_currency"] == {"USD": 750.0}
+    assert report["pnl"]["realized_net"]["by_currency"] == {"USD": 747.0}
+    assert report["pnl"]["option_realized_gross"]["by_currency"] == {"USD": 250.0}
+    assert report["pnl"]["option_realized_net"]["by_currency"] == {"USD": 250.0}
+    assert report["pnl"]["assigned_stock_realized_gross"]["by_currency"] == {"USD": 500.0}
+    assert report["pnl"]["assigned_stock_realized_net"]["by_currency"] == {"USD": 497.0}
+    assert report["assigned_stock"]["period"]["pnl"]["realized_gross"]["by_currency"] == {"USD": 500.0}
+    assert report["assigned_stock"]["period"]["pnl"]["realized_net"]["by_currency"] == {"USD": 497.0}
 
 
 def test_estimated_sale_fee_keeps_gross_and_marks_net_partial(tmp_path) -> None:

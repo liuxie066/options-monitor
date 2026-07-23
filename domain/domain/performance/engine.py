@@ -242,12 +242,14 @@ def build_period_performance(
     for event in period_events:
         facts.extend(cash_facts_for_trade_event(event))
 
+    option_realized_facts: list[PerformanceFact] = []
     allocations_by_close = {allocation.close_event_id: allocation for allocation in scoped_allocations}
     for allocation in scoped_allocations:
-        facts.extend(_allocation_realized_facts(allocation))
+        option_realized_facts.extend(_allocation_realized_facts(allocation))
     for event in period_events:
         if event.event_type in CLOSE_EVENT_TYPES and event.event_id not in allocations_by_close:
-            facts.extend(_missing_realized_facts(event))
+            option_realized_facts.extend(_missing_realized_facts(event))
+    facts.extend(option_realized_facts)
 
     facts.extend(
         _option_valuation_facts(
@@ -265,26 +267,47 @@ def build_period_performance(
             prefix="ending",
         )
     )
-    facts.extend(
-        _assigned_stock_period_facts(
-            opening_assigned_stock or {},
-            ending_assigned_stock or {},
-            period=period,
-        )
+    assigned_stock_facts = _assigned_stock_period_facts(
+        opening_assigned_stock or {},
+        ending_assigned_stock or {},
+        period=period,
     )
+    facts.extend(assigned_stock_facts)
 
     ordered_facts = tuple(
-        sorted(
-            facts,
-            key=lambda item: (
-                item.effective_at_ms,
-                item.fact_kind,
-                item.source_event_id,
-                item.allocation_id or "",
-            ),
-        )
+        sorted(facts, key=_performance_fact_order_key)
+    )
+    ordered_option_realized_facts = tuple(
+        sorted(option_realized_facts, key=_performance_fact_order_key)
+    )
+    ordered_assigned_stock_facts = tuple(
+        sorted(assigned_stock_facts, key=_performance_fact_order_key)
     )
     summary = _summarize(ordered_facts, fx_rates=fx_rates)
+    summary["pnl"].update(
+        {
+            "option_realized_gross": _metric(
+                ordered_option_realized_facts,
+                {"realized_gross"},
+                fx_rates=fx_rates,
+            ).to_dict(),
+            "option_realized_net": _metric(
+                ordered_option_realized_facts,
+                {"realized_net"},
+                fx_rates=fx_rates,
+            ).to_dict(),
+            "assigned_stock_realized_gross": _metric(
+                ordered_assigned_stock_facts,
+                {"realized_gross"},
+                fx_rates=fx_rates,
+            ).to_dict(),
+            "assigned_stock_realized_net": _metric(
+                ordered_assigned_stock_facts,
+                {"realized_net"},
+                fx_rates=fx_rates,
+            ).to_dict(),
+        }
+    )
     capital, capital_segments = _capital_report(
         events=scoped_events,
         allocations=scoped_all_allocations,
@@ -415,7 +438,7 @@ def build_period_performance(
         assigned_stock=_assigned_stock_report_summary(
             opening_assigned_stock or {},
             ending_assigned_stock or {},
-            facts=ordered_facts,
+            facts=ordered_assigned_stock_facts,
             fx_rates=fx_rates,
         ),
         breakdowns=breakdowns,
@@ -1370,38 +1393,23 @@ def _assigned_stock_report_summary(
     facts: Sequence[PerformanceFact],
     fx_rates: Sequence[FXRateFact],
 ) -> dict[str, Any]:
-    stock_source_ids = {
-        str(row.get("stock_event_id") or row.get("source_assignment_event_id") or row.get("stock_lot_id") or "")
-        for row in [
-            *_assigned_stock_rows(ending, "assigned_stock_lots"),
-            *_assigned_stock_rows(ending, "assigned_stock_sale_rows"),
-        ]
-    }
-    stock_facts = [
-        fact
-        for fact in facts
-        if fact.fact_kind.startswith("assigned_stock_")
-        or (
-            fact.source_event_id in stock_source_ids
-            and fact.fact_kind
-            in {
-                "realized_gross",
-                "realized_net",
-                "opening_unrealized_gross",
-                "opening_unrealized_net",
-                "ending_unrealized_gross",
-                "ending_unrealized_net",
-            }
-        )
-    ]
     return {
         "opening_lots": _assigned_stock_rows(opening, "assigned_stock_lots"),
         "ending_lots": _assigned_stock_rows(ending, "assigned_stock_lots"),
         "sales": _assigned_stock_rows(ending, "assigned_stock_sale_rows"),
         "review": _assigned_stock_rows(ending, "assigned_stock_review_rows"),
         "unsupported_inventory": _assigned_stock_rows(ending, "unsupported_inventory_rows"),
-        "period": _summarize(stock_facts, fx_rates=fx_rates),
+        "period": _summarize(facts, fx_rates=fx_rates),
     }
+
+
+def _performance_fact_order_key(fact: PerformanceFact) -> tuple[int, str, str, str]:
+    return (
+        fact.effective_at_ms,
+        fact.fact_kind,
+        fact.source_event_id,
+        fact.allocation_id or "",
+    )
 
 
 def _option_valuation_facts(

@@ -67,6 +67,22 @@ Cash CNY is booked once at the event-write boundary. Canonical option trade/assi
 
 Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
 
+Top-level `pnl.realized_gross/net` is the combined realized result of canonical option
+allocations and assigned-stock facts. To keep assignment inclusion auditable, the same engine
+pass also publishes additive components:
+
+```text
+pnl.option_realized_gross/net
+pnl.assigned_stock_realized_gross/net
+
+pnl.realized_* = pnl.option_realized_* + pnl.assigned_stock_realized_*
+```
+
+The components retain their own `observed|partial|not_observed` evidence envelope. They come from
+the exact generation-time fact collections; the renderer must not infer either component by
+subtracting totals. Period-total PnL remains the combined option plus assigned-stock result and
+must be labelled as combined in user-facing output.
+
 The application service reads immutable events only through `src.application.ledger.api`, rebuilds canonical projection without writes, and passes domain facts to the pure engine. Its S3 output is the internal `option_period_performance.core.v1` contract; the public Agent/CLI v1 envelope is added in S7.
 
 ## Valuation and FX Evidence
@@ -131,6 +147,11 @@ period_stock_total = sale_realized + ending_unrealized - opening_unrealized
 ```
 
 Settlement and sale fees are separate facts. Production net metrics use only `actual` fee evidence, including explicit actual zero. Estimated or missing fees preserve gross and make the affected net metric partial. The settlement fee is recognized once at assignment; it is not embedded again in stock gross basis. This keeps option premium, settlement fee, sale fee, and stock price movement from being double counted.
+
+`assigned_stock.period` consumes only the exact assigned-stock facts emitted by the assigned
+stock projector adapter. It does not infer membership from a shared assignment source event ID,
+because the canonical option allocation for the same assignment legitimately uses that ID too.
+This prevents option premium realization from leaking into assigned-stock realized PnL.
 
 Opening and ending assigned-stock projections use the same restated boundary semantics as option inventory: valid later voids are included when rebuilding an earlier boundary. Historical reports select persisted stock marks only and never fetch current stock prices. Current reports may collect deduplicated `StockInstrumentKey` marks through the S4 read-through collector.
 
