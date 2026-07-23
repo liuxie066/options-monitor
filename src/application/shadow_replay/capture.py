@@ -1595,6 +1595,71 @@ def latest_shadow_replay_run_dir(*, repo_root: Path, runs_root: Path | None = No
     }
 
 
+def latest_close_decision_run_dir(
+    *,
+    repo_root: Path,
+    runs_root: Path | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    """Return the latest run containing at least one Close Advice data row."""
+
+    root = (runs_root or (repo_root / "output_runs")).resolve()
+    searched_count = 0
+    skipped_without_close_count = 0
+    skipped_empty_count = 0
+    if not root.exists() or not root.is_dir():
+        return None, {
+            "requested": True,
+            "found": False,
+            "source": "runs_root_mtime",
+            "runs_root": safe_rel(root, base=repo_root),
+            "path": None,
+            "run_id": None,
+            "searched_count": 0,
+            "skipped_without_close_count": 0,
+            "skipped_empty_count": 0,
+        }
+    run_dirs = sorted(
+        [item.resolve() for item in root.iterdir() if item.is_dir()],
+        key=lambda item: (item.stat().st_mtime, item.name),
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        searched_count += 1
+        probe = ShadowReplaySourceSelection(repo_root=repo_root, run_dir=run_dir, runs_root=root)
+        close_paths = close_advice_paths_from_selection(probe)
+        if not close_paths:
+            skipped_without_close_count += 1
+            continue
+        close_row_count = sum(len(read_csv_rows(path)) for path in close_paths)
+        if close_row_count <= 0:
+            skipped_empty_count += 1
+            continue
+        return run_dir, {
+            "requested": True,
+            "found": True,
+            "source": "runs_root_mtime",
+            "runs_root": safe_rel(root, base=repo_root),
+            "path": safe_rel(run_dir, base=repo_root),
+            "run_id": run_dir.name,
+            "searched_count": searched_count,
+            "skipped_without_close_count": skipped_without_close_count,
+            "skipped_empty_count": skipped_empty_count,
+            "close_path_count": len(close_paths),
+            "close_row_count": close_row_count,
+        }
+    return None, {
+        "requested": True,
+        "found": False,
+        "source": "runs_root_mtime",
+        "runs_root": safe_rel(root, base=repo_root),
+        "path": None,
+        "run_id": None,
+        "searched_count": searched_count,
+        "skipped_without_close_count": skipped_without_close_count,
+        "skipped_empty_count": skipped_empty_count,
+    }
+
+
 def dedupe_snapshots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()

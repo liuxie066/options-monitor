@@ -152,9 +152,11 @@ cd "$REPO"
 
 这个开关会生成三类独立 timer：
 
-- `options-monitor-strategy-lab-build.timer`：每 6 小时幂等构建 latest scanned run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，已存在就跳过，不覆盖已有 mark path。build 只建立 cohort，不占用 mark/settle 维护批次。
-- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
-- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 outcome facts；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
+- `options-monitor-strategy-lab-build.timer`：每 6 小时分别幂等构建 latest scanned candidate run 与 latest non-empty Close Advice run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，同 run 只生成一个 close-aware dataset，已存在就跳过，不覆盖已有 mark/outcome。Close 正式 evidence 不完整时 build fail-closed，但 candidate build 仍独立执行。build 只建立 cohort，不占用 mark/settle 维护批次。
+- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 candidate / close mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
+- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 candidate outcome facts 与 close outcomes；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
+
+build 的 6 小时 cadence 是策略研究采样覆盖，不是每个 tick 的完整 Close Advice 事件日志。`service.profile.json.strategy_lab_recorder.include_close_decisions=true` 用于证明部署后的 recorder 已启用该 evidence facet；它不是 production Close Advice 策略开关。
 
 recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in，service drift reconcile 会继续渲染这些 timer；不传该开关则默认不启用。
 

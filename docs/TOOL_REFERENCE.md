@@ -902,7 +902,7 @@ om-agent run --tool notification_perception_read --input-json '{"conversation_id
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
 - Shadow Replay 基于已有候选、reject、trace、mark、outcome 和归档 run 证据做离线复盘
 - `review_readiness` 判断是否具备人工策略复盘条件；`candidate-impact` / `candidate-impact-report` 比较显式阈值 variants 对候选集合的影响
-- Strategy Lab update 默认 dry-run 汇总 Shadow Replay status / data-plan；显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset，显式 `--write` 才执行本地 collect / settle 维护动作
+- Strategy Lab update 默认 dry-run 汇总 Shadow Replay status / data-plan；显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset；再加 `--include-close-decisions` 时会独立选择 latest non-empty Close Advice run，构建正式 close decision facet。显式 `--write` 才执行本地 collect / settle 维护动作
 - Strategy Lab readiness 把 replay dataset 归一成 `decision_instance`，按 Sell Put / Covered Call / Combo Yield 输出 domain readiness 和 blocker
 - Strategy Lab experiment 自动生成 Sell Put / Covered Call 受控 hypotheses，复用 candidate-impact evaluator，并输出固定/历史百分位 IV/RV × 生产/去重排序的四格 observed-universe 对照和 scorecard；Combo Yield 输出独立的 group-level observed-universe experiment
 - Strategy Lab proposal 从 experiment artifact 生成 advisory-only proposal 和 Markdown；Sell Put / Covered Call 只有 `closed_replay` gate 通过才输出 dry-run patch，Combo Yield 只输出 group advisory，不应用生产配置
@@ -921,7 +921,7 @@ om research shadow-replay status --min-sample 30
 om research shadow-replay candidate-impact-report --params params.json --market us --start-date 2026-06-03 --account lx --min-sample 30
 om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 om research strategy-lab update --latest
-om research strategy-lab update --latest --build-dataset --write
+om research strategy-lab update --latest --build-dataset --include-close-decisions --write
 om research strategy-lab readiness --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 om research strategy-lab readiness --market us --account lx --start-date 2026-06-03 --end-date 2026-06-03 --min-sample 30
 om research strategy-lab experiment --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30 --auto
@@ -955,7 +955,7 @@ broker-facing data。
 
 Strategy Lab recorder 是同一条本地 artifact 写入路径的服务化封装：
 
-- latest-run build timer 默认用 scanned run id 作为 dataset id；目标 dataset 已存在时跳过，避免覆盖后续 mark path。
+- latest-run build timer 同时维护 latest scanned candidate run 与 latest non-empty Close Advice run，均默认用 run id 作为 dataset id；目标 dataset 已存在时跳过，避免覆盖后续 mark / outcome。Close Advice 非空但正式 evidence 不完整时 fail-closed，candidate build 仍独立执行。
 - mark sampler timer 默认每 2 小时维护最近 dataset，`--strategy-lab-recorder-source opend` 需要可用 OpenD。
 - outcome settler timer 默认每天北京时间 07:20 维护 `outcome_facts.jsonl`。
 - recorder opt-in 会写入 `service.profile.json.strategy_lab_recorder`，让 upgrade/service drift reconcile 保留这些 timer；默认 `service render` 不启用。
@@ -975,8 +975,9 @@ output_shared/research/strategy_lab/
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
 - `--shadow-replay-min-sample` 只影响 Research bundle 里的 `candidate_evidence.shadow_replay` 样本充足性判断，不会改生产策略参数。
 - Candidate-impact 报告只能说明 observed run universe 内候选集合变化，不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。
-- `strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 时只从 latest scanned run 构建本地 replay dataset，显式 `--write` 时只执行已有 Shadow Replay `collect_marks` / `settle` data-plan 和本地 receipt，不会执行 analyze、生成参数建议或修改生产状态。
+- `strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 时只从 latest scanned run 构建本地 replay dataset；增加 `--include-close-decisions` 时还会从 latest non-empty Close Advice run 构建 close facet。两者只写本地 research artifact；显式 `--write` 时只执行已有 Shadow Replay `collect_marks` / `settle` data-plan 和本地 receipt，不会执行 analyze、生成参数建议或修改生产状态。
 - 未显式传 `--dataset-id` 时，`strategy-lab update --latest --build-dataset --write` 默认使用 latest scanned run id 作为 dataset id；同名 dataset 已存在时返回 `dataset_build_reason=dataset_already_exists` 并跳过构建。
+- `--include-close-decisions` 必须和 `--build-dataset` 一起使用，且不能与显式 `--dataset-id` 组合。Close 与 candidate 属于独立选择；同 run 时只生成一个 close-aware dataset，不覆盖已有 dataset。
 - `strategy-lab readiness` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；显式 `--output` 只写本地 JSON artifact，不会采样 mark、settle outcome 或生成生产参数 patch。
 - `strategy-lab experiment` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；它生成的 scorecard 只用于人工复盘，不是生产参数建议；Combo Yield 结果位于 `group_experiments.combo_yield`。
 - `strategy-lab proposal` 接收 experiment JSON 文件或包含 `experiment.json` 的目录；显式 `--output` / `--markdown-output` 只写本地 artifact，不会应用 patch。`filter_only` / `path_only` 只返回 evidence gap；Combo Yield 结果通过 `group_advisory` 表达，不生成单腿 patch。

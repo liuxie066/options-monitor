@@ -171,6 +171,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="build a local replay dataset from the latest scanned run before running the data plan; writes only with --write",
     )
     strategy_lab_update.add_argument(
+        "--include-close-decisions",
+        action="store_true",
+        help="also build a dataset from the latest non-empty Close Advice run; requires --build-dataset and --write to persist",
+    )
+    strategy_lab_update.add_argument(
         "--runs-root",
         default=None,
         help="runs root for --build-dataset; defaults to profile/runtime output_runs",
@@ -850,6 +855,7 @@ def handle_research_command(
                     latest=bool(args.latest),
                     max_datasets=args.max_datasets,
                     build_dataset=bool(args.build_dataset),
+                    include_close_decisions=bool(args.include_close_decisions),
                     runs_root=runs_root,
                     dataset_id=args.dataset_id,
                     write=bool(args.write),

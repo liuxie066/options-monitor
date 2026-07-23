@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
+
+import pytest
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -163,7 +166,12 @@ def _write_update_dataset(dataset: Path) -> None:
 
 
 def _write_latest_scanned_run(runs_root: Path) -> Path:
-    run_account = runs_root / "run-evidence" / "accounts" / "lx"
+    _write_candidate_run(runs_root, "run-evidence")
+    return runs_root
+
+
+def _write_candidate_run(runs_root: Path, run_id: str) -> Path:
+    run_account = runs_root / run_id / "accounts" / "lx"
     run_account.mkdir(parents=True, exist_ok=True)
     (run_account / "sell_put_candidates.csv").write_text(
         (
@@ -187,7 +195,100 @@ def _write_latest_scanned_run(runs_root: Path) -> Path:
         + "\n",
         encoding="utf-8",
     )
-    return runs_root
+    return run_account.parent.parent
+
+
+def _write_close_run(
+    runs_root: Path,
+    run_id: str,
+    *,
+    include_audit: bool = True,
+    include_candidate: bool = False,
+) -> Path:
+    account_dir = runs_root / run_id / "accounts" / "lx"
+    close_path = account_dir / "close_advice.csv"
+    row = {
+        "account": "lx",
+        "position_lot_id": "lot-1",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "position_side": "short",
+        "strategy_family": "sell_put",
+        "strategy_profile": "insurance_underwriting",
+        "tier": "medium",
+        "exit_state": "profit_capture",
+        "evaluation_status": "priced",
+        "fee_calc_status": "schedule_estimate",
+        "estimated_pnl_if_close_net": 80,
+        "short_vol_thesis_status": "valid",
+        "continued_willingness": "true",
+        "close_calibration_status": "complete",
+        "capture_ratio": 0.85,
+        "remaining_annualized_return": 0.07,
+        "dte": 29,
+        "close_mid": 0.2,
+        "bid": 0.19,
+        "ask": 0.21,
+        "remaining_premium": 20,
+        "estimated_close_fee": 1.5,
+        "fee_calc_basis": "futu_us_fixed_package_2026-07-22",
+        "contracts_open": 1,
+        "multiplier": 100,
+        "currency": "USD",
+        "policy_version": "p0_current.v1",
+        "recommendation_state": "close",
+        "decision_basis": "profit_capture_medium",
+        "decision_evidence_status": "complete",
+    }
+    close_path.parent.mkdir(parents=True, exist_ok=True)
+    with close_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerow(row)
+    context_path = account_dir / "state" / "option_positions_context.json"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "as_of_utc": "2026-07-23T01:00:30Z",
+                "open_positions_min": [
+                    {
+                        "record_id": "lot-1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "expiration": "2026-08-21",
+                        "strike": 100,
+                        "contracts": 1,
+                        "contracts_open": 1,
+                        "multiplier": 100,
+                        "currency": "USD",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    if include_audit:
+        audit_path = runs_root / run_id / "state" / "audit_events.jsonl"
+        _write_jsonl(
+            audit_path,
+            [
+                {
+                    "run_id": run_id,
+                    "account": "lx",
+                    "action": "close_advice",
+                    "status": "ok",
+                    "event_at_utc": "2026-07-23T01:01:00Z",
+                }
+            ],
+        )
+    if include_candidate:
+        _write_candidate_run(runs_root, run_id)
+    return runs_root / run_id
 
 
 def _write_strategy_lab_window_run(root: Path) -> Path:
@@ -1383,6 +1484,308 @@ def test_strategy_lab_update_latest_build_is_idempotent_by_run_id(tmp_path: Path
     assert second["shadow_replay"]["dataset_build"]["dataset_id"] == "run-evidence"
     assert second["shadow_replay"]["dataset_build"]["executed"] is False
     assert json.loads(mark_path.read_text(encoding="utf-8"))["option_mid"] == 1.1
+
+
+def test_strategy_lab_update_builds_close_and_candidate_from_independent_runs(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    _write_close_run(runs_root, "20260723T010000Z-close")
+    _write_candidate_run(runs_root, "20260723T020000Z-candidate")
+    dataset_root = tmp_path / "datasets"
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        include_close_decisions=True,
+        latest=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    close_build = result["shadow_replay"]["close_decision_dataset_build"]
+    candidate_build = result["shadow_replay"]["dataset_build"]
+    assert close_build["executed"] is True
+    assert close_build["dataset_id"] == "20260723T010000Z-close"
+    assert close_build["source_selection"]["close_row_count"] == 1
+    assert candidate_build["executed"] is True
+    assert candidate_build["dataset_id"] == "20260723T020000Z-candidate"
+    assert result["summary"]["dataset_built"] is True
+    assert result["summary"]["built_dataset_id"] == "20260723T020000Z-candidate"
+    assert result["summary"]["close_decision_dataset_built"] is True
+    assert result["summary"]["built_close_decision_dataset_id"] == "20260723T010000Z-close"
+    assert result["safety"]["writes_shadow_replay_dataset_build"] is True
+    close_manifest = json.loads(
+        (dataset_root / "20260723T010000Z-close" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert close_manifest["close_decision_facet"]["episode_count"] == 1
+
+
+def test_strategy_lab_update_same_run_builds_one_close_aware_dataset(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    run_id = "20260723T010000Z-combined"
+    _write_close_run(runs_root, run_id, include_candidate=True)
+    dataset_root = tmp_path / "datasets"
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        include_close_decisions=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    assert result["summary"]["close_decision_dataset_built"] is True
+    assert result["summary"]["dataset_built"] is False
+    assert result["summary"]["dataset_build_reason"] == "dataset_already_exists"
+    assert (dataset_root / run_id / "close_decision_episodes.jsonl").is_file()
+    assert len(list(dataset_root.iterdir())) == 1
+
+
+def test_strategy_lab_update_skips_empty_close_run_and_keeps_candidate_build(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    empty_close = runs_root / "20260723T020000Z-empty" / "accounts" / "lx" / "close_advice.csv"
+    empty_close.parent.mkdir(parents=True, exist_ok=True)
+    empty_close.write_text("account,position_lot_id\n", encoding="utf-8")
+    _write_candidate_run(runs_root, "20260723T030000Z-candidate")
+    dataset_root = tmp_path / "datasets"
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        include_close_decisions=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    close_build = result["shadow_replay"]["close_decision_dataset_build"]
+    assert close_build["reason"] == "latest_close_decision_run_not_found"
+    assert close_build["source_selection"]["skipped_empty_count"] == 1
+    assert result["summary"]["dataset_built"] is True
+
+
+def test_strategy_lab_update_malformed_close_fails_after_independent_candidate_build(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    close_run_id = "20260723T010000Z-close"
+    candidate_run_id = "20260723T020000Z-candidate"
+    _write_close_run(runs_root, close_run_id, include_audit=False)
+    _write_candidate_run(runs_root, candidate_run_id)
+    dataset_root = tmp_path / "datasets"
+
+    with pytest.raises(ValueError, match="audit timestamp missing"):
+        run_strategy_lab_update(
+            repo_root=tmp_path,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            build_dataset=True,
+            include_close_decisions=True,
+            write=True,
+            max_datasets=0,
+            min_sample=1,
+        )
+
+    assert (dataset_root / candidate_run_id / "manifest.json").is_file()
+    assert not (dataset_root / close_run_id).exists()
+
+
+def test_strategy_lab_update_same_run_malformed_close_preserves_candidate_evidence(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    run_id = "20260723T010000Z-combined"
+    _write_close_run(runs_root, run_id, include_audit=False, include_candidate=True)
+    dataset_root = tmp_path / "datasets"
+
+    with pytest.raises(ValueError, match="audit timestamp missing"):
+        run_strategy_lab_update(
+            repo_root=tmp_path,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            build_dataset=True,
+            include_close_decisions=True,
+            write=True,
+            max_datasets=0,
+            min_sample=1,
+        )
+
+    assert (dataset_root / run_id / "manifest.json").is_file()
+    assert not (dataset_root / run_id / "close_decision_episodes.jsonl").exists()
+
+
+def test_strategy_lab_update_close_io_failure_preserves_candidate_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.strategy_lab.update as update_module
+
+    runs_root = tmp_path / "output_runs"
+    candidate_run_id = "20260723T020000Z-candidate"
+    _write_candidate_run(runs_root, candidate_run_id)
+    dataset_root = tmp_path / "datasets"
+
+    def _raise_close_io_error(**_kwargs):
+        raise OSError("close source temporarily unreadable")
+
+    monkeypatch.setattr(update_module, "_build_latest_close_decision_dataset", _raise_close_io_error)
+
+    with pytest.raises(OSError, match="temporarily unreadable"):
+        update_module.run_strategy_lab_update(
+            repo_root=tmp_path,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            build_dataset=True,
+            include_close_decisions=True,
+            write=True,
+            max_datasets=0,
+            min_sample=1,
+        )
+
+    assert (dataset_root / candidate_run_id / "manifest.json").is_file()
+
+
+def test_strategy_lab_update_reports_candidate_only_close_collision_without_overwrite(tmp_path: Path) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    run_id = "20260723T010000Z-combined"
+    _write_close_run(runs_root, run_id, include_candidate=True)
+    dataset_root = tmp_path / "datasets"
+    build_shadow_replay_dataset(
+        repo_root=tmp_path,
+        run_id=run_id,
+        runs_root=runs_root,
+        dataset_root=dataset_root,
+        dataset_id=run_id,
+    )
+    mark_path = dataset_root / run_id / "mark_path_snapshots.jsonl"
+    mark_path.write_text('{"preserved": true}\n', encoding="utf-8")
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        include_close_decisions=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    close_build = result["shadow_replay"]["close_decision_dataset_build"]
+    assert close_build["reason"] == "dataset_exists_without_close_decisions"
+    assert result["summary"]["close_decision_dataset_built"] is False
+    assert json.loads(mark_path.read_text(encoding="utf-8"))["preserved"] is True
+    assert not (dataset_root / run_id / "close_decision_episodes.jsonl").exists()
+
+
+def test_strategy_lab_update_complete_close_dataset_is_idempotent(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    run_id = "20260723T010000Z-combined"
+    _write_close_run(runs_root, run_id, include_candidate=True)
+    dataset_root = tmp_path / "datasets"
+    kwargs = {
+        "repo_root": tmp_path,
+        "dataset_root": dataset_root,
+        "runs_root": runs_root,
+        "build_dataset": True,
+        "include_close_decisions": True,
+        "write": True,
+        "max_datasets": 0,
+        "min_sample": 1,
+    }
+    run_strategy_lab_update(**kwargs)
+    close_marks = dataset_root / run_id / "close_decision_marks.jsonl"
+    close_marks.write_text('{"preserved": true}\n', encoding="utf-8")
+
+    second = run_strategy_lab_update(**kwargs)
+
+    close_build = second["shadow_replay"]["close_decision_dataset_build"]
+    assert close_build["reason"] == "dataset_already_has_close_decisions"
+    assert json.loads(close_marks.read_text(encoding="utf-8"))["preserved"] is True
+
+
+def test_strategy_lab_update_reports_incomplete_close_dataset_without_overwrite(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    run_id = "20260723T010000Z-combined"
+    _write_close_run(runs_root, run_id, include_candidate=True)
+    dataset_root = tmp_path / "datasets"
+    kwargs = {
+        "repo_root": tmp_path,
+        "dataset_root": dataset_root,
+        "runs_root": runs_root,
+        "build_dataset": True,
+        "include_close_decisions": True,
+        "write": True,
+        "max_datasets": 0,
+        "min_sample": 1,
+    }
+    run_strategy_lab_update(**kwargs)
+    missing_path = dataset_root / run_id / "close_decision_marks.jsonl"
+    missing_path.unlink()
+
+    second = run_strategy_lab_update(**kwargs)
+
+    close_build = second["shadow_replay"]["close_decision_dataset_build"]
+    assert close_build["reason"] == "dataset_exists_without_complete_close_decisions"
+    assert not missing_path.exists()
+
+
+def test_strategy_lab_update_close_build_dry_run_does_not_write(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = tmp_path / "output_runs"
+    _write_close_run(runs_root, "20260723T010000Z-close")
+    _write_candidate_run(runs_root, "20260723T020000Z-candidate")
+    dataset_root = tmp_path / "datasets"
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        include_close_decisions=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    assert result["summary"]["close_decision_dataset_build_reason"] == "requires_write"
+    assert result["shadow_replay"]["dataset_build"]["reason"] == "requires_write"
+    assert result["safety"]["writes_shadow_replay_dataset_build"] is False
+    assert not dataset_root.exists()
+
+
+def test_strategy_lab_update_rejects_ambiguous_close_build_arguments(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    with pytest.raises(ValueError, match="requires build_dataset"):
+        run_strategy_lab_update(repo_root=tmp_path, include_close_decisions=True)
+    with pytest.raises(ValueError, match="cannot be combined with dataset_id"):
+        run_strategy_lab_update(
+            repo_root=tmp_path,
+            build_dataset=True,
+            include_close_decisions=True,
+            dataset_id="explicit",
+        )
 
 
 def test_strategy_lab_experiment_supports_run_window_scope(tmp_path: Path) -> None:

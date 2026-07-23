@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
 from src.application.shadow_replay import build_shadow_replay_dataset, run_shadow_replay_data_plan
-from src.application.shadow_replay.capture import latest_shadow_replay_run_dir
-from src.application.shadow_replay.common import dataset_output_dir, resolve_optional, resolve_output_path, text, utc_now, write_json
+from src.application.shadow_replay.capture import (
+    latest_close_decision_run_dir,
+    latest_shadow_replay_run_dir,
+)
+from src.application.shadow_replay.common import (
+    OPTIONAL_CLOSE_DATASET_FILES,
+    dataset_output_dir,
+    resolve_optional,
+    resolve_output_path,
+    text,
+    utc_now,
+    write_json,
+)
 
 
 UPDATE_SCHEMA_VERSION = "strategy_lab_update.v1"
@@ -24,6 +36,7 @@ def run_strategy_lab_update(
     latest: bool = False,
     max_datasets: int | None = None,
     build_dataset: bool = False,
+    include_close_decisions: bool = False,
     runs_root: str | Path | None = None,
     dataset_id: str | None = None,
     write: bool = False,
@@ -39,7 +52,41 @@ def run_strategy_lab_update(
     include_realized_volatility: bool = False,
     max_symbols: int | None = None,
 ) -> dict[str, Any]:
+    if include_close_decisions and not build_dataset:
+        raise ValueError("include_close_decisions requires build_dataset")
+    if include_close_decisions and text(dataset_id):
+        raise ValueError("include_close_decisions cannot be combined with dataset_id")
     effective_max = _effective_max_datasets(latest=latest, max_datasets=max_datasets)
+    close_build_error: Exception | None = None
+    try:
+        close_dataset_build = _build_latest_close_decision_dataset(
+            repo_root=repo_root,
+            dataset_root=dataset_root,
+            runs_root=runs_root,
+            requested=bool(build_dataset and include_close_decisions),
+            write=bool(write),
+        )
+    except Exception as exc:
+        close_build_error = exc
+        close_dataset_build = {
+            "requested": True,
+            "executed": False,
+            "reason": "close_decision_dataset_build_failed",
+            "source": "latest_close_decision_run",
+        }
+    if close_build_error is not None:
+        try:
+            _build_latest_dataset(
+                repo_root=repo_root,
+                dataset_root=dataset_root,
+                runs_root=runs_root,
+                dataset_id=dataset_id,
+                requested=bool(build_dataset),
+                write=bool(write),
+            )
+        except Exception as candidate_build_error:
+            raise close_build_error from candidate_build_error
+        raise close_build_error
     dataset_build = _build_latest_dataset(
         repo_root=repo_root,
         dataset_root=dataset_root,
@@ -77,6 +124,7 @@ def run_strategy_lab_update(
         "summary": _summary(
             data_plan=data_plan,
             dataset_build=dataset_build,
+            close_dataset_build=close_dataset_build,
             status=status,
             write=bool(write),
             latest=bool(latest),
@@ -87,6 +135,8 @@ def run_strategy_lab_update(
             "selection_mode": "highest_priority_due_dataset" if latest else "all_due_datasets",
             "build_dataset": bool(build_dataset),
             "build_source": "latest_scanned_run" if build_dataset else None,
+            "include_close_decisions": bool(include_close_decisions),
+            "close_build_source": "latest_close_decision_run" if include_close_decisions else None,
             "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
             "dataset_id": text(dataset_id) or None,
         },
@@ -102,10 +152,16 @@ def run_strategy_lab_update(
         },
         "shadow_replay": {
             "dataset_build": dataset_build,
+            "close_decision_dataset_build": close_dataset_build,
             "status": status,
             "data_plan_run": data_plan,
         },
-        "safety": _safety(data_plan=data_plan, dataset_build=dataset_build, output=output),
+        "safety": _safety(
+            data_plan=data_plan,
+            dataset_build=dataset_build,
+            close_dataset_build=close_dataset_build,
+            output=output,
+        ),
     }
     if output:
         write_json(resolve_output_path(output), result)
@@ -207,6 +263,112 @@ def _build_latest_dataset(
     }
 
 
+def _build_latest_close_decision_dataset(
+    *,
+    repo_root: str | Path,
+    dataset_root: str | Path | None,
+    runs_root: str | Path | None,
+    requested: bool,
+    write: bool,
+) -> dict[str, Any]:
+    if not requested:
+        return {
+            "requested": False,
+            "executed": False,
+            "reason": "not_requested",
+            "source": "latest_close_decision_run",
+        }
+    base = Path(repo_root).expanduser().resolve()
+    run_dir, latest_selection = latest_close_decision_run_dir(
+        repo_root=base,
+        runs_root=resolve_optional(runs_root, base=base),
+    )
+    if run_dir is None:
+        return {
+            "requested": True,
+            "executed": False,
+            "reason": "latest_close_decision_run_not_found",
+            "source": "latest_close_decision_run",
+            "source_selection": latest_selection,
+            "dataset_id": None,
+            "dataset_id_source": "latest_close_run_id",
+            "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
+            "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+        }
+    selected_dataset_id = run_dir.name
+    target = _dataset_target_dir(repo_root=base, dataset_root=dataset_root, dataset_id=selected_dataset_id)
+    if target.exists():
+        close_facet_status = _close_decision_facet_status(target)
+        return {
+            "requested": True,
+            "executed": False,
+            "reason": (
+                "dataset_already_has_close_decisions"
+                if close_facet_status == "complete"
+                else (
+                    "dataset_exists_without_complete_close_decisions"
+                    if close_facet_status == "incomplete"
+                    else "dataset_exists_without_close_decisions"
+                )
+            ),
+            "source": "latest_close_decision_run",
+            "dataset_id": selected_dataset_id,
+            "dataset_id_source": "latest_close_run_id",
+            "dataset_dir": str(target),
+            "source_selection": latest_selection,
+            "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
+            "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+        }
+    if not write:
+        return {
+            "requested": True,
+            "executed": False,
+            "reason": "requires_write",
+            "source": "latest_close_decision_run",
+            "dataset_id": selected_dataset_id,
+            "dataset_id_source": "latest_close_run_id",
+            "source_selection": latest_selection,
+            "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
+            "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+        }
+    manifest = build_shadow_replay_dataset(
+        repo_root=base,
+        run_id=selected_dataset_id,
+        runs_root=runs_root,
+        run_dir=run_dir,
+        dataset_root=dataset_root,
+        dataset_id=selected_dataset_id,
+        include_close_decisions=True,
+    )
+    return {
+        "requested": True,
+        "executed": True,
+        "reason": "built_latest_close_decision_run",
+        "source": "latest_close_decision_run",
+        "dataset_id": manifest.get("dataset_id"),
+        "dataset_id_source": "latest_close_run_id",
+        "dataset_dir": manifest.get("dataset_dir"),
+        "source_selection": latest_selection,
+        "manifest_summary": manifest.get("summary") or {},
+        "manifest_safety": manifest.get("safety") or {},
+    }
+
+
+def _close_decision_facet_status(dataset_dir: Path) -> str:
+    manifest_path = dataset_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return "absent"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "absent"
+    if not isinstance(payload, dict) or not isinstance(payload.get("close_decision_facet"), dict):
+        return "absent"
+    if all((dataset_dir / name).is_file() for name in OPTIONAL_CLOSE_DATASET_FILES):
+        return "complete"
+    return "incomplete"
+
+
 def _dataset_target_dir(*, repo_root: Path, dataset_root: str | Path | None, dataset_id: str) -> Path:
     root = resolve_optional(dataset_root, base=repo_root)
     if root is not None:
@@ -218,6 +380,7 @@ def _summary(
     *,
     data_plan: dict[str, Any],
     dataset_build: dict[str, Any],
+    close_dataset_build: dict[str, Any],
     status: dict[str, Any] | None,
     write: bool,
     latest: bool,
@@ -229,14 +392,30 @@ def _summary(
     planned_count = int(plan_summary.get("planned_count") or 0)
     build_requested = bool(dataset_build.get("requested"))
     build_executed = bool(dataset_build.get("executed"))
+    close_build_requested = bool(close_dataset_build.get("requested"))
+    close_build_executed = bool(close_dataset_build.get("executed"))
     return {
-        "status": "error" if error_count else ("updated" if write and (executed_count or build_executed) else "planned"),
+        "status": (
+            "error"
+            if error_count
+            else (
+                "updated"
+                if write and (executed_count or build_executed or close_build_executed)
+                else "planned"
+            )
+        ),
         "write": bool(write),
         "latest": bool(latest),
         "dataset_build_requested": build_requested,
         "dataset_built": build_executed,
         "dataset_build_reason": dataset_build.get("reason"),
         "built_dataset_id": dataset_build.get("dataset_id") if build_executed else None,
+        "close_decision_dataset_build_requested": close_build_requested,
+        "close_decision_dataset_built": close_build_executed,
+        "close_decision_dataset_build_reason": close_dataset_build.get("reason"),
+        "built_close_decision_dataset_id": (
+            close_dataset_build.get("dataset_id") if close_build_executed else None
+        ),
         "dataset_count": status_summary.get("dataset_count"),
         "data_plan_action_count": plan_summary.get("plan_action_count"),
         "planned_count": planned_count,
@@ -287,10 +466,16 @@ def _next_action(
     return "wait_for_more_replay_evidence"
 
 
-def _safety(*, data_plan: dict[str, Any], dataset_build: dict[str, Any], output: str | Path | None) -> dict[str, Any]:
+def _safety(
+    *,
+    data_plan: dict[str, Any],
+    dataset_build: dict[str, Any],
+    close_dataset_build: dict[str, Any],
+    output: str | Path | None,
+) -> dict[str, Any]:
     safety = dict(data_plan.get("safety") or {})
     targets = list(safety.get("persistent_write_targets") or [])
-    if bool(dataset_build.get("executed")):
+    if bool(dataset_build.get("executed")) or bool(close_dataset_build.get("executed")):
         targets.append("shadow_replay_dataset")
     if output:
         targets.append("strategy_lab_update_artifact")
@@ -300,7 +485,9 @@ def _safety(*, data_plan: dict[str, Any], dataset_build: dict[str, Any], output:
             "runtime_config_write_allowed": False,
             "production_recommendation_allowed": False,
             "online_ai_called": False,
-            "writes_shadow_replay_dataset_build": bool(dataset_build.get("executed")),
+            "writes_shadow_replay_dataset_build": bool(
+                dataset_build.get("executed") or close_dataset_build.get("executed")
+            ),
             "writes_strategy_lab_update_artifact": bool(output),
             "persistent_write_targets": deduped_targets,
             "writes_persistent_outputs": bool(deduped_targets),

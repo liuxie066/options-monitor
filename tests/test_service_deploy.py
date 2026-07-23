@@ -823,7 +823,8 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
 
     assert str(repo / "om") + " research strategy-lab update --latest" in build_service
     assert "--profile-path " + str(runtime / "service.profile.json") in build_service
-    assert "--build-dataset --write --source local" in build_service
+    assert "--include-close-decisions" in build_service
+    assert "--build-dataset --include-close-decisions --write --source local" in build_service
     assert "--max-datasets 0" in build_service
     assert "--settle-after-collect" not in build_service
     assert "OnUnitActiveSec=6h" in build_timer
@@ -840,6 +841,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     assert {"name": "options-monitor-strategy-lab-settle.timer"} in profile["services"]
     assert profile["strategy_lab_recorder"] == {
         "enabled": True,
+        "include_close_decisions": True,
         "source": "opend",
         "max_datasets": 3,
         "mark_stale_hours": 2,
@@ -878,6 +880,7 @@ def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) 
     build_payload = plistlib.loads(build_plist.encode("utf-8"))
 
     assert build_args[build_args.index("--max-datasets") + 1] == "0"
+    assert "--include-close-decisions" in build_args
     assert "--settle-after-collect" not in build_args
     assert build_payload["StartInterval"] == 21600
     assert sample_args[sample_args.index("--action") + 1] == "collect_marks"
