@@ -141,6 +141,7 @@ def send_text_message(
 
 FEISHU_POST_REQUEST_BUDGET_BYTES = 28 * 1024
 FEISHU_POST_TOO_LARGE = "FEISHU_POST_TOO_LARGE"
+_POST_BLANK_PARAGRAPH = [{"tag": "text", "text": "\u00a0"}]
 
 
 def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
@@ -149,22 +150,29 @@ def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
     Feishu collapses empty lines inside a single md node, while placeholder
     spacer characters (for example the zero-width space the daily brief uses
     as a visible blank line) leak into rendered lines on desktop and break
-    line-start ``**bold**`` markers. Mapping blank/spacer-only lines to
-    native post paragraph breaks keeps visible gaps without emitting any
-    placeholder characters.
+    line-start ``**bold**`` markers. Keep those placeholders out of md nodes
+    and map each separator to a dedicated plain-text spacer paragraph.
     """
 
     paragraphs: list[list[dict[str, str]]] = []
     current: list[str] = []
+
+    def _flush_current() -> None:
+        nonlocal current
+        if current:
+            paragraphs.append([{"tag": "md", "text": "\n".join(current)}])
+            current = []
+
     for line in markdown.split("\n"):
         if not line.strip(" \t\u200b"):
-            if current:
-                paragraphs.append([{"tag": "md", "text": "\n".join(current)}])
-                current = []
+            _flush_current()
+            if paragraphs and paragraphs[-1] != _POST_BLANK_PARAGRAPH:
+                paragraphs.append([{"tag": "text", "text": "\u00a0"}])
             continue
         current.append(line)
-    if current:
-        paragraphs.append([{"tag": "md", "text": "\n".join(current)}])
+    _flush_current()
+    if paragraphs and paragraphs[-1] == _POST_BLANK_PARAGRAPH:
+        paragraphs.pop()
     if not paragraphs:
         paragraphs.append([{"tag": "md", "text": markdown}])
     return paragraphs

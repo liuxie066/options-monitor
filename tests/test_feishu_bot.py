@@ -14,7 +14,7 @@ def _post_request_body_bytes(markdown: str, *, uuid: str | None = None) -> int:
         "receive_id": "ou_1",
         "msg_type": "post",
         "content": json.dumps(
-            {"zh_cn": {"content": [[{"tag": "md", "text": markdown}]]}},
+            {"zh_cn": {"content": feishu_bot._post_md_paragraphs(markdown)}},
             ensure_ascii=False,
         ),
     }
@@ -199,7 +199,9 @@ def test_send_post_message_posts_md_paragraphs_without_title(monkeypatch: pytest
         "zh_cn": {
             "content": [
                 [{"tag": "md", "text": "# 决策简报"}],
+                [{"tag": "text", "text": "\u00a0"}],
                 [{"tag": "md", "text": '> 中文 "quote" 🙂'}],
+                [{"tag": "text", "text": "\u00a0"}],
                 [{"tag": "md", "text": "- **NVDA**\n  - 合约: 1"}],
             ]
         }
@@ -236,12 +238,16 @@ def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
         "zh_cn": {
             "content": [
                 [{"tag": "md", "text": "# OM · 决策简报 · lx"}],
+                [{"tag": "text", "text": "\u00a0"}],
                 [{"tag": "md", "text": "状态｜扫描完成"}],
+                [{"tag": "text", "text": "\u00a0"}],
                 [{"tag": "md", "text": "**1｜NVDA｜Sell Put**\n指标｜权利金 $5.25"}],
             ]
         }
     }
-    for paragraph in json.loads(calls[0]["payload"]["content"])["zh_cn"]["content"]:
+    paragraphs = json.loads(calls[0]["payload"]["content"])["zh_cn"]["content"]
+    assert [paragraph[0]["tag"] for paragraph in paragraphs] == ["md", "text", "md", "text", "md"]
+    for paragraph in paragraphs:
         assert "\u200b" not in paragraph[0]["text"]
 
 
@@ -411,7 +417,7 @@ def test_send_post_message_enforces_exact_final_request_boundary(
     assert len(http_calls) == 1
 
 
-def test_real_notification_renderers_are_embedded_unchanged_in_md_paragraphs(
+def test_real_notification_renderers_preserve_content_and_visible_blank_paragraphs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
@@ -592,9 +598,18 @@ def test_real_notification_renderers_are_embedded_unchanged_in_md_paragraphs(
         content = json.loads(payload["content"])
         paragraphs = content["zh_cn"]["content"]
         assert content == {"zh_cn": {"content": feishu_bot._post_md_paragraphs(expected.strip())}}
-        # canonical Markdown is embedded unchanged: dropping blank/spacer-only
-        # lines and joining paragraph lines back reproduces the original text
-        flattened = [line for paragraph in paragraphs for node in paragraph for line in node["text"].split("\n")]
+        # Canonical content lines stay unchanged; canonical separators become
+        # dedicated plain-text spacer paragraphs, never md prefixes.
+        flattened = [
+            line
+            for paragraph in paragraphs
+            for node in paragraph
+            if node["tag"] == "md"
+            for line in node["text"].split("\n")
+        ]
         assert flattened == [line for line in expected.strip().split("\n") if line.strip(" \t\u200b")]
         assert all("\u200b" not in line for line in flattened)
+        expected_blank_lines = sum(not line.strip(" \t\u200b") for line in expected.strip().split("\n"))
+        spacer_paragraphs = [paragraph for paragraph in paragraphs if paragraph == [{"tag": "text", "text": "\u00a0"}]]
+        assert len(spacer_paragraphs) == expected_blank_lines
         assert "title" not in content["zh_cn"]

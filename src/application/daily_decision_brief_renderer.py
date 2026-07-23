@@ -101,7 +101,11 @@ def build_daily_brief_user_view(
         diff=normalized_diff,
         limits=cfg,
     )
-    position_views, position_omitted = _position_views(brief, diff=normalized_diff, limits=cfg)
+    position_views, position_total, position_actionable_total = _position_views(
+        brief,
+        diff=normalized_diff,
+        limits=cfg,
+    )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
     strategy_failure_labels = _strategy_failure_labels(brief)
     if strategy_failure_labels:
@@ -124,7 +128,8 @@ def build_daily_brief_user_view(
             else "本轮暂无符合条件的候选。"
         ),
         "positions": position_views,
-        "position_omitted": position_omitted,
+        "position_total": position_total,
+        "position_actionable_total": position_actionable_total,
         "funds": _fund_views(brief),
         "capacity": capacity,
         "reminders": reminders,
@@ -350,15 +355,20 @@ def _render_user_view(
     positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
     if projection != "candidate_alert":
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 持仓"])
-        if not positions:
-            lines.append("当前没有需要展示的期权持仓。")
+        position_total = _whole_number(view.get("position_total")) or 0
+        position_actionable_total = _whole_number(view.get("position_actionable_total")) or 0
+        position_summary = f"汇总｜共 {position_total} 条"
+        if position_actionable_total:
+            position_summary += f"，需处理 {position_actionable_total} 条"
+            if len(positions) < position_actionable_total:
+                position_summary += f"，本消息展示 {len(positions)} 条"
+        else:
+            position_summary += "，当前没有需要处理的持仓"
+        lines.append(position_summary + "。")
         for item in positions:
             lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
                 lines.append(f"参考｜{detail}")
-        position_omitted = _whole_number(view.get("position_omitted")) or 0
-        if position_omitted:
-            lines.append(f"补充｜另有 {position_omitted} 个持仓未展开")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
@@ -540,12 +550,13 @@ def _position_views(
     *,
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, int]:
     positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
     total = len(positions)
-    # 无行动指向的持仓（继续观察、无法评估）不逐条展示，但仍计入“另有 N 个持仓未展开”，
-    # 避免用户以为持仓丢失
+    # 无行动指向的持仓（继续观察、无法评估）不逐条展示；
+    # 总持仓数和需处理数在汇总中分开呈现，避免把非行动项误说成“折叠”。
     positions = [row for row in positions if _position_has_advice(row)]
+    actionable_total = len(positions)
     changed_keys = _changed_position_keys(diff)
     changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
     unchanged_positions = [row for row in positions if row not in changed_positions]
@@ -553,7 +564,6 @@ def _position_views(
         [*changed_positions, *unchanged_positions],
         max(limits["max_actions_per_priority"], len(changed_positions)),
     )
-    omitted = total - len(selected)
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
     for row in selected:
@@ -573,7 +583,7 @@ def _position_views(
                 "details": _position_close_details(row, market=market, status=status),
             }
         )
-    return out, omitted
+    return out, total, actionable_total
 
 
 def _position_strategy_label(row: Mapping[str, Any]) -> str:

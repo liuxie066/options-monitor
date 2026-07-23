@@ -223,6 +223,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "数据｜美东 10:03 / 北京 22:03" in message
     assert "## 候选" in message
     assert "## 持仓" in message
+    assert "汇总｜共 3 条，需处理 1 条。" in message
     assert "## 资金" in message
     assert "MSFT｜Sell Put｜08-21 $400 Put（首选）" in message
     assert "NVDA｜Sell Put｜08-21 $100 Put（备选 2）" in message
@@ -496,8 +497,8 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     assert "**B｜Sell Put" not in message
     assert "**C｜Sell Put" not in message
     assert "**D｜Sell Put" not in message
-    assert "当前没有需要展示的期权持仓。" in message
-    assert "另有 4 个持仓未展开" in message
+    assert "汇总｜共 4 条，当前没有需要处理的持仓。" in message
+    assert "持仓未展开" not in message
     assert "future_state" not in message
 
 
@@ -602,7 +603,8 @@ def test_renderer_honors_section_limits() -> None:
     assert "P0｜Sell Put" in message
     assert "P1｜Sell Put" in message
     assert "P2｜Sell Put" not in message
-    assert "另有 6 个持仓未展开" in message
+    assert "汇总｜共 8 条，需处理 8 条，本消息展示 2 条。" in message
+    assert "持仓未展开" not in message
     assert "C6｜Sell Put" in message
     assert "C7｜Sell Put" not in message
     assert "Sell Put 另有 13 个候选未展开" in message
@@ -739,7 +741,8 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
 
     assert "PDD｜组合增强（Put 侧）｜08-21 $95 Put｜建议平掉 Put，保留 Call" in view_message
     assert "继续观察" not in view_message
-    assert "另有 2 个持仓未展开" in view_message
+    assert "汇总｜共 3 条，需处理 1 条。" in view_message
+    assert "持仓未展开" not in view_message
     assert "lot-2" not in view_message
 
 
