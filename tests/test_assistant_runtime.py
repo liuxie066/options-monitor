@@ -6,6 +6,7 @@ from typing import Any
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.runtime import handle_assistant_turn
+from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import AssistantSettings, CopilotSettings
 from src.application.copilot.contracts import AppResult
 
@@ -117,3 +118,76 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
     assert calls == 1
     assert first.response_text == second.response_text
     assert second.meta["idempotent_replay"] is True
+
+
+def test_option_performance_renderer_separates_profit_cash_and_assignment() -> None:
+    def metric(amount: float | None, *, status: str = "observed") -> dict[str, Any]:
+        return {
+            "by_currency": {"USD": amount} if amount is not None else {},
+            "cny": None,
+            "status": status,
+            "missing": ["evidence:test"] if status == "partial" else [],
+            "fx_fact_ids": [],
+        }
+
+    text = render_canonical_tool_result(
+        renderer_key="option_performance",
+        tool_result={"ok": True},
+        data={
+            "period": {
+                "kind": "mtd",
+                "requested_start_date": "2026-07-01",
+                "requested_end_date": "2026-07-23",
+                "status": "partial_current",
+            },
+            "scope": {"account": None, "accounts": ["lx", "sy"]},
+            "activity": {
+                "premium_collected_gross": metric(800),
+                "premium_paid_gross": metric(None, status="not_observed"),
+                "contracts_opened": 3,
+                "contracts_closed": 2,
+                "assigned_stock_shares_opened": 100,
+                "assigned_stock_shares_sold": 50,
+            },
+            "cash": {
+                "total_cash_change_net": metric(-4500),
+                "option_trade_cash_gross": metric(800),
+                "option_fee_cash": metric(-0.35),
+                "stock_settlement_cash_gross": metric(-10000),
+                "stock_settlement_fee_cash": metric(None, status="partial"),
+                "assigned_stock_sale_cash_gross": metric(5500),
+                "assigned_stock_sale_fee_cash": metric(-2.15),
+            },
+            "pnl": {
+                "period_total_gross": metric(900),
+                "period_total_net": metric(None, status="partial"),
+                "realized_gross": metric(750),
+                "realized_net": metric(745),
+                "option_realized_gross": metric(250),
+                "option_realized_net": metric(249),
+                "assigned_stock_realized_gross": metric(500),
+                "assigned_stock_realized_net": metric(496),
+            },
+            "assignment_lifecycle": {
+                "ending_lots": [{"stock_lot_id": "lot-1"}],
+                "sales": [{"stock_event_id": "sale-1"}],
+                "review": [{"status": "missing_fee"}],
+                "unsupported_inventory": [],
+            },
+            "quality": {
+                "missing": ["stock_settlement_fee_cash:assign-1"],
+                "warnings": [],
+            },
+        },
+    )
+
+    assert text.startswith("期权收益统计完成（全部账户（lx、sy），MTD")
+    assert "截至当前" in text
+    assert "已实现 PnL（合计）" in text
+    assert "纯期权已实现 PnL" in text
+    assert "指派股票已实现 PnL" in text
+    assert "指派股票卖出回款" in text
+    assert "期权费用现金：USD -0.35" in text
+    assert "指派股票卖出费用：USD -2.15" in text
+    assert "证据不完整" in text
+    assert "不直接等于 PnL" in text

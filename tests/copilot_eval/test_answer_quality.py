@@ -32,39 +32,91 @@ def _call(name: str, arguments: dict[str, Any], call_id: str) -> ToolCall:
 
 SCENARIOS = (
     Scenario(
-        name="option_performance_synthesis",
-        question="7月收益",
+        name="option_performance_mtd_synthesis",
+        question="7月 mtd 的期权收益",
         turns=(
             ModelTurn(
                 tool_calls=(
                     _call(
-                        "analysis_query",
-                        {"views": ["option_monthly_performance"], "period": "month", "month": "2026-07"},
+                        "option_performance_report",
+                        {"period": "mtd"},
                         "income_1",
                     ),
                 )
             ),
-            ModelTurn(text="结论：7月期间总 PnL 为 400 美元；收到权利金 800 美元属于交易活动，现金净变动为 1,200 美元，三者不能相加。"),
+            ModelTurn(
+                text=(
+                    "结论：截至 2026-07-23 的 MTD，全部账户（lx、sy）期权与指派股票"
+                    "合计已实现净 PnL 为 USD 747；其中纯期权 USD 250，指派股票 USD 497。"
+                    "总现金变动净额为 USD -4,500，包括指派结算本金 USD -10,000 和卖股"
+                    "回款 USD 5,500；收到权利金 USD 800。指派已纳入，但本金和回款是"
+                    "现金流，不是利润。"
+                )
+            ),
         ),
         tool_results={
-            "analysis_query": {
+            "option_performance_report": {
                 "ok": True,
                 "data": {
-                    "rows": [
-                        {
-                            "month": "2026-07",
-                            "currency": "USD",
-                            "premium_collected": 800,
-                            "period_total_pnl": 400,
-                            "total_cash_change": 1200,
-                        }
-                    ]
+                    "period": {
+                        "kind": "mtd",
+                        "requested_start_date": "2026-07-01",
+                        "requested_end_date": "2026-07-23",
+                        "status": "partial_current",
+                    },
+                    "scope": {"account": None, "accounts": ["lx", "sy"]},
+                    "activity": {"premium_collected_gross": {"by_currency": {"USD": 800}}},
+                    "cash": {
+                        "total_cash_change_net": {"by_currency": {"USD": -4500}},
+                        "stock_settlement_cash_gross": {"by_currency": {"USD": -10000}},
+                        "assigned_stock_sale_cash_gross": {"by_currency": {"USD": 5500}},
+                    },
+                    "pnl": {
+                        "realized_net": {"by_currency": {"USD": 747}},
+                        "option_realized_net": {"by_currency": {"USD": 250}},
+                        "assigned_stock_realized_net": {"by_currency": {"USD": 497}},
+                    },
                 },
             }
         },
-        expected_tools=("analysis_query",),
-        expected_terms=("结论", "期间总 PnL", "权利金", "不能相加"),
+        expected_tools=("option_performance_report",),
+        expected_terms=("结论", "MTD", "全部账户", "已实现", "纯期权", "指派股票", "现金流", "权利金"),
         forbidden_terms=("共 1 行", "分析完成"),
+    ),
+    Scenario(
+        name="option_performance_mtd_correction",
+        question="我写的是mtd",
+        turns=(
+            ModelTurn(
+                tool_calls=(
+                    _call("option_performance_report", {"period": "mtd"}, "income_correction_1"),
+                )
+            ),
+            ModelTurn(
+                text=(
+                    "结论：已按 MTD 重查；范围是全部账户（lx、sy）。已实现 PnL 包含"
+                    "纯期权与指派股票，现金流另列，指派结算本金不算利润。"
+                )
+            ),
+        ),
+        tool_results={
+            "option_performance_report": {
+                "ok": True,
+                "data": {
+                    "period": {"kind": "mtd", "status": "partial_current"},
+                    "scope": {"account": None, "accounts": ["lx", "sy"]},
+                    "cash": {},
+                    "pnl": {},
+                    "assignment_lifecycle": {},
+                },
+            }
+        },
+        expected_tools=("option_performance_report",),
+        expected_terms=("结论", "MTD", "全部账户", "已实现 PnL", "纯期权", "指派股票", "现金流"),
+        context=(
+            {"role": "user", "content": "7月 mtd 的期权收益"},
+            {"role": "assistant", "content": "我刚才错误地按自然月解释了。"},
+        ),
     ),
     Scenario(
         name="risk_concentration",
