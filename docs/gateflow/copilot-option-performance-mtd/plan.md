@@ -41,8 +41,8 @@
 Ownership decision:
 
 - public execution contract 继续严格拒绝歧义请求；
-- Copilot host 不再预填 fake null defaults，也不预填 `period=mtd` discriminator；
-  真正无期间参数时仍由 canonical `PeriodRequest` 默认 MTD；
+- Copilot host 不再预填 fake null defaults；先规范化 explicit static/model/scene
+  inputs，再叠加 `period=mtd` safe default，使默认值不能充当显式 discriminator；
 - `AgentTool` 增加一个可选、窄范围的 Copilot input normalizer，具体工具在自己的
   定义边界声明 period discriminator 的 canonicalization；
 - 只移除 tool definition 自己的 fake `None` defaults；模型或 static payload 显式
@@ -93,15 +93,17 @@ copilot_input_normalizer: Callable[[Mapping[str, Any]], dict[str, Any]] | None
 
 行为：
 
-1. 只复制 definition 中真实存在且非-null 的 safe defaults；option performance 不在
-   adapter 层预填 `period`；
-2. 合并 static/model/scene inputs，不改写显式 `None`、空字符串、`False` 或 `0`；
-3. 调用该 tool 自己的 Copilot normalizer；
-4. normalizer 只在 payload 显式携带合法 `period` 时删除 irrelevant period fields；
-5. 再交给既有 execution schema/validator。
+1. 合并 static/model explicit inputs，不改写显式 `None`、空字符串、`False` 或 `0`；
+2. 对这些可由模型产生的 explicit inputs 调用 tool 自己的 Copilot normalizer；
+3. 只在 model/static inputs 携带合法 `period` 时删除 irrelevant period fields；
+4. 再叠加 definition 中真实存在且非-null 的 safe defaults，model/static inputs 优先；
+5. 最后叠加 UI/runtime fixed scene inputs，fixed scope 优先且不被 normalizer 删除；
+6. 交给既有 execution schema/validator；fixed scope 与 model period 冲突时保留冲突并
+   fail closed。
 
 `option_performance_report.safe_default_input` 不再声明 fake `None` entries；
-也不声明 `period="mtd"`；canonical `PeriodRequest` 的 MTD default 保持不变。
+保留公开 Agent manifest 既有的 `period="mtd"` safe default；它在 explicit
+normalization 之后才叠加，因此不能触发 period-field pruning。
 `tool_descriptions()` 和 `_copilot_input_schema()` 也防御性地不把 safe
 `default: null` 发布成模型默认值。static/model 显式 null 不被静默删除。
 
@@ -170,10 +172,10 @@ Files:
 Changes:
 
 1. 在现有 `AgentTool` Copilot metadata 附近增加 optional input normalizer。
-2. 删除 option performance 的 fake `None` defaults 和 adapter-level `period=mtd`；
-   canonical default 不变。
+2. 删除 option performance 的 fake `None` defaults，保留公开 manifest 的 MTD default。
 3. payload merge 保留 explicit invalid inputs，不做全局 empty cleanup。
-4. option performance 自有 normalizer 只按 period 删除 irrelevant fields。
+4. option performance 自有 normalizer 在 safe defaults 之前只按 explicit period 删除
+   irrelevant fields。
 5. schema/description 不再携带 incompatible `default:null`。
 6. 用线上坏 payload 回归：`period=mtd` 同时带 month/year/range 与 hidden nulls，
    构建后只留下 MTD 合法字段，execution 首次成功。
@@ -183,11 +185,14 @@ Acceptance:
 - public API 的 ambiguous-period rejection 测试仍通过；
 - Copilot payload 不含 hidden nulls；
 - MTD/YTD/month/year/range 各自字段矩阵测试通过；
-- 空 payload 仍由 canonical contract 得到 MTD；`month` without `period` 仍
+- 空 payload 仍得到 MTD safe default；`month` without explicit `period` 在默认值
+  叠加后仍形成可见歧义并
   fail closed；
 - `account=""`、`config_key=""` 和当前 period 的 invalid/empty required field 仍
   fail closed；
 - explicit account/config scene overlay 仍保持原行为。
+- fixed month 与 model MTD 冲突时不静默丢失；fixed month 与 model month 一致时
+  fixed value 最终生效。
 
 ### Slice 2 — Canonical PnL decomposition and renderer
 
@@ -304,7 +309,7 @@ validation.
 
 | Risk | Mitigation |
 |---|---|
-| Copilot normalizer silently hides a genuinely invalid request | It only removes fields irrelevant to an explicitly supplied valid period. The adapter does not prefill the discriminator; explicit invalid/current-period/static/model values remain and public execution stays strict. |
+| Copilot normalizer silently hides a genuinely invalid request | It runs on explicit inputs before safe defaults and only removes fields irrelevant to an explicitly supplied valid period. Explicit invalid/current-period/static/model values remain and public execution stays strict. |
 | Generic tool metadata gains unnecessary complexity | One optional callable, default `None`, no registry or adapter layer; used only where a proven discriminator problem exists. |
 | New split metrics diverge from total | Derive all three from the exact fact collections in one engine pass and assert reconciliation. |
 | Assignment source IDs collide with option allocation IDs | Stop reclassifying from source IDs; pass exact assigned-stock facts to stock summary. |

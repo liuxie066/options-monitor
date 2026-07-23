@@ -42,10 +42,14 @@ confirmed work unit; the first re-review then identified PR-03.
 
 ## PR-03 — accepted — fixed
 
-The Copilot adapter will no longer prefill `period="mtd"` for option performance.
+The Copilot adapter will no longer let `period="mtd"` safe default act as discriminator
+provenance for option performance.
 
-- a truly empty period request still defaults to MTD inside canonical `PeriodRequest`;
-- `month` without an explicit period remains visible and is rejected as ambiguous;
+- explicit static/model/scene inputs are normalized before safe defaults are applied;
+- the public Agent manifest keeps its existing `period="mtd"` safe default;
+- a truly empty period request still receives MTD;
+- `month` without an explicit period remains visible beside the later default and is rejected
+  as ambiguous;
 - only an explicitly supplied valid period allows the Copilot normalizer to remove irrelevant
   period fields;
 - unknown periods and invalid relevant values remain fail closed.

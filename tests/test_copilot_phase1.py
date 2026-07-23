@@ -21,6 +21,7 @@ from src.application.copilot.model_client import CopilotModelSettings, build_mod
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.application.copilot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.copilot.service import prepare_contract
+from src.application.agent_tool_contracts import AgentToolError
 
 
 def _request(text: str, *, context=(), environment: str = "local") -> CopilotRequest:
@@ -197,11 +198,123 @@ def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
     assert "quote_snapshots" not in positions["input_schema"]["properties"]
     assert "opend_host" not in positions["input_schema"]["properties"]
 
+    performance = next(item for item in copilot_tools.tool_descriptions(("option_performance_report",)))
+    assert performance["default_input"] == {
+        "config_key": "us",
+        "period": "mtd",
+        "include_rows": False,
+        "refresh_quotes": True,
+    }
+    assert performance["input_schema"]["properties"]["period"]["default"] == "mtd"
+    assert all(value is not None for value in performance["default_input"].values())
+    assert "config_path" not in performance["input_schema"]["properties"]
+    assert "data_config" not in performance["input_schema"]["properties"]
+
     external_positions = get_tool_definition("option_positions_read")
     assert external_positions is not None
     assert external_positions.input_json_schema()["properties"]["action"]["type"] == ["string", "array"]
     assert "quote_snapshots" in external_positions.input_json_schema()["properties"]
     assert "opend_host" in external_positions.input_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
+    ("period", "expected_fields"),
+    [
+        ("mtd", {"as_of_date"}),
+        ("ytd", {"as_of_date"}),
+        ("month", {"month"}),
+        ("year", {"year"}),
+        ("range", {"start_date", "end_date"}),
+    ],
+)
+def test_option_performance_payload_keeps_only_explicit_period_fields(
+    period: str,
+    expected_fields: set[str],
+) -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {
+            "period": period,
+            "as_of_date": "2026-07-23",
+            "month": "2026-07",
+            "year": 2026,
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-23",
+        },
+    )
+
+    assert error is None
+    assert payload is not None
+    assert payload["period"] == period
+    assert {name for name in ("as_of_date", "month", "year", "start_date", "end_date") if name in payload} == expected_fields
+    assert "config_path" not in payload
+    assert "data_config" not in payload
+
+
+def test_option_performance_payload_does_not_infer_period_or_hide_invalid_scope() -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"month": "2026-07"},
+    )
+
+    assert error is None
+    assert payload is not None
+    assert payload["period"] == "mtd"
+    assert payload["month"] == "2026-07"
+    from src.application.agent_tool_registry import get_tool_definition
+
+    definition = get_tool_definition("option_performance_report")
+    assert definition is not None
+    with pytest.raises(AgentToolError, match="period=mtd does not accept: month"):
+        definition.call(payload)
+
+    invalid_payload, invalid_error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"period": "mtd", "account": ""},
+    )
+    assert invalid_payload is None
+    assert invalid_error == "account must be non-empty when provided"
+
+    explicit_null, null_error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"period": "mtd", "config_path": None},
+    )
+    assert null_error is None
+    assert explicit_null is not None
+    assert explicit_null["config_path"] is None
+    with pytest.raises(AgentToolError, match="config_path"):
+        definition.validate_input(explicit_null)
+
+
+def test_option_performance_payload_preserves_fixed_month_scope() -> None:
+    conflicting, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"period": "mtd", "month": "2026-07", "year": 2026},
+        fixed_input={"config_key": "us", "month": "2026-06"},
+    )
+
+    assert error is None
+    assert conflicting is not None
+    assert conflicting["config_key"] == "us"
+    assert conflicting["period"] == "mtd"
+    assert conflicting["month"] == "2026-06"
+
+    from src.application.agent_tool_registry import get_tool_definition
+
+    definition = get_tool_definition("option_performance_report")
+    assert definition is not None
+    with pytest.raises(AgentToolError, match="period=mtd does not accept: month"):
+        definition.call(conflicting)
+
+    aligned, aligned_error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"period": "month", "month": "2026-07"},
+        fixed_input={"config_key": "us", "month": "2026-06"},
+    )
+    assert aligned_error is None
+    assert aligned is not None
+    assert aligned["period"] == "month"
+    assert aligned["month"] == "2026-06"
 
 
 def test_symbol_inputs_are_structurally_required_without_fake_defaults() -> None:
@@ -499,6 +612,53 @@ def test_explicit_scope_cannot_be_overridden_by_model_tool_arguments(monkeypatch
     assert calls[0]["config_key"] == "us"
 
 
+def test_explicit_month_scope_is_not_pruned_by_model_mtd_arguments(monkeypatch) -> None:
+    calls: list[dict] = []
+    request = replace(
+        _request("查询明确月份的收益"),
+        explicit_scope=CopilotScope(config_key="us", month="2026-06"),
+    )
+    prepared = prepare_contract(request, reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+    turns = iter(
+        (
+            ModelTurn(
+                tool_calls=(
+                    _call(
+                        "option_performance_report",
+                        {"period": "mtd", "month": "2026-07", "year": 2026},
+                    ),
+                )
+            ),
+            ModelTurn(text="结论：期间参数与明确月份冲突，未返回错误期间的数据。"),
+        )
+    )
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        calls.append(dict(payload))
+        return {
+            "ok": False,
+            "error": {
+                "code": "INPUT_ERROR",
+                "message": "period=mtd does not accept: month",
+            },
+        }
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    result = run_contract(prepared, model_runner=lambda _request: next(turns))
+
+    assert result.status == "answered"
+    assert calls == [
+        {
+            "config_key": "us",
+            "period": "mtd",
+            "include_rows": False,
+            "refresh_quotes": True,
+            "month": "2026-06",
+        }
+    ]
+
+
 def test_budget_exhaustion_returns_tool_results_for_entire_native_batch(monkeypatch) -> None:
     contract = _contract("同时检查运行状态和收益")
     manifest = build_scene_manifest(contract, "run_budget_batch")
@@ -527,7 +687,11 @@ def test_budget_exhaustion_returns_tool_results_for_entire_native_batch(monkeypa
         manifest,
         scene_input=contract.input,
         record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(name, payload),
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
+            name,
+            payload,
+            fixed_input=fixed_input,
+        ),
         call_read_tool=lambda name, payload: copilot_tools.call_read_tool(
             name, payload, allowed_tools=tuple(manifest.allowed_tools)
         ),
@@ -564,7 +728,11 @@ def test_context_compaction_keeps_native_tool_call_pairs() -> None:
         manifest,
         scene_input=contract.input,
         record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(name, payload),
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
+            name,
+            payload,
+            fixed_input=fixed_input,
+        ),
         call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
         compact_observation=copilot_tools.compact_observation,
         fixture_observations=lambda _fixture: [],
@@ -614,7 +782,11 @@ def test_context_compaction_preserves_authoritative_system_context() -> None:
         manifest,
         scene_input=contract.input,
         record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(name, payload),
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
+            name,
+            payload,
+            fixed_input=fixed_input,
+        ),
         call_read_tool=lambda _name, _payload: {"ok": True, "data": {"blob": "x" * 20_000}},
         compact_observation=copilot_tools.compact_observation,
         fixture_observations=lambda _fixture: [],
@@ -649,7 +821,11 @@ def test_context_compaction_preserves_financial_identity_fields() -> None:
         manifest,
         scene_input=contract.input,
         record_event=lambda *_args: None,
-        build_tool_payload=lambda name, payload: copilot_tools.build_tool_payload(name, payload),
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
+            name,
+            payload,
+            fixed_input=fixed_input,
+        ),
         call_read_tool=lambda _name, _payload: {
             "ok": True,
             "data": {

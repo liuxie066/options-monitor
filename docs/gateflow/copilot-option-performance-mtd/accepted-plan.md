@@ -11,7 +11,8 @@
 ## Accepted findings
 
 - Explicit invalid/empty inputs remain fail closed; only fake safe defaults are removed.
-- The adapter does not prefill `period=mtd`; canonical domain default remains authoritative.
+- Explicit inputs are normalized before the existing public `period=mtd` safe default is
+  applied, so the default cannot act as discriminator provenance.
 - Period pruning requires an explicitly supplied valid discriminator.
 - Account provenance is not inferred by a new parser; actual report scope is always visible.
 
