@@ -70,6 +70,10 @@ def _tool_input(question: str, tool: str | None) -> dict[str, str]:
     return {}
 
 
+def test_p1_eval_recognizes_equivalent_evidence_limit_wording() -> None:
+    assert copilot_p1_eval._mentions_evidence_limit("净收益不可可靠给出，因为证据不完整。")
+
+
 def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
     runtime_root = tmp_path / "runtime"
     observed: dict[str, str | None] = {}
