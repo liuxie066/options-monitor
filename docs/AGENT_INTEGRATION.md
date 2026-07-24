@@ -88,6 +88,7 @@ Use the launcher as a local command tool. Typical pattern:
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_query --input-json '{"view":"overview","accounts":["lx","sy"]}'
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assignment_scenario --input-json '{"accounts":["lx","sy"]}'
 ```
 
 `portfolio_query` 是同机 portfolio-management 的纯读适配器。它只发送 GET，
@@ -106,6 +107,13 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash
 `cash.total_cash_change_net`，不会拿总资产代替现金。两者都要求 CNY、期末日期、
 FX 和实际费用覆盖对齐；缺失或不完整证据保持 `amount=null`，不会按 0 处理。
 输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
+
+`portfolio_assignment_scenario` 只接受 `accounts`。它通过 PM 的
+`portfolio.valuation_evidence.v1` 只读快照取得全部非期权资产、当前报价和显式 FX，
+并从 OM canonical SQLite `position_lots` 读取 open short put/call。输出固定为 CNY
+资金覆盖，MMF 计入现金，Long Option 不进入输入或输出。费用复用统一股票费用计算器；
+缺少指派费用规则时净现金与净分布保持 `null/partial`。该工具不写 assignment、
+持仓、报告或通知状态；上游实时估值可能刷新 portfolio-management 的既有行情 cache。
 
 Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、

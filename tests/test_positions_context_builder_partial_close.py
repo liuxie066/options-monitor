@@ -11,7 +11,11 @@ if str(BASE) not in sys.path:
 
 from domain.domain.expiration_dates import expiration_business_today
 from src.application.ledger.api import RiskPositionView, position_lot_risk_view, position_lot_snapshot
-from src.application.ledger.read_model import load_position_lot_records, list_position_rows
+from src.application.ledger.read_model import (
+    list_open_short_assignment_rows,
+    load_position_lot_records,
+    list_position_rows,
+)
 from src.application.positions.context_builder import build_context, build_shared_context
 
 
@@ -556,6 +560,65 @@ def test_list_position_rows_requires_broker_on_persisted_rows() -> None:
 
     assert [row["record_id"] for row in rows] == ["lot_1"]
     assert rows[0]["broker"] == "富途"
+
+
+def test_list_open_short_assignment_rows_is_strict_and_excludes_long_options() -> None:
+    class _Repo:
+        def list_position_lots(self) -> list[dict[str, Any]]:
+            common = {
+                "broker": "富途证券(香港)",
+                "account": "LX",
+                "symbol": "0700.HK",
+                "contracts_open": 1,
+                "multiplier": 100,
+                "strike": 350,
+                "currency": "HKD",
+                "expiration_ymd": "2026-08-28",
+            }
+            return [
+                {
+                    "record_id": "short-put",
+                    "fields": {**common, "status": "open", "side": "short", "option_type": "put"},
+                },
+                {
+                    "record_id": "long-call",
+                    "fields": {**common, "status": "open", "side": "long", "option_type": "call"},
+                },
+                {
+                    "record_id": "closed-call",
+                    "fields": {**common, "status": "closed", "side": "short", "option_type": "call"},
+                },
+                {
+                    "record_id": "other-account",
+                    "fields": {
+                        **common,
+                        "account": "sy",
+                        "status": "open",
+                        "side": "short",
+                        "option_type": "call",
+                    },
+                },
+            ]
+
+    rows = list_open_short_assignment_rows(_Repo(), accounts=["lx"])
+
+    assert [row["record_id"] for row in rows] == ["short-put"]
+    assert rows[0]["account"] == "lx"
+    assert rows[0]["option_type"] == "put"
+    assert rows[0]["side"] == "short"
+
+
+def test_list_open_short_assignment_rows_propagates_repository_failure() -> None:
+    class _Repo:
+        def list_position_lots(self) -> list[dict[str, Any]]:
+            raise RuntimeError("ledger unavailable")
+
+    try:
+        list_open_short_assignment_rows(_Repo(), accounts=["lx"])
+    except RuntimeError as exc:
+        assert str(exc) == "ledger unavailable"
+    else:
+        raise AssertionError("strict assignment read must fail closed")
 
 
 def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:

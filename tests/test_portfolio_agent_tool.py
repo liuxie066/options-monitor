@@ -54,7 +54,39 @@ def test_portfolio_tools_share_one_pure_read_toolset() -> None:
         "portfolio_query",
         "portfolio_pnl_bridge",
         "portfolio_cash_bridge",
+        "portfolio_assignment_scenario",
     )
+
+
+def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> None:
+    expected = {
+        "schema_version": "portfolio.assignment_scenario.v1",
+        "status": "complete",
+        "scope": {"accounts": ["lx"], "include_long_options": False},
+        "assignments": [],
+        "warnings": [],
+    }
+    monkeypatch.setattr(
+        portfolio,
+        "query_portfolio_assignment_scenario",
+        lambda accounts: {**expected, "scope": {**expected["scope"], "accounts": list(accounts)}},
+    )
+    definition = get_tool_definition("portfolio_assignment_scenario")
+
+    assert definition is not None
+    assert definition.is_pure_read() is True
+    assert definition.safe_default_input == {}
+    assert definition.input_json_schema()["required"] == ["accounts"]
+    assert definition.copilot_input_fields == ("accounts",)
+
+    data, warnings, meta = definition.call({"accounts": ["lx"]})
+
+    assert data == expected
+    assert warnings == []
+    assert meta == {}
+
+    with pytest.raises(AgentToolError, match="accepts only accounts"):
+        definition.call({"accounts": ["lx"], "price": 123})
 
 
 def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatch) -> None:

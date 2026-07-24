@@ -245,6 +245,65 @@ def build_position_lot_view(
     }
 
 
+def _position_row_from_view(view: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": view.get("record_id"),
+        "broker": view.get("broker"),
+        "account": view.get("account"),
+        "symbol": view.get("symbol"),
+        "option_type": view.get("option_type"),
+        "side": view.get("side"),
+        "strike": view.get("strike"),
+        "multiplier": view.get("multiplier"),
+        "expiration": view.get("expiration"),
+        "expiration_ymd": view.get("expiration_ymd"),
+        "days_to_expiration": view.get("days_to_expiration"),
+        "expiration_state": view.get("expiration_state"),
+        "state_warning": view.get("state_warning"),
+        "contracts": view.get("contracts"),
+        "contracts_open": view.get("contracts_open"),
+        "contracts_closed": view.get("contracts_closed"),
+        "currency": view.get("currency"),
+        "cash_secured_amount": view.get("cash_secured_amount"),
+        "cash_secured_amount_role": view.get("cash_secured_amount_role"),
+        "underlying_share_locked": view.get("underlying_share_locked"),
+        "close_type": view.get("close_type"),
+        "close_reason": view.get("close_reason"),
+        "status": view.get("status"),
+        "note": view.get("note"),
+    }
+
+
+def list_open_short_assignment_rows(
+    repo: Any,
+    *,
+    accounts: list[str],
+) -> list[dict[str, Any]]:
+    """Strictly read every open short put/call needed by the stress scenario."""
+
+    primary_repo = require_option_positions_read_repo(repo)
+    projected = primary_repo.list_position_lots()
+    if not isinstance(projected, list):
+        raise TypeError("position lot repository must return a list")
+    normalized_accounts = {
+        normalize_account(account)
+        for account in accounts
+        if normalize_account(account)
+    }
+    rows: list[dict[str, Any]] = []
+    for item in projected:
+        view = build_position_lot_view(item)
+        if normalize_account(view.get("account")) not in normalized_accounts:
+            continue
+        if view.get("status") != "open" or view.get("side") != "short":
+            continue
+        if view.get("option_type") not in {"put", "call"}:
+            continue
+        rows.append(_position_row_from_view(view))
+    rows.sort(key=_position_row_sort_key)
+    return rows
+
+
 def list_position_rows(
     repo: Any,
     *,
@@ -315,34 +374,7 @@ def list_position_rows(
         if expiration_within_days is not None:
             if days_to_expiration is None or days_to_expiration < 0 or days_to_expiration > int(expiration_within_days):
                 continue
-        rows.append(
-            {
-                "record_id": view.get("record_id"),
-                "broker": view.get("broker"),
-                "account": view.get("account"),
-                "symbol": view.get("symbol"),
-                "option_type": view.get("option_type"),
-                "side": view.get("side"),
-                "strike": view.get("strike"),
-                "multiplier": view.get("multiplier"),
-                "expiration": view.get("expiration"),
-                "expiration_ymd": view.get("expiration_ymd"),
-                "days_to_expiration": days_to_expiration,
-                "expiration_state": view.get("expiration_state"),
-                "state_warning": view.get("state_warning"),
-                "contracts": view.get("contracts"),
-                "contracts_open": view.get("contracts_open"),
-                "contracts_closed": view.get("contracts_closed"),
-                "currency": view.get("currency"),
-                "cash_secured_amount": view.get("cash_secured_amount"),
-                "cash_secured_amount_role": view.get("cash_secured_amount_role"),
-                "underlying_share_locked": view.get("underlying_share_locked"),
-                "close_type": view.get("close_type"),
-                "close_reason": view.get("close_reason"),
-                "status": normalized_status,
-                "note": view.get("note"),
-            }
-        )
+        rows.append(_position_row_from_view(view))
     rows.sort(key=_position_row_sort_key)
     return rows[: max(limit, 1)]
 
