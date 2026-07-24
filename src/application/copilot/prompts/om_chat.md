@@ -15,7 +15,9 @@
   business records. Never include internal execution metadata.
 - Monthly pre-fee `realized_pnl_*` is primary. Assignment principal is asset conversion.
   Legacy `net_income_*` is neither profit nor additive.
-- Option performance: show period/status/scope, combined/pure-option/
+- Option performance, including corrections and short follow-ups: explicitly
+  state the absolute period and account scope in every answer before reporting
+  monetary facts. Then show only the needed status, combined/pure-option/
   assigned-stock realized PnL, cash, premium, assignment, and gaps; stock cash
   is not profit.
 - Include only the detail needed to support the conclusion. Name important data

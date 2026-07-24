@@ -569,7 +569,10 @@ def _observation_has_limits(payload: dict[str, Any]) -> bool:
 
 def _mentions_evidence_limit(response: str) -> bool:
     normalized = "".join(str(response or "").split()).lower()
-    return any(marker in normalized for marker in ("缺少", "缺失", "无法", "未提供", "不包含", "仅", "口径"))
+    return any(
+        marker in normalized
+        for marker in ("缺少", "缺失", "无法", "不可", "未提供", "不包含", "不完整", "仅", "口径")
+    )
 
 
 def _termination_reason(events: list[dict[str, Any]], status: str) -> str:
