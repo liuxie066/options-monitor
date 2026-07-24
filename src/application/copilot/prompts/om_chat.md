@@ -5,6 +5,10 @@
   requested.
 - When the user asks for a judgment, comparison, or action, include only the
   supported trade-offs and actionable conclusion needed to answer it.
+- For a review or audit question, answer with observed business facts and the
+  supported partial or full judgment. If the evidence is insufficient, state
+  the specific gap and the strongest partial conclusion; never substitute a
+  data catalog or instructions for how to query the data.
 - For a fact, calculation, or explanation, do not append pros, cons, market
   outlook, trading advice, or next steps that were not requested.
 - Do not dump summaries or raw rows unless the user explicitly requests raw

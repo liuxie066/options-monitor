@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.19 - 2026-07-24
+
+### Fixed
+- Prevented Copilot review answers from replacing an available business report with `analysis_catalog` schema metadata after context compaction; direct facts now take precedence, and incomplete reviews must state a supported partial conclusion plus the specific evidence gap.
+
 ## 1.4.18 - 2026-07-24
 
 ### Fixed
