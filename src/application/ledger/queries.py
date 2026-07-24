@@ -149,6 +149,16 @@ def list_position_rows(
     )
 
 
+def list_open_short_assignment_rows(
+    repo: Any,
+    *,
+    accounts: list[str],
+) -> list[dict[str, Any]]:
+    from src.application.ledger.read_model import list_open_short_assignment_rows as _impl
+
+    return _impl(repo, accounts=accounts)
+
+
 def resolve_position_lot_snapshots(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any, list[dict[str, Any]]]:
     from src.application.ledger.read_model import resolve_position_lot_records as _impl
 

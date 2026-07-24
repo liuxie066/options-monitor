@@ -59,6 +59,10 @@ from src.interfaces.cli.option_performance import (
     add_option_performance_commands,
     handle_option_performance_command,
 )
+from src.interfaces.cli.portfolio_ops import (
+    add_portfolio_commands,
+    handle_portfolio_command,
+)
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
     add_runtime_observability_commands,
@@ -147,6 +151,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_setup_commands(sub)
 
     add_option_performance_commands(sub)
+
+    add_portfolio_commands(sub)
 
     add_daily_brief_commands(sub)
 
@@ -306,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "option-performance":
             return _print(handle_option_performance_command(args))
+
+        if args.command == "portfolio":
+            return handle_portfolio_command(args)
 
         if args.command == "daily-brief":
             return handle_daily_brief_command(args, repo_base_fn=repo_base)

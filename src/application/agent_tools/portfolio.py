@@ -20,6 +20,10 @@ from src.application.ledger.api import (
     open_position_ledger_from_data_config as resolve_option_positions_repo,
 )
 from src.application.portfolio_cash_bridge import build_portfolio_cash_bridge
+from src.application.portfolio_assignment_scenario import (
+    AssignmentScenarioInputError,
+    query_portfolio_assignment_scenario,
+)
 from src.application.portfolio_pnl_bridge import build_portfolio_pnl_bridge
 from src.application.performance.service import build_option_period_performance
 
@@ -371,6 +375,26 @@ def _validate_bridge_input(payload: dict[str, Any]) -> None:
         raise AgentToolError(code="INPUT_ERROR", message="portfolio bridge accounts must be non-empty")
 
 
+def _validate_assignment_scenario_input(payload: dict[str, Any]) -> None:
+    unsupported = sorted(set(payload).difference({"accounts"}))
+    if unsupported:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=(
+                "portfolio_assignment_scenario accepts only accounts; "
+                f"unsupported fields: {', '.join(unsupported)}"
+            ),
+        )
+
+
+def _portfolio_assignment_scenario(payload: dict[str, Any]):
+    try:
+        result = query_portfolio_assignment_scenario(payload.get("accounts") or [])
+    except AssignmentScenarioInputError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    return result, list(result.get("warnings") or []), {}
+
+
 PORTFOLIO_QUERY_TOOL = build_agent_tool(
     name="portfolio_query",
     description="Read portfolio-management account, holdings, cash, NAV, distribution, or report data through its same-host loopback HTTP API.",
@@ -496,13 +520,84 @@ PORTFOLIO_CASH_BRIDGE_TOOL = _bridge_tool(
     evidence_field="accounts[].option_cash_evidence",
 )
 
+PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
+    name="portfolio_assignment_scenario",
+    description=(
+        "Project the current CNY asset distribution and funding coverage if every open short put and "
+        "short call in the selected accounts were physically assigned. MMF is cash; long options are "
+        "excluded; the operation is read-only and does not write assignment events."
+    ),
+    requires=(
+        "portfolio-management valuation evidence loopback API",
+        "runtime_config",
+        "sqlite_position_lots",
+    ),
+    capabilities=(
+        "portfolio_read",
+        "assignment_stress_scenario",
+        "cross_product_read",
+        "read_only",
+    ),
+    input_schema={
+        "accounts": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9_-]*$",
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "required": True,
+            "description": "Required OM account labels; normalized to lowercase and de-duplicated.",
+        },
+    },
+    handler=_portfolio_assignment_scenario,
+    pure_read=True,
+    safe_default_input={},
+    input_validator=_validate_assignment_scenario_input,
+    examples=({"input": {"accounts": ["lx", "sy"]}},),
+    output_contract={
+        "schema_version": "portfolio.assignment_scenario.v1",
+        "source_label": "portfolio-management valuation evidence + OM SQLite position_lots",
+        "primary_rows": "assignments",
+        "fact_fields": [
+            "status",
+            "scope",
+            "snapshot",
+            "summary",
+            "cash_coverage",
+            "fee_summary",
+            "assignments",
+            "position_changes",
+            "expiration_ladder",
+            "distribution",
+            "account_breakdown",
+            "fx_facts",
+            "warnings",
+        ],
+        "missing_data_fields": [
+            "cash_coverage.ending_cash_net_estimated_cny",
+            "distribution.net_assets_cny",
+        ],
+        "notes": [
+            "Business status complete|partial|unavailable is independent of the tool envelope ok flag.",
+            "Long options are excluded and are neither valued nor retained in this report.",
+        ],
+    },
+    copilot_input_fields=("accounts",),
+)
+
 TOOLS: tuple[AgentTool, ...] = (
     PORTFOLIO_QUERY_TOOL,
     PORTFOLIO_PNL_BRIDGE_TOOL,
     PORTFOLIO_CASH_BRIDGE_TOOL,
+    PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL,
 )
 
 __all__ = [
+    "PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL",
     "PORTFOLIO_CASH_BRIDGE_TOOL",
     "PORTFOLIO_PNL_BRIDGE_TOOL",
     "PORTFOLIO_QUERY_TOOL",
