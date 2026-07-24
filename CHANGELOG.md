@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.4.21 - 2026-07-24
+
+### Fixed
+- Required every option-performance answer, including corrections and follow-ups, to state the explicit period and account scope before reporting monetary facts.
+- Recognized semantically equivalent evidence-limit wording such as `不可` and `不完整` in the production P1 gate, while retaining the requirement that partial observations be disclosed.
+
 ## 1.4.20 - 2026-07-24
 
 ### Fixed
