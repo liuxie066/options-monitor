@@ -1,6 +1,8 @@
-# Option Performance v1 Design
+# Option Performance Contract
 
-This document is the contract source for the option-performance refactor. Implementation lands in reviewed Gateflow slices; sections are expanded as each slice is accepted.
+This document describes the current option-performance contract. Historical
+Gateflow artifacts record how it was implemented, but current source, tests,
+and the public `option_performance_report` schema remain authoritative.
 
 ## Period Contract
 
@@ -12,7 +14,7 @@ Public period kinds are `mtd`, `ytd`, `month`, `year`, and `range`. Operator-fac
 
 Past date ranges end at the next local midnight. A range ending on local today ends at `now_ms + 1`, so `valuation_end_at_ms == now_ms`. Opening valuation is the instant immediately before activity begins: `valuation_open_at_ms = effective_start_at_ms - 1`.
 
-The public parser rejects future dates, inverted ranges, invalid calendar values, and period-specific fields that do not belong to the selected period. An internal `cutoff_ms_override` exists only for the deprecated adapter and must fall inside the normalized period.
+The public parser rejects future dates, inverted ranges, invalid calendar values, and period-specific fields that do not belong to the selected period. An internal `cutoff_ms_override` is not part of the public contract and must fall inside the normalized period.
 
 ## Instrument Identity
 
@@ -61,15 +63,37 @@ The pure period engine consumes effective canonical trade events plus canonical 
 - Stock settlement fee must be explicitly recorded to make total cash change net complete. Missing or malformed settlement data fails closed without erasing valid option realized PnL.
 - An effective close lacking a canonical allocation still counts as close activity and direct event cash, but realized gross/net are partial and explicitly missing.
 
+The public `activity` object exposes `premium_collected_gross`,
+`premium_paid_gross`, `contracts_opened`, `contracts_closed`,
+`assigned_stock_shares_opened`, and `assigned_stock_shares_sold`. Close,
+expiry, assignment, and exercise affect contracts and allocation PnL; they do
+not manufacture a second premium-activity amount.
+
 All authoritative amounts remain native-currency maps. A metric with an incomplete fact removes the affected currency from that metric rather than publishing a misleading partial subtotal.
 
-Cash CNY is booked once at the event-write boundary. Canonical option trade/assignment events store a `cash_conversion.v1` snapshot under `raw_payload.cash_conversions`; assigned-stock sale events store the same snapshot beside the sale fact. The snapshot records the native amount, CNY rate and result, rate timestamp, event timestamp, and stable conversion ID in the same transaction as the event. A nonzero foreign-currency cash fact is converted only when the cached rate is within 24 hours of the event; otherwise the event stores `status=pending` and `amount_cny=null`. Zero and CNY cash use explicit identity conversions. Idempotent retries retain the original snapshot. Report reads never re-price cash from later FX evidence, and legacy events without a snapshot remain native-only/partial until an explicit evidence-preserving migration exists.
+Cash CNY is booked once at the event-write boundary. Canonical option
+trade/assignment events store a `cash_conversion.v1` snapshot under
+`raw_payload.cash_conversions`; assigned-stock sale events store the same
+snapshot beside the sale fact. The snapshot records the native amount, CNY rate
+and result, rate timestamp, event timestamp, and stable conversion ID in the
+same transaction as the event. A nonzero foreign-currency cash fact is
+converted only when the cached rate is within 24 hours of the event; otherwise
+the event stores `status=pending` and `amount_cny=null`. Zero and CNY cash use
+explicit identity conversions. Idempotent retries retain the original
+snapshot. Report reads never re-price cash from later FX evidence, and legacy
+events without a snapshot remain native-only/partial until an explicit
+evidence-preserving migration exists.
+
+Premium activity, PnL, and valuation CNY use the separate
+`option_performance_evidence.v1` FX facts. Therefore
+`activity.premium_collected_gross.cny` and
+`cash.option_trade_cash_gross.cny` deliberately have different evidence paths.
 
 Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
 
-Top-level `pnl.realized_gross/net` is the combined realized result of canonical option
-allocations and assigned-stock facts. To keep assignment inclusion auditable, the same engine
-pass also publishes additive components:
+Top-level `pnl.realized_gross/net` is the combined realized result of canonical
+option allocations and assigned-stock facts. To keep assignment inclusion
+auditable, the same engine pass also publishes additive components:
 
 ```text
 pnl.option_realized_gross/net
@@ -78,12 +102,17 @@ pnl.assigned_stock_realized_gross/net
 pnl.realized_* = pnl.option_realized_* + pnl.assigned_stock_realized_*
 ```
 
-The components retain their own `observed|partial|not_observed` evidence envelope. They come from
-the exact generation-time fact collections; the renderer must not infer either component by
-subtracting totals. Period-total PnL remains the combined option plus assigned-stock result and
-must be labelled as combined in user-facing output.
+The components retain their own `observed|partial|not_observed` evidence
+envelope. They come from the exact generation-time fact collections; the
+renderer must not infer either component by subtracting totals. Period-total
+PnL remains the combined option plus assigned-stock result and must be labelled
+as combined in user-facing output.
 
-The application service reads immutable events only through `src.application.ledger.api`, rebuilds canonical projection without writes, and passes domain facts to the pure engine. Its S3 output is the internal `option_period_performance.core.v1` contract; the public Agent/CLI v1 envelope is added in S7.
+The application service reads immutable events only through
+`src.application.ledger.api`, rebuilds canonical projection without writes,
+and passes domain facts to the pure engine. Its internal output is
+`option_period_performance.core.v1`; Agent and CLI expose the public v1
+envelope.
 
 ## Valuation and FX Evidence
 
@@ -100,7 +129,11 @@ Selection is deterministic at the requested valuation or event instant:
 5. then choose the highest revision and stable fact ID;
 6. reject evidence older than seven days.
 
-The selected mark and FX fact IDs are returned in metric/report quality for valuation and PnL translation. Native-currency amounts remain available when FX is missing, while the CNY amount and affected quality become partial. Direct cash metrics instead use their immutable event-level booking conversion described above.
+The selected mark and FX fact IDs are returned in metric/report quality for
+valuation and PnL translation. Native-currency amounts remain available when
+FX is missing, while the CNY amount and affected quality become partial.
+Direct cash metrics instead use the immutable event-level booking conversion
+described above.
 
 Opening and ending option inventory are projected only through the ledger application API. Boundary projection is restated using all valid canonical voids, including a later void of an earlier event, then applies economic state only through the requested boundary. This keeps historical realized activity and opening/ending inventory on the same canonical replay semantics. Remaining actual opening fee is derived from canonical close allocations rather than rematching lots.
 
@@ -121,11 +154,17 @@ Period, month, account, and symbol views reduce the same valuation facts. Valuat
 
 Current collection runs only for `partial_current` reports with `refresh_quotes=true`. It deduplicates account-independent option identities, rejects conflicting stored market codes, resolves missing exact codes from only the required expiration chains, and fetches the resulting exact codes in one batched snapshot path. Positive bid/ask midpoint is preferred; positive last price is the explicit fallback. Crossed, zero, ambiguous, or unavailable markets fail closed with diagnostics. Broker timestamps are accepted only when timezone-aware and not in the future; otherwise the injected `now_ms` is used with `timestamp_fallback=true`.
 
-Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for later dry-run/apply wiring in S7.
+Current FX reuses the no-write exchange-rate adapter. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for the evidence lifecycle commands.
 
 ## Sell Put Assigned-Stock Lifecycle
 
-Supported assigned-stock inventory is projected once by `domain.domain.assigned_stock.project_assigned_stock_lifecycle`. Both the legacy monthly report and option-performance service delegate to that projector. Application code reads assigned-stock sale events only through `src.application.ledger.api.assigned_stock_event_log`; repository capability probing and read failures are contained at that boundary and become explicit diagnostics.
+Supported assigned-stock inventory is projected once by
+`domain.domain.assigned_stock.project_assigned_stock_lifecycle`. The
+option-performance service and assigned-stock read surface consume that
+projector. Application code reads assigned-stock sale events only through
+`src.application.ledger.api.assigned_stock_event_log`; repository capability
+probing and read failures are contained at that boundary and become explicit
+diagnostics.
 
 The supported inventory transition is deliberately narrow:
 
@@ -148,12 +187,13 @@ period_stock_total = sale_realized + ending_unrealized - opening_unrealized
 
 Settlement and sale fees are separate facts. Production net metrics use only `actual` fee evidence, including explicit actual zero. Estimated or missing fees preserve gross and make the affected net metric partial. The settlement fee is recognized once at assignment; it is not embedded again in stock gross basis. This keeps option premium, settlement fee, sale fee, and stock price movement from being double counted.
 
-`assigned_stock.period` consumes only the exact assigned-stock facts emitted by the assigned
-stock projector adapter. It does not infer membership from a shared assignment source event ID,
-because the canonical option allocation for the same assignment legitimately uses that ID too.
-This prevents option premium realization from leaking into assigned-stock realized PnL.
+`assigned_stock.period` consumes only the exact assigned-stock facts emitted by
+the assigned-stock projector adapter. It does not infer membership from a
+shared assignment source event ID, because the canonical option allocation for
+the same assignment legitimately uses that ID too. This prevents option
+premium realization from leaking into assigned-stock realized PnL.
 
-Opening and ending assigned-stock projections use the same restated boundary semantics as option inventory: valid later voids are included when rebuilding an earlier boundary. Historical reports select persisted stock marks only and never fetch current stock prices. Current reports may collect deduplicated `StockInstrumentKey` marks through the S4 read-through collector.
+Opening and ending assigned-stock projections use the same restated boundary semantics as option inventory: valid later voids are included when rebuilding an earlier boundary. Historical reports select persisted stock marks only and never fetch current stock prices. Current reports may collect deduplicated `StockInstrumentKey` marks through the current read-through collector.
 
 Covered-call lifecycle attribution prefers an explicit `stock_lot_id` link. If no explicit link exists, FIFO attribution is allowed only when the available inventory is entirely attributable to assigned-stock lots; it is labelled `heuristic` and downgrades lifecycle quality. Mixed ordinary/assigned inventory fails closed. Reservations prevent one stock share from backing two overlapping calls. Closed-call realized PnL and open-call marked unrealized PnL are both visible in the lifecycle projection, but they are not added again to top-level performance because canonical option facts already own those economics.
 
@@ -192,18 +232,21 @@ quality are `observed`; partial report diagnostics remain binding downstream eve
 subtotal is still visible. Contract mismatches and partial evidence keep bridge amounts null rather
 than attributing them to the requested account or treating them as zero.
 
-## Slice Status
+## Current Implementation
 
-- S1: period, instrument, money, quality, and fee contracts implemented.
-- S2: canonical option close allocations, signed premium economics, fee provenance/allocation, replay-stable identity, and legal ledger API implemented.
-- S3: native-currency activity, option/settlement cash, realized gross/net, quality, and period/month/account/symbol reductions implemented.
-- S4: deterministic valuation/FX evidence, no-write current collection, explicit capture core, boundary option valuation, CNY translation, and replay-stable historical service implemented.
-- S5: shared Sell Put assigned-stock projection, legal ledger API boundary, partial/full sales, stock marks, actual-fee net semantics, covered-call attribution quality, unsupported inventory diagnostics, and legacy delegation implemented.
-- S6: continuous-time option/assigned-stock notional-days, exact partial transitions, assignment handoff, covered-call zero-incremental treatment, and net annualized efficiency coverage implemented.
-- S7: primary Agent/CLI contract, evidence lifecycle commands, and deprecated monthly adapter implemented.
-- S8: analysis, Assistant, Copilot, and legacy CLI consumers migrated to explicit activity/cash/PnL semantics.
-- S9: independent portfolio PnL and cash bridges implemented; the mixed capital bridge is deprecated.
-- S10: old/new reconciliation, replay and coverage gates, explicit legacy-reference allowlist, proven-scope zero semantics, and rollback/removal documentation implemented.
+- Period, instrument, money, quality and fee contracts are implemented.
+- Canonical allocations own option realized PnL; assigned-stock facts publish a
+  separate additive component.
+- Event-time `cash_conversion.v1` snapshots own direct-cash CNY conversion.
+- Deterministic valuation evidence, no-write current quote collection,
+  assigned-stock lifecycle, continuous-time capital-days and Combo Yield
+  attribution are implemented.
+- Public surfaces are `option_performance_report`, `om option-performance`,
+  `analysis_catalog` / `analysis_query`, `portfolio_pnl_bridge` and
+  `portfolio_cash_bridge`.
+- `monthly_income_report`, `option-positions report monthly-income` and the
+  mixed `portfolio_capital_bridge` have been removed. Historical migration
+  notes are not callable rollback paths.
 
 ## Combo Yield Cross-Expiry Attribution
 

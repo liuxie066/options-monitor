@@ -11,6 +11,8 @@
 
 如果问题来自旧环境升级、多库并行或历史 Feishu 表，先用 `store inspect`
 确认当前 active SQLite；旧表只能作为人工历史证据，不能重新接成运行时事实源。
+生产环境中的每条命令都应显式传入正确的 `--runtime-root`；下面省略该参数只是为了
+突出修复语义，不代表可以依赖当前目录猜测目标 store。
 
 ---
 
@@ -47,10 +49,16 @@
 
 ### 场景 A：这笔开仓本来就不该存在
 
-动作：
+先预览：
 
 ```bash
-./om option-positions void-event --event-id <open_event_id> --confirm
+./om option-positions void-event --event-id <open_event_id> --dry-run
+```
+
+确认 event、lot 和影响范围后再写入：
+
+```bash
+./om option-positions void-event --event-id <open_event_id> --apply --confirm
 ```
 
 效果：
@@ -61,10 +69,11 @@
 
 ### 场景 B：这笔平仓记错了，应该撤销
 
-动作：
+先预览，确认后再写入：
 
 ```bash
-./om option-positions void-event --event-id <close_event_id> --confirm
+./om option-positions void-event --event-id <close_event_id> --dry-run
+./om option-positions void-event --event-id <close_event_id> --apply --confirm
 ```
 
 效果：
@@ -93,8 +102,8 @@
 确认后再 apply：
 
 ```bash
-./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1 --confirm
-./om option-positions adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105 --confirm
+./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1 --apply --confirm
+./om option-positions adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105 --apply --confirm
 ```
 
 效果：
@@ -106,13 +115,19 @@
 
 ### 场景 D：你怀疑投影脏了，但账本本身没问题
 
-动作：
+默认只预览投影差异：
 
 ```bash
 ./om option-positions rebuild
 ```
 
-效果：
+确认目标 store 和差异后才 apply：
+
+```bash
+./om option-positions rebuild --apply
+```
+
+apply 后的效果：
 - 从 `trade_events` 全量重建 `position_lots`
 
 这个命令适合：
@@ -129,14 +144,14 @@
 ./om option-positions history --record-id <record_id>
 ./om option-positions list --broker 富途 --account lx --status all
 ./om option-positions verify-projection
-./om option-performance report --config-key us --broker 富途 --account lx --period month --month 2026-04
+./om option-performance report --config-key us --broker 富途 --account lx --period month --month 2026-04 --no-refresh-quotes
 ```
 
-你要确认三件事：
+你要确认四件事：
 - 事件链符合预期
 - 当前 lot 状态符合预期
 - replay projection 与当前 `position_lots` 一致
-- canonical PnL / cash / premium activity 没有被错误污染
+- 当月 PnL、现金和 premium activity 没有被错误污染
 
 ---
 
@@ -146,7 +161,8 @@
 
 - `trade_events` 是写入事实。
 - `position_lots` 是本地 projection。
-- `./om option-positions rebuild` 从 `trade_events` 重建 projection。
+- `./om option-positions rebuild` 默认预览从 `trade_events` 重建 projection 的差异；
+  只有 `--apply` 才写入。
 
 普通 Feishu holdings 读取仍然保留，但它不参与期权持仓 ledger 修复。
 
@@ -163,6 +179,7 @@
 
 ```bash
 ./om option-positions rebuild
+./om option-positions verify-projection --mode full
 ```
 
-再重新检查结果。
+解释清楚差异后，才执行 `./om option-positions rebuild --apply` 并重新检查结果。
