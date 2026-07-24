@@ -48,6 +48,10 @@ from src.application.ledger.commands import (
 )
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.errors import LedgerPreflightError
+from src.application.ledger.cash_conversion_migration import (
+    CashConversionBackfillResult,
+    backfill_cash_conversions,
+)
 from src.application.ledger.queries import (
     AssignedStockEventLog,
     assigned_stock_event_log,
@@ -92,6 +96,8 @@ from src.application.ledger.store_resolution import (
 __all__ = [
     "AssignedStockEventLog",
     "assigned_stock_event_log",
+    "CashConversionBackfillResult",
+    "backfill_cash_conversions",
     "LedgerPreflightError",
     "LedgerStoreResolution",
     "BrokerTradeOpenPreviewResult",

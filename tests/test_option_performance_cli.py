@@ -162,3 +162,52 @@ def test_evidence_capture_defaults_to_dry_run(monkeypatch: pytest.MonkeyPatch) -
     assert data["dry_run"] is True
     assert captured["apply"] is False
     assert captured["account"] == "lx"
+
+
+def test_cash_conversion_backfill_defaults_to_dry_run_and_preserves_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def _backfill(args):
+        captured.update(vars(args))
+        return {
+            "schema_version": "option_performance_cash_conversion_backfill.output.v1",
+            "dry_run": not args.apply,
+        }
+
+    monkeypatch.setattr(option_performance, "_backfill_cash_conversion", _backfill)
+    args = parse_args(
+        [
+            "option-performance",
+            "cash-conversion",
+            "backfill",
+            "--account",
+            "lx",
+            "--start-date",
+            "2026-04-01",
+            "--end-date",
+            "2026-07-24",
+        ]
+    )
+
+    result = option_performance.handle_option_performance_command(args)
+
+    assert result["dry_run"] is True
+    assert captured["apply"] is False
+    assert captured["account"] == "lx"
+    assert captured["start_date"] == "2026-04-01"
+    assert captured["end_date"] == "2026-07-24"
+
+
+def test_cash_conversion_backfill_apply_and_dry_run_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "option-performance",
+                "cash-conversion",
+                "backfill",
+                "--dry-run",
+                "--apply",
+            ]
+        )

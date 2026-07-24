@@ -99,23 +99,27 @@ def build_cash_conversion(
     fx_payload: Mapping[str, Any] | None,
     effective_at_ms: int,
     observed_at_ms: int,
+    rate_source: str | None = None,
+    rate_source_id: str | None = None,
+    rate_evidence_fact_id: str | None = None,
+    method: str | None = None,
 ) -> dict[str, Any]:
     native_amount = quantize_money(to_decimal(amount, field_name="cash conversion amount"))
     native_currency = normalize_currency(currency)
     rate: Decimal | None = None
-    method = "booking_fx_snapshot"
-    rate_source = "rate_cache"
+    conversion_method = str(method or "booking_fx_snapshot").strip()
+    conversion_rate_source = str(rate_source or "rate_cache").strip()
     rate_timestamp = _payload_timestamp(fx_payload)
     rate_timestamp_ms = _payload_timestamp_ms(fx_payload)
     missing_reason: str | None = None
     if native_amount == 0:
         amount_cny = Decimal(0)
-        method = "zero_identity"
+        conversion_method = "zero_identity"
     elif native_currency == "CNY":
         rate = Decimal(1)
         amount_cny = native_amount
-        method = "cny_identity"
-        rate_source = "identity"
+        conversion_method = "cny_identity"
+        conversion_rate_source = "identity"
     else:
         rates = fx_payload.get("rates") if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("rates"), Mapping) else {}
         try:
@@ -133,7 +137,7 @@ def build_cash_conversion(
             missing_reason = f"{native_currency}CNY booking FX outside 24h event window"
         amount_cny = quantize_money(native_amount * rate) if rate is not None else None
     status = "observed" if amount_cny is not None else "pending"
-    source_id = f"{native_currency}CNY:{rate_timestamp or int(observed_at_ms)}"
+    source_id = str(rate_source_id or "").strip() or f"{native_currency}CNY:{rate_timestamp or int(observed_at_ms)}"
     identity = {
         "cash_fact_id": str(cash_fact_id),
         "native_amount": canonical_decimal_text(native_amount, field_name="native_amount"),
@@ -152,8 +156,9 @@ def build_cash_conversion(
         **identity,
         "quote_currency": "CNY",
         "status": status,
-        "method": method,
-        "rate_source": rate_source if rate is not None else None,
+        "method": conversion_method,
+        "rate_source": conversion_rate_source if rate is not None else None,
+        "rate_evidence_fact_id": str(rate_evidence_fact_id or "").strip() or None,
         "rate_timestamp": rate_timestamp,
         "observed_at_ms": int(observed_at_ms),
         "missing_reason": None if status == "observed" else missing_reason or f"{native_currency}CNY booking FX unavailable",

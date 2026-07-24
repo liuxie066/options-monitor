@@ -81,8 +81,23 @@ converted only when the cached rate is within 24 hours of the event; otherwise
 the event stores `status=pending` and `amount_cny=null`. Zero and CNY cash use
 explicit identity conversions. Idempotent retries retain the original
 snapshot. Report reads never re-price cash from later FX evidence, and legacy
-events without a snapshot remain native-only/partial until an explicit
-evidence-preserving migration exists.
+events without a snapshot remain native-only/partial until the explicit
+evidence-preserving migration is run:
+
+```bash
+./om option-performance cash-conversion backfill \
+  --config-key us --account lx \
+  --start-date 2026-04-01 --end-date 2026-07-24
+./om option-performance cash-conversion backfill \
+  --config-key us --account lx \
+  --start-date 2026-04-01 --end-date 2026-07-24 --apply
+```
+
+The command defaults to dry-run, consumes only persisted performance FX facts
+at or before each cash event, and enforces the same 24-hour event window.
+`--apply` atomically enriches only missing/pending snapshots, never overwrites
+an observed conversion, and records before/after hashes plus the selected FX
+fact ID in `cash_conversion_backfill_audit`.
 
 Premium activity, PnL, and valuation CNY use the separate
 `option_performance_evidence.v1` FX facts. Therefore
@@ -238,6 +253,8 @@ than attributing them to the requested account or treating them as zero.
 - Canonical allocations own option realized PnL; assigned-stock facts publish a
   separate additive component.
 - Event-time `cash_conversion.v1` snapshots own direct-cash CNY conversion.
+- Historical direct-cash snapshots can be filled only through the audited,
+  dry-run-first `option-performance cash-conversion backfill` entry point.
 - Deterministic valuation evidence, no-write current quote collection,
   assigned-stock lifecycle, continuous-time capital-days and Combo Yield
   attribution are implemented.
