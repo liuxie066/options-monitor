@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.23 - 2026-07-24
+
+### Added
+- Added an explicit dry-run-first `option-performance cash-conversion backfill` command that enriches only missing/pending historical `cash_conversion.v1` snapshots from persisted event-time FX evidence.
+- Added atomic cash-conversion audit receipts with before/after event hashes, selected FX fact IDs, account/date scoping, and idempotent rerun reporting.
+
+### Changed
+- Extended cash-conversion provenance with the original rate source, source ID, and persisted performance-evidence fact ID while preserving existing write-time conversion behavior.
+- Kept FX evidence beyond the 24-hour booking window and cash fees without actual provenance explicitly unresolved instead of applying stale rates or inferred zero fees.
+
 ## 1.4.22 - 2026-07-24
 
 ### Added
