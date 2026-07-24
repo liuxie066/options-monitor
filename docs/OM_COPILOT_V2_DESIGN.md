@@ -203,7 +203,9 @@ The Engine supports:
 - duplicate-call protection;
 - recoverable invalid-argument observations;
 - continuation after provider length truncation;
-- bounded context compaction;
+- bounded context compaction that preserves the current user request and every
+  current-turn native tool-call/result group by distributing the available
+  budget before admitting older conversation groups;
 - observation continuation for large results;
 - final-answer reserve;
 - cooperative cancellation;
