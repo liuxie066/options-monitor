@@ -161,6 +161,19 @@ def test_failed_read_only_run_resumes_with_recovered_observation(monkeypatch, tm
     assert resumed.status == "answered"
     assert "恢复后" in resumed.user_response
     assert store.run_record(resumed.run_id)["resumed_from"] == failed.run_id
+    failed_scene = next(
+        item["payload"]
+        for item in store.run_events(failed.run_id)
+        if item["type"] == "scene_prepared"
+    )
+    resumed_scene = next(
+        item["payload"]
+        for item in store.run_events(resumed.run_id)
+        if item["type"] == "scene_prepared"
+    )
+    assert resumed_scene["scene_version"] == "v3"
+    assert resumed_scene["compiled_prompt_sha256"] == failed_scene["compiled_prompt_sha256"]
+    assert resumed_scene["tool_schema_sha256"] == failed_scene["tool_schema_sha256"]
 
 
 def test_cancel_request_only_updates_active_run(tmp_path) -> None:
@@ -273,8 +286,11 @@ def test_run_trace_persists_iteration_usage_and_termination(tmp_path) -> None:
     metrics = __import__("json").loads(record["metrics_json"])
     events = store.run_events(result.run_id)
     context_event = next(item for item in events if item["type"] == "iteration_context_snapshot")
+    scene_event = next(item for item in events if item["type"] == "scene_prepared")
     assert context_event["payload"]["iteration_id"].startswith("iter_")
     assert len(context_event["payload"]["context_hash"]) == 64
+    assert len(scene_event["payload"]["compiled_prompt_sha256"]) == 64
+    assert scene_event["payload"]["compiled_prompt_sha256"] != context_event["payload"]["context_hash"]
     assert metrics["model_turn_count"] == 1
     assert metrics["usage"]["total_tokens"] == 15
     assert record["termination_reason"] == "final_answer"
@@ -309,6 +325,7 @@ def test_run_progress_exposes_only_coarse_public_labels(monkeypatch, tmp_path) -
     assert all(set(item) == {"event_id", "type", "label", "timestamp"} for item in progress)
     assert "hidden" not in str(progress)
     assert "运行正常" not in str(progress)
+    assert "scene_prepared" not in {item["type"] for item in progress}
 
 
 def test_reply_outbox_is_idempotent_retryable_and_deliverable(tmp_path) -> None:

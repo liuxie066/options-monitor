@@ -87,6 +87,10 @@ class SceneManifest:
     task_guidance: dict[str, Any] = field(default_factory=dict)
     tool_descriptions: list[dict[str, Any]] = field(default_factory=list)
     tool_static_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scene_version: str = ""
+    selected_toolsets: tuple[str, ...] = ()
+    fixed_tool_input: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
