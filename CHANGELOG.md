@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.4.16 - 2026-07-24
+
+### Changed
+- Reworked the README and living documentation around the current CLI, Tool Gateway, YAML configuration authority, runtime output layout, deployment, research, Close Advice, Option Performance, and assigned-stock contracts.
+- Added a current ledger architecture document and separated living operational guidance from completed plans and historical migration evidence.
+
+### Fixed
+- Corrected obsolete commands, output paths, dry-run/apply semantics, service-render requirements, Shadow Replay overwrite behavior, installation guidance, and release-test document mapping.
+- Removed the obsolete Futu multi-account OpenD redesign plan and replaced the completed trade/position redesign document with a historical pointer.
+- Made the assigned-stock cash-conversion regression independent of the wall-clock date while preserving the 24-hour event-time FX evidence boundary.
+
 ## 1.4.15 - 2026-07-23
 
 ### Fixed
