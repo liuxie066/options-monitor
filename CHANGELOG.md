@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.20 - 2026-07-24
+
+### Fixed
+- Preserved the current user request and every current-turn tool-call/result pair during Copilot context compaction, distributing the context budget across large observations so a later catalog cannot evict the business report or original question.
+
 ## 1.4.19 - 2026-07-24
 
 ### Fixed

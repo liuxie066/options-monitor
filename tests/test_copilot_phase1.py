@@ -925,10 +925,84 @@ def test_context_compaction_keeps_native_tool_call_pairs() -> None:
     )
 
     final_messages = list(requests[-1].messages)
+    assert any(
+        item.get("role") == "user" and item.get("content") == "总结上下文"
+        for item in final_messages
+    )
     assistant_index = next(index for index, item in enumerate(final_messages) if item.get("tool_calls"))
     assert final_messages[assistant_index + 1]["role"] == "tool"
     assert final_messages[assistant_index + 1]["tool_call_id"] == "context_1"
     assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
+
+
+def test_context_compaction_preserves_current_request_and_each_current_turn_tool_group() -> None:
+    contract = _contract("分析6月的期权操作有没有不合理")
+    manifest = build_scene_manifest(contract, "run_multi_group_context")
+    manifest = replace(manifest, limits={**manifest.limits, "max_context_chars": 16_000})
+    requests: list[ModelRequest] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        tool_call_ids = {
+            str(item.get("tool_call_id") or "")
+            for item in request.messages
+            if item.get("role") == "tool"
+        }
+        if "context_report" not in tool_call_ids:
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        "option_performance_report",
+                        {"period": "month", "month": "2026-06"},
+                        "context_report",
+                    ),
+                )
+            )
+        if "context_catalog" not in tool_call_ids:
+            return ModelTurn(
+                tool_calls=(
+                    _call("analysis_catalog", {"view": ""}, "context_catalog"),
+                )
+            )
+        return ModelTurn(text="结论：已基于6月业务事实完成复盘。")
+
+    from src.application.copilot.engine import run_engine
+
+    result = run_engine(
+        manifest,
+        user_message=str(contract.input.get("user_message") or ""),
+        record_event=lambda *_args: None,
+        build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
+            name,
+            payload,
+            fixed_input=fixed_input,
+        ),
+        call_read_tool=lambda name, _payload: {
+            "ok": True,
+            "data": {
+                "source": name,
+                "summary": "x" * 20_000,
+                "rows": [{"symbol": f"SYM{index}", "value": index} for index in range(500)],
+            },
+        },
+        compact_observation=copilot_tools.compact_observation,
+        fixture_observations=lambda _fixture: [],
+        model_runner=model,
+    )
+
+    final_messages = list(requests[-1].messages)
+    assert any(
+        item.get("role") == "user"
+        and item.get("content") == "分析6月的期权操作有没有不合理"
+        for item in final_messages
+    )
+    assert [
+        item["tool_call_id"]
+        for item in final_messages
+        if item.get("role") == "tool"
+    ] == ["context_report", "context_catalog"]
+    assert sum(len(json.dumps(item, ensure_ascii=False)) for item in final_messages) <= 16_000
+    assert result.status == "answered"
 
 
 def test_context_compaction_preserves_authoritative_system_context() -> None:
