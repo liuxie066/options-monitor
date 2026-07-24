@@ -172,12 +172,12 @@ not a reason for Host to run a hidden business workflow.
 - merges safe defaults and explicit Scene scope;
 - executes only Host-allowed pure-read tools;
 - converts canonical results into flat Agent-friendly observations;
-- exposes `portfolio_query`, `portfolio_pnl_bridge`, and `portfolio_cash_bridge`
-  through the `portfolio` toolset using GET-only stdlib HTTP against
-  `PORTFOLIO_SERVICE_URL` (default `http://127.0.0.1:8765`); each bridge keeps its
-  accounting equation explicit, uses PM's actual NAV end date as an
-  Asia/Shanghai end-of-day cutoff, and returns structured steps plus Markdown
-  fallback text without image rendering;
+- exposes `portfolio_query`, `portfolio_pnl_bridge`, and
+  `portfolio_cash_bridge` through the `portfolio` toolset using GET-only stdlib
+  HTTP against `PORTFOLIO_SERVICE_URL` (default
+  `http://127.0.0.1:8765`); the two bridges keep total-asset PnL and cash
+  movement separate, use PM's actual period-end facts, and return structured
+  steps plus Markdown fallback text without image rendering;
 - provides compact previews and continuation metadata.
 
 Tool descriptions, defaults, validation, error hints, and output contracts should

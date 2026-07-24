@@ -107,12 +107,10 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash
 FX 和实际费用覆盖对齐；缺失或不完整证据保持 `amount=null`，不会按 0 处理。
 输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
 
-历史混合 capital bridge 已移除。Portfolio 集成必须明确选择 PnL 或 cash bridge，
-不能再把期权交易现金变动解释为总资产收益。
-
 Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
-Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。
+Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。该工具是纯读入口，
+不会为了查询而写本地 cache。
 
 如果 payload 很长，优先用：
 
@@ -233,7 +231,7 @@ Recommended environment:
 - keep repo-local `config.us.json` / `config.hk.json` as generated runtime snapshots
 - complete first-time initialization with `./om config init --output config.yaml --runtime-output-dir .`
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
-- keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
+- keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want a Tool Gateway business/config write
 - use `$RUNTIME/service.profile.json` from `./om service render` when production paths are not repo-local
 - keep portfolio-management API on the same host and loopback; enable its `portfolio-management-api.service` explicitly
 
@@ -248,12 +246,13 @@ Use `runtime_status` when you only want to inspect existing runtime files. It do
 notifications, or write state. It summarizes:
 
 - `output_shared/state/last_run.json`
-- `output_shared/state/last_run.json`
-- `output_shared/reports/symbols_notification.txt`
 - `output_accounts/<account>/state/last_run.json`
-- `output_accounts/<account>/reports/symbols_notification.txt`
 - the latest `output_runs/<run_id>` pointer when available
+- compatibility notification artifacts and their explicit `compatibility_only` authority
 - freshness and per-account summary fields
+
+普通调度通知的权威渲染面是 Daily Brief；`symbols_notification.txt` 只作为兼容
+artifact 被 `runtime_status` 诊断，不能作为通知已投递的证据。
 
 If the production layout uses non-default paths, pass them explicitly:
 
@@ -267,7 +266,9 @@ Default service safety posture:
 
 - Prefer `healthcheck` or `runtime_status` before any runtime command.
 - Do not run `./om run tick` or notification send commands unless the user explicitly asks for a live run.
-- Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
+- 先看 `spec` 中每个工具的 `risk_level`、`side_effects`、`requires_confirm` 和 `requires_env`。
+- 纯读工具不写状态；`read_only=true` 且 `risk_level=local_write` 的 materialization 工具可能写本地 cache/report，但不写业务状态或远端。
+- 真正被工具定义判定为 write request 的调用需要 `OM_AGENT_ENABLE_WRITE_TOOLS=true`；只有 `requires_confirm=true` 的工具还要求 `confirm=true` 或 `yes=true`。
 - `add-account` / `edit-account` / `remove-account` are write-capable commands; use `--dry-run`
   first, then rerun with `OM_AGENT_ENABLE_WRITE_TOOLS=true` and `--confirm` only when the config write is intended.
 
@@ -275,13 +276,13 @@ Default service safety posture:
 
 `./om-agent spec` 输出的是当前环境下的 tool manifest。
 
-也就是说它不是完全静态文本，至少这些值会受环境影响：
+工具定义里的 `risk_level`、`requires_confirm`、`requires_env` 和
+`safe_default_input` 是代码声明，不会因为环境变量而改写。环境只会改变
+`defaults.write_tools_enabled`，用于说明当前进程是否打开 Tool Gateway 写门禁。
 
-- `write_tools_enabled`
-- 默认写工具可用性
-- 每个工具的 `risk_level` / `requires_confirm` / `requires_env` / `safe_default_input`
-
-`safe_default_input` 不会替 agent 选择 `config_key` 或 `config_path`。凡是需要 runtime config 的工具，调用方必须显式传 `config_key: us|hk` 或 `config_path`。
+调用方应先读取 `safe_default_input`，不要假设所有工具都要求显式选择市场。例如
+`option_performance_report` 当前有安全默认 `config_key=us`，而大多数 runtime
+诊断仍需要显式传 `config_key: us|hk` 或 `config_path`。
 
 如果你打开了：
 
@@ -293,14 +294,14 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true
 
 ## 写操作门禁
 
-当前写操作不是只靠一个开关就能执行。
+写权限由工具元数据和 payload 共同决定，不是按工具名硬编码。
 
 门禁入口在 `src/application/tool_execution.py`，但“这个 payload 是否请求写入”
 由 `src/application/agent_tools/<domain>.py` 的工具定义/写入策略决定，并由
 `src/application/agent_tools/permissions.py` 统一执行 env/confirm 门禁。执行层不再按
 具体工具名维护特殊分支。
 
-通常需要两层门禁：
+当且仅当工具定义把当前 payload 判定为 write request 时，环境开关才是必需的：
 
 1. 环境变量允许写：
 
@@ -308,11 +309,12 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true
 OM_AGENT_ENABLE_WRITE_TOOLS=true
 ```
 
-2. 调用 payload 显式确认（例如 `confirm=true`）
+如果该工具同时声明 `requires_confirm=true`，调用 payload 还要显式确认
+（例如 `confirm=true` 或 `yes=true`）。
 
 以 `manage_symbols` 为例：
 
 - `list` 永远允许
-- 真正写入需要环境变量 + 显式确认
+- 真正写入需要环境变量；该工具声明需要确认时还要显式确认
 
 OpenClaw cron/readiness/profile workflows are retired from the public plugin contract.
