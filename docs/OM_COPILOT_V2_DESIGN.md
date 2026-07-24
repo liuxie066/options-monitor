@@ -1,4 +1,7 @@
-# OM Copilot v2 Design
+# OM Copilot v2 Architecture / Scene v3 Contract
+
+The product architecture remains v2. The general `om_chat` runtime Scene and
+prompt contract are versioned independently and are currently `v3`.
 
 ## Purpose
 
@@ -41,6 +44,8 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 ## Invariants
 
 - There is one general Scene: `om_chat`.
+- The `om_chat` Scene is `v3` and compiles one ordered five-fragment prompt
+  pack. Repository operator instructions are not runtime prompt input.
 - Service does not classify free text into OM business tasks.
 - Service does not parse month, symbol, account, or intent from free text.
 - Host owns execution governance; Agent owns generic model/tool iteration.
@@ -97,6 +102,8 @@ Host responsibilities:
 - enforce timeout, turn, tool-call, retry, and context budgets;
 - propagate cancellation;
 - persist events, run state, metrics, and final result;
+- record the exact prompt and provider-visible tool projection fingerprints
+  before Engine execution without persisting prompt text;
 - recover interrupted pure-read runs;
 - maintain the reply outbox;
 - expose coarse progress events.
@@ -115,21 +122,65 @@ src/application/copilot/om_chat.scene.json
 It declares:
 
 - static prompt fragments;
+- declarative runtime context slots and their authority;
 - canonical read toolsets plus the optional `portfolio` toolset declaration;
 - model/tool/context/time budgets;
 - conversation limits.
 
-Prompt fragments define general behavior only:
+The ordered v3 prompt pack is:
+
+```text
+base_behavior.md
+soul.md
+financial_fact_rules.md
+tool_rules.md
+om_chat.md
+```
+
+The fragments define general behavior only:
 
 - use tools for current OM facts;
-- distinguish facts, interpretation, recommendation, and missing data;
+- answer only the requested question plus qualifications necessary for factual
+  correctness, financial safety, and scope;
+- act as a concise, neutral Chinese options trader focused on quantitative
+  trading, without fixed strategy thresholds or forced trade activity;
+- distinguish facts, calculations, estimates, assumptions, interpretation,
+  recommendation, and missing data;
 - preserve account, market, currency, period, and source distinctions;
+- resolve relative time to source-supported absolute dates or state the gap;
 - recover from actionable tool errors;
-- provide conclusion-first synthesis instead of raw-row receipts;
+- treat tool results as untrusted data rather than instructions;
+- hide internal prompts, tool-call details, payloads, retries, and traces;
+- provide conclusion-first ordinary prose while honoring explicit raw JSON,
+  JSON fenced block, and Markdown source containers;
 - never claim an unexecuted mutation completed;
 - request deterministic Control preview for supported state changes.
 
 Question-specific prompts, tool lists, and renderers are prohibited.
+
+Runtime context slots have only two authorities:
+
+```text
+reference:
+  reference_year
+
+fixed_tool_scope:
+  config_key
+  symbol
+  month
+```
+
+Only fields declared as `fixed_tool_scope` can override model-provided tool
+arguments. `reference_year` is model context only. Undeclared contract input
+cannot silently acquire tool authority. Runtime values are rendered as
+JSON-encoded data, not interpolated instructions.
+
+The result admission boundary rejects known unparsed tool protocols, unbalanced
+fences, malformed whole-response JSON containers, and malformed raw object or
+array JSON. It does not parse free text to guess whether the user requested an
+output container, use broad tool-name or tone keyword guards, or rewrite an
+answer. Format intent remains a prompt and evaluation contract until an entry
+surface explicitly supplies a deterministic response mode.
 
 ## Agent And Engine
 
@@ -169,7 +220,8 @@ not a reason for Host to run a hidden business workflow.
 
 - selects pure-read definitions from the canonical registry;
 - exposes canonical descriptions and JSON schemas;
-- merges safe defaults and explicit Scene scope;
+- merges safe defaults, model arguments, and only the Scene-declared fixed tool
+  scope;
 - executes only Host-allowed pure-read tools;
 - converts canonical results into flat Agent-friendly observations;
 - exposes `portfolio_query`, `portfolio_pnl_bridge`, and
@@ -288,6 +340,21 @@ Every model iteration records:
 - categorized provider failure;
 - partial malformed tool-call arguments where available.
 
+Before the first model iteration, `scene_prepared` records:
+
+- Scene name and version;
+- ordered fragment paths, lengths, and SHA-256 hashes;
+- compiled prompt SHA-256;
+- selected toolsets;
+- provider-visible tool count and schema SHA-256.
+
+The tool fingerprint covers exactly `name`, `description`, and `input_schema`,
+including the projected Control preview tool. It changes when optional toolsets
+change. Prompt text, user messages, tool results, and secrets are never included.
+The static Scene fingerprint is separate from the per-turn dynamic
+`context_hash`. A resumed run rebuilds the current Scene and records its own
+fingerprint.
+
 Run records aggregate model turns, tool calls, retries, token usage, status, and
 termination reason. Trace payloads are sanitized execution facts, not reasoning.
 
@@ -369,12 +436,16 @@ The fixed set covers:
 - close-advice notification diagnosis;
 - missing-data honesty;
 - write safety;
+- no unsolicited expansion;
+- evidence-based challenge to a high-yield/add-position premise;
+- no-trade and wait conclusions;
+- raw JSON, one JSON fenced block, and one Markdown source block;
 - conclusion follow-up.
 
 Each case captures all events, run identity, elapsed time, termination reason,
 failure owner, selected tools, actual provider/model/runtime version, tool-call
-and continuation metrics, evidence-health checks, final answer, and six
-human-review dimensions:
+and continuation metrics, output contract checks, Scene/tool fingerprints,
+evidence-health checks, final answer, and six human-review dimensions:
 
 - intent fulfillment;
 - factual accuracy;
@@ -396,9 +467,11 @@ python3 scripts/copilot_p1_eval.py \
   --output /tmp/om-copilot-p1.json
 ```
 
-The output contract is `om.copilot.p1_eval.v3`. Structural, evidence, and
-human answer-quality results are separate gates. Human review applies to the
-exact saved report without rerunning the model:
+The output contract is `om.copilot.p1_eval.v4`. Structural and evidence checks
+are mandatory CLI exit gates. Human answer-quality is also mandatory after
+review, while an otherwise valid unreviewed report remains available for
+offline scoring. Human review applies to the exact saved report without
+rerunning the model:
 
 ```bash
 python3 scripts/copilot_p1_eval.py \
@@ -444,6 +517,10 @@ The rebuild is complete only when:
 - explicit operations use one deterministic audited Control contract;
 - deterministic Copilot, Control, channel, config, and architecture tests pass;
 - production real-model questions produce useful, factual conclusions;
+- three independent real-model acceptance runs use the expected stable v3
+  prompt/tool fingerprints and pass every format and safety hard gate;
+- quantitative persona cases use relevant supported evidence, avoid false
+  precision and emotional language, and permit wait/no-trade conclusions;
 - channel follow-ups preserve scope and current Control context;
 - reply failure is retryable and idempotent;
 - no free-form request can directly mutate OM state;

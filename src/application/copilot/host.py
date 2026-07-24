@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Lock
@@ -201,10 +203,11 @@ def run_contract(
             ),
         )
 
+    event_log.record("scene_prepared", _scene_prepared_payload(manifest))
     fixture_id = _fixture_id(contract)
     engine_result = run_engine(
         manifest,
-        scene_input=contract.input,
+        user_message=str(contract.input.get("user_message") or ""),
         record_event=event_log.record,
         build_tool_payload=lambda name, payload, fixed_input: copilot_tools.build_tool_payload(
             name,
@@ -263,10 +266,43 @@ def _manifest_with_tool_descriptions(
     )
     if control_preview_specs:
         descriptions.append(control_preview_tool_description(control_preview_specs))
+    provider_tools = [
+        {
+            "name": str(item.get("name") or ""),
+            "description": str(item.get("description") or ""),
+            "input_schema": dict(item.get("input_schema") or {}),
+        }
+        for item in descriptions
+    ]
+    canonical_tools = json.dumps(
+        provider_tools,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return replace(
         manifest,
         tool_descriptions=descriptions,
+        provenance={
+            **manifest.provenance,
+            "tool_schema_sha256": hashlib.sha256(canonical_tools.encode("utf-8")).hexdigest(),
+            "tool_count": len(provider_tools),
+        },
     )
+
+
+def _scene_prepared_payload(manifest: SceneManifest) -> dict[str, Any]:
+    provenance = manifest.provenance
+    return {
+        "scene": manifest.scene_name,
+        "scene_version": manifest.scene_version,
+        "fragments": [dict(item) for item in provenance.get("fragments") or ()],
+        "compiled_prompt_sha256": str(provenance.get("compiled_prompt_sha256") or ""),
+        "selected_toolsets": list(manifest.selected_toolsets),
+        "tool_count": int(provenance.get("tool_count") or 0),
+        "tool_schema_sha256": str(provenance.get("tool_schema_sha256") or ""),
+    }
 
 
 def _contract_rejection_reason(contract: ExecutionContract) -> str | None:

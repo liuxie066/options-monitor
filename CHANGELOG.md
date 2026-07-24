@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.4.17 - 2026-07-24
+
+### Added
+- Added a Scene v3 Copilot prompt contract that compiles ordered behavior, quantitative options-trader persona, financial fact, tool, and channel fragments with prompt/tool-schema fingerprints and runtime provenance.
+- Added strict structural admission for raw JSON, fenced JSON, and fenced Markdown responses, plus expanded P1 cases for format compliance, non-expansion, no-trade conclusions, quantitative bias, and prompt-injection resistance.
+
+### Changed
+- Made Feishu Copilot default to concise, neutral Chinese from an options trader focused on quantitative analysis, while preserving user decision authority and allowing wait, hold, or insufficient-evidence conclusions.
+- Isolated user conversation context from fixed tool scope, limited tool execution to declared scene toolsets, and exposed safe scene preparation metadata without leaking prompt or tool traces.
+
+### Fixed
+- Made P1 command success require both structural and evidence gates so a missing or failed evidence result can no longer pass the release acceptance command.
+
 ## 1.4.16 - 2026-07-24
 
 ### Changed
