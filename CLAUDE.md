@@ -18,17 +18,12 @@ After that, follow the standard hierarchy in `AGENTS.md`:
 - Read-only diagnostics before mutating commands
 - `./om-agent` > `./om` > `python3 -m ...` > `python3 scripts/...`
 
-## Codex Co-authorship
+## Commit Format
 
-Commits made through OMX/Codex automation must include the trailer:
-
-```
-Co-authored-by: OmX <omx@oh-my-codex.dev>
-```
-
-This is enforced by the local commit gate (`scripts/setup_git_hooks.sh`).
+The local commit-message hook requires `<type>(<scope>): <subject>` on the
+first line. It does not require a co-author or other trailer.
 
 ## Guardrails Reference
 
 - Local commit gate, CI gate, and deploy gate details: `docs/GUARDRAILS.md`
-- Symbol canonicalization rules: `docs/GUARDRAILS.md` §D
+- Symbol canonicalization rules: `docs/GUARDRAILS.md` §C

@@ -102,9 +102,15 @@ single-leg candidate-impact parameter model.
 This side lane may read runtime artifacts, candidate/reject/trace evidence,
 required-data snapshots, and archived run outputs. It must not mutate runtime
 config, notification behavior, Feishu/ledger/trade state, broker-facing data,
-or live tick scheduling. Writes are limited to local research/replay artifacts
-behind explicit `./om research ... --write` or `--write-outputs --confirm`
-flags.
+or live tick scheduling. Research has no universal write flag. `collect` writes
+only with `--write-outputs --confirm`; maintenance and archive pull/build
+commonly use `--write`; `shadow-replay build`,
+`shadow-replay candidate-impact-report`, `archive verify`, and commands given
+explicit output paths materialize local artifacts as part of their own
+contract. `archive prune-remote` is a separate destructive boundary and
+deletes remote runtime artifacts only with `--confirm` after local
+verification. Inspect the selected `./om research <subcommand> --help` before
+execution.
 
 Product boundary:
 
@@ -224,13 +230,16 @@ Account execution is per account:
 
 ```text
 account_run.run_one_account
--> expired position maintenance
 -> required_data prefetch
 -> event prefetch / event_snapshot.json
 -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
 -> optional close advice
 -> account metrics and account notification text
 ```
+
+Expired-position maintenance is a separate
+`option-positions auto-close-expired` service/timer workflow. It is not a stage
+of the live tick account flow.
 
 ## Scan And Candidate Flow
 
@@ -349,8 +358,9 @@ Market runtime configs are generated snapshots:
 Runtime execution consumes those JSON snapshots rather than editing
 `config.yaml` directly. First-run setup uses `src.application.config_yaml_init`
 to create a starter YAML file and build market snapshots. Legacy JSON overlays
-under `configs/` are migration/upgrade-recovery inputs only, not a normal
-authoring path.
+under `configs/` are one-time `config migrate-yaml` inputs only, not an
+authoring or upgrade-recovery path. Production upgrade requires a usable YAML
+authoring source and fails closed before switching releases when it is absent.
 
 Shared config section helpers such as symbol/watchlist and templates live in
 `src.application.config_sections`; both loading and validation depend on that

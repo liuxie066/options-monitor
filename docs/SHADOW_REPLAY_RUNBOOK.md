@@ -10,7 +10,7 @@ Shadow Replay = 反事实复盘引擎
 Strategy Lab = 策略进化产品入口
 ```
 
-因此，本文是底层复盘引擎手册。面向策略参数自我进化的上层 PRD 和技术方案见 [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)。Strategy Lab 当前已提供 update、只读 readiness、experiment、advisory proposal 和 llm-context 入口；Shadow Replay 继续作为它的反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，而不是被删除。`strategy-lab update` 现在包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset；再加 `--include-close-decisions` 时独立选择 latest non-empty Close Advice run，严格构建 close decision facet。显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
+因此，本文是底层复盘引擎手册。面向策略参数自我进化的上层 PRD 和技术方案见 [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)。Strategy Lab 当前已提供 update、只读 readiness、experiment、advisory proposal 和 llm-context 入口；Shadow Replay 继续作为它的反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，而不是被删除。`strategy-lab update` 现在包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset；再加 `--include-close-decisions` 时会独立选择 latest non-empty Close Advice run，严格构建 close-decision facet。显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
 
 Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield。统一的是 evidence / readiness / experiment / scorecard / proposal workflow；分开的是决策单元、目标函数、参数空间、硬约束和 proposal target。Sell Put / Covered Call 可以先复用单腿 candidate-impact；Combo Yield 必须按 `strategy_group_id` / legs 形成 group-level decision instance，不能被拆成彼此独立的单腿参数实验。
 
@@ -59,11 +59,12 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 ./om service render \
   --target systemd \
   --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
   --include-strategy-lab-recorder \
   --strategy-lab-recorder-source opend
 ```
 
-生成的 build timer 每 6 小时分别按 latest scanned candidate run 和 latest non-empty Close Advice run 幂等构建 dataset；同 run 时只生成一个 close-aware dataset。Close 正式 evidence 不完整会 fail-closed，但 candidate build 仍独立执行。sample timer 每 2 小时采样 candidate / close mark path；settle timer 每天维护 `outcome_facts.jsonl` 与 close outcomes。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。6 小时 cadence 是采样覆盖，不是每个 tick 的完整事件日志。
+生成的 build timer 每 6 小时分别按 latest scanned candidate run 和 latest non-empty Close Advice run 幂等构建 dataset；同 run 时只生成一个 close-aware dataset。Close 正式 evidence 不完整会 fail closed，但 candidate build 仍独立执行。sample timer 每 2 小时采样 candidate / close mark path；settle timer 每天维护 `outcome_facts.jsonl` 与 close outcomes。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。6 小时 cadence 是采样覆盖，不是每个 tick 的完整事件日志。
 
 ## 候选影响对比
 
@@ -164,6 +165,20 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 ./om research shadow-replay build --run-id <run-id> --dataset-id "$DATASET_ID"
 ```
 
+需要在建库时同时捕获 Close Advice episode / mark / outcome facet：
+
+```bash
+./om research shadow-replay build \
+  --run-id <run-id> \
+  --dataset-id "$DATASET_ID" \
+  --include-close-decisions
+```
+
+Close facet 应在首次 build 时显式选择。`build` 会在目标 dataset 目录中重写
+candidate/filter/rank/mark/outcome JSONL；close-aware build 还会重建 close facet，
+并把 close mark/outcome 初始化为空。复用已有 `dataset-id` 会覆盖已积累的 evidence。
+若需要两种口径或保留已有 mark/outcome，必须使用新的 dataset id。
+
 ## 远端证据归档
 
 远端 runtime 空间有限时，把原始 run 证据镜像到本地归档，再从本地归档生成 Shadow Replay dataset。默认归档根目录：
@@ -187,7 +202,13 @@ output_shared/research/remote_archive/prod/
 ./om research archive inventory --remote prod
 ```
 
-`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。`--require-replay-evidence` 会在源端只选择含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，避免把 scheduler skip / tick 心跳当 replay 样本。没有 SSH 时，也可以用已挂载 runtime 根目录：
+`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。`--require-replay-evidence` 会在源端只选择含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，避免把 scheduler skip / tick 心跳当 replay 样本。
+
+`archive verify` 会核对归档并写本地
+`manifests/inventory.latest.json`；`archive inventory` 只读取该 inventory。两者都不
+修改远端，远端删除只有独立的 `prune-remote --confirm`。
+
+没有 SSH 时，也可以用已挂载 runtime 根目录：
 
 ```bash
 ./om research archive pull --remote prod --source-root /Volumes/prod-runtime --run-id <run-id> --write
@@ -220,7 +241,8 @@ DATASET_ID=us-<run-id>
 ./om research shadow-replay build \
   --profile-path "$PROFILE" \
   --latest-scanned-run \
-  --dataset-id "$DATASET_ID"
+  --dataset-id "$DATASET_ID" \
+  --include-close-decisions
 
 ./om research shadow-replay status \
   --profile-path "$PROFILE" \
@@ -320,6 +342,13 @@ DATASET_ID=us-<run-id>
 
 ```bash
 ./om research shadow-replay settle --dataset "$DATASET" --write
+
+# Close facet 如需 assignment / called-away terminal outcome，
+# 可重复提供与 episode 严格绑定的 canonical lifecycle evidence
+./om research shadow-replay settle \
+  --dataset "$DATASET" \
+  --lifecycle-path <canonical-ledger-evidence> \
+  --write
 ```
 
 `collect-marks --write` 默认只追加 mark path，不重算 outcome。需要采样后立即重算时显式加 `--settle`，或者单独运行上面的 `settle --write`。
@@ -340,6 +369,8 @@ DATASET_ID=us-<run-id>
 - `insurance_metrics`：把 Sell Put / Covered Call 当作承保组合复盘；接货/被叫走必须使用完整生命周期 PnL，缺失时不回退单腿期权 PnL。除保费、loss ratio、资本占用和路径最大浮亏外，至少 30 个且达到 `min_sample` 的资金回报样本后才输出经验 90% CVaR（越负越差）。
 - `wheel_lifecycle_risk`：按账户和标的汇总 Sell Put 的单张候选接货义务、接货后标的/账户暴露，以及 Covered Call 的已锁定和单张候选可能叫走股数。候选 strike 是替代场景，不会相加成实际仓位；缺现金、NAV 或持股上下文时输出 `not_evaluable`，该汇总不参与生产过滤。
 - `outcome_by_bucket`：DTE、Delta、IV/RV、Spread、集中度各区间的表现。
+- `close_decision_readiness`：close facet 的 episode、point-in-time、费用、窗口和 terminal lifecycle 覆盖；它是机械 evidence gate，不是生产策略授权。
+- `close_policy_analysis`：只在 close facet 存在时，对 P0/P1/P2/P3 做 paired analysis；缺失或不合格 episode 保持 inconclusive，不输出自动 policy winner。
 
 ## Status 解释
 

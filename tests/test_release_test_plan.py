@@ -53,6 +53,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
 
     plan = build_release_test_plan(
         changed_files=[
+            "docs/OM_COPILOT_V2_DESIGN.md",
             "src/application/assistant/runtime.py",
             "src/application/agent_tools/analysis.py",
         ],
@@ -76,6 +77,17 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
     assert all("test_assistant_evidence_session.py" not in command for command in plan["commands"])
     assert all("test_assistant_context_projection.py" not in command for command in plan["commands"])
     assert all("test_assistant_context_validation.py" not in command for command in plan["commands"])
+
+
+def test_release_test_plan_maps_current_copilot_design_doc() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(
+        changed_files=["docs/OM_COPILOT_V2_DESIGN.md"],
+        mode="standard",
+    )
+
+    assert {rule["name"] for rule in plan["matched_rules"]} == {"assistant_runtime"}
 
 
 def test_release_test_plan_maps_config_validator_changes_to_config_gate() -> None:

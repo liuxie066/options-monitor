@@ -8,7 +8,7 @@
 - Linux / Mac 服务化部署：`DEPLOY.md` / `docs/DEPLOY_LINUX_MAC.md`
 - 配置来源与同步：`CONFIGS.md`
 - option positions 状态检查与错账修复：`docs/OPTION_POSITIONS_REPAIR.md`
-- 发布/回滚：仅在本地私有运维仓执行（本仓不公开流程细节）
+- 发布/回滚：`docs/RELEASE_PROCESS.md`
 
 ## Option Positions 状态与修账入口
 
@@ -33,13 +33,24 @@ trade_events -> projection -> position_lots
 ## 日常运行（prod）
 
 ```bash
-cd /var/lib/options-monitor/current
-./om run tick --config config.us.json --accounts lx sy
+REPO_ROOT="$HOME/apps/options-monitor/current"
+RUNTIME_ROOT="/var/lib/options-monitor"
+
+cd "$REPO_ROOT"
+./om run tick-cron \
+  --market us \
+  --config "$RUNTIME_ROOT/config.us.json" \
+  --accounts lx sy \
+  --timeout 600
 ```
 
 - 运行入口配置：`config.us.json`（US）/ `config.hk.json`（HK）
-- 产出：`<report_dir>/symbols_*` 与每标的 `*_sell_put_* / *_sell_call_*`（默认 `report_dir=output_shared/reports`）
-- 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 repo 根目录；详见 `DEPLOY.md`
+- 统一 tick 的账户报告写入
+  `output_runs/<run_id>/accounts/<account>/`；`output_accounts/<account>/`
+  保存账户级稳定状态/投影，`output_shared/` 保存共享状态
+- `repo_root` 是代码 release/current symlink；`runtime_root` 保存配置、状态和报告，不要把两者混成同一路径
+- 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 release 目录；详见 `DEPLOY.md`
+- `tick-cron` 是正式定时入口，负责锁、超时和触发证据；`run tick` 只用于明确的人工运行
 
 服务化环境的只读巡检：
 
@@ -56,9 +67,10 @@ cd /var/lib/options-monitor/current
 | `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 | 检查 runtime readiness |
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
-| `./om run tick --config ...` | 是 | 可能 | 是 | 正式扫描/通知入口 |
-| `./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
-| `./om option-positions auto-close-expired --config ... --apply` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
+| `./om run tick --config ...` | 是 | 可能 | 否 | 人工扫描入口；普通 Tick 通知只由 cron trigger 发送 |
+| `./om run tick-cron --market ... --config ...` | 是 | 可能 | 是 | 正式定时扫描/通知入口 |
+| `./om run trade-intake --config ... --mode apply --yes` | 是 | 否 | 是 | 会写 canonical ledger、intake 状态，并默认发送入账回执 |
+| `./om option-positions auto-close-expired --config ... --apply --yes` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
 
 判断原则：
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
@@ -68,35 +80,38 @@ cd /var/lib/options-monitor/current
 
 Linux / Mac 部署使用 `./om service render` 生成 systemd / launchd 服务；OpenClaw cron/readiness/profile 路径已退役，不再作为推荐运行面。
 
-生产 service profile 固定为 `$RUNTIME/service.profile.json`。只读状态优先看：
+生产 service profile 固定为 `<runtime_root>/service.profile.json`。以 `/var/lib/options-monitor` 为例：
 
 ```bash
-./om service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
-./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
+./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
+./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-“过期自动平仓维护”cron 应触发专用入口，不再借用 tick。例如每天 `00:10` 唤醒一次：
+“过期自动平仓维护”使用 `service render` 生成的独立 timer，不借用 tick。人工预览与明确执行分别为：
 
 ```bash
-flock -n /tmp/om-auto-close-expired.lock bash -lc 'set -euo pipefail; cd "$REPO_ROOT"; timeout 600s ./om option-positions auto-close-expired --config "$RUNTIME/config.hk.json" --accounts lx sy --apply --quiet' || { rc=$?; if [ "$rc" -eq 1 ]; then echo SKIP_LOCKED; exit 0; else echo EXEC_FAILED_RC_$rc; exit $rc; fi; }
+./om option-positions auto-close-expired \
+  --config /var/lib/options-monitor/config.hk.json \
+  --accounts lx sy \
+  --dry-run
+
+./om option-positions auto-close-expired \
+  --config /var/lib/options-monitor/config.hk.json \
+  --accounts lx sy \
+  --apply \
+  --yes
 ```
 
 专用入口会写入 `output_runs/<run_id>/accounts/<account>/state/expired_position_maintenance.json` 和 `output_shared/state/auto_close_expired.json`；回执按账户、券商、业务日和平仓记录生成 `receipt_key`，同一天已确认发送的回执不会因为人工重跑或 cron 重试而重复发送，未确认回执会按 `option_positions.auto_close.receipt.retry_unconfirmed` 重试。
 
-线上定时执行入口：`./om run tick --config config.us.json --accounts lx sy`
-
-旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 兼容 wrapper 已删除；任何老定时任务都应直接调用 `./om run tick`。
-
-统一 tick 手动/可选定时入口：
+线上定时执行入口：
 
 ```bash
-./om run tick --config config.us.json --accounts lx
-./om run tick --config config.us.json --accounts lx sy
+./om run tick-cron --market us --config /var/lib/options-monitor/config.us.json --accounts lx sy --timeout 600
+./om run tick-cron --market hk --config /var/lib/options-monitor/config.hk.json --accounts lx sy --timeout 600
 ```
 
-传一个账户就是单账户运行，传多个账户就是多账户运行；二者使用同一条
-`src.application.multi_account_tick.run_tick` 链路。统一 tick 会复用共享运行数据，
-但通知按账户逐条发送到同一目标；每个账户一条消息，发送失败按账户隔离。
+旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 已删除。传一个账户就是单账户运行，传多个账户就是多账户运行；两者最终进入同一条 `multi_account_tick.run_tick` 链路。共享扫描数据可复用，通知与失败按账户隔离。
 
 ## 值班三步检查（先做这个）
 
@@ -130,17 +145,20 @@ cat /var/lib/options-monitor/output_shared/state/last_run.json
 3. 查看最新通知内容：
 
 ```bash
-cat /var/lib/options-monitor/output_shared/reports/symbols_notification.txt
+./om daily-brief latest --account lx --market US
 ```
 
-统一 tick 的账户级状态和报告位于 `output_accounts/<account>/`，共享运行状态位于 `output_runs/<run_id>/`。
+Daily Brief 是普通调度通知的权威读取面。`symbols_notification.txt` 仅保留作兼容报告，
+不能证明通知已发送。本次运行的账户报告和 run-scoped state 位于
+`output_runs/<run_id>/accounts/<account>/`；账户级稳定状态/当前投影位于
+`output_accounts/<account>/`，跨账户共享状态位于 `output_shared/`。
 
 ## 高频故障处理
 
 ### OpenD 不可用 / 登录失效
 
 1. 先确认 OpenD 进程与端口。
-2. 检查 `output/*/opend_metrics.json` 是否大量失败。
+2. 检查 `<runtime_root>/output_shared/state/opend_metrics.json` 是否连续失败。
 3. 恢复后手动触发一次 cron run 观察 `last_run.json`。
 
 ### 字段缺失 / 源不可用
@@ -151,8 +169,9 @@ cat /var/lib/options-monitor/output_shared/reports/symbols_notification.txt
 
 ### “非交易时段：不监控”误判
 
-1. 确认运行命令的 `--market-config` 与配置文件市场一致。
-2. 检查是否误用 US/HK 配置。
+1. 确认 `tick-cron --market us|hk` 与传入的 `config.us.json` / `config.hk.json` 一致。
+2. 检查 runtime config 中的市场、时区与 scheduler run points。
+3. 用 `scheduler_status` 只读检查账户当前调度判断。
 
 ## 应急控制
 
@@ -165,11 +184,12 @@ cat /var/lib/options-monitor/output_shared/reports/symbols_notification.txt
 运行产物清理：
 
 ```bash
-cd ~/apps/options-monitor
+REPO_ROOT="$HOME/apps/options-monitor/current"
+cd "$REPO_ROOT"
 
 # 预览（dry-run）
 ./om service cleanup \
-  --repo-root ~/apps/options-monitor \
+  --repo-root "$REPO_ROOT" \
   --runtime-root /var/lib/options-monitor \
   --cleanup-output-runs \
   --output-runs-keep-days 14 \
@@ -179,7 +199,7 @@ cd ~/apps/options-monitor
 
 # 执行删除
 ./om service cleanup \
-  --repo-root ~/apps/options-monitor \
+  --repo-root "$REPO_ROOT" \
   --runtime-root /var/lib/options-monitor \
   --cleanup-output-runs \
   --output-runs-keep-days 14 \

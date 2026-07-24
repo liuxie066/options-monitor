@@ -63,8 +63,8 @@ assignment/called-away willingness is `hold`, not `close`. An observed thesis
 condition or revoked willingness requests `review`; it never becomes an
 automatic loss/risk exit. Strong capture closes only with a valid thesis,
 complete willingness/execution evidence, usable fees, and positive net-close
-economics. Incomplete paired
-Combo Yield evidence downgrades an otherwise-close result to `review`.
+economics. Incomplete paired Combo Yield evidence downgrades an otherwise-close
+result to `review`.
 
 P3 cannot be selected by `evaluate_close_policy`; the Shadow Replay adapter
 composes it only after formal Close Advice and reallocation artifacts exist. A
@@ -378,10 +378,10 @@ expiration-date mark for an expired-worthless result. Assignment or
 called-away rows require an explicitly decision-time-sliced lifecycle P&L for a
 money outcome, bound to the episode by `episode_id` or the exact
 `decision_observed_at_utc`; full-lifecycle or unbound P&L is not substituted.
-Multiple lifecycle events, mismatched contract quantities, ITM expiry without canonical lifecycle,
-or missing fees/prices remain inconclusive.
+Multiple lifecycle events, mismatched contract quantities, ITM expiry without
+canonical lifecycle, or missing fees/prices remain inconclusive.
 
-`om research shadow-replay mark` and `collect` remain dry-run by default;
+`om research shadow-replay mark` and `collect-marks` remain dry-run by default;
 `--write` is required for local dataset mutation. Dataset build adds the close
 facet only with `--include-close-decisions`, and settlement accepts repeatable
 canonical projected lifecycle evidence through `--lifecycle-path`.

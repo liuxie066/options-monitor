@@ -309,6 +309,6 @@ def test_current_operational_docs_do_not_reintroduce_ambiguous_python_bootstrap(
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in (
         ROOT / "scripts" / "generate_dependency_graph.py"
     ).read_text(encoding="utf-8")
-    assert "./.venv/bin/python -m src.application.trades.auto_intake --mode apply --yes" in (
+    assert "./om run trade-intake --config ... --mode apply --yes" in (
         ROOT / "RUNBOOK.md"
     ).read_text(encoding="utf-8")

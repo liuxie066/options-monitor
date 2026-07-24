@@ -24,5 +24,5 @@ mkdir -p secrets
 echo "[install-agent] OK"
 echo "[install-agent] next:"
 echo "  1) start OpenD and confirm it is logged in"
-echo "  2) initialize config with ./om init runtime --market us|hk --futu-acc-id <id>"
+echo "  2) initialize config with ./om config init --output config.yaml --runtime-output-dir . --futu-acc-id <id>"
 echo "  3) optional: render services with ./om service render and use the generated service.profile.json for runtime_status"

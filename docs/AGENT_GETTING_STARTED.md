@@ -49,7 +49,7 @@ python3.12 -m venv .venv
 
 - `config.yaml`
 - `config.us.json` 和 `config.hk.json`
-- `portfolio.runtime.json`（可选；最小部署可不需要）
+- `config.assistant.json`
 
 默认最小配置下：
 
@@ -123,7 +123,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-它不属于 `./om-agent` manifest，默认不写文件、不发送通知、不调用在线 AI。Shadow Replay 只做离线证据 readiness、路径/outcome 复盘和 candidate-impact 对比，入口是 `candidate-impact` / `candidate-impact-report`。Shadow Replay 输出本身不能自动生成最优参数，也不能修改 runtime config、交易状态或通知；Strategy Lab 当前已提供 update、只读 decision-instance readiness、experiment、advisory-only proposal 和 llm-context，能生成受控 hypotheses、复用 candidate-impact、输出 scorecard，从 experiment artifact 生成 dry-run patch / Markdown，并生成脱敏本地 LLM context。`strategy-lab readiness` / `strategy-lab experiment` 可读取已有 dataset，也可按 date / market / account 聚合 scanned-run window。`strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 只从 latest scanned run 构建本地 replay dataset，显式 `--write` 也只代理本地 replay dataset mark / settle data-plan。Strategy Lab 按 Sell Put / Covered Call / Combo Yield 三个 strategy family 分域，Combo Yield 第一版做 group evidence readiness 和组合级 outcome evaluator，但不输出参数 variant 或单腿化 patch，设计见 [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、已有 dataset 上的 readiness/status 等是只读或显式禁止报告落盘；dataset build、mark/settle、proposal、llm-context 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。`strategy-lab update` 默认 dry-run；只有显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset。Strategy Lab 按 Sell Put / Covered Call / Combo Yield 三个 strategy family 分域，设计见 [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 

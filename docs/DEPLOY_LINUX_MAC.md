@@ -126,7 +126,7 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
-启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。使用 YAML authoring 时，同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。旧 legacy profile 只作为升级恢复通道，恢复后应迁移到 `config.yaml`。
+启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。必须同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。缺少可用 YAML authoring source 时升级会 fail closed，不再从 legacy JSON profile 恢复。
 
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
@@ -152,11 +152,9 @@ cd "$REPO"
 
 这个开关会生成三类独立 timer：
 
-- `options-monitor-strategy-lab-build.timer`：每 6 小时分别幂等构建 latest scanned candidate run 与 latest non-empty Close Advice run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，同 run 只生成一个 close-aware dataset，已存在就跳过，不覆盖已有 mark/outcome。Close 正式 evidence 不完整时 build fail-closed，但 candidate build 仍独立执行。build 只建立 cohort，不占用 mark/settle 维护批次。
-- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 candidate / close mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
-- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 candidate outcome facts 与 close outcomes；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
-
-build 的 6 小时 cadence 是策略研究采样覆盖，不是每个 tick 的完整 Close Advice 事件日志。`service.profile.json.strategy_lab_recorder.include_close_decisions=true` 用于证明部署后的 recorder 已启用该 evidence facet；它不是 production Close Advice 策略开关。
+- `options-monitor-strategy-lab-build.timer`：每 6 小时幂等构建 latest scanned run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，已存在就跳过，不覆盖已有 mark path。build 只建立 cohort，不占用 mark/settle 维护批次。
+- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
+- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 outcome facts；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
 
 recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in，service drift reconcile 会继续渲染这些 timer；不传该开关则默认不启用。
 
@@ -367,23 +365,58 @@ launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:
 
 ## 6. 切换旧数据
 
-如果旧 runtime 里已有真实数据，先备份再迁移：
+如果旧 runtime 里已有真实数据，先安排维护窗口并停掉所有可能写 ledger 的
+tick / trade-intake / auto-close / inbound Control 进程。源库和目标 runtime 都必须
+保持停写，直到完整性检查结束。只停 timer 不够：还要停已经运行的 service 和人工
+CLI writer；恢复时只恢复迁移前原本启用或运行的 unit。
+
+仓库使用 SQLite WAL。禁止只 `cp option_positions.sqlite3`：未 checkpoint 的提交可能
+仍在 `-wal`，而且裸复制会静默覆盖目标库。下面使用 SQLite backup API 生成一致快照，
+并在目标已存在时 fail closed；需要系统已安装 `sqlite3` CLI：
 
 ```bash
-OLD_RUNTIME=/path/to/old-runtime
-NEW_RUNTIME=/var/lib/options-monitor
-mkdir -p "$NEW_RUNTIME/output_shared/state"
-cp "$OLD_RUNTIME/output_shared/state/option_positions.sqlite3" "$NEW_RUNTIME/output_shared/state/option_positions.sqlite3"
+(
+  set -euo pipefail
+  umask 077
+
+  OLD_RUNTIME=/path/to/old-runtime
+  NEW_RUNTIME=/var/lib/options-monitor
+  OLD_DB="$OLD_RUNTIME/output_shared/state/option_positions.sqlite3"
+  NEW_STATE_DIR="$NEW_RUNTIME/output_shared/state"
+  NEW_DB="$NEW_STATE_DIR/option_positions.sqlite3"
+  STAGED_DB="$NEW_STATE_DIR/option_positions.sqlite3.migrating"
+
+  test -f "$OLD_DB"
+  mkdir -p "$NEW_STATE_DIR"
+  test ! -e "$NEW_DB"
+  test ! -e "$STAGED_DB"
+
+  sqlite3 -readonly "$OLD_DB" ".backup '$STAGED_DB'"
+  test "$(sqlite3 -readonly "$STAGED_DB" 'PRAGMA integrity_check;')" = "ok"
+  mv -n "$STAGED_DB" "$NEW_DB"
+  test ! -e "$STAGED_DB"
+  test -f "$NEW_DB"
+)
 ```
 
-迁移后只用 canonical store 诊断：
+源库保持不动，作为回退证据。若 `sqlite3` 不可用、目标库已存在、integrity check
+不是 `ok` 或移动没有产生目标文件，应停止迁移，不要改用裸复制。
+
+迁移后在恢复任何 writer 前，只用 canonical store 诊断：
 
 ```bash
-./om option-positions store inspect --config config.us.json
-./om option-positions rebuild --config config.us.json
+./om option-positions store inspect \
+  --config "$NEW_RUNTIME/config.us.json" \
+  --runtime-root "$NEW_RUNTIME"
+
+./om option-positions verify-projection \
+  --runtime-root "$NEW_RUNTIME" \
+  --mode full
 ```
 
-如果 `store inspect` 报告 active DB 为空但 legacy DB 有数据，先处理迁移，不要让服务带着双库并行状态启动。
+如果 `store inspect` 报告 active DB 为空但 legacy DB 有数据，或 event / lot 数量与源库
+不一致，或 projection verify 不是 `ok`，先处理迁移，不要重建、不要让服务带着双库
+并行状态启动。
 
 ## 7. 安全边界
 

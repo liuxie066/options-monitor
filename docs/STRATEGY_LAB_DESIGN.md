@@ -102,6 +102,7 @@ update evidence -> run experiment -> review proposal
 ```bash
 ./om research strategy-lab update --latest
 ./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab update --latest --build-dataset --include-close-decisions --write
 ./om research strategy-lab readiness --dataset <dataset> --min-sample 30
 ./om research strategy-lab readiness --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30
 ./om research strategy-lab experiment --dataset <dataset> --min-sample 30 --auto
@@ -109,7 +110,7 @@ update evidence -> run experiment -> review proposal
 ./om research strategy-lab proposal --experiment <experiment-json>
 ```
 
-这些入口只读取已有 Shadow Replay dataset 或显式写本地 research artifact。`update --build-dataset --write` 可以从 latest scanned run 构建本地 replay dataset；未显式传 `--dataset-id` 时，dataset id 默认使用 latest run id，目标 dataset 已存在就跳过，避免覆盖之后积累的 mark path / outcome evidence。`update --write` 可以代理本地 mark / settle data-plan；`readiness` 把 candidate / leg / group evidence 归一成 `decision_instance`，并输出 Strategy Lab 能走到哪一层；`experiment` 生成受控单腿参数 hypotheses，复用 Shadow Replay candidate-impact 做反事实评估，并输出轻量 scorecard；`proposal` 从 experiment artifact 生成 advisory-only dry-run patch 和 Markdown。它们不会采样 mark、settle outcome、应用生产 patch 或修改任何生产状态，除非 operator 对 `update` 显式传入 `--write`，且写入仍只限本地 replay artifact。
+这些入口只读取已有 Shadow Replay dataset 或显式写本地 research artifact。`update --build-dataset --write` 可以从 latest scanned run 构建本地 replay dataset；再加 `--include-close-decisions` 时，会独立选择 latest non-empty Close Advice run 并构建 close-decision facet。该 flag 必须与 `--build-dataset` 一起使用，且不能与显式 `--dataset-id` 组合。未显式传 `--dataset-id` 时，candidate dataset id 默认使用 latest run id，目标 dataset 已存在就跳过，避免覆盖之后积累的 mark path / outcome evidence。`update --write` 可以代理本地 mark / settle data-plan；`readiness` 把 candidate / leg / group / close-decision evidence 归一成可审计 decision instance，并输出 Strategy Lab 能走到哪一层；`experiment` 生成受控 hypotheses，复用 Shadow Replay evaluator 做反事实评估，并输出轻量 scorecard；`proposal` 从 experiment artifact 生成 advisory-only dry-run patch 和 Markdown。它们不会应用生产 patch 或修改生产状态；operator 对 `update` 显式传入 `--write` 时，写入仍只限本地 replay artifact、required-data / provider cache 和 receipt。
 
 内部 pipeline 不被删除：
 
@@ -629,6 +630,7 @@ artifact 命名必须能区分策略域：
 ./om research strategy-lab readiness --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30
 ./om research strategy-lab update --latest
 ./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab update --latest --build-dataset --include-close-decisions --write
 ./om research strategy-lab update --latest --write
 ./om research strategy-lab experiment --dataset <dataset> --min-sample 30 --auto
 ./om research strategy-lab experiment --dataset <dataset> --min-sample 30 --auto --output output_shared/research/strategy_lab/experiment.json
@@ -639,7 +641,7 @@ artifact 命名必须能区分策略域：
 ./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-这些命令只读 dataset、scanned-run window 或本地 experiment / proposal artifact；只有显式 `--output` / `--markdown-output` / `--write` 时写本地 artifact。`update --build-dataset --write` 只写本地 replay dataset，`update --write` 只执行本地 replay data-plan / receipt。`update` 返回 `research.strategy-lab.update`；`readiness` 返回 `research.strategy-lab.readiness`；`experiment` 返回 `research.strategy-lab.experiment`；`proposal` 返回 `research.strategy-lab.proposal`；`llm-context` 返回 `research.strategy-lab.llm-context`。
+这些命令只读 dataset、scanned-run window 或本地 experiment / proposal artifact；只有显式 `--output` / `--markdown-output` / `--write` 时写本地 artifact。`update --build-dataset --write` 只写本地 replay dataset；`--include-close-decisions` 显式加入 close facet；`update --write` 只执行本地 replay data-plan / receipt。`update` 返回 `research.strategy-lab.update`；`readiness` 返回 `research.strategy-lab.readiness`；`experiment` 返回 `research.strategy-lab.experiment`；`proposal` 返回 `research.strategy-lab.proposal`；`llm-context` 返回 `research.strategy-lab.llm-context`。
 
 ### `update`
 
@@ -654,6 +656,7 @@ artifact 命名必须能区分策略域：
 ```bash
 ./om research strategy-lab update --latest
 ./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab update --latest --build-dataset --include-close-decisions --write
 ./om research strategy-lab update --latest --write
 ```
 
@@ -662,14 +665,32 @@ artifact 命名必须能区分策略域：
 ```bash
 ./om research strategy-lab update --latest
 ./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab update --latest --build-dataset --include-close-decisions --write
 ./om research strategy-lab update --latest --write
 ./om research strategy-lab update --max-datasets 3 --source local
 ./om research strategy-lab update --max-datasets 3 --source opend --write
 ```
 
-当前 `update` 复用 Shadow Replay latest scanned run build、`status` / `run-data-plan`。默认 dry-run，只返回会执行的 dataset build 或 `collect_marks` / `settle` 本地数据维护动作、ready queue 和 next action。显式 `--build-dataset --write` 时先从 latest scanned run 写本地 replay dataset，再进入 data-plan；未显式传 `--dataset-id` 时默认使用 latest run id 作为 dataset id，已存在则返回 `dataset_build_reason=dataset_already_exists` 并跳过，不覆盖已有路径数据。显式 `--write` 时才执行已有 Shadow Replay data-plan，并可写本地 receipt；`--source opend --write` 仍只允许写 required-data cache、OpenD cache/rate-limit state、Shadow Replay dataset 和 receipt。它不执行 `analyze`，不生成参数建议，不修改 runtime config、交易状态、通知、Feishu 或 broker-facing state。
+当前 `update` 复用 Shadow Replay latest scanned run build、`status` / `run-data-plan`。默认 dry-run，只返回会执行的 dataset build 或 `collect_marks` / `settle` 本地数据维护动作、ready queue 和 next action。显式 `--build-dataset --write` 时先从 latest scanned run 写本地 replay dataset，再进入 data-plan；加 `--include-close-decisions` 时另选 latest non-empty Close Advice run，构建可选 close facet。该 flag 要求 `--build-dataset` 且拒绝显式 `--dataset-id`。未显式传 `--dataset-id` 时默认使用所选 run id 作为 dataset id，已存在则返回 `dataset_build_reason=dataset_already_exists` 并跳过，不覆盖已有路径数据。显式 `--write` 时才执行已有 Shadow Replay data-plan，并可写本地 receipt；`--source opend --write` 仍只允许写 required-data cache、OpenD cache/rate-limit state、Shadow Replay dataset 和 receipt。它不执行 `analyze`，不生成参数建议，不修改 runtime config、交易状态、通知、Feishu 或 broker-facing state。
 
-远端持续记录由 `./om service render --include-strategy-lab-recorder` 显式生成，默认不启用。它把 `update` 拆成三个低频 timer：latest-run dataset build、mark sampler、outcome settler。这个 recorder 只是 evidence lifecycle 的服务化入口，不是 experiment runner，也不会应用 proposal。
+远端持续记录需要显式渲染，默认不启用：
+
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --markets us hk \
+  --accounts lx sy \
+  --include-strategy-lab-recorder \
+  --output-dir /tmp/options-monitor-service
+```
+
+它把 `update` 拆成三个低频 timer：candidate/close-aware dataset build、mark
+sampler、outcome settler。build unit 固定使用
+`--build-dataset --include-close-decisions --write --source local`。这个
+recorder 只是 evidence lifecycle 的服务化入口，不是 experiment runner，也不会应用
+proposal。
 
 ### `readiness`
 
@@ -830,6 +851,10 @@ Research
       -> Portfolio Lab
       -> Notification Lab
 ```
+
+当前 close-decision facet 仍属于 Shadow Replay 的 evidence/analysis 能力；
+`Close Lab` 只是未来产品化方向，不代表已经上线第二个 Lab，也不授权自动改变生产
+Close policy。
 
 未来每个 Lab 作为一个 decision domain：
 

@@ -129,7 +129,7 @@ TEST_RULES: tuple[TestRule, ...] = (
     TestRule(
         name="assistant_runtime",
         patterns=(
-            "docs/OM_ASSISTANT_ARCHITECTURE.md",
+            "docs/OM_COPILOT_V2_DESIGN.md",
             "docs/INBOUND_CONTROL.md",
             "src/application/assistant/**",
             "src/application/agent_tools/**",
