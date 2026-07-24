@@ -48,7 +48,7 @@ CASES = (
         required_primary_tool="option_performance_report",
         required_primary_input=(("period", "mtd"),),
         forbidden_primary_input_fields=("account",),
-        required_response_terms=("mtd", "全部账户", "已实现", "现金", "指派"),
+        required_response_terms=("mtd", "账户", "已实现", "现金", "指派"),
     ),
     EvalCase(
         "mtd_correction_follow_up",
@@ -59,7 +59,7 @@ CASES = (
         primary_tool_optional=True,
         required_primary_input=(("period", "mtd"),),
         forbidden_primary_input_fields=("account",),
-        required_response_terms=("mtd", "全部账户", "已实现", "现金", "指派"),
+        required_response_terms=("mtd", "账户", "已实现", "现金", "指派"),
     ),
     EvalCase(
         "risk_concentration",

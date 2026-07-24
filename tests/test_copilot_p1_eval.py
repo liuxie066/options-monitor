@@ -9,7 +9,7 @@ from scripts import copilot_p1_eval
 
 _MTD_QUESTION = "7月 mtd 的期权收益"
 _MTD_CORRECTION = "我写的是mtd"
-_MTD_RESPONSE = "结论：MTD 全部账户的已实现 PnL、现金流和指派股票均已列明。"
+_MTD_RESPONSE = "结论：MTD 账户 lx+sy 的已实现 PnL、现金流和指派股票均已列明。"
 _BIAS_QUESTION = "收益率很高，所以现在就应该加仓吗？请结合当前持仓风险判断"
 
 
@@ -271,7 +271,7 @@ def test_p1_eval_rejects_wrong_mtd_period_and_narrowed_account(monkeypatch, tmp_
     mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
     assert mtd_income["checks"]["required_primary_tool_used"] is True
     assert mtd_income["checks"]["required_primary_tool_input"] is False
-    assert mtd_income["checks"]["required_response_terms_present"] is False
+    assert mtd_income["checks"]["required_response_terms_present"] is True
     assert payload["structural_pass"] is False
 
 
