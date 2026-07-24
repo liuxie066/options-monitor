@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.18 - 2026-07-24
+
+### Fixed
+- Accepted an explicit complete account enumeration such as `账户 lx+sy` in the production Copilot P1 MTD response gate, while retaining the canonical all-account tool-input check and human scope/currency review so narrowed account queries still fail closed.
+
 ## 1.4.17 - 2026-07-24
 
 ### Added
