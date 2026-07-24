@@ -310,6 +310,7 @@ Primary read entry points:
 ```bash
 ./om option-performance report --config-key us --account lx --period mtd
 ./om option-performance report --config-key us --account lx --period ytd --as-of-date 2026-07-17
+./om option-performance cash-conversion backfill --config-key us --account lx --start-date 2026-04-01 --end-date 2026-07-24
 ./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"month","month":"2026-06"}'
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
 PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
@@ -323,6 +324,10 @@ Use the metric namespace that matches the question:
 - capital efficiency -> the explicit `capital.*_annualized_efficiency` fields only.
 
 `premium_collected_gross` is not additional profit. Assignment stock principal is cash movement and an asset conversion, not option PnL. Missing fee, mark, or FX evidence stays partial/null and must never be replaced with zero. A configured account scope with no events is a proven observed zero; an arbitrary unconfigured scope remains `not_observed`.
+
+Cash backfill reads persisted event-time FX evidence, defaults to dry-run, and
+requires `--apply` for the atomic ledger enrichment plus audit receipt. It
+never replaces an already observed `cash_conversion.v1`.
 
 `monthly_income_report`, `./om option-positions report monthly-income`, and
 `portfolio_capital_bridge` have been removed. Do not recreate their ambiguous
