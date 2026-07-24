@@ -235,14 +235,20 @@ _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND = {
     "year": frozenset({"year"}),
     "range": frozenset({"start_date", "end_date"}),
 }
+_OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS = frozenset({"all", ":all", "__omit__"})
 
 
 def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     for name in ("account", "broker"):
         value = normalized.get(name)
-        if name in normalized and isinstance(value, str) and not value.strip():
+        if name not in normalized or not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped:
             raise ValueError(f"{name} must be non-empty when provided")
+        if stripped.lower() in _OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS:
+            normalized.pop(name)
     period_value = normalized.get("period")
     if not isinstance(period_value, str) or period_value not in _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND:
         return normalized
@@ -314,8 +320,14 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "type": "object",
         "properties": {
             "config_key": {"type": "string", "enum": ["us", "hk"]},
-            "account": {"type": "string"},
-            "broker": {"type": "string"},
+            "account": {
+                "type": "string",
+                "description": "Optional account filter. Omit or use all for all accounts.",
+            },
+            "broker": {
+                "type": "string",
+                "description": "Optional broker filter. Omit or use all for all brokers.",
+            },
             "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year", "range"]},
             "as_of_date": {"type": "string", "format": "date"},
             "month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},

@@ -290,6 +290,42 @@ def test_option_performance_payload_does_not_infer_period_or_hide_invalid_scope(
         definition.validate_input(explicit_null)
 
 
+@pytest.mark.parametrize("marker", ["all", " ALL ", ":all", "__omit__"])
+def test_option_performance_payload_omits_hosted_all_scope_markers(marker: str) -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {
+            "period": "mtd",
+            "account": marker,
+            "broker": marker,
+        },
+        fixed_input={"config_key": "us"},
+    )
+
+    assert error is None
+    assert payload is not None
+    assert payload["config_key"] == "us"
+    assert payload["period"] == "mtd"
+    assert "account" not in payload
+    assert "broker" not in payload
+
+
+def test_option_performance_payload_preserves_real_scope_filters() -> None:
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {
+            "period": "mtd",
+            "account": " lx ",
+            "broker": " 富途 ",
+        },
+    )
+
+    assert error is None
+    assert payload is not None
+    assert payload["account"] == "lx"
+    assert payload["broker"] == "富途"
+
+
 def test_option_performance_payload_preserves_fixed_month_scope() -> None:
     conflicting, error = copilot_tools.build_tool_payload(
         "option_performance_report",
