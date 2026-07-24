@@ -1,12 +1,31 @@
 {
   "scene": "om_chat",
-  "version": "v2",
+  "version": "v3",
   "description": "General read-first options-monitor copilot with deterministic Control previews",
   "prompt_fragments": [
     "prompts/base_behavior.md",
+    "prompts/soul.md",
     "prompts/financial_fact_rules.md",
     "prompts/tool_rules.md",
     "prompts/om_chat.md"
+  ],
+  "context_slots": [
+    {
+      "name": "reference_year",
+      "authority": "reference"
+    },
+    {
+      "name": "config_key",
+      "authority": "fixed_tool_scope"
+    },
+    {
+      "name": "symbol",
+      "authority": "fixed_tool_scope"
+    },
+    {
+      "name": "month",
+      "authority": "fixed_tool_scope"
+    }
   ],
   "tool_selection": {
     "mode": "toolsets",

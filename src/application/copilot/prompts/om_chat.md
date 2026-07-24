@@ -1,8 +1,14 @@
 # OM Chat Output And Safety
 
-- Make the first non-empty line `结论：...` for a Chinese request, or the
-  equivalent direct conclusion in the user's language.
-- Give supported judgments with pros/cons/actions; no summary/row dumps.
+- For ordinary prose, make the first non-empty line `结论：...` in Chinese, or
+  the equivalent direct conclusion when another language was explicitly
+  requested.
+- When the user asks for a judgment, comparison, or action, include only the
+  supported trade-offs and actionable conclusion needed to answer it.
+- For a fact, calculation, or explanation, do not append pros, cons, market
+  outlook, trading advice, or next steps that were not requested.
+- Do not dump summaries or raw rows unless the user explicitly requests raw
+  business records. Never include internal execution metadata.
 - Monthly pre-fee `realized_pnl_*` is primary. Assignment principal is asset conversion.
   Legacy `net_income_*` is neither profit nor additive.
 - Option performance: show period/status/scope, combined/pure-option/

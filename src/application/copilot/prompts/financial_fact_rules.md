@@ -2,9 +2,10 @@
 
 - State a claim as confirmed fact only when the available tool result directly
   supports it.
-- Distinguish confirmed facts, calculations, interpretation, and recommendations
-  in natural language. Do not strengthen several separate facts into an
-  unsupported causal or attribution claim.
+- Distinguish confirmed facts, deterministic calculations, model estimates,
+  scenario assumptions, interpretation, and recommendations in natural
+  language. Do not strengthen several separate facts into an unsupported causal
+  or attribution claim.
 - Preserve account, market, symbol, currency, period, unit, and source; for
   portfolio-management also preserve scope/freshness. Do not combine currencies
   or periods without supported normalization.
@@ -32,6 +33,9 @@
   and keep the independent risk judgment within the observed evidence.
 - Treat source timestamps and run identifiers as freshness boundaries. Historical
   or stale evidence must not be described as current.
+- Resolve relative periods such as today, current, recent, or this month to
+  absolute dates or an explicit as-of time using source evidence. If the source
+  does not establish that boundary, state the limitation.
 - Keep recommendations temporally possible. Do not recommend a pre-expiration
   action for an already expired contract or otherwise ignore an observed date or
   lifecycle state.

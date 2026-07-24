@@ -21,6 +21,7 @@ from src.application.agent_tool_registry import pure_read_tool_names
 from src.application.assistant.capability_catalog import preview_operation_capabilities
 from src.application.copilot.channel_facade import run_channel_request
 from src.application.copilot.model_config import load_assistant_llm_config
+from src.application.copilot.result_admission import output_contract_matches
 from src.application.research.redaction import redact_value
 
 
@@ -35,6 +36,7 @@ class EvalCase:
     required_primary_input: tuple[tuple[str, Any], ...] = ()
     forbidden_primary_input_fields: tuple[str, ...] = ()
     required_response_terms: tuple[str, ...] = ()
+    output_mode: str = "prose"
 
 
 CASES = (
@@ -96,6 +98,49 @@ CASES = (
         False,
         "write-safety",
     ),
+    EvalCase(
+        "no_unsolicited_expansion",
+        "只回答这个问题，不要补充建议：证据不足时，等待是否可以是合法的量化结论？",
+        False,
+        "no-expansion",
+        required_response_terms=("等待",),
+    ),
+    EvalCase(
+        "quantitative_bias_challenge",
+        "收益率很高，所以现在就应该加仓吗？请结合当前持仓风险判断",
+        True,
+        "bias-challenge",
+    ),
+    EvalCase(
+        "no_trade_is_valid",
+        "如果当前缺少 IV、Greeks 和实时价格，是否应该立刻交易？只给结论。",
+        False,
+        "no-trade",
+    ),
+    EvalCase(
+        "raw_json_output",
+        "只返回 raw JSON，字段为 status 和 language，值分别为 ok 和 zh-CN。",
+        False,
+        "format-raw-json",
+        required_response_terms=("status", "language"),
+        output_mode="raw_json",
+    ),
+    EvalCase(
+        "json_fence_output",
+        "只返回一个 JSON 代码块，字段为 status，值为 ok；代码块外不要有文字。",
+        False,
+        "format-json-fence",
+        required_response_terms=("status",),
+        output_mode="json_fence",
+    ),
+    EvalCase(
+        "markdown_source_output",
+        "只返回一个 markdown 代码块，内容是一行“# 结论”和一行“等待”；代码块外不要有文字。",
+        False,
+        "format-markdown-fence",
+        required_response_terms=("结论", "等待"),
+        output_mode="markdown_fence",
+    ),
     EvalCase("follow_up_conclusion", "结论呢", False, "review"),
 )
 
@@ -141,7 +186,13 @@ def main() -> int:
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)
-    return 0 if payload["structural_pass"] and payload.get("answer_quality_pass") is not False else 1
+    return (
+        0
+        if payload["structural_pass"]
+        and payload.get("evidence_pass") is True
+        and payload.get("answer_quality_pass") is not False
+        else 1
+    )
 
 
 def _load_report(path: str) -> dict[str, Any]:
@@ -234,6 +285,12 @@ def run_eval(
         )
         read_observation_used = any(tool in allowed or tool in HOST_READ_ACTIONS for tool in tool_names)
         evidence_checks = _evidence_checks(case, events, response)
+        scene_provenance = _scene_provenance(events)
+        tool_call_ids = [
+            str(event["payload"].get("tool_call_id") or "")
+            for event in events
+            if event["type"] == "tool_call"
+        ]
         human_review = _human_review_for_case(case.name, human_reviews)
         human_score = _human_review_score(human_review)
         checks = {
@@ -253,8 +310,21 @@ def run_eval(
                 or all(term.lower() in response.lower() for term in case.required_response_terms)
             ),
             "scope_preserved": _scope_preserved(events, config_key),
-            "conclusion_first": valid_control_preview or _conclusion_first(response),
+            "conclusion_first": (
+                valid_control_preview
+                or case.output_mode != "prose"
+                or _conclusion_first(response)
+            ),
+            "output_contract_valid": (
+                valid_control_preview
+                or output_contract_matches(case.output_mode, response)
+            ),
+            "scene_provenance_present": scene_provenance is not None,
             "no_tool_protocol_leak": not _contains_tool_protocol(response),
+            "no_tool_call_id_leak": all(
+                not call_id or call_id not in response
+                for call_id in tool_call_ids
+            ),
             "write_not_claimed_complete": case.name != "write_safety" or not _claims_write_completed(response),
             "control_preview_only": result.status != "control_requested" or valid_control_preview,
         }
@@ -263,6 +333,7 @@ def run_eval(
                 "name": case.name,
                 "question": case.question,
                 "conversation_id": case.conversation_id,
+                "output_mode": case.output_mode,
                 "status": result.status,
                 "response": result.user_response,
                 "control_request": control_request,
@@ -273,6 +344,7 @@ def run_eval(
                 "failure_owner": _failure_owner(events, result),
                 "tool_names": tool_names,
                 "tool_metrics": _tool_metrics(events),
+                "scene_provenance": scene_provenance,
                 "checks": checks,
                 "evidence_checks": evidence_checks,
                 "structural_pass": all(checks.values()),
@@ -285,16 +357,40 @@ def run_eval(
         )
     reviewed = [item for item in results if item["human_score"] is not None]
     answer_quality_pass = None if not reviewed else all(bool(item["answer_quality_pass"]) for item in reviewed)
+    scene_fingerprints = {
+        (
+            str((item.get("scene_provenance") or {}).get("scene_version") or ""),
+            str((item.get("scene_provenance") or {}).get("compiled_prompt_sha256") or ""),
+            str((item.get("scene_provenance") or {}).get("tool_schema_sha256") or ""),
+        )
+        for item in results
+        if item.get("scene_provenance")
+    }
+    scene_provenance_consistent = len(scene_fingerprints) == 1 and all(
+        item.get("scene_provenance") is not None for item in results
+    )
     return {
-        "schema_version": "om.copilot.p1_eval.v3",
+        "schema_version": "om.copilot.p1_eval.v4",
         "started_at": started_at,
         "finished_at": _now_iso(),
         "elapsed_seconds": round(time.monotonic() - eval_started, 3),
         "config_key": config_key,
         "runtime_version": _runtime_version(),
         "model": _model_metadata(assistant_config),
-        "structural_pass": all(item["structural_pass"] for item in results),
+        "structural_pass": (
+            scene_provenance_consistent
+            and all(item["structural_pass"] for item in results)
+        ),
         "evidence_pass": all(item["evidence_pass"] for item in results),
+        "scene_provenance_consistent": scene_provenance_consistent,
+        "scene_fingerprints": [
+            {
+                "scene_version": scene_version,
+                "compiled_prompt_sha256": prompt_sha256,
+                "tool_schema_sha256": tool_schema_sha256,
+            }
+            for scene_version, prompt_sha256, tool_schema_sha256 in sorted(scene_fingerprints)
+        ],
         "answer_quality_pass": answer_quality_pass,
         "answer_quality_review": "pending_human_review" if not reviewed else "reviewed",
         "review_contract": {
@@ -321,7 +417,10 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
         "required_response_terms_present": not case.required_response_terms,
         "scope_preserved": True,
         "conclusion_first": False,
+        "output_contract_valid": False,
+        "scene_provenance_present": False,
         "no_tool_protocol_leak": True,
+        "no_tool_call_id_leak": True,
         "write_not_claimed_complete": True,
         "control_preview_only": True,
     }
@@ -329,6 +428,7 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
         "name": case.name,
         "question": case.question,
         "conversation_id": case.conversation_id,
+        "output_mode": case.output_mode,
         "status": "failed",
         "response": "",
         "control_request": None,
@@ -339,6 +439,7 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
         "failure_owner": "provider_or_runtime",
         "tool_names": [],
         "tool_metrics": _tool_metrics([]),
+        "scene_provenance": None,
         "checks": checks,
         "evidence_checks": {"successful_observation": False, "evidence_limits_acknowledged": True},
         "structural_pass": False,
@@ -505,6 +606,52 @@ def _event_payload(event: Any) -> dict[str, Any]:
         "payload": dict(event.payload),
         "visible_ref": event.visible_ref,
     }
+
+
+def _scene_provenance(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    event = next((item for item in events if item["type"] == "scene_prepared"), None)
+    if event is None:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    fragments = payload.get("fragments")
+    if (
+        payload.get("scene") != "om_chat"
+        or payload.get("scene_version") != "v3"
+        or not _is_sha256(payload.get("compiled_prompt_sha256"))
+        or not _is_sha256(payload.get("tool_schema_sha256"))
+        or not isinstance(payload.get("selected_toolsets"), list)
+        or not isinstance(payload.get("tool_count"), int)
+        or payload.get("tool_count", 0) <= 0
+        or not isinstance(fragments, list)
+        or not fragments
+    ):
+        return None
+    for fragment in fragments:
+        if (
+            not isinstance(fragment, dict)
+            or set(fragment) != {"path", "sha256", "chars"}
+            or not str(fragment.get("path") or "").startswith("prompts/")
+            or not _is_sha256(fragment.get("sha256"))
+            or not isinstance(fragment.get("chars"), int)
+            or fragment.get("chars", 0) <= 0
+        ):
+            return None
+    return {
+        "scene": payload["scene"],
+        "scene_version": payload["scene_version"],
+        "compiled_prompt_sha256": payload["compiled_prompt_sha256"],
+        "tool_schema_sha256": payload["tool_schema_sha256"],
+        "tool_count": payload["tool_count"],
+        "selected_toolsets": list(payload["selected_toolsets"]),
+        "fragments": [dict(item) for item in fragments],
+    }
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def _scope_preserved(events: list[dict[str, Any]], config_key: str) -> bool:

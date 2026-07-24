@@ -32,7 +32,7 @@ TRANSIENT_TOOL_ERRORS = frozenset(
 def run_engine(
     manifest: SceneManifest,
     *,
-    scene_input: dict[str, Any],
+    user_message: str,
     record_event: EventRecorder,
     build_tool_payload: ToolPayloadBuilder,
     call_read_tool: ReadToolCaller,
@@ -173,7 +173,7 @@ def run_engine(
             call = control_calls[0]
             control_request, control_error = build_control_request(
                 dict(call.arguments),
-                str(scene_input.get("user_message") or ""),
+                user_message,
             )
             if control_error or control_request is None:
                 _append_tool_observation(
@@ -204,7 +204,6 @@ def run_engine(
             observation = _execute_tool_call(
                 state,
                 call,
-                scene_input=scene_input,
                 build_tool_payload=build_tool_payload,
                 call_read_tool=call_read_tool,
                 compact_observation=compact_observation,
@@ -539,7 +538,6 @@ def _execute_tool_call(
     state: AgentState,
     call: ToolCall,
     *,
-    scene_input: dict[str, Any],
     build_tool_payload: ToolPayloadBuilder,
     call_read_tool: ReadToolCaller,
     compact_observation: ObservationCompactor,
@@ -604,7 +602,11 @@ def _execute_tool_call(
             ),
             record_event,
         )
-    payload, payload_error = build_tool_payload(call.name, dict(call.arguments), scene_input)
+    payload, payload_error = build_tool_payload(
+        call.name,
+        dict(call.arguments),
+        state.manifest.fixed_tool_input,
+    )
     if payload_error or payload is None:
         return _append_tool_observation(
             state,

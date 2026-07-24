@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 751 (`src`: 411, `domain`: 63, `scripts`: 7, `tests`: 270)
-- Internal import edges: 4386 total, 1929 production/script edges excluding tests
+- Python files scanned: 752 (`src`: 411, `domain`: 63, `scripts`: 7, `tests`: 271)
+- Internal import edges: 4391 total, 1930 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -40,10 +40,10 @@ flowchart LR
   infrastructure -->|2| domain
   interfaces -->|123| application
   interfaces -->|2| domain
-  scripts -->|7| application
+  scripts -->|8| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1729| application
+  tests -->|1733| application
   tests -->|374| domain
   tests -->|2| domain_services
   tests -->|111| infrastructure
@@ -60,7 +60,7 @@ flowchart LR
 | interfaces | application | 123 |
 | application | infrastructure | 99 |
 | application | storage | 36 |
-| scripts | application | 7 |
+| scripts | application | 8 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
 | infrastructure | domain | 2 |
@@ -73,7 +73,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1729 |
+| tests | application | 1733 |
 | tests | domain | 374 |
 | tests | interfaces | 186 |
 | tests | infrastructure | 111 |
@@ -111,12 +111,12 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | src.infrastructure | 7 |
 | src.application.multi_tick | src.infrastructure | 7 |
 | src.application.positions | domain.storage | 7 |
+| scripts | src.application | 7 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | src.infrastructure | 6 |
 | src.application.trades | src.application.ledger | 6 |
 | src.application.trades | src.infrastructure | 6 |
 | domain.domain.ledger | domain.domain | 6 |
-| scripts | src.application | 6 |
 | src.application.positions | src.application.ledger | 5 |
 | src.application.setup | src.application | 5 |
 | src.application.trades | domain.domain.ledger | 5 |
