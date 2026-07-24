@@ -35,6 +35,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
     assert "portfolio_query" in tool_names
+    assert "portfolio_assignment_scenario" in tool_names
     assert "portfolio_capital_bridge" not in tool_names
     assert "assistant_trace" not in tool_names
     assert "openclaw_readiness" not in tool_names
@@ -83,6 +84,18 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert portfolio_query["safe_default_input"] == {"view": "health"}
     assert "view" in portfolio_query["input_schema"]
     assert "url" not in portfolio_query["input_schema"]
+    assignment_scenario = next(
+        item for item in spec["tools"] if item["name"] == "portfolio_assignment_scenario"
+    )
+    assert assignment_scenario["risk_level"] == "read_only"
+    assert assignment_scenario["requires_confirm"] is False
+    assert assignment_scenario["side_effects"] == []
+    assert assignment_scenario["safe_default_input"] == {}
+    assert set(assignment_scenario["input_schema"]) == {"accounts"}
+    assert assignment_scenario["input_json_schema"]["required"] == ["accounts"]
+    assert assignment_scenario["output_contract"]["schema_version"] == (
+        "portfolio.assignment_scenario.v1"
+    )
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -323,6 +336,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "portfolio_query" in PURE_READ_TOOLS
+    assert "portfolio_assignment_scenario" in PURE_READ_TOOLS
     assert "portfolio_capital_bridge" not in PURE_READ_TOOLS
     assert "assistant_trace" not in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS

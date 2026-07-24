@@ -104,6 +104,7 @@
 - `query_cash_headroom`
 - `get_portfolio_context`
 - `portfolio_query`
+- `portfolio_assignment_scenario`
 
 ### Close Advice
 
@@ -144,6 +145,16 @@
 ./om-agent run --tool runtime_status \
   --input-json '{"config_path":"/var/lib/options-monitor/config.us.json"}'
 ```
+
+### 指派后资产分布
+
+```bash
+./om-agent run --tool portfolio_assignment_scenario \
+  --input-json '{"accounts":["lx","sy"]}'
+```
+
+该工具只有 `accounts` 一个业务入参。它把 portfolio-management 的非期权估值证据与 OM SQLite 的 open short put/call lot 合并，输出
+`portfolio.assignment_scenario.v1`。MMF 计入现金、主资金口径为 CNY、Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 
 ### 查询运行历史
 

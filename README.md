@@ -38,18 +38,22 @@ trade_events -> projection -> position_lots
 
 产品域见 [产品架构](docs/PRODUCT_ARCHITECTURE.md)，技术调用链见 [系统架构](docs/ARCHITECTURE.md)。
 
-## 主要能力
+## 项目功能清单
 
 | 能力 | 当前入口 | 权威说明 |
 |---|---|---|
+| YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
 | Sell Put / Covered Call | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | Close Advice | `om close-advice` | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Daily Decision Brief | `om daily-brief` | [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
+| 全部 Sell Put / Sell Call 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
+| 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化工具 | `om-agent spec|run` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Shadow Replay / Strategy Lab | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
+| 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
 开仓策略支持两种口径：
 
@@ -238,6 +242,29 @@ om option-positions add \
 ```
 
 写入前确认目标 runtime root、SQLite、account、lot 和 event 语义。修账流程见 [Option Positions Repair](docs/OPTION_POSITIONS_REPAIR.md)。
+
+### 指派后资产分布
+
+把所选账户中所有 open short Sell Put 和 Sell Call 同时按 strike 实物指派，并按当前现货价格与当前显式汇率证据计算 CNY 资产分布、现金覆盖、费用、到期梯度和潜在负债：
+
+```bash
+om portfolio assignment-scenario --accounts lx sy
+om portfolio assignment-scenario --accounts lx sy --format json
+
+om-agent run --tool portfolio_assignment_scenario \
+  --input-json '{"accounts":["lx","sy"]}'
+```
+
+该功能是纯读压力测试，不写 assignment event、不修改 `position_lots`、不修改 portfolio-management 持仓，也不发送通知。固定口径：
+
+- 只处理 open short put/call；Long Option 完全不读取、不估值、不保留；
+- portfolio-management 提供全部非期权资产、当前报价、显式 FX 和补充标的报价，OM SQLite 提供 short option lot；
+- MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
+- 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
+- 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
+- 现金不足形成 funding liability，Sell Call 覆盖不足形成 short-stock liability，不会被改写成执行错误。
+
+Copilot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Copilot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
 
 ### Close Advice
 

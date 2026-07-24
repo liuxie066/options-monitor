@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.4.22 - 2026-07-24
+
+### Added
+- Added a read-only all-short-options assignment stress scenario with one shared domain calculation for internal callers, the human CLI, Tool Gateway, and Copilot.
+- Added CNY cash/MMF coverage, assignment and fee details, expiry ladders, post-assignment asset distribution, funding liabilities, short-stock liabilities, and account/FX evidence in the versioned `portfolio.assignment_scenario.v1` result.
+- Added the project feature inventory and assignment-scenario usage contract to the README.
+
+### Changed
+- Read open short put/call lots strictly from the canonical SQLite projection and current non-option holdings, spot quotes, and explicit FX evidence from portfolio-management; long options are excluded entirely.
+- Reused the unified Futu stock-fee calculator and kept missing broker, currency, FX, or assignment-fee evidence explicitly partial instead of treating it as zero.
+
 ## 1.4.21 - 2026-07-24
 
 ### Fixed
