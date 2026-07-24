@@ -9,12 +9,7 @@
 - Prefer root-cause fixes at the owning boundary. If a tactical patch is unavoidable, state the tradeoff and follow-up.
 - Follow parsimony at repo boundaries: do not add entities, layers, states, tools, config keys, or workflows unless they are necessary.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
-
-## Founder Operating Model
-
-- The human operator is the CEO: owns product direction, priority, business judgment, risk appetite, and final decision authority.
-- The agent also acts as strategy lead for Sell Put / Covered Call / Yield Enhancement work: challenge weak assumptions and optimize with replay, dry-run evidence, controlled experiments, and risk metrics.
-- Keep strategy research separate from production execution. Research output must not mutate live config, notification behavior, position state, or broker-facing data without explicit CEO approval.
+- Do not invoke Gateflow, planreview, or deepreview unless the user explicitly requests the named workflow or skill in the current task.
 
 ## Project Identity
 
@@ -95,12 +90,12 @@ Research evidence handoff for MacBook Codex:
 | Task | Primary owner | Guardrail |
 |---|---|---|
 | Candidate filter/rank logic | `domain/domain/engine/candidate_engine.py` | Do not add parallel ranking in application scan adapters |
-| Candidate trace / ranking diagnostics | `src/application/agent_tool_candidate_filter.py`, `src/application/agent_tool_candidate_rank.py` | Keep analysis read-only unless explicitly designing a write path |
-| Notification text | `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py` | Keep Markdown-friendly Chinese text; no card-like plain text |
+| Candidate trace / ranking diagnostics | `src/application/agent_tools/candidate_filter_impl.py`, `src/application/agent_tools/candidate_rank_impl.py` | Keep analysis read-only unless explicitly designing a write path |
+| Notification text | `src/application/daily_decision_brief_renderer.py`; compatibility formatting in `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py` | Keep Markdown-friendly Chinese text; Daily Brief owns ordinary scheduled delivery |
 | Close-advice policy | `domain/domain/close_advice.py` | Runner assembles I/O; scoring policy stays in domain |
 | Option-position projection | `domain/domain/ledger/projection.py` | `trade_events -> projection -> position_lots` is canonical |
 | Ledger application boundary | `src/application/ledger/api.py` | Non-ledger modules must not import ledger internals directly |
-| Position workflows | `src/application/positions/` | Feishu `option_positions` is mirror/sync, not source of truth |
+| Position workflows | `src/application/positions/` | Feishu `option_positions` mirror/sync is retired; SQLite ledger is authoritative |
 | Trade intake/review | `src/application/trades/` | Preserve idempotency, review, void, and repair semantics |
 | Tick orchestration | `src/application/multi_account_tick.py`, `src/application/multi_tick/` | Keep helper modules narrow |
 | Runtime status / readiness | `src/application/agent_tools/runtime_status_impl.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
