@@ -395,22 +395,33 @@ def _bounded_messages(
         "content": "Earlier conversation and tool details were compacted to stay within the model context budget.",
     }
     budget = max(0, effective_chars - _message_chars([*fixed, notice]) - 256)
-    kept: list[list[dict[str, Any]]] = []
-    used = 0
-    for group in reversed(groups):
-        if budget <= 0:
+    current_user_index = max(
+        (
+            index
+            for index, group in enumerate(groups)
+            if str(group[0].get("role") or "") == "user"
+        ),
+        default=len(groups),
+    )
+    older_groups = groups[:current_user_index]
+    current_turn_groups = groups[current_user_index:]
+    kept_current = _fit_groups(current_turn_groups, budget)
+    used = _message_chars([item for group in kept_current for item in group])
+    kept_older: list[list[dict[str, Any]]] = []
+    for group in reversed(older_groups):
+        remaining = budget - used
+        if remaining <= 0:
             break
         size = _message_chars(group)
-        if kept and used + size > budget:
+        if kept_older and size > remaining:
             break
-        if size > budget:
-            group = _clip_group(group, budget)
+        if size > remaining:
+            group = _clip_group(group, remaining)
             size = _message_chars(group)
-        kept.append(group)
+        kept_older.append(group)
         used += size
-        if used >= budget:
-            break
-    kept.reverse()
+    kept_older.reverse()
+    kept = [*kept_older, *kept_current]
     flattened = [item for group in kept for item in group]
     omitted = max(0, len(conversation) - len(flattened))
     return tuple([*fixed, notice, *flattened]), omitted
@@ -429,6 +440,38 @@ def _message_groups(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]
                 index += 1
         groups.append(group)
     return groups
+
+
+def _fit_groups(
+    groups: list[list[dict[str, Any]]],
+    max_chars: int,
+) -> list[list[dict[str, Any]]]:
+    if not groups or max_chars <= 0:
+        return []
+    if _message_chars([item for group in groups for item in group]) <= max_chars:
+        return [[dict(item) for item in group] for group in groups]
+
+    remaining = max_chars
+    pending = set(range(len(groups)))
+    allocations = [0] * len(groups)
+    sizes = [_message_chars(group) for group in groups]
+    while pending:
+        share = max(1, remaining // len(pending))
+        fitting = [index for index in pending if sizes[index] <= share]
+        if not fitting:
+            ordered = sorted(pending)
+            for offset, index in enumerate(ordered):
+                allocations[index] = share + (1 if offset < remaining % len(ordered) else 0)
+            break
+        for index in fitting:
+            allocations[index] = sizes[index]
+            remaining = max(0, remaining - sizes[index])
+            pending.remove(index)
+
+    return [
+        _clip_group(group, max(1, allocation))
+        for group, allocation in zip(groups, allocations, strict=True)
+    ]
 
 
 def _clip_group(group: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
