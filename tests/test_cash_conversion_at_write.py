@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -129,18 +128,18 @@ def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monke
     assert stale["missing_reason"] == "USDCNY booking FX outside 24h event window"
 
 
-def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(tmp_path: Path) -> None:
+def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     state_dir = tmp_path / "output_shared" / "state"
     repo = SQLiteOptionPositionsRepository(state_dir / "option_positions.sqlite3")
-    state_dir.joinpath("rate_cache.json").write_text(
-        json.dumps(
-            {
-                "rates": {"USDCNY": 7.2},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        ),
-        encoding="utf-8",
-    )
+    fx_payload = {
+        "rates": {"USDCNY": 7.2},
+        "timestamp": "2026-07-23T01:00:00+00:00",
+    }
+    monkeypatch.setattr(ledger_writer, "load_cash_fx_payload", lambda _repo: fx_payload)
+    monkeypatch.setattr("src.application.positions.workflows.load_cash_fx_payload", lambda _repo: fx_payload)
     persist_manual_open_event(
         repo,
         OpenPositionCommand(
