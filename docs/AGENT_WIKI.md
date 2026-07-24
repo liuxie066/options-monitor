@@ -271,7 +271,6 @@ trade_events
 -> domain.domain.ledger.projection
 -> position_lots
 -> SQLite projection
--> optional Feishu mirror
 ```
 
 Ownership:
@@ -280,7 +279,7 @@ Ownership:
 |---|---|
 | Domain projection | `domain/domain/ledger/projection.py` |
 | Public application boundary | `src/application/ledger/api.py` |
-| Use-case service | `src/application/ledger/service.py` |
+| Use-case commands | `src/application/ledger/commands.py` |
 | Repository/config boundary | `src/application/ledger/repository.py` |
 | Stored event codec | `src/application/ledger/event_codec.py` |
 | Event write and projection publish | `src/application/ledger/writer.py` |
@@ -325,7 +324,10 @@ Use the metric namespace that matches the question:
 
 `premium_collected_gross` is not additional profit. Assignment stock principal is cash movement and an asset conversion, not option PnL. Missing fee, mark, or FX evidence stays partial/null and must never be replaced with zero. A configured account scope with no events is a proven observed zero; an arbitrary unconfigured scope remains `not_observed`.
 
-The historical monthly-income adapters and mixed portfolio capital bridge have been removed. Archived output interpretation is documented in `docs/migrations/OPTION_PERFORMANCE_V1_MIGRATION.md`; it is not a runtime rollback path.
+`monthly_income_report`, `./om option-positions report monthly-income`, and
+`portfolio_capital_bridge` have been removed. Do not recreate their ambiguous
+`net_income_cny` or generic return fields. The migration note is historical
+mapping only, not a callable rollback path.
 
 ### Close Advice
 
@@ -374,11 +376,11 @@ notifications, or mutate broker-facing state.
 
 - YAML authoring: `src/application/config_yaml.py`, `src/application/config_yaml_init.py`
 - Runtime snapshot validation: `src/application/config_validator.py`
-- Legacy JSON compatibility: `src/application/layered_config.py`
+- Legacy JSON migration reader: `src/application/layered_config.py`
 - Examples: `configs/examples/config.yaml.example`, `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
 - Full config docs: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`
 
-`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are migration/upgrade-recovery inputs only; normal operator flows should use `config migrate-yaml`, then `config build --source yaml`.
+`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are one-time `config migrate-yaml` inputs only, not an upgrade-recovery path; production upgrade fails closed when the YAML authoring source is unavailable.
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 

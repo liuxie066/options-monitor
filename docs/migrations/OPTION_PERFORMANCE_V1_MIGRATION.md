@@ -2,58 +2,94 @@
 
 ## Status
 
-The migration is complete. Runtime code, public tools, CLI commands, Assistant bindings,
-analysis views, portfolio bridges, and tests use the canonical option-performance model.
-The former monthly-income model is historical documentation only and is not a rollback path.
+The migration completed in v1.4.11 on 2026-07-23. This file is a historical
+field-mapping note, not an active migration or rollback procedure.
 
-## Canonical model
+Current public authority:
 
-| Question | Namespace | Primary fields |
+- Tool Gateway: `option_performance_report`
+- Portfolio integrations: `portfolio_pnl_bridge` and `portfolio_cash_bridge`
+- Namespaces: `activity`, `cash`, `pnl`, `capital`, and
+  `assignment_lifecycle`
+
+Removed public surfaces:
+
+- `monthly_income_report`
+- `./om option-positions report monthly-income`
+- `portfolio_capital_bridge`
+- legacy Assistant and analysis projections built around ambiguous
+  `net_income_cny` or generic return fields
+
+Do not recreate these adapters for rollback. Runtime facts remain in the
+canonical ledger and are read through the current Option Performance contract.
+
+## Current Period Contract
+
+The public period selector supports:
+
+- `mtd`
+- `ytd`
+- `month` plus `YYYY-MM`
+- `year` plus `YYYY`
+- `range` plus inclusive local start/end dates
+
+Reporting dates use `Asia/Shanghai`; the engine evaluates a half-open UTC
+millisecond interval. Historical reads do not fill missing evidence with
+current values.
+
+## Namespace Rule
+
+The namespaces answer different questions and must not be added or subtracted
+to manufacture a residual:
+
+| Question | Current namespace | Primary fields |
 |---|---|---|
 | Profit / PnL | `pnl` | `period_total_net`, `period_total_gross`, `realized_net`, `realized_gross` |
-| Cash movement | `cash` | `total_cash_change_net`, `option_trade_cash_gross`, fees, settlement and assigned-stock sale cash |
-| Premium / trading activity | `activity` | `premium_collected_gross`, `premium_paid_gross`, opened/closed contracts |
-| Capital efficiency | `capital` | explicitly named notional-days annualized efficiency fields |
+| Cash movement | `cash` | `total_cash_change_net`, `option_trade_cash_gross`, fees, settlement and sale cash |
+| Premium / activity | `activity` | `premium_collected_gross`, `premium_paid_gross`, opened/closed contracts |
+| Capital efficiency | `capital` | Explicit realized or period-total annualized efficiency fields |
+| Assigned stock | `assignment_lifecycle` | Ending lots, sales, review and lifecycle evidence |
 
-`cash.option_trade_cash_gross` remains a canonical fact because trades really move cash.
-It is not profit, total cash change, or a generic return numerator. Assignment/exercise
-stock principal is an asset conversion reported separately from option PnL.
+`premium_collected_gross` is activity, not additional profit. Assignment or
+exercise stock principal is cash movement and an asset conversion, not option
+PnL.
 
-## Historical mapping
+## Historical Field Mapping
 
-The following names describe the removed model and appear here only to help operators
-interpret archived reports:
+The left-hand names below may appear in old artifacts only.
 
-| Historical surface | Canonical replacement |
+| Historical field/view | Current interpretation |
 |---|---|
-| `monthly_income_report` | `option_performance_report` |
-| `om option-positions report monthly-income` | `om option-performance report` |
-| `net_income_cny` in the old report | `cash.option_trade_cash_gross.cny` for the narrow trade-cash fact; `cash.total_cash_change_net.cny` for complete cash movement |
-| generic `net_return_rate` / `realized_return_rate` | explicit `capital.*_annualized_efficiency` fields |
-| `account_monthly_performance` | `option_monthly_performance` |
-| `account_monthly_income_components` | `option_activity_components`, `option_cash_components`, `option_pnl_components` |
-| `symbol_income_attribution` | `symbol_performance_attribution` |
-| `portfolio_capital_bridge` | independent `portfolio_pnl_bridge` and `portfolio_cash_bridge` |
+| `monthly_income_report.return_summary[].net_income_cny` | Use `cash.option_trade_cash_gross.cny` for the narrow trade-cash question, or `cash.total_cash_change_net.cny` for complete cash movement; never call it profit |
+| `premium_income_cny` / `premium_received_gross` | `activity.premium_collected_gross` |
+| `realized_pnl_cny` | Choose `pnl.realized_gross` or `pnl.realized_net` explicitly |
+| `realized_return_rate` / `net_return_rate` | Choose an explicit `capital.*_annualized_efficiency` field |
+| `assignment_stock_net_cashflow_gross` | `cash.stock_settlement_cash_gross` |
+| `assignment_lifecycle_rows` | `assignment_lifecycle.ending_lots`, `.sales`, and `.review` |
+| `account_monthly_income_components` | Separate activity, cash, and PnL component views |
+| `symbol_income_attribution` | Current fact-row attribution with an explicit source namespace |
 
-Candidate ranking and strategy research may still use `net_income` names for quoted
-candidate economics. Those fields are a separate domain and are not historical
-performance reporting.
+## Evidence Rules Preserved by the Migration
 
-## Removed boundaries
+- Native-currency facts are authoritative.
+- Cash CNY snapshots use event-time FX evidence captured when the event is
+  written.
+- Missing event-time FX keeps CNY `null/partial`; current rates must not
+  backfill history.
+- Missing fees preserve gross metrics but keep affected net metrics
+  `null/partial`.
+- Missing marks preserve realized metrics but keep unrealized and period-total
+  metrics incomplete.
+- A configured account scope with no events can be observed zero; an arbitrary
+  unconfigured scope is not proof of completeness.
 
-- The old Agent tool and human CLI command are not registered.
-- `/income` routes to `option_performance_report`.
-- Analysis exposes only canonical performance views.
-- Portfolio integration keeps independent PnL and cash equations.
-- Assigned-stock inspection uses the canonical performance adapters.
-- The old report builder, capital bridge, compatibility renderer, and legacy
-  reconciliation/allowlist have been removed.
+## Current References
 
-## Validation contract
+- [Option Performance Contract](../OPTION_PERFORMANCE_DESIGN.md)
+- [Assigned Stock Return Design](../ASSIGNED_STOCK_RETURN_DESIGN.md)
+- [Tool Reference](../TOOL_REFERENCE.md)
+- [Ledger Architecture](../LEDGER_ARCHITECTURE.md)
 
-- MTD, YTD, natural month, natural year, and range parsing stay covered.
-- Profit, cash, activity, and capital remain separate namespaces.
-- Missing fee, mark, or FX evidence remains explicit rather than becoming zero.
-- Historical replay determinism and report-coverage checks remain available in
-  `src/application/performance/reconciliation.py`; they validate canonical reports only.
-- Archived changelog and migration references are history, not callable compatibility.
+The original phased implementation and review evidence remains under
+`docs/gateflow/` and `docs/reviews/`. Those artifacts explain history but do
+not override current source, tests, or public schemas.

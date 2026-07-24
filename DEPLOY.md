@@ -13,8 +13,22 @@
 最小渲染命令：
 
 ```bash
-./om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
-./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --env-file /etc/options-monitor/options-monitor.env \
+  --markets us hk \
+  --accounts lx sy \
+  --output-dir /tmp/options-monitor-service
+
+./om service render \
+  --target launchd \
+  --runtime-root "$HOME/Library/Application Support/options-monitor" \
+  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
+  --markets us hk \
+  --accounts lx sy \
+  --output-dir /tmp/options-monitor-service
 ```
 
 渲染结果只生成服务文件和安装命令，不会自动安装、启动、发送通知或修改生产配置。

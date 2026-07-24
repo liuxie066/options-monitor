@@ -25,10 +25,12 @@ equations: `portfolio_pnl_bridge` combines PM capital facts with
 combines PM `/analysis/cash-facts` with
 `option_performance_report.cash.total_cash_change_net`. Both return MTD/YTD
 waterfall `steps[]` and Markdown `fallback_text`; missing or incomplete evidence
-remains unavailable instead of becoming zero. None of these tools exposes portfolio
-writes, accepts endpoint arguments, or adds a second Scene/Agent. The toolset is
-optional and defaults off for internal Copilot projection; `./om-agent` continues
-to expose all three canonical tools independently of this Copilot setting.
+remains unavailable instead of becoming zero. The old `portfolio_capital_bridge`
+has been removed because it mixed total assets with legacy option cash
+semantics. None of the current tools exposes portfolio writes, accepts endpoint
+arguments, or adds a second Scene/Agent. The toolset is optional and defaults
+off for internal Copilot projection; `./om-agent` continues to expose all three
+canonical tools independently of this Copilot setting.
 
 ## Deterministic Control
 
