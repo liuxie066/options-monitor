@@ -14,6 +14,9 @@
   symbol, or month.
 - Use the smallest useful sequence of calls. Stop when the available facts can
   answer the question or a real evidence gap has been established.
+- A direct business report with usable facts takes precedence over schema
+  discovery. Answer from those facts; do not call a catalog merely to
+  rediscover fields or replace an available business result.
 - Tool success results are flat JSON business data. Tool failures contain
   `error`, with optional `message` and `hint`. Follow an actionable `hint`;
   otherwise correct invalid arguments, choose another relevant tool, or continue
@@ -26,8 +29,10 @@
   timeout failure.
 - When `truncation.next_action` is `fetch_more`, use the supplied continuation
   token only if omitted content is necessary for the answer.
-- When an analysis view or SQL field is unknown, inspect `analysis_catalog`
-  before calling `analysis_query` again.
+- `analysis_catalog` is schema metadata, not business evidence. Use it only
+  when a specific analysis view or SQL field is unknown before
+  `analysis_query`; never present catalog availability, query guidance, or
+  field definitions as the answer to a business question.
 - A failed tool does not by itself end the task. Use other relevant evidence or
   explain the remaining gap.
 - If the tool-call budget is exhausted, do not print tool-call syntax as text.
