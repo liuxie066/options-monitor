@@ -285,28 +285,11 @@ def build_period_performance(
     )
     summary = _summarize(ordered_facts, fx_rates=fx_rates)
     summary["pnl"].update(
-        {
-            "option_realized_gross": _metric(
-                ordered_option_realized_facts,
-                {"realized_gross"},
-                fx_rates=fx_rates,
-            ).to_dict(),
-            "option_realized_net": _metric(
-                ordered_option_realized_facts,
-                {"realized_net"},
-                fx_rates=fx_rates,
-            ).to_dict(),
-            "assigned_stock_realized_gross": _metric(
-                ordered_assigned_stock_facts,
-                {"realized_gross"},
-                fx_rates=fx_rates,
-            ).to_dict(),
-            "assigned_stock_realized_net": _metric(
-                ordered_assigned_stock_facts,
-                {"realized_net"},
-                fx_rates=fx_rates,
-            ).to_dict(),
-        }
+        _realized_component_summary(
+            ordered_option_realized_facts,
+            ordered_assigned_stock_facts,
+            fx_rates=fx_rates,
+        )
     )
     capital, capital_segments = _capital_report(
         events=scoped_events,
@@ -329,7 +312,14 @@ def build_period_performance(
             key_fn=lambda fact: _month_for_fact(fact, period=period),
             fx_rates=fx_rates,
         ),
-        "accounts": _breakdown(ordered_facts, key_name="account", key_fn=lambda fact: fact.account, fx_rates=fx_rates),
+        "accounts": _breakdown(
+            ordered_facts,
+            key_name="account",
+            key_fn=lambda fact: fact.account,
+            fx_rates=fx_rates,
+            option_realized_facts=ordered_option_realized_facts,
+            assigned_stock_realized_facts=ordered_assigned_stock_facts,
+        ),
         "symbols": _breakdown(ordered_facts, key_name="symbol", key_fn=lambda fact: fact.symbol, fx_rates=fx_rates),
     }
     assigned_scope_rows = [
@@ -1552,6 +1542,36 @@ def _summarize(
     }
 
 
+def _realized_component_summary(
+    option_realized_facts: Sequence[PerformanceFact],
+    assigned_stock_realized_facts: Sequence[PerformanceFact],
+    *,
+    fx_rates: Sequence[FXRateFact] = (),
+) -> dict[str, Any]:
+    return {
+        "option_realized_gross": _metric(
+            option_realized_facts,
+            {"realized_gross"},
+            fx_rates=fx_rates,
+        ).to_dict(),
+        "option_realized_net": _metric(
+            option_realized_facts,
+            {"realized_net"},
+            fx_rates=fx_rates,
+        ).to_dict(),
+        "assigned_stock_realized_gross": _metric(
+            assigned_stock_realized_facts,
+            {"realized_gross"},
+            fx_rates=fx_rates,
+        ).to_dict(),
+        "assigned_stock_realized_net": _metric(
+            assigned_stock_realized_facts,
+            {"realized_net"},
+            fx_rates=fx_rates,
+        ).to_dict(),
+    }
+
+
 def _cash_metric(
     facts: Sequence[PerformanceFact],
     kinds: set[str] | frozenset[str],
@@ -1703,6 +1723,8 @@ def _breakdown(
     key_name: str,
     key_fn: Any,
     fx_rates: Sequence[FXRateFact] = (),
+    option_realized_facts: Sequence[PerformanceFact] | None = None,
+    assigned_stock_realized_facts: Sequence[PerformanceFact] | None = None,
 ) -> list[dict[str, Any]]:
     groups: dict[str, list[PerformanceFact]] = {}
     for fact in facts:
@@ -1713,6 +1735,14 @@ def _breakdown(
     for key in sorted(groups):
         item = {key_name: key}
         item.update(_summarize(groups[key], fx_rates=fx_rates))
+        if option_realized_facts is not None and assigned_stock_realized_facts is not None:
+            item["pnl"].update(
+                _realized_component_summary(
+                    [fact for fact in option_realized_facts if str(key_fn(fact) or "").strip() == key],
+                    [fact for fact in assigned_stock_realized_facts if str(key_fn(fact) or "").strip() == key],
+                    fx_rates=fx_rates,
+                )
+            )
         out.append(item)
     return out
 

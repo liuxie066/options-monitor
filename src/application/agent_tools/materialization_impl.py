@@ -4,7 +4,7 @@ import csv
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Mapping, cast
 import json
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -414,6 +414,168 @@ def _row_order_key(row: dict[str, Any]) -> tuple[int, str, str, str]:
     )
 
 
+_OPTION_TRADE_CASH_EXCLUDED_FIELDS = (
+    "cash.stock_settlement_cash_gross",
+    "cash.stock_settlement_fee_cash",
+    "cash.assigned_stock_sale_cash_gross",
+    "cash.assigned_stock_sale_fee_cash",
+)
+
+
+def _presentation_reason_category(value: Any) -> str:
+    prefix = str(value or "").strip().lower().split(":", 1)[0]
+    if prefix.startswith("cash_conversion"):
+        return "cash_conversion"
+    if prefix.startswith("fx"):
+        return "fx"
+    if "fee" in prefix:
+        return "fee"
+    if "valuation" in prefix or "mark" in prefix or "quote" in prefix:
+        return "valuation"
+    if prefix.startswith("missing_stock_settlement"):
+        return "stock_settlement"
+    if prefix.startswith("source_conflict"):
+        return "source_conflict"
+    if prefix.startswith("assigned_stock") or prefix.startswith("assignment"):
+        return "assigned_stock"
+    if prefix.startswith("capital"):
+        return "capital"
+    if prefix.startswith("realized") or prefix.startswith("missing_realized"):
+        return "realized_pnl"
+    if prefix in {"trade_events", "position_lots"}:
+        return prefix
+    return "other"
+
+
+def _presentation_reason_summary(values: Any) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for value in values if isinstance(values, (list, tuple)) else ():
+        category = _presentation_reason_category(value)
+        counts[category] = counts.get(category, 0) + 1
+    return [
+        {"category": category, "count": counts[category]}
+        for category in sorted(counts)
+    ]
+
+
+def _presentation_metric(value: Any) -> dict[str, Any]:
+    metric = value if isinstance(value, Mapping) else {}
+    by_currency = metric.get("by_currency")
+    return {
+        "by_currency": {
+            str(currency): amount
+            for currency, amount in sorted(
+                by_currency.items() if isinstance(by_currency, Mapping) else (),
+                key=lambda item: str(item[0]),
+            )
+        },
+        "cny": metric.get("cny"),
+        "status": str(metric.get("status") or "not_observed"),
+        "missing_summary": _presentation_reason_summary(metric.get("missing")),
+    }
+
+
+def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str, Any]:
+    period = data.get("period") if isinstance(data.get("period"), Mapping) else {}
+    scope = data.get("scope") if isinstance(data.get("scope"), Mapping) else {}
+    activity = data.get("activity") if isinstance(data.get("activity"), Mapping) else {}
+    cash = data.get("cash") if isinstance(data.get("cash"), Mapping) else {}
+    pnl = data.get("pnl") if isinstance(data.get("pnl"), Mapping) else {}
+    breakdowns = data.get("breakdowns") if isinstance(data.get("breakdowns"), Mapping) else {}
+    quality = data.get("quality") if isinstance(data.get("quality"), Mapping) else {}
+
+    account_rows: list[dict[str, Any]] = []
+    raw_account_rows = breakdowns.get("accounts") if isinstance(breakdowns, Mapping) else []
+    for raw_row in raw_account_rows if isinstance(raw_account_rows, list) else []:
+        if not isinstance(raw_row, Mapping):
+            continue
+        account = str(raw_row.get("account") or "").strip().lower()
+        if not account:
+            continue
+        row_pnl = raw_row.get("pnl") if isinstance(raw_row.get("pnl"), Mapping) else {}
+        row_cash = raw_row.get("cash") if isinstance(raw_row.get("cash"), Mapping) else {}
+        row_activity = raw_row.get("activity") if isinstance(raw_row.get("activity"), Mapping) else {}
+        account_rows.append(
+            {
+                "account": account,
+                "option_realized_gross": _presentation_metric(row_pnl.get("option_realized_gross")),
+                "option_trade_cash_gross": _presentation_metric(row_cash.get("option_trade_cash_gross")),
+                "premium_collected_gross": _presentation_metric(row_activity.get("premium_collected_gross")),
+            }
+        )
+    account_rows.sort(key=lambda item: item["account"])
+
+    limitations = [
+        {
+            "kind": "missing_evidence",
+            **item,
+        }
+        for item in _presentation_reason_summary(quality.get("missing"))
+    ]
+    limitations.extend(
+        {
+            "kind": "warning",
+            **item,
+        }
+        for item in _presentation_reason_summary(quality.get("warnings"))
+    )
+    option_realized_net = _presentation_metric(pnl.get("option_realized_net"))
+    if option_realized_net["status"] != "observed":
+        limitations.append(
+            {
+                "kind": "metric_status",
+                "metric": "option_realized_net",
+                "status": option_realized_net["status"],
+                "missing_summary": option_realized_net["missing_summary"],
+            }
+        )
+
+    return {
+        "schema_version": "option_performance_presentation.v1",
+        "period_scope": {
+            "period": {
+                key: period.get(key)
+                for key in (
+                    "kind",
+                    "requested_start_date",
+                    "requested_end_date",
+                    "status",
+                    "timezone",
+                )
+                if period.get(key) is not None
+            },
+            "scope": {
+                key: deepcopy(scope.get(key))
+                for key in ("account", "accounts", "broker", "brokers")
+                if scope.get(key) not in (None, "", [])
+            },
+        },
+        "reporting_basis": {
+            "primary": "gross",
+            "net_metric": "pnl.option_realized_net",
+            "net_evidence": option_realized_net,
+        },
+        "primary_metrics": {
+            "option_realized_gross": _presentation_metric(pnl.get("option_realized_gross")),
+            "option_trade_cash_gross": _presentation_metric(cash.get("option_trade_cash_gross")),
+        },
+        "account_rows": account_rows,
+        "supporting_metrics": {
+            "premium_collected_gross": _presentation_metric(activity.get("premium_collected_gross")),
+        },
+        "assigned_stock_impact": {
+            "assigned_stock_realized_gross": _presentation_metric(pnl.get("assigned_stock_realized_gross")),
+            "combined_realized_gross": _presentation_metric(pnl.get("realized_gross")),
+        },
+        "definitions": {
+            "option_realized_gross": "期权已实现毛收益，不含指派正股已实现收益。",
+            "option_trade_cash_gross": "期权交易产生的有符号现金流，不含指派正股结算和卖出现金。",
+            "excluded_from_option_trade_cash_gross": list(_OPTION_TRADE_CASH_EXCLUDED_FIELDS),
+        },
+        "limitations": limitations,
+    }
+
+
 def _public_option_performance_report(
     report: dict[str, Any],
     *,
@@ -464,6 +626,7 @@ def _public_option_performance_report(
         quality["row_count"] = 0
     quality["diagnostics"] = diagnostics
     data["quality"] = quality
+    data["presentation"] = _build_option_performance_presentation(data)
     return data
 
 
