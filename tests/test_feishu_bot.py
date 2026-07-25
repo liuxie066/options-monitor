@@ -104,6 +104,96 @@ def test_reply_text_message_remains_backward_compatible(monkeypatch: pytest.Monk
     ]
 
 
+def test_send_message_sends_proactive_card_with_uuid_and_retry_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    card = {
+        "schema": "2.0",
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": "notification_body",
+                    "content": "| 项目 | 数值 |\n|---|---:|\n| 现金 | ¥1,000 |",
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda _app_id, _app_secret, fn: fn("tenant_token"),
+    )
+
+    out = feishu_bot.send_message(
+        app_id="app_1",
+        app_secret="secret_1",
+        open_id="ou_1",
+        msg_type="interactive",
+        content=card,
+        uuid="om-card-1",
+        log_fn=lambda item: calls.append({"log": item}),
+        http_json_fn=lambda method, url, payload, headers, **kwargs: calls.append(
+            {
+                "method": method,
+                "url": url,
+                "payload": payload,
+                "headers": headers,
+                "kwargs": kwargs,
+            }
+        )
+        or {"code": 0, "data": {"message_id": "om_card"}},
+    )
+
+    request = calls[0]
+    assert out["data"]["message_id"] == "om_card"
+    assert request["url"].endswith("/open-apis/im/v1/messages?receive_id_type=open_id")
+    assert request["payload"] == {
+        "receive_id": "ou_1",
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+        "uuid": "om-card-1",
+    }
+    assert request["kwargs"]["retry_max_attempts"] == 3
+    assert request["kwargs"]["log_success_attempts"] is True
+
+
+def test_send_message_rejects_oversized_card_before_token_or_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not request token")),
+    )
+    card = {
+        "schema": "2.0",
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": "notification_body",
+                    "content": "中" * feishu_bot.FEISHU_SEND_REQUEST_BUDGET_BYTES,
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(feishu_bot.FeishuPermanentError) as exc_info:
+        feishu_bot.send_message(
+            app_id="app_1",
+            app_secret="secret_1",
+            open_id="ou_1",
+            msg_type="interactive",
+            content=card,
+            uuid="om-card-too-large",
+        )
+
+    assert exc_info.value.response["local_error_code"] == feishu_bot.FEISHU_SEND_TOO_LARGE
+    assert exc_info.value.response["request_body_bytes"] > feishu_bot.FEISHU_SEND_REQUEST_BUDGET_BYTES
+
+
 def test_reply_message_rejects_request_over_local_budget_without_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

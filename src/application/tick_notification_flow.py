@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import decide_daily_brief_notification, diff_daily_decision_briefs
-from domain.domain.multi_tick import evaluate_dnd_quiet_hours
+from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, evaluate_dnd_quiet_hours
+from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
 from domain.domain.engine import (
     build_failure_audit_fields,
     decide_notification_delivery,
@@ -17,8 +18,10 @@ from domain.storage.repositories import state_repo
 from src.application.cron_runtime import apply_notify_results_to_tick_metrics, build_notify_summary
 from src.application.daily_decision_brief_renderer import (
     render_candidate_alert,
+    render_candidate_alert_card_markdown,
     render_fixed_failure,
     render_fixed_report,
+    render_fixed_report_card_markdown,
     resolve_daily_brief_render_limits,
 )
 from src.application.daily_decision_brief_repository import (
@@ -84,6 +87,7 @@ class DailyBriefNotificationPreparation:
     lifecycles_by_account: dict[str, dict[str, Any]]
     delivery_keys_by_account: dict[str, str]
     markets: tuple[str, ...]
+    transport_envelopes_by_account: dict[str, dict[str, Any]] = field(default_factory=dict)
     multi_market_delivery_unsupported: bool = False
 
 
@@ -382,6 +386,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             base=process_root,
             failure_stage=delivery_adapter.failure_stage,
             idempotency_keys_by_account=daily_brief_prep.delivery_keys_by_account,
+            transport_envelopes_by_account=daily_brief_prep.transport_envelopes_by_account,
         )
         sent_accounts = list(execution.sent_accounts)
         notify_failures = list(execution.notify_failures)
@@ -598,6 +603,7 @@ def _prepare_daily_brief_notification(
             ),
             lifecycles_by_account={},
             delivery_keys_by_account={},
+            transport_envelopes_by_account={},
             markets=markets,
             multi_market_delivery_unsupported=True,
         )
@@ -605,6 +611,7 @@ def _prepare_daily_brief_notification(
     multi_market = len(markets) != 1
     lifecycles_by_account: dict[str, dict[str, Any]] = {}
     delivery_keys_by_account: dict[str, str] = {}
+    transport_envelopes_by_account: dict[str, dict[str, Any]] = {}
     messages_by_account: dict[str, str] = {}
     lifecycle_audit: list[dict[str, Any]] = []
     daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
@@ -630,6 +637,8 @@ def _prepare_daily_brief_notification(
                     continue
                 messages_by_account[account] = str(envelope["rendered_message"])
                 delivery_keys_by_account[account] = str(envelope["delivery_key"])
+                if isinstance(envelope.get("rendered_transport"), dict):
+                    transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
                 lifecycles_by_account[account] = {
                     "envelope": envelope,
                     "market": market,
@@ -638,6 +647,10 @@ def _prepare_daily_brief_notification(
                 }
                 lifecycle_audit.append(_daily_brief_envelope_audit(account, market, envelope, retry=True))
     else:
+        feishu_card_delivery = (
+            str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
+            == FEISHU_APP_NOTIFICATION_PROVIDER
+        )
         ran_pipeline_accounts = {
             str(value or "").strip().lower()
             for value in request.ran_pipeline_accounts
@@ -773,6 +786,11 @@ def _prepare_daily_brief_notification(
                                 limits=daily_limits,
                                 context=render_context,
                             )
+                            card_markdown = render_fixed_report_card_markdown(
+                                persisted["brief"],
+                                limits=daily_limits,
+                                context=render_context,
+                            )
                         else:
                             message = render_candidate_alert(
                                 persisted["brief"],
@@ -780,6 +798,20 @@ def _prepare_daily_brief_notification(
                                 limits=daily_limits,
                                 context=render_context,
                             )
+                            card_markdown = render_candidate_alert_card_markdown(
+                                persisted["brief"],
+                                identities,
+                                limits=daily_limits,
+                                context=render_context,
+                            )
+                        rendered_transport = (
+                            render_feishu_notification_card(
+                                markdown=card_markdown,
+                                fallback_text=message,
+                            )
+                            if feishu_card_delivery
+                            else None
+                        )
                         prepared = prepare_daily_decision_brief_delivery(
                             base=request.base,
                             account=account,
@@ -793,6 +825,7 @@ def _prepare_daily_brief_notification(
                             scheduled_target_market=(fixed_target or None),
                             candidate_identities=identities,
                             rendered_message=message,
+                            rendered_transport=rendered_transport,
                             render_context=render_context,
                         )
 
@@ -808,6 +841,8 @@ def _prepare_daily_brief_notification(
                     if isinstance(envelope, dict):
                         messages_by_account[account] = str(envelope["rendered_message"])
                         delivery_keys_by_account[account] = str(envelope["delivery_key"])
+                        if isinstance(envelope.get("rendered_transport"), dict):
+                            transport_envelopes_by_account[account] = dict(envelope["rendered_transport"])
                         lifecycles_by_account[account] = {
                             "brief": persisted["brief"] if persisted is not None else brief,
                             "diff": diff,
@@ -832,6 +867,11 @@ def _prepare_daily_brief_notification(
                         "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
                         "delivery_key": selected_envelope.get("delivery_key") if isinstance(selected_envelope, dict) else None,
                         "message_sha256": selected_envelope.get("message_sha256") if isinstance(selected_envelope, dict) else None,
+                        "rendered_transport_sha256": (
+                            selected_envelope.get("rendered_transport_sha256")
+                            if isinstance(selected_envelope, dict)
+                            else None
+                        ),
                         "message_chars": len(str(selected_envelope.get("rendered_message") or "")) if isinstance(selected_envelope, dict) else 0,
                         "render_limits": dict(daily_limits),
                     }
@@ -862,6 +902,7 @@ def _prepare_daily_brief_notification(
         ),
         lifecycles_by_account=lifecycles_by_account,
         delivery_keys_by_account=delivery_keys_by_account,
+        transport_envelopes_by_account=transport_envelopes_by_account,
         markets=markets,
         multi_market_delivery_unsupported=multi_market,
     )
@@ -927,6 +968,12 @@ def _daily_brief_envelope_audit(account: str, market: str, envelope: dict[str, A
         "delivery_kind": envelope.get("delivery_kind"),
         "delivery_key": envelope.get("delivery_key"),
         "message_sha256": envelope.get("message_sha256"),
+        "rendered_transport_sha256": envelope.get("rendered_transport_sha256"),
+        "render_mode": (
+            envelope.get("rendered_transport", {}).get("render_mode")
+            if isinstance(envelope.get("rendered_transport"), dict)
+            else "post_markdown"
+        ),
         "retry": retry,
     }
 
@@ -1025,6 +1072,9 @@ def _confirm_daily_brief_execution(
                         "delivery_kind": envelope["delivery_kind"],
                         "delivery_key": envelope["delivery_key"],
                         "confirmation_reason": confirmation.get("reason"),
+                        "render_mode": send_result.get("render_mode"),
+                        "fallback_used": bool(send_result.get("fallback_used")),
+                        "effective_idempotency_key": send_result.get("effective_idempotency_key"),
                     },
                 )
                 continue

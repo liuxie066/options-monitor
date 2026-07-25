@@ -121,6 +121,18 @@ def _config(*, enabled: bool = True, quiet: str | None = None) -> dict:
     return {"notifications": notifications, "schedule": {"timezone": "America/New_York"}}
 
 
+def _feishu_config() -> dict:
+    return {
+        "notifications": {
+            "provider": "feishu_app",
+            "channel": "feishu_app",
+            "target": "feishu:bot-user",
+            "daily_brief": {"enabled": True},
+        },
+        "schedule": {"timezone": "America/New_York"},
+    }
+
+
 def _request(
     tmp_path: Path,
     *,
@@ -306,7 +318,45 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
     assert envelope["status"] == "confirmed"
     assert set(state["days"][MARKET_DATE]["alerted_candidates"]) == {IDENTITY}
     assert calls[0]["idempotency_key"] == build_notification_transport_key(envelope["delivery_key"])
+    assert "transport_envelope" not in calls[0]
     assert bundle.commits == [{"lx": FIXED_TARGET}]
+
+
+def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+    )
+
+    _patch_assembler(monkeypatch)
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(
+        tmp_path,
+        run_id="fixed-feishu-card",
+        config=_feishu_config(),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    envelope = state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    transport = envelope["rendered_transport"]
+
+    assert envelope["status"] == "confirmed"
+    assert envelope["rendered_transport_sha256"]
+    assert transport["schema_version"] == "feishu-proactive-notification.v1"
+    assert transport["render_mode"] == "card_markdown_v2"
+    assert transport["text"] == envelope["rendered_message"]
+    assert transport["render_meta"]["markdown_table_detected"] is True
+    assert calls[0]["transport_envelope"] == transport
+    card_markdown = transport["transport"]["content"]["body"]["elements"][0]["content"]
+    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" in card_markdown
+    assert "| 现金总额 | $100,000.00 |" in card_markdown
 
 
 @pytest.mark.parametrize(
@@ -438,6 +488,54 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     assert mod.run_tick_notification_flow(second.request) == 0
     assert retry_calls[0]["message"] == retry_before["rendered_message"]
     assert retry_calls[0]["idempotency_key"] == calls[0]["idempotency_key"]
+
+
+def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_retryable_daily_decision_brief_delivery,
+    )
+
+    _patch_assembler(monkeypatch)
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
+    first_calls: list[dict] = []
+    _patch_sender(
+        monkeypatch,
+        calls=first_calls,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    first = _request(
+        tmp_path,
+        run_id="feishu-card-send-fail",
+        config=_feishu_config(),
+    )
+    assert mod.run_tick_notification_flow(first.request) == 1
+    retry_before = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )["envelope"]
+
+    retry_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=retry_calls)
+    second = _request(
+        tmp_path,
+        run_id="feishu-card-delivery-only",
+        delivery_only=True,
+        config=_feishu_config(),
+    )
+    assert mod.run_tick_notification_flow(second.request) == 0
+
+    assert retry_calls[0]["message"] == retry_before["rendered_message"]
+    assert retry_calls[0]["transport_envelope"] == retry_before["rendered_transport"]
+    assert retry_calls[0]["idempotency_key"] == first_calls[0]["idempotency_key"]
 
 
 def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monkeypatch, tmp_path: Path) -> None:

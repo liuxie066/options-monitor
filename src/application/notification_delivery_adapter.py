@@ -14,6 +14,9 @@ from domain.domain.multi_tick import (
 )
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from src.application.channels.feishu import build_feishu_channel_adapter
+from src.application.channels.feishu_notification_renderer import (
+    normalize_feishu_notification_envelope,
+)
 from src.application.channels.service import ChannelRegistry
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_channel_adapter
 from src.application.channels.wechat_clawbot.notification import (
@@ -21,8 +24,8 @@ from src.application.channels.wechat_clawbot.notification import (
     send_wechat_clawbot_message_process,
 )
 from src.application.secret_resolver import resolve_feishu_bot_config
-from src.infrastructure.feishu_bitable import FeishuError
-from src.infrastructure.feishu_bot import send_post_message
+from src.infrastructure.feishu_bitable import FeishuError, FeishuPermanentError
+from src.infrastructure.feishu_bot import FEISHU_SEND_TOO_LARGE, send_message, send_post_message
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,7 @@ def send_feishu_app_message(
     notifications: dict[str, Any] | None = None,
     receive_id_type: str = "open_id",
     idempotency_key: str | None = None,
+    transport_envelope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     del base, target
     resolved_channel = str(channel or "").strip().lower()
@@ -94,15 +98,52 @@ def send_feishu_app_message(
 
     request_path = f"/open-apis/im/v1/messages?receive_id_type={receive_id_type}"
     http_attempts: list[dict[str, Any]] = []
-    try:
-        response_json = send_post_message(
-            app_id=bot_cfg.app_id,
-            app_secret=bot_cfg.app_secret,
-            open_id=receive_id,
-            markdown=str(message or ""),
-            uuid=idempotency_key,
-            log_fn=http_attempts.append,
+    envelope = (
+        normalize_feishu_notification_envelope(
+            transport_envelope,
+            expected_text=str(message or ""),
         )
+        if transport_envelope is not None
+        else None
+    )
+    fallback_used = False
+    effective_idempotency_key = idempotency_key
+    try:
+        if envelope is None:
+            response_json = send_post_message(
+                app_id=bot_cfg.app_id,
+                app_secret=bot_cfg.app_secret,
+                open_id=receive_id,
+                markdown=str(message or ""),
+                uuid=idempotency_key,
+                log_fn=http_attempts.append,
+            )
+        else:
+            transport = dict(envelope["transport"])
+            try:
+                response_json = send_message(
+                    app_id=bot_cfg.app_id,
+                    app_secret=bot_cfg.app_secret,
+                    open_id=receive_id,
+                    msg_type=str(transport["msg_type"]),
+                    content=dict(transport["content"]),
+                    uuid=idempotency_key,
+                    log_fn=http_attempts.append,
+                )
+            except FeishuPermanentError as exc:
+                if not _card_permanent_failure_allows_fallback(exc):
+                    raise
+                fallback = dict(envelope["fallback"])
+                fallback_used = True
+                effective_idempotency_key = f"{idempotency_key}:fallback" if idempotency_key else None
+                response_json = send_post_message(
+                    app_id=bot_cfg.app_id,
+                    app_secret=bot_cfg.app_secret,
+                    open_id=receive_id,
+                    markdown=str(fallback["markdown"]),
+                    uuid=effective_idempotency_key,
+                    log_fn=http_attempts.append,
+                )
         return {
             "ok": True,
             "http_status": 200,
@@ -110,7 +151,10 @@ def send_feishu_app_message(
             "response_json": response_json,
             "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
             "idempotency_key": idempotency_key,
+            "effective_idempotency_key": effective_idempotency_key,
             "http_attempts": http_attempts,
+            "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
+            "fallback_used": fallback_used,
         }
     except FeishuError as exc:
         response = exc.response if isinstance(exc.response, dict) else {}
@@ -139,8 +183,21 @@ def send_feishu_app_message(
             "normalized_markdown_chars": response.get("normalized_markdown_chars"),
             "normalized_markdown_sha256": response.get("normalized_markdown_sha256"),
             "idempotency_key": idempotency_key,
+            "effective_idempotency_key": effective_idempotency_key,
             "http_attempts": response_http_attempts if isinstance(response_http_attempts, list) else http_attempts,
+            "render_mode": envelope.get("render_mode") if envelope else "post_markdown",
+            "fallback_used": fallback_used,
         }
+
+
+def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
+    response = exc.response if isinstance(exc.response, dict) else {}
+    if str(response.get("local_error_code") or "") == FEISHU_SEND_TOO_LARGE:
+        return True
+    http_status = response.get("http_status")
+    return exc.code is not None or (
+        isinstance(http_status, int) and 400 <= http_status <= 499
+    )
 
 
 def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str, Any]:
@@ -159,6 +216,7 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     request_path = str(result.get("request_path") or "/open-apis/im/v1/messages?receive_id_type=open_id")
     response_tail = str(result.get("response_tail") or "")
     idempotency_key = str(result.get("idempotency_key") or "").strip() or None
+    effective_idempotency_key = str(result.get("effective_idempotency_key") or "").strip() or None
     http_attempts = result.get("http_attempts") if isinstance(result.get("http_attempts"), list) else []
     retry_attempt_count = max(0, len(http_attempts) - 1)
     ambiguous_send = any(str(item.get("category") or "") == "transient" for item in http_attempts if isinstance(item, dict))
@@ -213,12 +271,15 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "request_path": request_path,
             "response_tail": response_tail,
             "idempotency_key": idempotency_key,
+            "effective_idempotency_key": effective_idempotency_key,
             "http_attempts": http_attempts,
             "retry_attempt_count": retry_attempt_count,
             "ambiguous_send": ambiguous_send,
             "duplicate_risk": duplicate_risk,
             "local_error_code": local_error_code,
             "error_code": local_error_code,
+            "render_mode": str(result.get("render_mode") or ""),
+            "fallback_used": bool(result.get("fallback_used")),
             **local_diagnostics,
         },
     )
@@ -249,6 +310,7 @@ def send_feishu_app_message_process(
     message: str,
     notifications: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    transport_envelope: dict[str, Any] | None = None,
 ) -> Any:
     send_result = send_feishu_app_message(
         base=base,
@@ -257,6 +319,7 @@ def send_feishu_app_message_process(
         message=message,
         notifications=notifications,
         idempotency_key=idempotency_key,
+        transport_envelope=transport_envelope,
     )
     normalized = normalize_feishu_app_send_output(send_result=send_result)
     stdout = ""

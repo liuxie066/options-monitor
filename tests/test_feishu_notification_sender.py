@@ -623,6 +623,171 @@ def test_feishu_size_preflight_error_preserves_local_diagnostics(monkeypatch, tm
     assert "# 简报" not in repr(normalized)
 
 
+def test_send_feishu_card_uses_interactive_transport_and_preserves_logical_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.feishu_notification_renderer import (
+        render_feishu_notification_card,
+    )
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    fallback_text = "# 决策简报\n\n候选｜NVDA"
+    envelope = render_feishu_notification_card(
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        fallback_text=fallback_text,
+    )
+    captured: dict[str, object] = {}
+
+    def _send_message(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return {"code": 0, "msg": "success", "data": {"message_id": "om_card_1"}}
+
+    monkeypatch.setattr(service, "send_message", _send_message)
+    monkeypatch.setattr(
+        service,
+        "send_post_message",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not use fallback")),
+    )
+
+    send_result = service.send_feishu_app_message(
+        base=tmp_path,
+        channel="feishu_app",
+        target="",
+        message=fallback_text,
+        notifications={},
+        idempotency_key="idem-card-1",
+        transport_envelope=envelope,
+    )
+    normalized = service.normalize_feishu_app_send_output(send_result=send_result)
+
+    assert captured["msg_type"] == "interactive"
+    assert captured["content"] == envelope["transport"]["content"]
+    assert captured["uuid"] == "idem-card-1"
+    assert normalized["delivery_confirmed"] is True
+    assert normalized["message_id"] == "om_card_1"
+    assert normalized["render_mode"] == "card_markdown_v2"
+    assert normalized["fallback_used"] is False
+    assert normalized["idempotency_key"] == "idem-card-1"
+    assert normalized["effective_idempotency_key"] == "idem-card-1"
+
+
+def test_send_feishu_card_falls_back_once_on_safe_permanent_rejection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.feishu_notification_renderer import (
+        render_feishu_notification_card,
+    )
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    fallback_text = "# 决策简报\n\n候选｜NVDA"
+    envelope = render_feishu_notification_card(
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        fallback_text=fallback_text,
+    )
+    fallback_calls: list[dict[str, object]] = []
+
+    def _reject_card(**_kwargs):  # type: ignore[no-untyped-def]
+        raise FeishuPermanentError(
+            "card rejected",
+            code=230001,
+            response={"http_status": 400, "feishu_code": 230001},
+        )
+
+    def _send_post_message(**kwargs):  # type: ignore[no-untyped-def]
+        fallback_calls.append(dict(kwargs))
+        return {"code": 0, "msg": "success", "data": {"message_id": "om_post_1"}}
+
+    monkeypatch.setattr(service, "send_message", _reject_card)
+    monkeypatch.setattr(service, "send_post_message", _send_post_message)
+
+    normalized = service.normalize_feishu_app_send_output(
+        send_result=service.send_feishu_app_message(
+            base=tmp_path,
+            channel="feishu_app",
+            target="",
+            message=fallback_text,
+            notifications={},
+            idempotency_key="idem-card-2",
+            transport_envelope=envelope,
+        )
+    )
+
+    assert len(fallback_calls) == 1
+    assert fallback_calls[0]["markdown"] == fallback_text
+    assert fallback_calls[0]["uuid"] == "idem-card-2:fallback"
+    assert normalized["delivery_confirmed"] is True
+    assert normalized["render_mode"] == "card_markdown_v2"
+    assert normalized["fallback_used"] is True
+    assert normalized["idempotency_key"] == "idem-card-2"
+    assert normalized["effective_idempotency_key"] == "idem-card-2:fallback"
+
+
+def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.feishu_notification_renderer import (
+        render_feishu_notification_card,
+    )
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    fallback_text = "# 决策简报\n\n候选｜NVDA"
+    envelope = render_feishu_notification_card(
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        fallback_text=fallback_text,
+    )
+
+    def _ambiguous_card_failure(**_kwargs):  # type: ignore[no-untyped-def]
+        raise FeishuPermanentError(
+            "response could not be classified",
+            response={
+                "http_status": 200,
+                "http_attempts": [
+                    {"category": "transient", "attempt": 1, "http_status": 500},
+                    {"category": "invalid_response", "attempt": 2, "http_status": 200},
+                ],
+            },
+        )
+
+    monkeypatch.setattr(service, "send_message", _ambiguous_card_failure)
+    monkeypatch.setattr(
+        service,
+        "send_post_message",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ambiguous send must not fallback")),
+    )
+
+    normalized = service.normalize_feishu_app_send_output(
+        send_result=service.send_feishu_app_message(
+            base=tmp_path,
+            channel="feishu_app",
+            target="",
+            message=fallback_text,
+            notifications={},
+            idempotency_key="idem-card-3",
+            transport_envelope=envelope,
+        )
+    )
+
+    assert normalized["delivery_confirmed"] is False
+    assert normalized["command_ok"] is True
+    assert normalized["ambiguous_send"] is True
+    assert normalized["fallback_used"] is False
+    assert normalized["effective_idempotency_key"] == "idem-card-3"
+
+
 def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp_path: Path) -> None:
     from src.application import notification_delivery_adapter as service
     from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message

@@ -1123,3 +1123,92 @@ def test_data_recovery_keeps_candidate_event_change_summary() -> None:
 
     assert "数据已恢复，以下为当前结果" in message
     assert "事件证据已恢复，现预计 8 月 5 日发布财报" in message
+
+
+def test_fixed_report_card_groups_regular_combo_and_actionable_position_tables() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
+
+    brief = _brief()
+    brief["positions"][0]["metrics"] = {
+        "close_mid": 0.35,
+        "realized_if_close": 285,
+        "remaining_annualized_return": 0.041,
+    }
+    brief["positions"].append(
+        {
+            "symbol": "AMD",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-21",
+            "strike": 150,
+            "option_type": "put",
+            "close_action": "close",
+            "tier": "strong",
+            "evaluation_status": "evaluable",
+            "quote_status": "priced",
+            "metrics": {
+                "close_mid": 0.52,
+                "realized_if_close": -74.5,
+                "remaining_annualized_return": 0.022,
+            },
+        }
+    )
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" in message
+    assert "| 首选 | MSFT 08-21 $400 Put | $5.25 / $480.00 | 18.1% | Δ -0.24 · 32天 · 可开2手 |" in message
+    assert "### Covered Call" in message
+    assert "AAPL 08-21 $250 Call" in message
+    assert "可卖1手" in message
+    assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" in message
+    assert "卖 08-21 $300 Put @ $3.45" in message
+    assert "买 09-18 $400 Call @ $1.05" in message
+    assert "年化 15.4% · 净收入 $620.00" in message
+    assert "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |" in message
+    assert "NVDA · 组合增强（Put 侧） · 08-21 $100 Put" in message
+    assert "建议平掉 Put，保留 Call | $0.35 | +$285.00 | 4.1%" in message
+    assert "AMD · Sell Put · 08-21 $150 Put | 强烈建议平仓 | $0.52 | -$74.50 | 2.2%" in message
+    assert "| 现金总额 | 暂不可用 |" in message
+    assert "<br>" not in message
+    _assert_no_internal_leak(message)
+
+
+def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+    from src.application.daily_decision_brief_renderer import render_candidate_alert_card_markdown
+
+    brief = _brief()
+    identity = build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="MSFT",
+        strategy_family="sell_put",
+    )
+    representative = deepcopy(brief["candidates"]["sell_put"][0])
+    representative["strategy_family"] = "sell_put"
+    brief["candidate_index"] = [
+        {
+            "identity": identity,
+            "symbol": "MSFT",
+            "strategy_family": "sell_put",
+            "representative": representative,
+            "contract_count": 1,
+        }
+    ]
+
+    message = render_candidate_alert_card_markdown(
+        brief,
+        [identity],
+        context=_scheduled_context(),
+    )
+
+    assert "### Sell Put" in message
+    assert "**MSFT｜Sell Put｜08-21 $400 Put（首选）**" in message
+    assert "| 优先 | 合约 |" not in message
+    assert "事件｜Sell Put #1：" in message
+    assert message.count("执行前需要再次检查") == 1
+    assert "## 持仓" not in message
+    assert "| 项目 | 数值 |" in message

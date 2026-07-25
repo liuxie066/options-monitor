@@ -18,6 +18,10 @@ from domain.domain.daily_decision_brief import (
 )
 from domain.storage import paths
 from domain.storage.json_io import atomic_write_json, atomic_write_text
+from src.application.channels.feishu_notification_renderer import (
+    feishu_notification_envelope_sha256,
+    normalize_feishu_notification_envelope,
+)
 
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
@@ -242,6 +246,7 @@ def prepare_daily_decision_brief_delivery(
     candidate_identities: list[str] | tuple[str, ...] = (),
     source_reference: str | None = None,
     render_context: Mapping[str, Any] | None = None,
+    rendered_transport: Mapping[str, Any] | None = None,
     prepared_at_utc: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Persist an exact v2 delivery envelope and its run-scoped audit copy."""
@@ -264,6 +269,21 @@ def prepare_daily_decision_brief_delivery(
     if not message.strip():
         raise ValueError("rendered_message is required")
     message_sha256 = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    rendered_transport_norm = (
+        normalize_feishu_notification_envelope(
+            rendered_transport,
+            expected_text=message,
+        )
+        if rendered_transport is not None
+        else None
+    )
+    if kind_norm == "fixed_failure" and rendered_transport_norm is not None:
+        raise ValueError("fixed_failure must remain a plain-text notification")
+    rendered_transport_sha256 = (
+        feishu_notification_envelope_sha256(rendered_transport_norm)
+        if rendered_transport_norm is not None
+        else None
+    )
     prepared_at = _coerce_utc_iso(prepared_at_utc)
     context = dict(render_context or {})
     identities = _normalize_candidate_identities(
@@ -335,6 +355,8 @@ def prepare_daily_decision_brief_delivery(
         "delivery_key": delivery_key,
         "rendered_message": message,
         "message_sha256": message_sha256,
+        "rendered_transport": rendered_transport_norm,
+        "rendered_transport_sha256": rendered_transport_sha256,
         "candidate_identities": identities,
         "scheduled_target_market": target_norm,
         "render_context": context,
@@ -1490,6 +1512,27 @@ def _normalize_delivery_envelope(
         raise DailyDecisionBriefStateError(f"daily brief delivery message is invalid: {path}")
     if hashlib.sha256(rendered_message.encode("utf-8")).hexdigest() != message_sha256:
         raise DailyDecisionBriefStateError(f"daily brief delivery message digest mismatch: {path}")
+    rendered_transport_raw = envelope.get("rendered_transport")
+    rendered_transport_sha256 = str(envelope.get("rendered_transport_sha256") or "").strip() or None
+    if rendered_transport_raw is None:
+        if rendered_transport_sha256 is not None:
+            raise DailyDecisionBriefStateError(f"daily brief delivery transport digest has no payload: {path}")
+        rendered_transport = None
+    else:
+        try:
+            rendered_transport = normalize_feishu_notification_envelope(
+                rendered_transport_raw,
+                expected_text=rendered_message,
+            )
+        except ValueError as exc:
+            raise DailyDecisionBriefStateError(
+                f"daily brief delivery transport is invalid: {path}: {exc}"
+            ) from exc
+        actual_transport_sha256 = feishu_notification_envelope_sha256(rendered_transport)
+        if rendered_transport_sha256 != actual_transport_sha256:
+            raise DailyDecisionBriefStateError(f"daily brief delivery transport digest mismatch: {path}")
+    if delivery_kind == "fixed_failure" and rendered_transport is not None:
+        raise DailyDecisionBriefStateError(f"fixed failure delivery must not contain card transport: {path}")
     if status == "confirmed" and confirmed_at is None:
         raise DailyDecisionBriefStateError(f"confirmed daily brief delivery has no confirmation time: {path}")
     if status != "confirmed" and confirmed_at is not None:
@@ -1561,6 +1604,8 @@ def _normalize_delivery_envelope(
         "delivery_key": delivery_key,
         "rendered_message": rendered_message,
         "message_sha256": message_sha256,
+        "rendered_transport": rendered_transport,
+        "rendered_transport_sha256": rendered_transport_sha256,
         "candidate_identities": candidate_identities,
         "scheduled_target_market": target_norm,
         "render_context": dict(render_context),
@@ -1725,6 +1770,8 @@ def _delivery_envelope_content(envelope: Mapping[str, Any]) -> dict[str, Any]:
             "delivery_key",
             "rendered_message",
             "message_sha256",
+            "rendered_transport",
+            "rendered_transport_sha256",
             "candidate_identities",
             "scheduled_target_market",
             "render_context",
