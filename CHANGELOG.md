@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.27 - 2026-07-25
+
+### Added
+- Added adaptive Feishu conversation replies that render Copilot and rich Markdown responses as display-only Card JSON 2.0 content, including readable Markdown tables, while keeping short plain control and error replies as text.
+- Added block-aware character and byte truncation, safe link and mention sanitization, deterministic table-to-text fallback, and render metadata without duplicating response bodies in delivery receipts.
+
+### Changed
+- Persisted final Feishu reply transport envelopes before delivery so retries reuse the same content and UUID, while retaining legacy text-row compatibility and a top-level text copy that remains drainable after a code rollback.
+- Kept the adaptive renderer limited to inbound Feishu conversations without changing scheduled briefs, proactive notifications, other channels, or financial calculations.
+
 ## 1.4.26 - 2026-07-25
 
 ### Fixed
