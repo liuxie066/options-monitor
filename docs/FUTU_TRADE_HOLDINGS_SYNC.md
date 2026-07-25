@@ -12,24 +12,24 @@ portfolio-management 服务，PM 再读取 Futu 完整持仓快照并更新绝�
 
 ## 启用
 
-运行配置的 `trade_intake` 可增加：
+权威 `config.yaml` 可增加：
 
-```json
-{
-  "holdings_sync": {
-    "enabled": true,
-    "debounce_sec": 2,
-    "request_timeout_sec": 120,
-    "max_attempts": 3,
-    "retry_backoff_sec": 2,
-    "queue_capacity": 100,
-    "recent_deal_limit": 2000,
-    "state_dir": "output_shared/state/trade_intake/stock_holdings_sync"
-  }
-}
+```yaml
+trade_intake:
+  holdings_sync:
+    enabled: true
+    debounce_sec: 2
+    request_timeout_sec: 120
+    max_attempts: 3
+    retry_backoff_sec: 2
+    queue_capacity: 100
+    recent_deal_limit: 2000
+    state_dir: output_shared/state/trade_intake/stock_holdings_sync
 ```
 
 默认关闭。只有 `trade-intake` 处于 `apply` 且已经经过写入确认时才会启动。
+YAML 只接受 `holdings_sync` 子树；`mode`、确认和其他写入权限仍由
+CLI、服务定义和环境文件控制。
 目标服务地址沿用 `PORTFOLIO_SERVICE_URL`，默认
 `http://127.0.0.1:8765`，并强制为 loopback origin。
 

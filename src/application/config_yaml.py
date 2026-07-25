@@ -51,7 +51,15 @@ PASSTHROUGH_KEYS = {
     "watchdog",
 }
 ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
-ROOT_KEYS = {"accounts", "features", "markets", *PASSTHROUGH_KEYS, *ASSISTANT_AUTHORING_KEYS}
+TRADE_INTAKE_AUTHORING_KEYS = {"holdings_sync"}
+ROOT_KEYS = {
+    "accounts",
+    "features",
+    "markets",
+    "trade_intake",
+    *PASSTHROUGH_KEYS,
+    *ASSISTANT_AUTHORING_KEYS,
+}
 MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS}
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
 COVERED_CALL_AUTHORING_KEY = "covered_call"
@@ -372,6 +380,23 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
     return out
 
 
+def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object")
+    _reject_unknown_keys(raw, allowed=TRADE_INTAKE_AUTHORING_KEYS, path=path)
+    if "holdings_sync" not in raw:
+        return {}
+    holdings_sync = raw.get("holdings_sync")
+    if not isinstance(holdings_sync, dict):
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"{path}.holdings_sync must be an object",
+        )
+    return {"holdings_sync": deepcopy(holdings_sync)}
+
+
 def _normalize_templates_authoring_keys(raw: Any, *, path: str) -> Any:
     if not isinstance(raw, dict):
         return deepcopy(raw)
@@ -502,6 +527,11 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
 
     out = _copy_passthrough(raw_cfg, path="config.yaml")
     out = _deep_merge(out, _copy_passthrough(market_cfg, path=f"markets.{normalized_market}"))
+    if "trade_intake" in raw_cfg:
+        out["trade_intake"] = _normalize_trade_intake_authoring(
+            raw_cfg.get("trade_intake"),
+            path="config.yaml.trade_intake",
+        )
     out = _deep_merge(out, _normalize_features(raw_cfg.get("features"), path="features"))
     out = _deep_merge(out, _normalize_features(market_cfg.get("features"), path=f"markets.{normalized_market}.features"))
     out["accounts"] = accounts
