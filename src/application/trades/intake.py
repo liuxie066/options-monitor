@@ -381,6 +381,7 @@ def process_trade_payload(
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
     source: str = "push",
 ) -> dict[str, Any]:
@@ -440,6 +441,38 @@ def process_trade_payload(
             source=source,
         )
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", source=source, deal=deal))
+    holdings_sync_intent: dict[str, Any] | None = None
+    if on_stock_holdings_sync_fn is not None:
+        try:
+            callback_result = on_stock_holdings_sync_fn(
+                {
+                    "payload": payload,
+                    "effective_payload": effective_payload,
+                    "deal": deal,
+                    "apply_changes": apply_changes,
+                    "state_path": state_path,
+                    "audit_path": audit_path,
+                    "source": source,
+                }
+            )
+            if isinstance(callback_result, dict):
+                holdings_sync_intent = dict(callback_result)
+        except Exception as exc:
+            holdings_sync_intent = {
+                "status": "failed",
+                "reason": "dispatcher_callback_exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if holdings_sync_intent is not None:
+            append_trade_intake_audit_fn(
+                audit_path,
+                build_trade_intake_audit_event(
+                    "stock_holdings_sync_intent",
+                    source=source,
+                    deal=deal,
+                    extra={"stock_holdings_sync": holdings_sync_intent},
+                ),
+            )
     try:
         result = resolve_trade_deal_fn(
             deal,
@@ -454,9 +487,13 @@ def process_trade_payload(
             repo=repo,
             apply_changes=apply_changes,
         )
+        if holdings_sync_intent is not None:
+            result_dict["stock_holdings_sync"] = holdings_sync_intent
         append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", source=source, deal=deal, result=result_dict))
     except Exception as exc:
         result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")
+        if holdings_sync_intent is not None:
+            result_dict["stock_holdings_sync"] = holdings_sync_intent
         append_trade_intake_audit_fn(
             audit_path,
             build_trade_intake_audit_event("failed", source=source, deal=deal, result=result_dict),
