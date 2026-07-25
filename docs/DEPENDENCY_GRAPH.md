@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 766 (`src`: 417, `domain`: 64, `scripts`: 7, `tests`: 278)
-- Internal import edges: 4443 total, 1958 production/script edges excluding tests
+- Python files scanned: 768 (`src`: 418, `domain`: 64, `scripts`: 7, `tests`: 279)
+- Internal import edges: 4468 total, 1962 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -43,10 +43,10 @@ flowchart LR
   scripts -->|8| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1750| application
-  tests -->|376| domain
+  tests -->|1768| application
+  tests -->|377| domain
   tests -->|2| domain_services
-  tests -->|113| infrastructure
+  tests -->|115| infrastructure
   tests -->|189| interfaces
   tests -->|10| scripts
   tests -->|16| storage
@@ -73,10 +73,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1750 |
-| tests | domain | 376 |
+| tests | application | 1768 |
+| tests | domain | 377 |
 | tests | interfaces | 189 |
-| tests | infrastructure | 113 |
+| tests | infrastructure | 115 |
 | tests | storage | 16 |
 | tests | scripts | 10 |
 | tests | domain_services | 2 |
@@ -204,8 +204,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tools.diagnostics | 20 |
 | src.application.multi_tick.required_data_prefetch | 20 |
 | src.application.pipeline_runtime | 20 |
+| src.application.tick_notification_flow | 20 |
 | src.application.agent_tools.runtime_status_impl | 19 |
-| src.application.tick_notification_flow | 19 |
 | src.application.trades.auto_intake | 19 |
 | src.application.account_run | 18 |
 

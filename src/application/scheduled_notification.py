@@ -299,6 +299,7 @@ def send_account_message_with_retry(
     max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
     retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
     idempotency_key_override: str | None = None,
+    transport_envelope: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     attempts = max(1, int(max_attempts or 1))
     final_record: dict[str, object] | None = None
@@ -327,6 +328,7 @@ def send_account_message_with_retry(
             "target_set": bool(str(target or "")),
             "message_len": len(str(message or "")),
             "idempotency_key": idempotency_key,
+            "transport_envelope": bool(transport_envelope),
         }
         audit_fn(
             "notify",
@@ -340,12 +342,17 @@ def send_account_message_with_retry(
 
         send_tool_dto: dict[str, Any] = {}
         try:
+            send_kwargs: dict[str, Any] = {
+                "base": base,
+                "channel": str(channel),
+                "target": str(target),
+                "message": message,
+                "idempotency_key": idempotency_key,
+            }
+            if transport_envelope is not None:
+                send_kwargs["transport_envelope"] = transport_envelope
             send = send_fn(
-                base=base,
-                channel=str(channel),
-                target=str(target),
-                message=message,
-                idempotency_key=idempotency_key,
+                **send_kwargs,
             )
             send_tool_dto = normalize_notification_delivery_result(send, normalize_fn=normalize_fn)
             raw_message_id = send_tool_dto.get("message_id")
@@ -375,6 +382,7 @@ def send_account_message_with_retry(
                 "error_code": error_code,
                 "provider_response_code": provider_response_code,
                 "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
+                "effective_idempotency_key": send_tool_dto.get("effective_idempotency_key"),
                 "local_receipt_id": send_tool_dto.get("local_receipt_id"),
                 "http_attempts": send_tool_dto.get("http_attempts") if isinstance(send_tool_dto.get("http_attempts"), list) else [],
                 "retry_attempt_count": int(send_tool_dto.get("retry_attempt_count") or 0),
@@ -385,6 +393,8 @@ def send_account_message_with_retry(
                 "request_body_budget_bytes": send_tool_dto.get("request_body_budget_bytes"),
                 "normalized_markdown_chars": send_tool_dto.get("normalized_markdown_chars"),
                 "normalized_markdown_sha256": send_tool_dto.get("normalized_markdown_sha256"),
+                "render_mode": send_tool_dto.get("render_mode"),
+                "fallback_used": bool(send_tool_dto.get("fallback_used")),
             }
         except subprocess.TimeoutExpired as exc:
             message_id = None
@@ -481,10 +491,13 @@ def send_account_message_with_retry(
                 "delivery_confirmed": bool(record.get("delivery_confirmed")),
                 "provider_response_code": record.get("provider_response_code"),
                 "idempotency_key": record.get("idempotency_key") or idempotency_key,
+                "effective_idempotency_key": record.get("effective_idempotency_key"),
                 "local_receipt_id": record.get("local_receipt_id"),
                 "retry_attempt_count": int(record.get("retry_attempt_count") or 0),
                 "ambiguous_send": bool(record.get("ambiguous_send")),
                 "duplicate_risk": bool(record.get("duplicate_risk")),
+                "render_mode": record.get("render_mode"),
+                "fallback_used": bool(record.get("fallback_used")),
             }
 
         runlog.safe_event(
@@ -535,6 +548,7 @@ def send_account_message_with_retry(
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
         "provider_response_code": final.get("provider_response_code"),
         "idempotency_key": final.get("idempotency_key") or idempotency_key,
+        "effective_idempotency_key": final.get("effective_idempotency_key"),
         "local_receipt_id": final.get("local_receipt_id"),
         "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
         "ambiguous_send": bool(final.get("ambiguous_send")),
@@ -544,6 +558,8 @@ def send_account_message_with_retry(
         "request_body_budget_bytes": final.get("request_body_budget_bytes"),
         "normalized_markdown_chars": final.get("normalized_markdown_chars"),
         "normalized_markdown_sha256": final.get("normalized_markdown_sha256"),
+        "render_mode": final.get("render_mode"),
+        "fallback_used": bool(final.get("fallback_used")),
     }
 
 
@@ -562,6 +578,7 @@ def execute_per_account_delivery(
     failure_stage: str = "send_notification_message",
     sleep_fn: Callable[[float], Any] = sleep,
     idempotency_keys_by_account: dict[str, str] | None = None,
+    transport_envelopes_by_account: dict[str, dict[str, Any]] | None = None,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
@@ -600,6 +617,7 @@ def execute_per_account_delivery(
             failure_stage=failure_stage,
             sleep_fn=sleep_fn,
             idempotency_key_override=(idempotency_keys_by_account or {}).get(str(acct)),
+            transport_envelope=(transport_envelopes_by_account or {}).get(str(acct)),
         )
         if not bool(send_result.get("ok")):
             send_results.append(dict(send_result))
@@ -623,6 +641,7 @@ def execute_per_account_delivery(
                     "timeout_sec": final_record.get("timeout_sec"),
                     "exception_type": final_record.get("exception_type"),
                     "idempotency_key": send_result.get("idempotency_key"),
+                    "effective_idempotency_key": send_result.get("effective_idempotency_key"),
                     "local_receipt_id": send_result.get("local_receipt_id"),
                     "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
                     "ambiguous_send": bool(send_result.get("ambiguous_send")),
@@ -632,6 +651,8 @@ def execute_per_account_delivery(
                     "request_body_budget_bytes": send_result.get("request_body_budget_bytes"),
                     "normalized_markdown_chars": send_result.get("normalized_markdown_chars"),
                     "normalized_markdown_sha256": send_result.get("normalized_markdown_sha256"),
+                    "render_mode": send_result.get("render_mode"),
+                    "fallback_used": bool(send_result.get("fallback_used")),
                 }
             )
             continue

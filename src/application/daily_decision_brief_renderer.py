@@ -113,6 +113,7 @@ def build_daily_brief_user_view(
         limits=cfg,
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    funds = _fund_views(brief)
     strategy_failure_labels = _strategy_failure_labels(brief)
     if strategy_failure_labels:
         reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
@@ -136,7 +137,8 @@ def build_daily_brief_user_view(
         "positions": position_views,
         "position_total": position_total,
         "position_actionable_total": position_actionable_total,
-        "funds": _fund_views(brief),
+        "funds": funds,
+        "fund_rows": [_split_display_field(item) for item in funds],
         "capacity": capacity,
         "reminders": reminders,
     }
@@ -156,6 +158,21 @@ def render_fixed_report(
         context=context,
     )
     return _render_user_view(view, projection="fixed_report")
+
+
+def render_fixed_report_card_markdown(
+    brief: Mapping[str, Any],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="fixed_report",
+        limits=limits,
+        context=context,
+    )
+    return _render_user_view_card(view, projection="fixed_report")
 
 
 def render_candidate_alert(
@@ -179,6 +196,29 @@ def render_candidate_alert(
             f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
         ]
     return _render_user_view(view, projection="candidate_alert")
+
+
+def render_candidate_alert_card_markdown(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    filtered, omitted = _candidate_alert_brief(brief, candidate_identities)
+    alert_limits = dict(limits or {})
+    alert_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
+    view = build_daily_brief_user_view(
+        filtered,
+        delivery_kind="candidate_alert",
+        limits=alert_limits,
+        context=context,
+    )
+    if omitted:
+        view["candidate_omissions"] = [
+            f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
+        ]
+    return _render_user_view_card(view, projection="candidate_alert")
 
 
 def render_fixed_failure(
@@ -389,6 +429,210 @@ def _render_user_view(
     return _bounded_markdown(lines)
 
 
+def _render_user_view_card(
+    view: Mapping[str, Any],
+    *,
+    projection: str,
+) -> str:
+    lines = [
+        f"# OM · 决策简报 · {view['account']}",
+        "",
+        f"状态｜{view['phase_line']}",
+        f"市场｜{view['market_label']}",
+        f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
+    ]
+    planning_notice = str(view.get("planning_notice") or "")
+    if planning_notice:
+        lines.extend(["", f"提示｜{planning_notice}"])
+    if bool(view.get("blocked")):
+        lines.extend(
+            [
+                "",
+                f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
+                "后续｜系统将在后续批次自动重新评估。",
+            ]
+        )
+        return "\n".join(lines).strip()
+
+    changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
+    if changes:
+        lines.extend(["", "变化｜" + "；".join(changes) + "。"])
+
+    candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
+    candidate_heading = "新增候选" if projection == "candidate_alert" else "当前候选"
+    lines.extend(["", f"## {candidate_heading}"])
+    if not candidates:
+        lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+    else:
+        for family in ("sell_put", "covered_call", "combo_yield"):
+            family_rows = [item for item in candidates if item.get("family") == family]
+            if not family_rows:
+                continue
+            lines.extend(
+                _render_candidate_family_card(
+                    family,
+                    family_rows,
+                    use_table=not (projection == "candidate_alert" and len(family_rows) == 1),
+                )
+            )
+        lines.extend(_render_candidate_event_card(candidates))
+        for note in view.get("candidate_omissions") or []:
+            lines.append(f"补充｜{note}")
+
+    if projection != "candidate_alert":
+        lines.extend(["", "## 持仓"])
+        positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
+        position_total = _whole_number(view.get("position_total")) or 0
+        position_actionable_total = _whole_number(view.get("position_actionable_total")) or 0
+        summary = f"汇总｜共 {position_total} 条"
+        if position_actionable_total:
+            summary += f"，需处理 {position_actionable_total} 条"
+            if len(positions) < position_actionable_total:
+                summary += f"，本消息展示 {len(positions)} 条"
+        else:
+            summary += "，当前没有需要处理的持仓"
+        lines.append(summary + "。")
+        if positions:
+            lines.extend(
+                [
+                    "",
+                    "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |",
+                    "|---|---|---:|---:|---:|",
+                    *[
+                        "| "
+                        + " | ".join(
+                            _table_cell(item.get(key) or "—")
+                            for key in (
+                                "holding",
+                                "status",
+                                "close_mid",
+                                "realized_if_close",
+                                "remaining_annualized",
+                            )
+                        )
+                        + " |"
+                        for item in positions
+                    ],
+                ]
+            )
+
+    fund_rows = [item for item in view.get("fund_rows") or [] if isinstance(item, Mapping)]
+    lines.extend(["", "## 资金"])
+    if fund_rows:
+        lines.extend(
+            [
+                "",
+                "| 项目 | 数值 |",
+                "|---|---:|",
+                *[
+                    f"| {_table_cell(item.get('label') or '—')} | {_table_cell(item.get('value') or '—')} |"
+                    for item in fund_rows
+                ],
+            ]
+        )
+    else:
+        lines.append("资金数据暂不可用。")
+
+    reminders = [str(item) for item in view.get("reminders") or [] if str(item).strip()]
+    if reminders:
+        lines.extend(["", "## 提醒"])
+        lines.extend(f"提醒｜{item}" for item in reminders)
+    return "\n".join(lines).strip()
+
+
+def _render_candidate_family_card(
+    family: str,
+    rows: list[Mapping[str, Any]],
+    *,
+    use_table: bool,
+) -> list[str]:
+    heading = _STRATEGY_LABELS.get(family, family)
+    lines = ["", f"### {heading}"]
+    if not use_table:
+        item = rows[0]
+        lines.extend(
+            [
+                f"**{_flat_title(item.get('title'))}**",
+                *[
+                    f"{_candidate_detail_label(detail)}｜{detail}"
+                    for detail in item.get("details") or []
+                    if str(detail) != str(item.get("event_line") or "")
+                ],
+            ]
+        )
+        return lines
+    if family == "combo_yield":
+        lines.extend(
+            [
+                "",
+                "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |",
+                "|---|---|---|---|---|",
+                *[
+                    "| "
+                    + " | ".join(
+                        _table_cell(item.get(key) or "—")
+                        for key in ("choice", "symbol", "put_leg_card", "call_leg_card", "return_card")
+                    )
+                    + " |"
+                    for item in rows
+                ],
+            ]
+        )
+        return lines
+    lines.extend(
+        [
+            "",
+            "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |",
+            "|---|---|---|---:|---|",
+            *[
+                "| "
+                + " | ".join(
+                    _table_cell(item.get(key) or "—")
+                    for key in ("choice", "contract_card", "income_card", "annualized_card", "risk_capacity_card")
+                )
+                + " |"
+                for item in rows
+            ],
+        ]
+    )
+    return lines
+
+
+def _render_candidate_event_card(candidates: list[Mapping[str, Any]]) -> list[str]:
+    grouped: dict[str, list[str]] = {}
+    family_counts: dict[str, int] = {}
+    for item in candidates:
+        family = str(item.get("family") or "")
+        family_counts[family] = family_counts.get(family, 0) + 1
+        label = f"{_STRATEGY_LABELS.get(family, family)} #{family_counts[family]}"
+        event_line = str(item.get("event_line") or "").strip()
+        if event_line:
+            grouped.setdefault(event_line, []).append(label)
+    return [
+        f"事件｜{'、'.join(labels)}：{event_line}"
+        for event_line, labels in grouped.items()
+    ]
+
+
+def _table_cell(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("\r\n", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("|", r"\|")
+        .strip()
+    )
+
+
+def _split_display_field(value: Any) -> dict[str, str]:
+    text = str(value or "").strip()
+    if "：" in text:
+        label, body = text.split("：", 1)
+        return {"label": label.strip(), "value": body.strip()}
+    return {"label": text, "value": "—"}
+
+
 def _strip_display_label(value: Any, prefix: str) -> str:
     text = str(value or "").strip()
     return text.removeprefix(prefix).strip()
@@ -465,12 +709,29 @@ def _candidate_views(
                 out.append(
                     {
                         "family": family,
+                        "rank": rank,
+                        "choice": choice,
+                        "symbol": symbol,
                         "title": f"{symbol} · 组合增强（{choice}）",
                         "legs": [put_leg, call_leg],
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),
                             _candidate_event_line(row, family=family),
                         ],
+                        "event_line": _candidate_event_line(row, family=family),
+                        "put_leg_card": _combo_leg_card(
+                            direction="卖",
+                            contract=put_contract,
+                            reference=put_ref,
+                            market=market,
+                        ),
+                        "call_leg_card": _combo_leg_card(
+                            direction="买",
+                            contract=call_contract,
+                            reference=call_ref,
+                            market=market,
+                        ),
+                        "return_card": _combo_return_card(row, market=market),
                     }
                 )
                 continue
@@ -484,12 +745,18 @@ def _candidate_views(
             out.append(
                 {
                     "family": family,
+                    "rank": rank,
+                    "choice": choice,
+                    "symbol": symbol,
                     "title": (f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）"),
                     "details": [
                         *_candidate_metric_details(row, family=family, market=market),
                         _candidate_event_line(row, family=family),
                     ],
                     "legs": [],
+                    "event_line": _candidate_event_line(row, family=family),
+                    "contract_card": f"{symbol} {contract}",
+                    **_regular_candidate_card_fields(row, family=family, market=market),
                 }
             )
     return out, omissions, selected_by_family
@@ -532,6 +799,79 @@ def _candidate_metric_details(
     if net_income is not None:
         parts.append(f"预计净收入 {_money(net_income, market=market)}")
     return [" · ".join(parts)] if parts else []
+
+
+def _regular_candidate_card_fields(
+    candidate: Mapping[str, Any],
+    *,
+    family: str,
+    market: str,
+) -> dict[str, str]:
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), Mapping) else {}
+    mid = _number(metrics.get("mid"))
+    bid = _number(metrics.get("bid"))
+    ask = _number(metrics.get("ask"))
+    if mid is not None:
+        premium = _money(mid, market=market)
+    elif bid is not None or ask is not None:
+        bid_text = _money(bid, market=market) if bid is not None else "—"
+        ask_text = _money(ask, market=market) if ask is not None else "—"
+        premium = f"{bid_text}/{ask_text}"
+    else:
+        premium = "—"
+    net_income = _number(metrics.get("net_income"))
+    income_card = premium
+    if net_income is not None:
+        income_card += f" / {_money(net_income, market=market)}"
+    annualized_key = {
+        "sell_put": "annualized_net_return_on_cash_basis",
+        "covered_call": "annualized_net_premium_return",
+    }.get(family)
+    annualized = _number(metrics.get(annualized_key)) if annualized_key else None
+    delta = _number(metrics.get("delta"))
+    dte = _number(metrics.get("dte"))
+    capacity = _capacity_contracts(candidate)
+    risk_parts: list[str] = []
+    if delta is not None:
+        risk_parts.append(f"Δ {delta:.2f}")
+    if dte is not None:
+        risk_parts.append(f"{max(0, int(dte))}天")
+    if capacity is not None:
+        action = "可卖" if family == "covered_call" else "可开"
+        risk_parts.append(f"{action}{capacity}手")
+    return {
+        "income_card": income_card,
+        "annualized_card": _percent(annualized) if annualized is not None else "—",
+        "risk_capacity_card": " · ".join(risk_parts) or "—",
+    }
+
+
+def _combo_leg_card(
+    *,
+    direction: str,
+    contract: str,
+    reference: float | None,
+    market: str,
+) -> str:
+    value = f"{direction} {contract}"
+    if reference is not None:
+        value += f" @ {_money(reference, market=market)}"
+    return value
+
+
+def _combo_return_card(candidate: Mapping[str, Any], *, market: str) -> str:
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), Mapping) else {}
+    parts: list[str] = []
+    mid = _number(metrics.get("mid"))
+    if mid is not None:
+        parts.append(f"净权利金 {_money(mid, market=market)}")
+    annualized = _number(metrics.get("annualized_net_credit_yield"))
+    if annualized is not None:
+        parts.append(f"年化 {_percent(annualized)}")
+    net_income = _number(metrics.get("net_income"))
+    if net_income is not None:
+        parts.append(f"净收入 {_money(net_income, market=market)}")
+    return " · ".join(parts) or "—"
 
 
 def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
@@ -585,8 +925,10 @@ def _position_views(
         out.append(
             {
                 "title": " · ".join(title_parts),
+                "holding": " · ".join(title_parts),
                 "status": status,
                 "details": _position_close_details(row, market=market, status=status),
+                **_position_card_fields(row, market=market, status=status),
             }
         )
     return out, total, actionable_total
@@ -676,6 +1018,29 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
     if remaining_annualized is not None:
         parts.append(f"剩余权利金毛年化 {_percent(remaining_annualized)}")
     return [" · ".join(parts)] if parts else []
+
+
+def _position_card_fields(row: Mapping[str, Any], *, market: str, status: str) -> dict[str, str]:
+    if status.startswith("暂无法评估") or _lower(row.get("close_action")) not in _CLOSE_DETAIL_ACTIONS:
+        return {
+            "close_mid": "—",
+            "realized_if_close": "—",
+            "remaining_annualized": "—",
+        }
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
+    close_mid = _number(metrics.get("close_mid"))
+    realized = _number(metrics.get("realized_if_close"))
+    remaining = _number(metrics.get("remaining_annualized_return"))
+    realized_text = "—"
+    if realized is not None:
+        realized_text = _money(realized, market=market)
+        if realized > 0:
+            realized_text = "+" + realized_text
+    return {
+        "close_mid": _money(close_mid, market=market) if close_mid is not None else "—",
+        "realized_if_close": realized_text,
+        "remaining_annualized": _percent(remaining) if remaining is not None else "—",
+    }
 
 
 def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:
@@ -1391,10 +1756,12 @@ __all__ = [
     "resolve_daily_brief_render_limits",
     "render_blocked_brief",
     "render_candidate_alert",
+    "render_candidate_alert_card_markdown",
     "render_daily_brief_lifecycle",
     "render_delta_brief",
     "render_fixed_failure",
     "render_fixed_report",
+    "render_fixed_report_card_markdown",
     "render_full_brief",
     "render_query_brief",
     "render_recovery_brief",
