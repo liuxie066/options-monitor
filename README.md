@@ -38,7 +38,7 @@ trade_events -> projection -> position_lots
 
 产品域见 [产品架构](docs/PRODUCT_ARCHITECTURE.md)，技术调用链见 [系统架构](docs/ARCHITECTURE.md)。
 
-## 项目功能清单
+## 主要能力与入口
 
 | 能力 | 当前入口 | 权威说明 |
 |---|---|---|
@@ -51,9 +51,11 @@ trade_events -> projection -> position_lots
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 全部 Sell Put / Sell Call 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
 | 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
-| 结构化工具 | `om-agent spec|run` | [Tool Reference](docs/TOOL_REFERENCE.md) |
+| 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Shadow Replay / Strategy Lab | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
+
+本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
 
 开仓策略支持两种口径：
 
@@ -333,6 +335,8 @@ om-agent spec
 om-agent run --tool healthcheck \
   --input-json '{"config_key":"us"}'
 ```
+
+`om-agent spec` 用于发现当前环境公开的工具及其调用合同；`om-agent run` 用于按工具名执行一次结构化调用，必须根据 manifest 传入符合 schema 的参数。
 
 `om-agent` 是给外部 agent、脚本和操作者使用的结构化 Tool Gateway，不是 OM 自己的自治 Agent。每个工具的 manifest 会声明：
 
