@@ -1171,7 +1171,9 @@ def test_fixed_report_card_groups_regular_combo_and_actionable_position_tables()
     assert "NVDA · 组合增强（Put 侧） · 08-21 $100 Put" in message
     assert "建议平掉 Put，保留 Call | $0.35 | +$285.00 | 4.1%" in message
     assert "AMD · Sell Put · 08-21 $150 Put | 强烈建议平仓 | $0.52 | -$74.50 | 2.2%" in message
-    assert "| 现金总额 | 暂不可用 |" in message
+    assert "现金总额｜暂不可用" in message
+    assert "可用于期权开仓｜暂不可用" in message
+    assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
 
@@ -1211,4 +1213,6 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "事件｜Sell Put #1：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
-    assert "| 项目 | 数值 |" in message
+    assert "现金总额｜暂不可用" in message
+    assert "可用于期权开仓｜暂不可用" in message
+    assert "| 项目 | 数值 |" not in message

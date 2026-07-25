@@ -138,7 +138,6 @@ def build_daily_brief_user_view(
         "position_total": position_total,
         "position_actionable_total": position_actionable_total,
         "funds": funds,
-        "fund_rows": [_split_display_field(item) for item in funds],
         "capacity": capacity,
         "reminders": reminders,
     }
@@ -516,20 +515,10 @@ def _render_user_view_card(
                 ]
             )
 
-    fund_rows = [item for item in view.get("fund_rows") or [] if isinstance(item, Mapping)]
+    funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     lines.extend(["", "## 资金"])
-    if fund_rows:
-        lines.extend(
-            [
-                "",
-                "| 项目 | 数值 |",
-                "|---|---:|",
-                *[
-                    f"| {_table_cell(item.get('label') or '—')} | {_table_cell(item.get('value') or '—')} |"
-                    for item in fund_rows
-                ],
-            ]
-        )
+    if funds:
+        lines.extend(_flat_field_line(item) for item in funds)
     else:
         lines.append("资金数据暂不可用。")
 
@@ -623,14 +612,6 @@ def _table_cell(value: Any) -> str:
         .replace("|", r"\|")
         .strip()
     )
-
-
-def _split_display_field(value: Any) -> dict[str, str]:
-    text = str(value or "").strip()
-    if "：" in text:
-        label, body = text.split("：", 1)
-        return {"label": label.strip(), "value": body.strip()}
-    return {"label": text, "value": "—"}
 
 
 def _strip_display_label(value: Any, prefix: str) -> str:

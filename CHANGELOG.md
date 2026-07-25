@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.29 - 2026-07-25
+
+### Changed
+- Kept Daily Brief funds as compact prose lines in Feishu cards; only candidate comparisons, Combo Yield legs, and actionable-position advice remain tabular.
+
 ## 1.4.28 - 2026-07-25
 
 ### Added
