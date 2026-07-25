@@ -98,6 +98,10 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
+`option_performance_report` 的 `presentation` 视图优先展示纯期权已实现毛收益和
+期权交易现金流，并提供相同口径的分账户行。这里的期权交易现金流不包含指派正股
+结算本金、结算费用、卖出回款或卖出费用；完整审计字段仍保留在原始报告中。
+
 ### 持仓、现金与组合
 
 - `option_positions_read`

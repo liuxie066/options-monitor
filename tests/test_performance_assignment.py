@@ -303,6 +303,16 @@ def test_assignment_and_stock_sale_reconcile_option_and_stock_realized_component
     assert report["pnl"]["assigned_stock_realized_net"]["by_currency"] == {"USD": 497.0}
     assert report["assigned_stock"]["period"]["pnl"]["realized_gross"]["by_currency"] == {"USD": 500.0}
     assert report["assigned_stock"]["period"]["pnl"]["realized_net"]["by_currency"] == {"USD": 497.0}
+    assert (
+        report["pnl"]["option_realized_gross"]["by_currency"]["USD"]
+        + report["pnl"]["assigned_stock_realized_gross"]["by_currency"]["USD"]
+        == report["pnl"]["realized_gross"]["by_currency"]["USD"]
+    )
+    account = report["breakdowns"]["accounts"][0]
+    assert account["account"] == "lx"
+    assert account["pnl"]["option_realized_gross"]["by_currency"] == {"USD": 250.0}
+    assert account["pnl"]["assigned_stock_realized_gross"]["by_currency"] == {"USD": 500.0}
+    assert account["pnl"]["realized_gross"]["by_currency"] == {"USD": 750.0}
 
 
 def test_estimated_sale_fee_keeps_gross_and_marks_net_partial(tmp_path) -> None:
