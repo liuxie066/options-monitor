@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -17,6 +18,11 @@ from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
 from src.application.channels.feishu import build_feishu_inbound_channel_service
+from src.application.channels.feishu_reply_renderer import (
+    is_feishu_reply_envelope,
+    legacy_text_envelope,
+    render_feishu_conversation_reply,
+)
 from src.application.channels.service import ChannelService
 from src.application.channels.reply_decision import (
     decide_inbound_reply,
@@ -35,7 +41,14 @@ from src.application.secret_resolver import (
     resolve_feishu_bot_config,
 )
 from src.application.settings import build_effective_env
-from src.infrastructure.feishu_bot import add_message_reaction, reply_text_message
+from src.infrastructure.feishu_bitable import (
+    FeishuAuthError,
+    FeishuPermissionError,
+    FeishuPermanentError,
+    FeishuRateLimitError,
+    FeishuTransientError,
+)
+from src.infrastructure.feishu_bot import FEISHU_REPLY_TOO_LARGE, add_message_reaction, reply_message
 from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available, start_feishu_ws_client
 
 
@@ -201,7 +214,7 @@ def handle_feishu_ws_event(
     payload: dict[str, Any],
     *,
     settings: FeishuWsSettings,
-    reply_fn: ReplyFn = reply_text_message,
+    reply_fn: ReplyFn = reply_message,
     reaction_fn: ReactionFn = add_message_reaction,
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
@@ -288,7 +301,7 @@ class _FeishuAckJob:
 def serve_feishu_ws(
     settings: FeishuWsSettings,
     *,
-    reply_fn: ReplyFn = reply_text_message,
+    reply_fn: ReplyFn = reply_message,
     reaction_fn: ReactionFn = add_message_reaction,
     execute_tool_fn: ExecuteToolFn | None = None,
     start_client_fn: StartClientFn = start_feishu_ws_client,
@@ -681,7 +694,7 @@ def _maybe_reply(
     decision = decide_inbound_reply(
         inbound,
         reply_enabled=settings.reply_enabled,
-        max_reply_chars=settings.max_reply_chars,
+        max_reply_chars=0,
         permission_denied_message_fn=_permission_denied_message,
     )
     if not decision.should_send:
@@ -693,6 +706,13 @@ def _maybe_reply(
     if not message_id:
         return {"attempted": True, "ok": False, "reason": "missing_message_id"}
     command_id = _inbound_command_id(decision.inbound_result)
+    envelope = render_feishu_conversation_reply(
+        message_id=message_id,
+        text=decision.text,
+        reply_in_thread=settings.reply_in_thread,
+        max_chars=settings.max_reply_chars,
+        render_route=_inbound_render_route(decision.inbound_result),
+    )
     outbox: CopilotHostStore | None = None
     delivery_key: str | None = None
     if str(settings.audit_db or "").strip() and command_id:
@@ -701,11 +721,7 @@ def _maybe_reply(
         record = outbox.enqueue_reply(
             delivery_key=delivery_key,
             channel="feishu",
-            payload={
-                "message_id": message_id,
-                "text": decision.text,
-                "reply_in_thread": settings.reply_in_thread,
-            },
+            payload=envelope,
         )
         if str(record.get("status") or "") == "delivered":
             return {
@@ -714,7 +730,8 @@ def _maybe_reply(
                 "reason": "idempotent_replay",
                 "delivery_key": delivery_key,
             }
-        if outbox.claim_reply(delivery_key=delivery_key) is None:
+        claimed = outbox.claim_reply(delivery_key=delivery_key)
+        if claimed is None:
             status = str(record.get("status") or "")
             return {
                 "attempted": False,
@@ -722,23 +739,47 @@ def _maybe_reply(
                 "reason": "reply_pending" if status != "terminal_failed" else "reply_terminal_failed",
                 "delivery_key": delivery_key,
             }
+        try:
+            envelope = _reply_envelope_from_outbox_record(claimed)
+        except Exception as exc:
+            outbox.mark_reply_failed(
+                delivery_key,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=False,
+            )
+            return {
+                "attempted": True,
+                "ok": False,
+                "reason": "reply_payload_invalid",
+                "delivery_key": delivery_key,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     try:
-        api_response = reply_fn(
-            app_id=settings.app_id,
-            app_secret=settings.app_secret,
-            message_id=message_id,
-            text=decision.text,
+        delivery = _deliver_feishu_reply(
+            settings=settings,
+            reply_fn=reply_fn,
+            envelope=envelope,
             uuid=delivery_key or command_id,
-            reply_in_thread=settings.reply_in_thread,
         )
+        api_response = delivery["api_response"]
     except Exception as exc:
         if outbox is not None and delivery_key:
-            outbox.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+            outbox.mark_reply_failed(
+                delivery_key,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=_reply_exception_is_retryable(exc),
+            )
         return {
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
             "error": f"{type(exc).__name__}: {exc}",
+            "render": _reply_render_status(
+                envelope,
+                uuid=delivery_key or command_id,
+                fallback_used=False,
+            ),
+            **({"delivery_key": delivery_key} if delivery_key else {}),
         }
     if not _reply_api_success(api_response):
         if outbox is not None and delivery_key:
@@ -752,6 +793,11 @@ def _maybe_reply(
             "ok": False,
             "reason": "reply_failed",
             "api_response": api_response,
+            "render": _reply_render_status(
+                envelope,
+                uuid=delivery_key or command_id,
+                fallback_used=bool(delivery.get("fallback_used")),
+            ),
             **({"delivery_key": delivery_key} if delivery_key else {}),
         }
     outbound_message_id = _reply_api_message_id(api_response)
@@ -764,6 +810,11 @@ def _maybe_reply(
         "message_id": message_id,
         "outbound_message_id": outbound_message_id,
         "api_response": api_response,
+        "render": _reply_render_status(
+            envelope,
+            uuid=delivery_key or command_id,
+            fallback_used=bool(delivery.get("fallback_used")),
+        ),
         **({"delivery_key": delivery_key} if delivery_key else {}),
     }
 
@@ -777,19 +828,20 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
         return {"attempted": False, "reason": "outbox_empty"}
     delivery_key = str(record.get("delivery_key") or "")
     try:
-        import json
-
-        payload = json.loads(str(record.get("payload_json") or "{}"))
-        api_response = reply_fn(
-            app_id=settings.app_id,
-            app_secret=settings.app_secret,
-            message_id=str(payload.get("message_id") or ""),
-            text=str(payload.get("text") or ""),
+        envelope = _reply_envelope_from_outbox_record(record)
+        delivery = _deliver_feishu_reply(
+            settings=settings,
+            reply_fn=reply_fn,
+            envelope=envelope,
             uuid=delivery_key,
-            reply_in_thread=bool(payload.get("reply_in_thread")),
         )
+        api_response = delivery["api_response"]
     except Exception as exc:
-        store.mark_reply_failed(delivery_key, error=f"{type(exc).__name__}: {exc}", retryable=True)
+        store.mark_reply_failed(
+            delivery_key,
+            error=f"{type(exc).__name__}: {exc}",
+            retryable=_reply_exception_is_retryable(exc),
+        )
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
     if not _reply_api_success(api_response):
         store.mark_reply_failed(
@@ -805,7 +857,166 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
         "reason": "sent",
         "delivery_key": delivery_key,
         "outbound_message_id": _reply_api_message_id(api_response),
+        "render": _reply_render_status(
+            envelope,
+            uuid=delivery_key,
+            fallback_used=bool(delivery.get("fallback_used")),
+        ),
     }
+
+
+def _reply_envelope_from_outbox_record(record: dict[str, Any]) -> dict[str, Any]:
+    payload = json.loads(str(record.get("payload_json") or "{}"))
+    if not isinstance(payload, dict):
+        raise ValueError("Feishu reply outbox payload must be an object")
+    if is_feishu_reply_envelope(payload):
+        return payload
+    if "text" in payload:
+        return legacy_text_envelope(payload)
+    raise ValueError(
+        "unsupported Feishu reply outbox payload schema: "
+        f"{str(payload.get('schema_version') or '<missing>')}"
+    )
+
+
+def _deliver_feishu_reply(
+    *,
+    settings: FeishuWsSettings,
+    reply_fn: ReplyFn,
+    envelope: dict[str, Any],
+    uuid: str | None,
+) -> dict[str, Any]:
+    transport = _dict(envelope.get("transport"))
+    try:
+        api_response = _call_feishu_reply_transport(
+            settings=settings,
+            reply_fn=reply_fn,
+            envelope=envelope,
+            transport=transport,
+            uuid=uuid,
+        )
+        return {"api_response": api_response, "fallback_used": False}
+    except FeishuPermanentError as exc:
+        fallback = _dict(envelope.get("fallback"))
+        if (
+            str(envelope.get("render_mode") or "") != "card_markdown_v2"
+            or not fallback
+            or not _card_permanent_failure_allows_fallback(exc)
+        ):
+            raise
+        api_response = _call_feishu_reply_transport(
+            settings=settings,
+            reply_fn=reply_fn,
+            envelope=envelope,
+            transport=fallback,
+            uuid=f"{uuid}:fallback" if uuid else None,
+        )
+        return {"api_response": api_response, "fallback_used": True}
+
+
+def _call_feishu_reply_transport(
+    *,
+    settings: FeishuWsSettings,
+    reply_fn: ReplyFn,
+    envelope: dict[str, Any],
+    transport: dict[str, Any],
+    uuid: str | None,
+) -> dict[str, Any]:
+    message_id = str(envelope.get("message_id") or "").strip()
+    msg_type = str(transport.get("msg_type") or "").strip()
+    content = _dict(transport.get("content"))
+    if not message_id:
+        raise ValueError("Feishu reply envelope message_id is required")
+    if not msg_type or not content:
+        raise ValueError("Feishu reply envelope transport is invalid")
+    common = {
+        "app_id": settings.app_id,
+        "app_secret": settings.app_secret,
+        "message_id": message_id,
+        "uuid": uuid,
+        "reply_in_thread": bool(envelope.get("reply_in_thread")),
+    }
+    if msg_type == "text":
+        text = str(content.get("text") or "")
+        if not text.strip():
+            raise ValueError("Feishu text reply content is empty")
+        return reply_fn(**common, text=text)
+    return reply_fn(**common, msg_type=msg_type, content=content)
+
+
+def _reply_exception_is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (FeishuTransientError, FeishuRateLimitError)):
+        return True
+    if isinstance(exc, FeishuPermanentError):
+        response = exc.response if isinstance(exc.response, dict) else {}
+        if str(response.get("local_error_code") or ""):
+            return False
+        http_status = response.get("http_status")
+        if exc.code is not None or (
+            isinstance(http_status, int) and 400 <= http_status <= 499
+        ):
+            return False
+        return True
+    if isinstance(
+        exc,
+        (FeishuAuthError, FeishuPermissionError, ValueError),
+    ):
+        return False
+    return True
+
+
+def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
+    response = exc.response if isinstance(exc.response, dict) else {}
+    if str(response.get("local_error_code") or "") == FEISHU_REPLY_TOO_LARGE:
+        return True
+    http_status = response.get("http_status")
+    return exc.code is not None or (
+        isinstance(http_status, int) and 400 <= http_status <= 499
+    )
+
+
+def _inbound_render_route(inbound_result: dict[str, Any]) -> str | None:
+    direct = _first_text(inbound_result.get("render_route"))
+    if direct:
+        return direct
+    meta = _dict(inbound_result.get("meta"))
+    assistant = _dict(meta.get("assistant"))
+    return _first_text(assistant.get("route"))
+
+
+def _reply_render_status(
+    envelope: dict[str, Any],
+    *,
+    uuid: str | None,
+    fallback_used: bool,
+) -> dict[str, Any]:
+    render_meta = _dict(envelope.get("render_meta"))
+    transport = (
+        _dict(envelope.get("fallback"))
+        if fallback_used
+        else _dict(envelope.get("transport"))
+    )
+    content = _dict(transport.get("content"))
+    effective_uuid = f"{uuid}:fallback" if fallback_used and uuid else uuid
+    request_payload: dict[str, Any] = {
+        "msg_type": str(transport.get("msg_type") or ""),
+        "content": json.dumps(content, ensure_ascii=False),
+        "reply_in_thread": bool(envelope.get("reply_in_thread")),
+    }
+    if effective_uuid:
+        request_payload["uuid"] = str(effective_uuid)
+    out: dict[str, Any] = {
+        "mode": str(envelope.get("render_mode") or "text"),
+        "renderer_version": render_meta.get("renderer_version"),
+        "card_schema": render_meta.get("card_schema"),
+        "request_body_bytes": len(json.dumps(request_payload, ensure_ascii=False).encode("utf-8")),
+        "source_sha256": render_meta.get("source_sha256"),
+        "rendered_sha256": render_meta.get("rendered_sha256"),
+        "markdown_table_detected": bool(render_meta.get("markdown_table_detected")),
+        "truncated": bool(render_meta.get("truncated")),
+        "fallback_used": bool(fallback_used),
+    }
+    return {key: value for key, value in out.items() if value is not None}
 
 
 def _record_reply_receipt(
@@ -855,6 +1066,9 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
     error = _first_text(reply_status.get("error"))
     if error:
         receipt["error"] = error
+    render = _dict(reply_status.get("render"))
+    if render:
+        receipt["render"] = render
     if isinstance(api_response, dict):
         receipt["api_response"] = api_response
     return {key: value for key, value in receipt.items() if value is not None}
