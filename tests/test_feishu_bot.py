@@ -23,6 +23,122 @@ def _post_request_body_bytes(markdown: str, *, uuid: str | None = None) -> int:
     return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
+def test_reply_message_sends_card_json_v2_and_serializes_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    card = {
+        "schema": "2.0",
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": "reply_body",
+                    "content": "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |",
+                }
+            ]
+        },
+    }
+
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda _app_id, _app_secret, fn: fn("tenant_token"),
+    )
+
+    def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "payload": payload,
+                "headers": headers,
+                "kwargs": kwargs,
+            }
+        )
+        return {"code": 0, "data": {"message_id": "om_reply"}}
+
+    out = feishu_bot.reply_message(
+        app_id="app_1",
+        app_secret="secret_1",
+        message_id="msg/1",
+        msg_type="interactive",
+        content=card,
+        uuid="feishu:cmd_1",
+        reply_in_thread=True,
+        http_json_fn=_http_json,
+    )
+
+    assert out["code"] == 0
+    assert calls[0]["url"].endswith("/messages/msg%2F1/reply")
+    assert calls[0]["payload"] == {
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+        "uuid": "feishu:cmd_1",
+        "reply_in_thread": True,
+    }
+    assert json.loads(calls[0]["payload"]["content"]) == card
+
+
+def test_reply_text_message_remains_backward_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads: list[dict] = []
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda _app_id, _app_secret, fn: fn("tenant_token"),
+    )
+
+    feishu_bot.reply_text_message(
+        app_id="app_1",
+        app_secret="secret_1",
+        message_id="msg_1",
+        text="当前没有待确认操作。",
+        http_json_fn=lambda _method, _url, payload, **_kwargs: payloads.append(payload) or {"code": 0},
+    )
+
+    assert payloads == [
+        {
+            "msg_type": "text",
+            "content": json.dumps({"text": "当前没有待确认操作。"}, ensure_ascii=False),
+        }
+    ]
+
+
+def test_reply_message_rejects_request_over_local_budget_without_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feishu_bot,
+        "with_tenant_token_retry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not request token")),
+    )
+    card = {
+        "schema": "2.0",
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": "reply_body",
+                    "content": "中🙂" * feishu_bot.FEISHU_REPLY_REQUEST_BUDGET_BYTES,
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(feishu_bot.FeishuPermanentError) as raised:
+        feishu_bot.reply_message(
+            app_id="app_1",
+            app_secret="secret_1",
+            message_id="msg_1",
+            msg_type="interactive",
+            content=card,
+        )
+
+    assert raised.value.response["local_error_code"] == feishu_bot.FEISHU_REPLY_TOO_LARGE
+    assert raised.value.response["request_body_bytes"] > feishu_bot.FEISHU_REPLY_REQUEST_BUDGET_BYTES
+    assert "content_sha256" in raised.value.response
+
+
 def test_add_message_reaction_posts_feishu_reaction_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
