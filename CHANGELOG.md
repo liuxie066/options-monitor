@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.25 - 2026-07-25
+
+### Added
+- Added an asynchronous, account-isolated stock and ETF holdings-sync dispatcher from normalized Futu trade intake to the loopback portfolio-management API, with bounded retries, debounce, persistent deal-id deduplication, and audit receipts.
+- Added explicit account-mapping and runtime configuration for the holdings-sync boundary, which remains disabled by default and only starts for confirmed apply-mode trade intake.
+
+### Changed
+- Routed both Futu push events and history backfill through the same normalized post-intake callback while keeping option trades exclusively within the Options Monitor ledger.
+- Kept portfolio quantity and average-cost authority in portfolio-management by sending refresh intents rather than inferred position deltas or transaction records.
+
 ## 1.4.24 - 2026-07-25
 
 ### Added
