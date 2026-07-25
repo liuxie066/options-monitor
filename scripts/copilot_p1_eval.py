@@ -5,6 +5,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -36,6 +37,9 @@ class EvalCase:
     required_primary_input: tuple[tuple[str, Any], ...] = ()
     forbidden_primary_input_fields: tuple[str, ...] = ()
     required_response_terms: tuple[str, ...] = ()
+    ordered_response_terms: tuple[str, ...] = ()
+    forbidden_response_terms: tuple[str, ...] = ()
+    max_response_chars: int | None = None
     output_mode: str = "prose"
 
 
@@ -48,7 +52,10 @@ CASES = (
         required_primary_tool="option_performance_report",
         required_primary_input=(("period", "mtd"),),
         forbidden_primary_input_fields=("account",),
-        required_response_terms=("mtd", "账户", "已实现", "现金", "指派"),
+        required_response_terms=("mtd", "账户", "期权已实现毛收益", "期权交易现金流", "不含指派正股"),
+        ordered_response_terms=("期权已实现毛收益", "期权交易现金流"),
+        forbidden_response_terms=("source_event_id", "evidence_fact_id", "cash_conversion:", "CNY 折算为空"),
+        max_response_chars=1200,
     ),
     EvalCase(
         "mtd_correction_follow_up",
@@ -59,7 +66,23 @@ CASES = (
         primary_tool_optional=True,
         required_primary_input=(("period", "mtd"),),
         forbidden_primary_input_fields=("account",),
-        required_response_terms=("mtd", "账户", "已实现", "现金", "指派"),
+        required_response_terms=("mtd", "账户", "期权已实现毛收益", "期权交易现金流", "不含指派正股"),
+        ordered_response_terms=("期权已实现毛收益", "期权交易现金流"),
+        forbidden_response_terms=("source_event_id", "evidence_fact_id", "cash_conversion:"),
+        max_response_chars=800,
+    ),
+    EvalCase(
+        "ytd_option_income",
+        "今年 ytd 的期权收益和现金流",
+        True,
+        "income-ytd",
+        required_primary_tool="option_performance_report",
+        required_primary_input=(("period", "ytd"),),
+        forbidden_primary_input_fields=("account",),
+        required_response_terms=("ytd", "账户", "期权已实现毛收益", "期权交易现金流", "不含指派正股"),
+        ordered_response_terms=("期权已实现毛收益", "期权交易现金流"),
+        forbidden_response_terms=("source_event_id", "evidence_fact_id", "cash_conversion:", "CNY 折算为空"),
+        max_response_chars=1200,
     ),
     EvalCase(
         "risk_concentration",
@@ -309,6 +332,23 @@ def run_eval(
                 valid_control_preview
                 or all(term.lower() in response.lower() for term in case.required_response_terms)
             ),
+            "required_response_order": (
+                valid_control_preview
+                or _terms_in_order(response, case.ordered_response_terms)
+            ),
+            "forbidden_response_terms_absent": (
+                valid_control_preview
+                or all(term.lower() not in response.lower() for term in case.forbidden_response_terms)
+            ),
+            "response_length_within_limit": (
+                valid_control_preview
+                or case.max_response_chars is None
+                or len(response) <= case.max_response_chars
+            ),
+            "no_raw_evidence_identifier": (
+                valid_control_preview
+                or not _contains_raw_evidence_identifier(response)
+            ),
             "scope_preserved": _scope_preserved(events, config_key),
             "conclusion_first": (
                 valid_control_preview
@@ -415,6 +455,10 @@ def _failed_case(case: EvalCase, error: str, *, elapsed_seconds: float) -> dict[
             case.required_primary_input or case.forbidden_primary_input_fields
         ),
         "required_response_terms_present": not case.required_response_terms,
+        "required_response_order": not case.ordered_response_terms,
+        "forbidden_response_terms_absent": True,
+        "response_length_within_limit": True,
+        "no_raw_evidence_identifier": True,
         "scope_preserved": True,
         "conclusion_first": False,
         "output_contract_valid": False,
@@ -549,6 +593,36 @@ def _required_primary_tool_input(case: EvalCase, events: list[dict[str, Any]]) -
         return False
     return all(tool_input.get(key) == expected for key, expected in case.required_primary_input) and all(
         field not in tool_input for field in case.forbidden_primary_input_fields
+    )
+
+
+def _terms_in_order(response: str, terms: tuple[str, ...]) -> bool:
+    if not terms:
+        return True
+    normalized = str(response or "").lower()
+    positions = [normalized.find(term.lower()) for term in terms]
+    return all(position >= 0 for position in positions) and positions == sorted(positions)
+
+
+def _contains_raw_evidence_identifier(response: str) -> bool:
+    normalized = str(response or "")
+    lowered = normalized.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "source_event_id",
+            "evidence_fact_id",
+            "fx_fact_ids",
+            "cash_conversion:",
+        )
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:event|fact|allocation|cash_conversion|fx)[-_][A-Za-z0-9][A-Za-z0-9_.:-]{5,}",
+            normalized,
+            flags=re.IGNORECASE,
+        )
     )
 
 

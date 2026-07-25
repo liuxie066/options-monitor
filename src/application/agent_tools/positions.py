@@ -55,6 +55,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "breakdowns.monthly",
         "breakdowns.accounts",
         "breakdowns.symbols",
+        "presentation",
     ],
     "missing_data_fields": [
         "quality.missing",
@@ -68,14 +69,18 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "evidence.collection.status",
     ],
     "model_preview_fields": [
+        "presentation",
         "period",
         "scope",
-        "activity",
-        "cash",
-        "pnl",
-        "capital",
-        "quality",
+        "evidence",
     ],
+    "model_value_fields": [
+        "presentation",
+        "period",
+        "scope",
+        "evidence.schema_state",
+    ],
+    "model_missing_data_fields": ["presentation.limitations"],
 }
 
 _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -268,7 +273,9 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "Primary read-only option performance report. Separates premium activity, cash movement, realized PnL, "
         "period total PnL, assigned-stock lifecycle, and capital efficiency. Supports MTD, YTD, natural month, "
         "natural year, and explicit date ranges. Omit account or broker to aggregate all matching ledger facts; "
-        "native-currency amounts remain authoritative and CNY is null when FX evidence is incomplete."
+        "native-currency amounts remain authoritative and CNY is null when FX evidence is incomplete. "
+        "cash.option_trade_cash_gross is signed option-trade cash only and excludes assigned-stock settlement "
+        "and sale cash."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),

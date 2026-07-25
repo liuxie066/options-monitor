@@ -164,7 +164,25 @@ def test_long_option_cash_signs_and_realized_pnl_are_opposite_short() -> None:
 def test_breakdowns_and_scope_keep_month_account_and_symbol_dimensions() -> None:
     events = [
         _event("lx-open", "open", "2026-04-03T10:00:00", account="lx", symbol="NVDA", price=2),
-        _event("sy-open", "open", "2026-05-03T10:00:00", account="sy", symbol="AAPL", price=1),
+        _event(
+            "lx-close",
+            "close",
+            "2026-05-03T10:00:00",
+            account="lx",
+            symbol="NVDA",
+            price=1,
+            target_lot_id="lot-lx-open",
+        ),
+        _event("sy-open", "open", "2026-04-03T10:00:00", account="sy", symbol="AAPL", price=3),
+        _event(
+            "sy-close",
+            "close",
+            "2026-05-03T10:00:00",
+            account="sy",
+            symbol="AAPL",
+            price=1,
+            target_lot_id="lot-sy-open",
+        ),
     ]
 
     report = _report(
@@ -177,6 +195,19 @@ def test_breakdowns_and_scope_keep_month_account_and_symbol_dimensions() -> None
     assert [item["month"] for item in report["breakdowns"]["monthly"]] == ["2026-04", "2026-05"]
     assert [item["account"] for item in report["breakdowns"]["accounts"]] == ["lx", "sy"]
     assert [item["symbol"] for item in report["breakdowns"]["symbols"]] == ["AAPL", "NVDA"]
+    accounts = {item["account"]: item for item in report["breakdowns"]["accounts"]}
+    assert accounts["lx"]["pnl"]["option_realized_gross"]["by_currency"] == {"USD": 100.0}
+    assert accounts["sy"]["pnl"]["option_realized_gross"]["by_currency"] == {"USD": 200.0}
+    assert accounts["lx"]["pnl"]["assigned_stock_realized_gross"]["status"] == "not_observed"
+    assert accounts["sy"]["pnl"]["assigned_stock_realized_gross"]["status"] == "not_observed"
+    assert sum(
+        item["pnl"]["option_realized_gross"]["by_currency"]["USD"]
+        for item in report["breakdowns"]["accounts"]
+    ) == report["pnl"]["option_realized_gross"]["by_currency"]["USD"]
+    assert sum(
+        item["cash"]["option_trade_cash_gross"]["by_currency"]["USD"]
+        for item in report["breakdowns"]["accounts"]
+    ) == report["cash"]["option_trade_cash_gross"]["by_currency"]["USD"]
 
 
 def test_effective_close_without_allocation_is_explicitly_partial_not_silently_dropped() -> None:

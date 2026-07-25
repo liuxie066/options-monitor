@@ -23,6 +23,8 @@ class Scenario:
     expected_tools: tuple[str, ...]
     expected_terms: tuple[str, ...]
     forbidden_terms: tuple[str, ...] = ()
+    ordered_terms: tuple[str, ...] = ()
+    max_response_chars: int | None = None
     context: tuple[dict[str, str], ...] = ()
 
 
@@ -46,11 +48,16 @@ SCENARIOS = (
             ),
             ModelTurn(
                 text=(
-                    "结论：截至 2026-07-23 的 MTD，全部账户（lx、sy）期权与指派股票"
-                    "合计已实现净 PnL 为 USD 747；其中纯期权 USD 250，指派股票 USD 497。"
-                    "总现金变动净额为 USD -4,500，包括指派结算本金 USD -10,000 和卖股"
-                    "回款 USD 5,500；收到权利金 USD 800。指派已纳入，但本金和回款是"
-                    "现金流，不是利润。"
+                    "结论：截至 2026-07-23，全部账户（lx、sy）MTD 期权已实现毛收益 "
+                    "CNY 2,100，期权交易现金流 CNY 5,600。\n\n"
+                    "| 账户 | 期权已实现毛收益 | 期权交易现金流 | 收取权利金 |\n"
+                    "|---|---:|---:|---:|\n"
+                    "| lx | CNY 700 | CNY 2,100 | CNY 2,800 |\n"
+                    "| sy | CNY 1,400 | CNY 3,500 | CNY 4,200 |\n"
+                    "| 合计 | CNY 2,100 | CNY 5,600 | CNY 7,000 |\n\n"
+                    "指派正股已实现毛收益另列为 CNY 3,500；计入后整体已实现毛收益为 "
+                    "CNY 5,600。\n"
+                    "口径：期权交易现金流不含指派正股买卖；净收益费用证据不完整，以上明确为毛额。"
                 )
             ),
         ),
@@ -65,23 +72,100 @@ SCENARIOS = (
                         "status": "partial_current",
                     },
                     "scope": {"account": None, "accounts": ["lx", "sy"]},
-                    "activity": {"premium_collected_gross": {"by_currency": {"USD": 800}}},
+                    "activity": {"premium_collected_gross": {"by_currency": {"USD": 1000}}},
                     "cash": {
+                        "option_trade_cash_gross": {"by_currency": {"USD": 800}, "cny": 5600, "status": "observed"},
                         "total_cash_change_net": {"by_currency": {"USD": -4500}},
                         "stock_settlement_cash_gross": {"by_currency": {"USD": -10000}},
                         "assigned_stock_sale_cash_gross": {"by_currency": {"USD": 5500}},
                     },
                     "pnl": {
+                        "realized_gross": {"by_currency": {"USD": 800}, "cny": 5600, "status": "observed"},
+                        "option_realized_gross": {"by_currency": {"USD": 300}, "cny": 2100, "status": "observed"},
+                        "assigned_stock_realized_gross": {
+                            "by_currency": {"USD": 500},
+                            "cny": 3500,
+                            "status": "observed",
+                        },
                         "realized_net": {"by_currency": {"USD": 747}},
                         "option_realized_net": {"by_currency": {"USD": 250}},
                         "assigned_stock_realized_net": {"by_currency": {"USD": 497}},
+                    },
+                    "presentation": {
+                        "schema_version": "option_performance_presentation.v1",
+                        "reporting_basis": {
+                            "primary": "gross",
+                            "net_evidence": {"status": "partial", "missing_summary": [{"category": "fee", "count": 1}]},
+                        },
+                        "primary_metrics": {
+                            "option_realized_gross": {
+                                "by_currency": {"USD": 300},
+                                "cny": 2100,
+                                "status": "observed",
+                                "missing_summary": [],
+                            },
+                            "option_trade_cash_gross": {
+                                "by_currency": {"USD": 800},
+                                "cny": 5600,
+                                "status": "observed",
+                                "missing_summary": [],
+                            },
+                        },
+                        "account_rows": [
+                            {
+                                "account": "lx",
+                                "option_realized_gross": {"by_currency": {"USD": 100}, "cny": 700, "status": "observed"},
+                                "option_trade_cash_gross": {"by_currency": {"USD": 300}, "cny": 2100, "status": "observed"},
+                                "premium_collected_gross": {"by_currency": {"USD": 400}, "cny": 2800, "status": "observed"},
+                            },
+                            {
+                                "account": "sy",
+                                "option_realized_gross": {"by_currency": {"USD": 200}, "cny": 1400, "status": "observed"},
+                                "option_trade_cash_gross": {"by_currency": {"USD": 500}, "cny": 3500, "status": "observed"},
+                                "premium_collected_gross": {"by_currency": {"USD": 600}, "cny": 4200, "status": "observed"},
+                            },
+                        ],
+                        "supporting_metrics": {
+                            "premium_collected_gross": {
+                                "by_currency": {"USD": 1000},
+                                "cny": 7000,
+                                "status": "observed",
+                            }
+                        },
+                        "assigned_stock_impact": {
+                            "assigned_stock_realized_gross": {
+                                "by_currency": {"USD": 500},
+                                "cny": 3500,
+                                "status": "observed",
+                            },
+                            "combined_realized_gross": {
+                                "by_currency": {"USD": 800},
+                                "cny": 5600,
+                                "status": "observed",
+                            },
+                        },
+                        "limitations": [
+                            {"kind": "metric_status", "metric": "option_realized_net", "status": "partial"}
+                        ],
                     },
                 },
             }
         },
         expected_tools=("option_performance_report",),
-        expected_terms=("结论", "MTD", "全部账户", "已实现", "纯期权", "指派股票", "现金流", "权利金"),
-        forbidden_terms=("共 1 行", "分析完成"),
+        expected_terms=(
+            "结论",
+            "MTD",
+            "全部账户",
+            "期权已实现毛收益",
+            "期权交易现金流",
+            "指派正股",
+            "收取权利金",
+            "不含指派正股买卖",
+            "费用证据不完整",
+        ),
+        forbidden_terms=("共 1 行", "分析完成", "source_event_id", "cash_conversion:", "CNY 折算为空"),
+        ordered_terms=("期权已实现毛收益", "期权交易现金流", "收取权利金", "口径"),
+        max_response_chars=900,
     ),
     Scenario(
         name="option_performance_mtd_correction",
@@ -94,8 +178,8 @@ SCENARIOS = (
             ),
             ModelTurn(
                 text=(
-                    "结论：已按 MTD 重查；范围是全部账户（lx、sy）。已实现 PnL 包含"
-                    "纯期权与指派股票，现金流另列，指派结算本金不算利润。"
+                    "结论：已按 MTD 重查；范围是全部账户（lx、sy）。先报告期权已实现毛收益，"
+                    "再报告期权交易现金流；该现金流不含指派正股买卖，指派正股影响另列。"
                 )
             ),
         ),
@@ -112,7 +196,9 @@ SCENARIOS = (
             }
         },
         expected_tools=("option_performance_report",),
-        expected_terms=("结论", "MTD", "全部账户", "已实现 PnL", "纯期权", "指派股票", "现金流"),
+        expected_terms=("结论", "MTD", "全部账户", "期权已实现毛收益", "期权交易现金流", "不含指派正股买卖"),
+        ordered_terms=("期权已实现毛收益", "期权交易现金流"),
+        max_response_chars=500,
         context=(
             {"role": "user", "content": "7月 mtd 的期权收益"},
             {"role": "assistant", "content": "我刚才错误地按自然月解释了。"},
@@ -400,6 +486,10 @@ def test_freeform_answer_quality_scenarios(monkeypatch, scenario: Scenario) -> N
         assert term in result.user_response
     for term in scenario.forbidden_terms:
         assert term not in result.user_response
+    positions = [result.user_response.index(term) for term in scenario.ordered_terms]
+    assert positions == sorted(positions)
+    if scenario.max_response_chars is not None:
+        assert len(result.user_response) <= scenario.max_response_chars
     if scenario.context:
         assert list(requests[0].messages[-3:-1]) == list(scenario.context)
     assert "an options trader focused on quantitative trading" in requests[0].messages[0]["content"]

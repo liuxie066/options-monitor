@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.4.24 - 2026-07-25
+
+### Added
+- Added a deterministic `option_performance_presentation.v1` contract for Copilot MTD/YTD answers, with total-first pure-option realized PnL and option-trade cash flow, account breakdowns, metric-specific CNY evidence, and compact supporting assignment and premium facts.
+
+### Changed
+- Made option-performance model projections consume only the presentation contract when available, while preserving a compatibility fallback for older tool results.
+- Clarified that option-trade cash flow excludes assigned-stock settlement and sale cash, and required Copilot answers to present realized PnL before cash flow without inventing missing CNY, fee, or net evidence.
+
+### Fixed
+- Exposed pure-option and assigned-stock realized gross/net components directly in account summaries instead of deriving them by subtracting combined totals.
+- Rejected unreadable performance answers that leak raw evidence identifiers, misorder MTD/YTD totals, omit cash-flow scope, or collapse partial CNY evidence into an all-or-nothing status.
+
 ## 1.4.23 - 2026-07-24
 
 ### Added

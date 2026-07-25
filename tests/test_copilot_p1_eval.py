@@ -9,7 +9,15 @@ from scripts import copilot_p1_eval
 
 _MTD_QUESTION = "7月 mtd 的期权收益"
 _MTD_CORRECTION = "我写的是mtd"
-_MTD_RESPONSE = "结论：MTD 账户 lx+sy 的已实现 PnL、现金流和指派股票均已列明。"
+_YTD_QUESTION = "今年 ytd 的期权收益和现金流"
+_MTD_RESPONSE = (
+    "结论：MTD 账户 lx+sy 的期权已实现毛收益先列，期权交易现金流随后列示；"
+    "该现金流不含指派正股买卖，费用证据不完整时只报告毛额。"
+)
+_YTD_RESPONSE = (
+    "结论：YTD 全部账户的期权已实现毛收益先列，期权交易现金流随后列示；"
+    "该现金流不含指派正股买卖，费用证据不完整时只报告毛额。"
+)
 _BIAS_QUESTION = "收益率很高，所以现在就应该加仓吗？请结合当前持仓风险判断"
 
 
@@ -37,6 +45,7 @@ def _scene_event() -> AppEvent:
 def _expected_tool(question: str) -> str | None:
     return {
         _MTD_QUESTION: "option_performance_report",
+        _YTD_QUESTION: "option_performance_report",
         "当前期权风险主要集中在哪里": "option_positions_read",
         "分析6月的期权操作有没有不合理，需要优化的地方": "option_positions_read",
         "为什么 NVDA 没进候选": "candidate_filter_explain",
@@ -49,6 +58,8 @@ def _response(question: str) -> str:
     case = next(item for item in copilot_p1_eval.CASES if item.question == question)
     if question in {_MTD_QUESTION, _MTD_CORRECTION}:
         return _MTD_RESPONSE
+    if question == _YTD_QUESTION:
+        return _YTD_RESPONSE
     if case.output_mode == "raw_json":
         return '{"status":"ok","language":"zh-CN"}'
     if case.output_mode == "json_fence":
@@ -67,11 +78,30 @@ def _response(question: str) -> str:
 def _tool_input(question: str, tool: str | None) -> dict[str, str]:
     if question in {_MTD_QUESTION, _MTD_CORRECTION} and tool == "option_performance_report":
         return {"period": "mtd"}
+    if question == _YTD_QUESTION and tool == "option_performance_report":
+        return {"period": "ytd"}
     return {}
 
 
 def test_p1_eval_recognizes_equivalent_evidence_limit_wording() -> None:
     assert copilot_p1_eval._mentions_evidence_limit("净收益不可可靠给出，因为证据不完整。")
+
+
+def test_p1_eval_readability_guards_enforce_order_and_hide_evidence_ids() -> None:
+    assert copilot_p1_eval._terms_in_order(
+        "期权已实现毛收益 CNY 100；期权交易现金流 CNY 300。",
+        ("期权已实现毛收益", "期权交易现金流"),
+    )
+    assert not copilot_p1_eval._terms_in_order(
+        "期权交易现金流 CNY 300；期权已实现毛收益 CNY 100。",
+        ("期权已实现毛收益", "期权交易现金流"),
+    )
+    assert copilot_p1_eval._contains_raw_evidence_identifier(
+        "缺失证据 source_event_id=event-private-001"
+    )
+    assert not copilot_p1_eval._contains_raw_evidence_identifier(
+        "费用证据不完整，因此仅报告毛额。"
+    )
 
 
 def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
@@ -245,7 +275,10 @@ def test_p1_eval_rejects_wrong_mtd_period_and_narrowed_account(monkeypatch, tmp_
         if question in {_MTD_QUESTION, _MTD_CORRECTION}:
             return AppResult(
                 status="answered",
-                user_response="结论：MTD lx账户的已实现 PnL、现金流和指派股票均已列明。",
+                user_response=(
+                    "结论：MTD lx账户的期权已实现毛收益和期权交易现金流均已列明；"
+                    "现金流不含指派正股买卖。"
+                ),
                 events=[
                     AppEvent(
                         "evt_wrong_scope",

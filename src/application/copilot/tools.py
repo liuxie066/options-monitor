@@ -147,7 +147,16 @@ def compact_observation(
             **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
             **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
         }
-    missing_data = _contract_values(data, output_contract.get("missing_data_fields"), missing_only=True)
+    model_missing_fields = output_contract.get("model_missing_data_fields")
+    has_model_missing_surface = bool(model_missing_fields) and any(
+        _values_at_path(data, str(path).split("."))
+        for path in model_missing_fields
+    )
+    missing_data = _contract_values(
+        data,
+        model_missing_fields if has_model_missing_surface else output_contract.get("missing_data_fields"),
+        missing_only=True,
+    )
     freshness = _freshness(data, output_contract)
     row_count = _row_count(data, output_contract)
     scope = _scope(data)
@@ -157,7 +166,7 @@ def compact_observation(
         "ok": True,
         "status": "partial" if missing_data or warnings else ("not_found" if row_count == 0 else "complete"),
         "summary": _summary(tool_name, data, None, output_contract),
-        "value": _preview(data, priorities=_field_priorities(output_contract)),
+        "value": _model_value(data, output_contract),
         "source": _source(data, output_contract),
         **({"scope": scope} if scope else {}),
         **({"coverage": coverage} if coverage else {}),
@@ -310,16 +319,25 @@ def _field_priorities(output_contract: dict[str, Any]) -> dict[str, list[str]]:
     return priorities
 
 
+def _model_value(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
+    fields = output_contract.get("model_value_fields")
+    presentation_required = "presentation" in (fields or ())
+    if fields and (not presentation_required or isinstance(data.get("presentation"), dict)):
+        return _contract_values(data, fields, preview_max_depth=6)
+    return _preview(data, priorities=_field_priorities(output_contract))
+
+
 def _preview(
     value: Any,
     *,
     depth: int = 0,
     path: str = "",
     priorities: dict[str, list[str]] | None = None,
+    max_depth: int = MAX_PREVIEW_DEPTH,
 ) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
-    if depth >= MAX_PREVIEW_DEPTH:
+    if depth >= max_depth:
         return _clip(json.dumps(value, ensure_ascii=False, default=str), 320)
     if isinstance(value, dict):
         preferred = list((priorities or {}).get(path, ()))
@@ -332,6 +350,7 @@ def _preview(
                 depth=depth + 1,
                 path=f"{path}.{key}" if path else str(key),
                 priorities=priorities,
+                max_depth=max_depth,
             )
             for key in keys
         }
@@ -341,7 +360,13 @@ def _preview(
     if isinstance(value, list):
         item_path = f"{path}[]"
         items = [
-            _preview(item, depth=depth + 1, path=item_path, priorities=priorities)
+            _preview(
+                item,
+                depth=depth + 1,
+                path=item_path,
+                priorities=priorities,
+                max_depth=max_depth,
+            )
             for item in value[:MAX_PREVIEW_ITEMS]
         ]
         if len(value) > len(items):
@@ -355,6 +380,7 @@ def _contract_values(
     paths: Any,
     *,
     missing_only: bool = False,
+    preview_max_depth: int = MAX_PREVIEW_DEPTH,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for raw_path in paths or ():
@@ -366,7 +392,10 @@ def _contract_values(
         if missing_only:
             values = [value for value in values if _indicates_missing_data(value)]
         if values:
-            out[path] = _preview(values[0] if len(values) == 1 else values)
+            out[path] = _preview(
+                values[0] if len(values) == 1 else values,
+                max_depth=preview_max_depth,
+            )
     return out
 
 

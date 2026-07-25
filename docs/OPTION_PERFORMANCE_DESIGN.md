@@ -106,6 +106,14 @@ Premium activity, PnL, and valuation CNY use the separate
 
 Period, monthly, account, and symbol summaries are all reductions over the same ordered fact stream. Fact order is `(effective_at_ms, fact_kind, source_event_id, allocation_id)`. Diagnostics are scoped to the requested period/account/broker so unrelated historical or cross-account errors do not degrade a selected report, while decode/projection errors inside the selected scope remain visible as partial quality.
 
+Account breakdowns publish `pnl.option_realized_gross/net` and
+`pnl.assigned_stock_realized_gross/net` from the same component fact
+collections as the top-level report. Public consumers must use these fields
+directly; they must not derive account option PnL by subtracting one aggregate
+from another. `cash.option_trade_cash_gross` is independently reduced from
+option-trade cash facts and excludes stock settlement principal/fees and
+assigned-stock sale cash/fees.
+
 Top-level `pnl.realized_gross/net` is the combined realized result of canonical
 option allocations and assigned-stock facts. To keep assignment inclusion
 auditable, the same engine pass also publishes additive components:
@@ -128,6 +136,20 @@ The application service reads immutable events only through
 and passes domain facts to the pure engine. Its internal output is
 `option_period_performance.core.v1`; Agent and CLI expose the public v1
 envelope.
+
+The public report also adds the deterministic
+`option_performance_presentation.v1` view. It keeps gross option realized PnL
+and gross option-trade cash as parallel primary metrics, exposes the same
+fields per account, keeps premium as supporting activity, and places
+assigned-stock PnL in a separate impact section. Every presentation amount
+retains its own native-currency map, CNY value, and evidence status. Missing
+evidence is reduced to category/count summaries; source event, allocation, FX,
+and evidence IDs remain available only in the full audit report.
+
+Copilot consumes a strict allowlist projection of this presentation plus
+period, scope, and evidence schema state. The complete public v1 report remains
+available to Agent/CLI callers, so the presentation does not replace or
+recalculate canonical facts.
 
 ## Valuation and FX Evidence
 
