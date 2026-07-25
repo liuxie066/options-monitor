@@ -10,33 +10,69 @@ from src.infrastructure.feishu_bitable import FeishuPermanentError, http_json, w
 
 HttpJsonFn = Callable[..., dict[str, Any]]
 
+FEISHU_REPLY_REQUEST_BUDGET_BYTES = 28 * 1024
+FEISHU_REPLY_TOO_LARGE = "FEISHU_REPLY_TOO_LARGE"
+_FEISHU_REPLY_MESSAGE_TYPES = {"text", "post", "interactive"}
 
-def reply_text_message(
+
+def reply_message(
     *,
     app_id: str,
     app_secret: str,
     message_id: str,
-    text: str,
+    msg_type: str = "text",
+    content: dict[str, Any] | None = None,
+    text: str | None = None,
     uuid: str | None = None,
     reply_in_thread: bool | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
     message_id_value = str(message_id or "").strip()
-    text_value = str(text or "").strip()
+    msg_type_value = str(msg_type or "").strip()
     if not message_id_value:
         raise ValueError("message_id is required")
-    if not text_value:
-        raise ValueError("text is required")
+    if msg_type_value not in _FEISHU_REPLY_MESSAGE_TYPES:
+        raise ValueError(f"unsupported Feishu reply msg_type: {msg_type_value or '<empty>'}")
+
+    content_value = dict(content) if isinstance(content, dict) else None
+    if content_value is None and msg_type_value == "text":
+        text_value = str(text or "").strip()
+        if not text_value:
+            raise ValueError("text is required")
+        content_value = {"text": text_value}
+    if not content_value:
+        raise ValueError("content is required")
 
     url = f"https://open.feishu.cn/open-apis/im/v1/messages/{quote(message_id_value, safe='')}/reply"
     payload: dict[str, Any] = {
-        "msg_type": "text",
-        "content": json.dumps({"text": text_value}, ensure_ascii=False),
+        "msg_type": msg_type_value,
+        "content": json.dumps(content_value, ensure_ascii=False),
     }
     if uuid:
         payload["uuid"] = str(uuid)
     if reply_in_thread is not None:
         payload["reply_in_thread"] = bool(reply_in_thread)
+
+    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    if request_body_bytes > FEISHU_REPLY_REQUEST_BUDGET_BYTES:
+        canonical_content = json.dumps(
+            content_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raise FeishuPermanentError(
+            "feishu reply request exceeds local byte budget",
+            response={
+                "local_error_code": FEISHU_REPLY_TOO_LARGE,
+                "http_status": None,
+                "feishu_code": None,
+                "http_attempts": [],
+                "request_body_bytes": request_body_bytes,
+                "request_body_budget_bytes": FEISHU_REPLY_REQUEST_BUDGET_BYTES,
+                "content_sha256": hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
+            },
+        )
 
     def _send(tenant_token: str) -> dict[str, Any]:
         return http_json_fn(
@@ -50,6 +86,28 @@ def reply_text_message(
         )
 
     return with_tenant_token_retry(app_id, app_secret, _send)
+
+
+def reply_text_message(
+    *,
+    app_id: str,
+    app_secret: str,
+    message_id: str,
+    text: str,
+    uuid: str | None = None,
+    reply_in_thread: bool | None = None,
+    http_json_fn: HttpJsonFn = http_json,
+) -> dict[str, Any]:
+    return reply_message(
+        app_id=app_id,
+        app_secret=app_secret,
+        message_id=message_id,
+        msg_type="text",
+        text=text,
+        uuid=uuid,
+        reply_in_thread=reply_in_thread,
+        http_json_fn=http_json_fn,
+    )
 
 
 def add_message_reaction(

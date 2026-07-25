@@ -156,8 +156,11 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert reactions[0]["message_id"] == "msg_1"
     assert reactions[0]["emoji_type"] == "Typing"
     assert replies[0]["message_id"] == "msg_1"
-    assert replies[0]["text"].startswith("期权收益统计完成")
+    assert replies[0]["msg_type"] == "interactive"
+    assert replies[0]["content"]["schema"] == "2.0"
+    assert replies[0]["content"]["body"]["elements"][0]["content"].startswith("期权收益统计完成")
     assert out["data"]["reply"]["outbound_message_id"] == "reply_1"
+    assert out["data"]["reply"]["render"]["mode"] == "card_markdown_v2"
 
     with sqlite3.connect(tmp_path / "audit.sqlite3") as conn:
         response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
@@ -168,6 +171,9 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert reply_receipt["message_id"] == "reply_1"
     assert reply_receipt["outbound_message_id"] == "reply_1"
     assert reply_receipt["delivery_confirmed"] is True
+    assert reply_receipt["render"]["mode"] == "card_markdown_v2"
+    assert reply_receipt["render"]["fallback_used"] is False
+    assert "source_sha256" in reply_receipt["render"]
     assert reply_receipt["api_response"]["data"]["message_id"] == "reply_1"
 
 
@@ -211,6 +217,240 @@ def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) ->
     record = CopilotHostStore(database).list_replies()[0]
     assert record["status"] == "retryable_failed"
     assert record["attempt_count"] == 1
+
+
+def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: Path) -> None:
+    from src.application.copilot.host_store import CopilotHostStore
+
+    markdown = (
+        "拆解如下：\n\n"
+        "| 项目 | CNY | 原币 |\n"
+        "|---|---:|---|\n"
+        "| 卖出开仓权利金收入 | ¥13,266.88 | HKD +10,449；USD +471 |"
+    )
+    replies: list[dict[str, Any]] = []
+
+    class FakeChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            del channel, payload, kwargs
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": "msg_table"},
+                    "response_text": markdown,
+                    "inbound_result": {
+                        "ok": True,
+                        "command_id": "cmd_table",
+                        "render_route": "copilot",
+                        "response_text": markdown,
+                    },
+                },
+            )
+
+    database = tmp_path / "audit.sqlite3"
+    out = handle_feishu_ws_event(
+        _message_payload(message_id="msg_table"),
+        settings=FeishuWsSettings(
+            config_key="us",
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=lambda **kwargs: replies.append(dict(kwargs))
+        or {"code": 0, "data": {"message_id": "reply_table"}},
+        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+    )
+
+    assert out["ok"] is True
+    assert replies[0]["msg_type"] == "interactive"
+    assert replies[0]["content"]["body"]["elements"][0]["content"] == markdown
+    assert replies[0]["uuid"] == "feishu:cmd_table"
+    assert out["data"]["reply"]["render"]["markdown_table_detected"] is True
+    record = CopilotHostStore(database).list_replies()[0]
+    assert record["status"] == "delivered"
+    stored = json.loads(record["payload_json"])
+    assert stored["schema_version"] == "feishu-conversation-reply.v1"
+    assert stored["transport"]["content"] == replies[0]["content"]
+    assert stored["text"] == (
+        "拆解如下：\n\n"
+        "项目：卖出开仓权利金收入\n"
+        "CNY：¥13,266.88\n"
+        "原币：HKD +10,449；USD +471"
+    )
+    assert stored["render_meta"]["source_sha256"] == out["data"]["reply"]["render"]["source_sha256"]
+
+
+def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Path) -> None:
+    from src.application.copilot.host_store import CopilotHostStore
+
+    markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
+    calls: list[dict[str, Any]] = []
+
+    class FakeChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            del channel, payload, kwargs
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": "msg_fallback"},
+                    "response_text": markdown,
+                    "inbound_result": {
+                        "ok": True,
+                        "command_id": "cmd_fallback",
+                        "render_route": "copilot",
+                        "response_text": markdown,
+                    },
+                },
+            )
+
+    def _reply(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        if kwargs.get("msg_type") == "interactive":
+            raise feishu_ws.FeishuPermanentError(
+                "invalid card",
+                code=230001,
+                response={"http_status": 400, "code": 230001},
+            )
+        return {"code": 0, "data": {"message_id": "reply_fallback"}}
+
+    database = tmp_path / "audit.sqlite3"
+    out = handle_feishu_ws_event(
+        _message_payload(message_id="msg_fallback"),
+        settings=FeishuWsSettings(
+            config_key="us",
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=_reply,
+        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+    )
+
+    assert out["ok"] is True
+    assert len(calls) == 2
+    assert calls[0]["uuid"] == "feishu:cmd_fallback"
+    assert calls[1]["uuid"] == "feishu:cmd_fallback:fallback"
+    assert calls[1]["text"] == "项目：权利金\nCNY：¥1,000"
+    assert out["data"]["reply"]["render"]["fallback_used"] is True
+    assert CopilotHostStore(database).list_replies()[0]["status"] == "delivered"
+
+
+def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp_path: Path) -> None:
+    from src.application.copilot.host_store import CopilotHostStore
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            del channel, payload, kwargs
+            markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": "msg_ambiguous"},
+                    "response_text": markdown,
+                    "inbound_result": {
+                        "ok": True,
+                        "command_id": "cmd_ambiguous",
+                        "render_route": "copilot",
+                        "response_text": markdown,
+                    },
+                },
+            )
+
+    def _reply(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        raise feishu_ws.FeishuPermanentError(
+            "invalid json response",
+            response={"http_status": 200, "body": "not-json"},
+        )
+
+    database = tmp_path / "audit.sqlite3"
+    out = handle_feishu_ws_event(
+        _message_payload(message_id="msg_ambiguous"),
+        settings=FeishuWsSettings(
+            config_key="us",
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=_reply,
+        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+    )
+
+    assert out["ok"] is False
+    assert len(calls) == 1
+    assert calls[0]["msg_type"] == "interactive"
+    assert calls[0]["uuid"] == "feishu:cmd_ambiguous"
+    record = CopilotHostStore(database).list_replies()[0]
+    assert record["status"] == "retryable_failed"
+    assert record["attempt_count"] == 1
+
+
+def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path) -> None:
+    from src.application.channels.feishu_reply_renderer import render_feishu_conversation_reply
+    from src.application.copilot.host_store import CopilotHostStore
+
+    database = tmp_path / "audit.sqlite3"
+    store = CopilotHostStore(database)
+    envelope = render_feishu_conversation_reply(
+        message_id="msg_card",
+        text="| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |",
+        reply_in_thread=True,
+        max_chars=3500,
+        render_route="copilot",
+    )
+    store.enqueue_reply(delivery_key="feishu:card", channel="feishu", payload=envelope)
+    card_calls: list[dict[str, Any]] = []
+
+    card_retry = feishu_ws._retry_pending_feishu_reply(
+        settings=FeishuWsSettings(
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0},
+    )
+
+    assert card_retry["ok"] is True
+    assert card_calls[0]["uuid"] == "feishu:card"
+    assert card_calls[0]["content"] == envelope["transport"]["content"]
+
+    store.enqueue_reply(
+        delivery_key="feishu:legacy",
+        channel="feishu",
+        payload={"message_id": "msg_legacy", "text": "旧版文本", "reply_in_thread": False},
+    )
+    legacy_calls: list[dict[str, Any]] = []
+    legacy_retry = feishu_ws._retry_pending_feishu_reply(
+        settings=FeishuWsSettings(
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(database),
+        ),
+        reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0},
+    )
+
+    assert legacy_retry["ok"] is True
+    assert legacy_calls == [
+        {
+            "app_id": "app_1",
+            "app_secret": "secret_1",
+            "message_id": "msg_legacy",
+            "uuid": "feishu:legacy",
+            "reply_in_thread": False,
+            "text": "旧版文本",
+        }
+    ]
 
 
 def test_feishu_ws_routes_inbound_through_channel_service() -> None:
@@ -345,7 +585,8 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
     assert calls == []
     assert copilot_calls[0]["user_message"] == "分析 lx 6月的净现金流明细"
     assert replies
-    assert replies[0]["text"].startswith("结论：")
+    assert replies[0]["msg_type"] == "interactive"
+    assert replies[0]["content"]["body"]["elements"][0]["content"].startswith("结论：")
     assert inbound_result["data"]["decision"]["reason"] == "copilot_freeform"
     assert inbound_result["meta"]["assistant"]["route"] == "copilot"
 
@@ -410,7 +651,8 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
     assert replies
-    assert replies[0]["text"] == "结论：系统运行正常。"
+    assert replies[0]["msg_type"] == "interactive"
+    assert replies[0]["content"]["body"]["elements"][0]["content"] == "结论：系统运行正常。"
     assert inbound_result["meta"]["assistant"]["route"] == "copilot"
 
 
