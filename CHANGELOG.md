@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.4.26 - 2026-07-25
+
+### Fixed
+- Allowed the canonical YAML authoring config to persist the `trade_intake.holdings_sync` subtree so the deployed stock/ETF holdings-sync dispatcher can be enabled without editing generated runtime JSON.
+- Kept trade-intake mode, confirmation, and other write-policy fields outside YAML authoring while validating holdings-sync values through the existing runtime contract.
+
 ## 1.4.25 - 2026-07-25
 
 ### Added

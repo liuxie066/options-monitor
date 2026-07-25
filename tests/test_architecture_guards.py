@@ -39,6 +39,7 @@ def test_runtime_config_generation_excludes_assistant_control_plane() -> None:
 
     assert "assistant" not in PASSTHROUGH_KEYS
     assert "inbound" not in PASSTHROUGH_KEYS
+    assert "trade_intake" not in PASSTHROUGH_KEYS
 
     cfg, _meta = resolve_yaml_runtime_config(
         repo_root=ROOT,

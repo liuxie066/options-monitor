@@ -975,8 +975,62 @@ markets:
 """,
     )
 
-    with pytest.raises(AgentToolError, match="trade_intake is not supported"):
+    with pytest.raises(AgentToolError, match=r"trade_intake\.mode is not supported"):
         resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_yaml_config_accepts_trade_intake_holdings_sync(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  holdings_sync:
+    enabled: true
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert cfg["trade_intake"]["mode"] == "apply"
+    assert cfg["trade_intake"]["holdings_sync"] == {"enabled": True}
+
+
+def test_yaml_config_rejects_invalid_trade_intake_holdings_sync(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  holdings_sync:
+    enabled: "true"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="holdings_sync.enabled must be a boolean"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
 
 
 def test_yaml_config_rejects_override_for_symbol_not_in_market(tmp_path: Path) -> None:
