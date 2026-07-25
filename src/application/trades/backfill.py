@@ -43,6 +43,7 @@ def run_history_backfill(
     backfill_config: dict[str, Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
     process_payload_fn: Callable[..., dict[str, Any]],
+    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     process_lock: Any | None = None,
     history_deals_fn: Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]] = fetch_opend_history_deals,
     now_fn: Callable[[], datetime] | None = None,
@@ -157,6 +158,7 @@ def run_history_backfill(
                 config_path=config_path,
                 runtime_root=runtime_root,
                 on_result_fn=on_result_fn,
+                on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
                 source="backfill",
             )
         last_result = dict(result)

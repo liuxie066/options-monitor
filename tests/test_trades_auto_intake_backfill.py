@@ -42,6 +42,7 @@ def _audit_events(path: Path) -> list[dict[str, Any]]:
 
 def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: Path) -> None:
     processed: list[dict[str, Any]] = []
+    callback = lambda _context: {"status": "queued"}
 
     def _history_deals_fn(**_kwargs):
         return (
@@ -50,7 +51,13 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
         )
 
     def _process_payload_fn(payload: dict[str, Any], **kwargs):
-        processed.append({"payload": payload, "source": kwargs.get("source")})
+        processed.append(
+            {
+                "payload": payload,
+                "source": kwargs.get("source"),
+                "callback": kwargs.get("on_stock_holdings_sync_fn"),
+            }
+        )
         return {
             "status": "applied",
             "action": "open",
@@ -63,12 +70,22 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
         **_backfill_kwargs(tmp_path),
         history_deals_fn=_history_deals_fn,
         process_payload_fn=_process_payload_fn,
+        on_stock_holdings_sync_fn=callback,
     )
 
     assert out["ok"] is True
     assert out["deal_count"] == 1
     assert out["applied_count"] == 1
-    assert processed == [{"payload": {"deal_id": "deal-1", "code": "HK.TCH260605P440000"}, "source": "backfill"}]
+    assert processed == [
+        {
+            "payload": {
+                "deal_id": "deal-1",
+                "code": "HK.TCH260605P440000",
+            },
+            "source": "backfill",
+            "callback": callback,
+        }
+    ]
     phases = [event["phase"] for event in _audit_events(tmp_path / "audit.jsonl")]
     assert phases == ["backfill_check_started", "backfill_received", "backfill_applied", "backfill_check_finished"]
 

@@ -40,8 +40,10 @@ from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import process_trade_payload
+from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
 from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import atomic_write_json, utc_now
+from src.infrastructure.portfolio_holdings_sync_client import sync_portfolio_holdings
 
 
 TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE = 78
@@ -89,6 +91,7 @@ def _process_payload(
     config_path: Path | None = None,
     runtime_root: Path | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
     source: str = "push",
     allow_external_lookup: bool = True,
@@ -131,6 +134,7 @@ def _process_payload(
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=resolve_trade_deal,
         on_result_fn=on_result_fn,
+        on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
         retry_failed_deal=retry_failed_deal,
         source=source,
     )
@@ -303,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
                     "status_path": str(status_path),
                     "receipt": dict(intake_cfg["receipt"]),
                     "backfill": dict(intake_cfg["backfill"]),
+                    "holdings_sync": _holdings_sync_status_payload(
+                        intake_cfg.get("holdings_sync")
+                    ),
                     "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
                     "sources": [_source_status_payload(source) for source in sources],
                 },
@@ -319,7 +326,10 @@ def main(argv: list[str] | None = None) -> int:
         high_risk=True,
     )
     if apply_changes and control["confirmation_required"]:
-        print("trade-intake apply mode writes trade_events and may send receipts; use --confirm or --yes")
+        print(
+            "trade-intake apply mode writes trade_events, may sync PM holdings, "
+            "and may send receipts; use --confirm or --yes"
+        )
         return 2
     receipt_callback = _build_receipt_callback(
         base=base,
@@ -328,6 +338,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.deal_json:
+        holdings_sync_dispatcher = _build_stock_holdings_sync_dispatcher(
+            intake_cfg=intake_cfg,
+            sources=sources,
+            runtime_root=runtime_root,
+            apply_changes=apply_changes,
+        )
+        holdings_sync_callback = (
+            holdings_sync_dispatcher.handle_normalized_deal
+            if holdings_sync_dispatcher is not None
+            else None
+        )
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         manual_source = _select_source_for_payload(
             sources,
@@ -339,29 +360,34 @@ def main(argv: list[str] | None = None) -> int:
         manual_port = int(args.port or manual_source.get("port") or 11111)
         manual_account_mapping = dict(manual_source.get("account_mapping") or intake_cfg["account_mapping"])
         manual_futu_account_ids = list(manual_source.get("futu_account_ids") or intake_cfg["futu_account_ids"])
-        with contextlib.redirect_stdout(sys.stderr):
-            if apply_changes:
-                _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
-            else:
-                repo = _ReplayRepo()
-            result = _process_payload(
-                payload,
-                repo=repo,
-                state_path=state_path,
-                audit_path=audit_path,
-                account_mapping=manual_account_mapping,
-                futu_account_ids=manual_futu_account_ids,
-                apply_changes=apply_changes,
-                host=manual_host,
-                port=manual_port,
-                config=cfg,
-                config_path=cfg_path,
-                runtime_root=runtime_root,
-                on_result_fn=receipt_callback,
-                retry_failed_deal=bool(args.retry_failed),
-                source="manual",
-                allow_external_lookup=bool(apply_changes),
-            )
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                if apply_changes:
+                    _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+                else:
+                    repo = _ReplayRepo()
+                result = _process_payload(
+                    payload,
+                    repo=repo,
+                    state_path=state_path,
+                    audit_path=audit_path,
+                    account_mapping=manual_account_mapping,
+                    futu_account_ids=manual_futu_account_ids,
+                    apply_changes=apply_changes,
+                    host=manual_host,
+                    port=manual_port,
+                    config=cfg,
+                    config_path=cfg_path,
+                    runtime_root=runtime_root,
+                    on_result_fn=receipt_callback,
+                    on_stock_holdings_sync_fn=holdings_sync_callback,
+                    retry_failed_deal=bool(args.retry_failed),
+                    source="manual",
+                    allow_external_lookup=bool(apply_changes),
+                )
+        finally:
+            if holdings_sync_dispatcher is not None:
+                holdings_sync_dispatcher.close()
         if apply_changes:
             _write_listener_status(
                 status_path,
@@ -399,37 +425,54 @@ def main(argv: list[str] | None = None) -> int:
             )
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
 
-    process_lock = threading.RLock()
-    if len(sources) == 1:
-        return _run_listener_source_loop(
-            source=sources[0],
-            repo=repo,
-            cfg=cfg,
-            cfg_path=cfg_path,
-            runtime_root=runtime_root,
-            runtime_root_source=runtime_resolution.source,
-            intake_cfg=intake_cfg,
-            apply_changes=apply_changes,
-            receipt_callback=receipt_callback,
-            process_lock=process_lock,
-        )
-
-    return _coordinate_listener_sources(
-        sources,
-        run_source=lambda source, stop_event: _run_listener_source_loop(
-            source=source,
-            repo=repo,
-            cfg=cfg,
-            cfg_path=cfg_path,
-            runtime_root=runtime_root,
-            runtime_root_source=runtime_resolution.source,
-            intake_cfg=intake_cfg,
-            apply_changes=apply_changes,
-            receipt_callback=receipt_callback,
-            process_lock=process_lock,
-            stop_event=stop_event,
-        ),
+    holdings_sync_dispatcher = _build_stock_holdings_sync_dispatcher(
+        intake_cfg=intake_cfg,
+        sources=sources,
+        runtime_root=runtime_root,
+        apply_changes=apply_changes,
     )
+    holdings_sync_callback = (
+        holdings_sync_dispatcher.handle_normalized_deal
+        if holdings_sync_dispatcher is not None
+        else None
+    )
+    process_lock = threading.RLock()
+    try:
+        if len(sources) == 1:
+            return _run_listener_source_loop(
+                source=sources[0],
+                repo=repo,
+                cfg=cfg,
+                cfg_path=cfg_path,
+                runtime_root=runtime_root,
+                runtime_root_source=runtime_resolution.source,
+                intake_cfg=intake_cfg,
+                apply_changes=apply_changes,
+                receipt_callback=receipt_callback,
+                stock_holdings_sync_callback=holdings_sync_callback,
+                process_lock=process_lock,
+            )
+
+        return _coordinate_listener_sources(
+            sources,
+            run_source=lambda source, stop_event: _run_listener_source_loop(
+                source=source,
+                repo=repo,
+                cfg=cfg,
+                cfg_path=cfg_path,
+                runtime_root=runtime_root,
+                runtime_root_source=runtime_resolution.source,
+                intake_cfg=intake_cfg,
+                apply_changes=apply_changes,
+                receipt_callback=receipt_callback,
+                stock_holdings_sync_callback=holdings_sync_callback,
+                process_lock=process_lock,
+                stop_event=stop_event,
+            ),
+        )
+    finally:
+        if holdings_sync_dispatcher is not None:
+            holdings_sync_dispatcher.close()
 
 
 def _build_receipt_callback(
@@ -451,6 +494,50 @@ def _build_receipt_callback(
         )
 
     return _callback
+
+
+def _build_stock_holdings_sync_dispatcher(
+    *,
+    intake_cfg: dict[str, Any],
+    sources: list[dict[str, Any]],
+    runtime_root: Path,
+    apply_changes: bool,
+) -> StockHoldingsSyncDispatcher | None:
+    sync_cfg = dict(intake_cfg.get("holdings_sync") or {})
+    if not apply_changes or not bool(sync_cfg.get("enabled")):
+        return None
+    accounts = sorted(
+        {
+            str(account or "").strip().lower()
+            for source in sources
+            for account in dict(source.get("account_mapping") or {}).values()
+            if str(account or "").strip()
+        }
+    )
+    if not accounts:
+        raise ValueError(
+            "trade_intake.holdings_sync.enabled=true requires mapped Futu accounts"
+        )
+    state_dir = Path(
+        sync_cfg.get("state_dir")
+        or "output_shared/state/trade_intake/stock_holdings_sync"
+    )
+    if not state_dir.is_absolute():
+        state_dir = (runtime_root / state_dir).resolve()
+    timeout_sec = float(sync_cfg.get("request_timeout_sec") or 120.0)
+    return StockHoldingsSyncDispatcher(
+        accounts=accounts,
+        state_dir=state_dir,
+        sync_fn=lambda account: sync_portfolio_holdings(
+            account,
+            timeout_sec=timeout_sec,
+        ),
+        debounce_sec=float(sync_cfg.get("debounce_sec") or 0.0),
+        max_attempts=int(sync_cfg.get("max_attempts") or 1),
+        retry_backoff_sec=float(sync_cfg.get("retry_backoff_sec") or 0.0),
+        queue_capacity=int(sync_cfg.get("queue_capacity") or 100),
+        recent_deal_limit=int(sync_cfg.get("recent_deal_limit") or 2000),
+    )
 
 
 def _select_source_for_payload(
@@ -587,6 +674,7 @@ def _run_listener_source_loop(
     apply_changes: bool,
     receipt_callback: Callable[[dict[str, Any]], dict[str, Any]],
     process_lock: threading.RLock,
+    stock_holdings_sync_callback: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     stop_event: threading.Event | None = None,
 ) -> int:
     state_path = source["state_path"]
@@ -622,6 +710,7 @@ def _run_listener_source_loop(
                 config_path=cfg_path,
                 runtime_root=runtime_root,
                 on_result_fn=receipt_callback,
+                on_stock_holdings_sync_fn=stock_holdings_sync_callback,
                 source="push",
             )
         status_state.update(
@@ -630,6 +719,11 @@ def _run_listener_source_loop(
                 "last_push_deal_id": result.get("deal_id") or payload_deal_id(payload) or None,
                 "last_deal_result": _result_summary(result),
                 "last_receipt_result": _receipt_summary(result.get("receipt")),
+                "last_stock_holdings_sync_intent": (
+                    dict(result.get("stock_holdings_sync"))
+                    if isinstance(result.get("stock_holdings_sync"), dict)
+                    else None
+                ),
             }
         )
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
@@ -678,6 +772,7 @@ def _run_listener_source_loop(
                                 backfill_config=backfill_cfg,
                                 on_result_fn=receipt_callback,
                                 process_payload_fn=_process_payload,
+                                on_stock_holdings_sync_fn=stock_holdings_sync_callback,
                                 process_lock=process_lock,
                             )
                         except Exception as exc:
@@ -788,8 +883,19 @@ def _status_base_payload(
         "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
         "receipt": dict(intake_cfg.get("receipt") or {}),
         "backfill": dict(intake_cfg.get("backfill") or {}),
+        "holdings_sync": _holdings_sync_status_payload(
+            intake_cfg.get("holdings_sync")
+        ),
         "started_at_utc": utc_now(),
     }
+
+
+def _holdings_sync_status_payload(value: object) -> dict[str, Any]:
+    src = dict(value) if isinstance(value, dict) else {}
+    out = dict(src)
+    if "state_dir" in out:
+        out["state_dir"] = str(out["state_dir"])
+    return out
 
 
 def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: str, stage: str, **extra: Any) -> None:
