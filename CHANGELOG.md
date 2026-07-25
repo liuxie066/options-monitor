@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.4.28 - 2026-07-25
+
+### Added
+- Added Feishu Card JSON 2.0 rendering for proactive Daily Brief notifications, with compact comparison tables for Sell Put and Covered Call candidates, explicit two-leg tables for Combo Yield candidates, actionable-position advice tables, and account-funds tables.
+- Added a versioned, digest-verified proactive transport envelope so failed deliveries and delivery-only retries reuse the exact rendered card and logical idempotency key.
+
+### Changed
+- Kept single-candidate alerts compact and kept events, reminders, blocked scans, and other narrative context as prose instead of forcing all monitoring content into tables.
+- Limited the richer transport to Feishu while preserving the existing canonical flat notification text for WeChat, compatibility fallback, and safe rollback to older releases.
+
+### Fixed
+- Fell back to the existing Feishu `post` projection only after a definite permanent card rejection, using a distinct fallback UUID; ambiguous or transient sends remain fail-closed to avoid duplicate notifications.
+- Enforced local character and byte budgets with block-aware truncation so tables are never cut through a row and over-sized card requests are rejected before any provider call.
+
 ## 1.4.27 - 2026-07-25
 
 ### Added

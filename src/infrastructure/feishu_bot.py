@@ -13,6 +13,9 @@ HttpJsonFn = Callable[..., dict[str, Any]]
 FEISHU_REPLY_REQUEST_BUDGET_BYTES = 28 * 1024
 FEISHU_REPLY_TOO_LARGE = "FEISHU_REPLY_TOO_LARGE"
 _FEISHU_REPLY_MESSAGE_TYPES = {"text", "post", "interactive"}
+FEISHU_SEND_REQUEST_BUDGET_BYTES = 28 * 1024
+FEISHU_SEND_TOO_LARGE = "FEISHU_SEND_TOO_LARGE"
+_FEISHU_SEND_MESSAGE_TYPES = {"text", "post", "interactive"}
 
 
 def reply_message(
@@ -151,6 +154,75 @@ def add_message_reaction(
         token_retry_max_attempts=1,
         token_lock_timeout=0.0,
     )
+
+
+def send_message(
+    *,
+    app_id: str,
+    app_secret: str,
+    open_id: str,
+    msg_type: str,
+    content: dict[str, Any],
+    uuid: str | None = None,
+    log_fn: Callable[[dict[str, Any]], Any] | None = None,
+    http_json_fn: HttpJsonFn = http_json,
+) -> dict[str, Any]:
+    open_id_value = str(open_id or "").strip()
+    msg_type_value = str(msg_type or "").strip()
+    content_value = dict(content) if isinstance(content, dict) else {}
+    if not open_id_value:
+        raise ValueError("open_id is required")
+    if msg_type_value not in _FEISHU_SEND_MESSAGE_TYPES:
+        raise ValueError(f"unsupported Feishu send msg_type: {msg_type_value or '<empty>'}")
+    if not content_value:
+        raise ValueError("content is required")
+
+    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
+    url = f"https://open.feishu.cn{request_path}"
+    payload: dict[str, Any] = {
+        "receive_id": open_id_value,
+        "msg_type": msg_type_value,
+        "content": json.dumps(content_value, ensure_ascii=False),
+    }
+    if uuid:
+        payload["uuid"] = str(uuid)
+
+    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    if request_body_bytes > FEISHU_SEND_REQUEST_BUDGET_BYTES:
+        canonical_content = json.dumps(
+            content_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raise FeishuPermanentError(
+            "feishu send request exceeds local byte budget",
+            response={
+                "local_error_code": FEISHU_SEND_TOO_LARGE,
+                "http_status": None,
+                "feishu_code": None,
+                "http_attempts": [],
+                "request_body_bytes": request_body_bytes,
+                "request_body_budget_bytes": FEISHU_SEND_REQUEST_BUDGET_BYTES,
+                "content_sha256": hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
+            },
+        )
+
+    def _send(tenant_token: str) -> dict[str, Any]:
+        return http_json_fn(
+            "POST",
+            url,
+            payload,
+            headers={
+                "Authorization": f"Bearer {tenant_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            retry_max_attempts=(3 if uuid else 1),
+            log_fn=log_fn,
+            log_success_attempts=bool(log_fn),
+        )
+
+    return with_tenant_token_retry(app_id, app_secret, _send)
 
 
 def send_text_message(
