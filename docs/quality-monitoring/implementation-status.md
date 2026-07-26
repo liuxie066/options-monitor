@@ -76,15 +76,33 @@ Exit gate 判定：
 
 ## Phase 2 — PM
 
-状态：**未完成**
+状态：**代码与本地验证完成；生产 canary/onboarding 待 Phase 5**
 
-所需证据：
+完成证据：
 
-- 显式账户映射和 OpenD source contract
-- cash/MMF 正确语义与 receipt
-- 写后立即与 30 秒只读复查
-- price/FX/NAV quality gate
-- PM Quality API/artifact
+- PM commit：`80d51e0`（叠加前置 commits `26dc4da`、`0c3448c`、`fe83d63`）
+- `lx`/`sy` 使用显式账户级 `acc_id`、`REAL`、market、CNH source contract；不回退全局 `acc_id` 或 `acc_index`
+- `accinfo.cash` 与 `fund_assets` 分别成为 securities cash/MMF 唯一权威字段；0 与 missing 分离
+- positions/cash/MMF 使用同一 source snapshot，保存 durable latest/history receipt 和 dataset-scoped partial-write 状态
+- 写后立即对账；不一致时 30 秒后只读重查，不重复写
+- quantity 精确比较、cost basis 按 PM 存储精度比较；cost mismatch 不单独阻断 NAV
+- NAV 写入边界复用当前 valuation evidence 和最近一次 durable reconciliation receipt；producer onboarding 后 fail closed，且不依赖 Hub 在线
+- price evidence 保留 source、quote time、fallback、missing；非 CNY FX 缺少 fact time 时 unavailable，不用当前汇率补历史证据
+- producer 覆盖 `PM-ACC-001` 至 `PM-NAV-002` 的 17 个 PM 检查 ID
+- artifact 原子发布；`GET /quality/status` 只读已发布 artifact，独立 bearer token、ETag、`no-store` 和安全错误 envelope
+- `pm quality status --json` 与 HTTP 使用同一 application payload；`pm quality refresh` 只发布控制面 artifact
+- PM focused 74 项、完整 753 项测试通过；触及文件 Ruff 通过（仓库全量 Ruff 仍有既存基线问题，不属于本 work unit）
+
+Exit gate 判定：
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| PM 检查矩阵有实现/测试映射 | pass | producer check ID 集合回归 |
+| partial-write 数据集级 untrusted | pass | cash success + MMF failure receipt/status 回归 |
+| `/health` 与 `/quality/status` 分离 | pass | HTTP auth/ETag/503/只读 artifact tests |
+| producer payload 通过 canonical Schema | pass | `PMQualityService` Draft 2020-12 validation |
+| 生产只读 canary 不写 Feishu | pending Phase 5 | 需要目标实例当前配置与只读执行批准 |
+| Hub onboard 后真实告警和本地门禁 | pending Phase 5 | 需要生产 token/onboarded 配置与真实恢复测试 |
 
 ## Phase 3 — OM
 
