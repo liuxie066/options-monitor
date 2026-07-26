@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+### New Features
+- Added the versioned OM runtime and data-quality producer, atomic local artifacts, an independently authenticated loopback status endpoint, and local fail-closed gates for position-dependent advice and official option performance.
+- Added opt-in systemd units for the quality HTTP endpoint, 15-minute regular checks, one-minute due probes, and market-local US/HK day-end authoritative reconciliation.
+
 ### Improvements
+- Made regular quality scans reuse still-current authoritative OpenD evidence and query the broker only for baseline creation, local ledger changes, due discrepancy rechecks, day-end reconciliation, or explicit operator refresh.
+- Preserved the other market's published evidence during a single-market day-end refresh and persisted only redacted control timing, trading-calendar, and local ledger revision hashes.
 - Separated validated development delivery from VERSION-driven publication, standardized future release notes as New Features, Improvements, and Bug Fixes, and kept production upgrades behind a separate explicit action.
+
+### Bug Fixes
+- Required legacy quality artifacts without an authoritative refresh deadline to rebuild their OpenD baseline instead of carrying old evidence indefinitely.
 
 ## 1.4.30 - 2026-07-26
 
