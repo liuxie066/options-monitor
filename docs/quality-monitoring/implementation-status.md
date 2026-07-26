@@ -11,7 +11,7 @@
 
 | 仓库 | 分支 | 当前用途 |
 |---|---|---|
-| `options-monitor` | `main`（合并进行中） | OM producer、本地门禁、设计与完成证据 |
+| `options-monitor` | `main`（已合并，未发布） | OM producer、本地门禁、设计与完成证据 |
 | `portfolio-management` | `main@c66422a` | PM 前置修复、producer、本地门禁 |
 | `investment-quality` | `main` | canonical contract、Hub、incident/outbox/watchdog |
 
