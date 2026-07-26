@@ -11,6 +11,7 @@ from src.application import portfolio_assignment_scenario as application
 class _Response:
     def __init__(self, payload):
         self.body = json.dumps(payload).encode("utf-8")
+        self.headers = {"X-PM-API-Version": "portfolio.api.v1"}
 
     def __enter__(self):
         return self
@@ -59,7 +60,7 @@ def test_valuation_evidence_client_posts_to_fixed_loopback_endpoint(monkeypatch)
     request = seen["request"]
     assert urlsplit(request.full_url).scheme == "http"
     assert urlsplit(request.full_url).netloc == "127.0.0.1:8765"
-    assert urlsplit(request.full_url).path == "/analysis/valuation-evidence"
+    assert urlsplit(request.full_url).path == "/api/v1/analysis/valuation-evidence"
     assert request.get_method() == "POST"
     assert json.loads(request.data) == {
         "accounts": ["lx", "sy"],

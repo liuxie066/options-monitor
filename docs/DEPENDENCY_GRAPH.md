@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 797 (`src`: 441, `domain`: 64, `scripts`: 7, `tests`: 285)
-- Internal import edges: 4568 total, 2029 production/script edges excluding tests
+- Python files scanned: 801 (`src`: 442, `domain`: 64, `scripts`: 7, `tests`: 288)
+- Internal import edges: 4573 total, 2032 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|306| domain
   application -->|2| domain_services
-  application -->|108| infrastructure
+  application -->|110| infrastructure
   application -->|36| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -47,7 +47,7 @@ flowchart LR
   tests -->|1788| application
   tests -->|382| domain
   tests -->|2| domain_services
-  tests -->|121| infrastructure
+  tests -->|123| infrastructure
   tests -->|190| interfaces
   tests -->|11| scripts
   tests -->|16| storage
@@ -59,7 +59,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 306 |
 | interfaces | application | 128 |
-| application | infrastructure | 108 |
+| application | infrastructure | 110 |
 | application | storage | 36 |
 | scripts | application | 10 |
 | domain_services | domain | 5 |
@@ -78,7 +78,7 @@ flowchart LR
 | tests | application | 1788 |
 | tests | domain | 382 |
 | tests | interfaces | 190 |
-| tests | infrastructure | 121 |
+| tests | infrastructure | 123 |
 | tests | storage | 16 |
 | tests | scripts | 11 |
 | tests | domain_services | 2 |
@@ -91,7 +91,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 174 |
 | src.interfaces | src.application | 107 |
-| src.application | src.infrastructure | 76 |
+| src.application | src.infrastructure | 78 |
 | src.application.ledger | domain.domain | 30 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 27 |

@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
-import json
-import os
-import socket
-import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
@@ -26,60 +20,29 @@ from src.application.portfolio_assignment_scenario import (
 )
 from src.application.portfolio_pnl_bridge import build_portfolio_pnl_bridge
 from src.application.performance.service import build_option_period_performance
+from src.infrastructure.portfolio_management_client import (
+    SERVICE_URL_ENV,
+    PortfolioManagementClient,
+    PortfolioManagementConfigError,
+    PortfolioManagementError,
+    PortfolioManagementHTTPError,
+)
 
 
-DEFAULT_SERVICE_URL = "http://127.0.0.1:8765"
-SERVICE_URL_ENV = "PORTFOLIO_SERVICE_URL"
-MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-
-_VIEW_PATHS = {
-    "health": "/health",
-    "accounts": "/accounts",
-    "overview": "/accounts/overview",
-    "holdings": "/holdings",
-    "cash": "/cash",
-    "nav": "/nav",
-    "distribution": "/distribution",
-    "full_report": "/report/full",
-}
 _ACCOUNT_REQUIRED_VIEWS = frozenset({"holdings", "cash", "nav", "full_report"})
 _FORBIDDEN_ENDPOINT_FIELDS = frozenset({"base_url", "endpoint", "service_url", "url"})
 
 
-def _loopback_service_url() -> str:
-    raw = str(os.environ.get(SERVICE_URL_ENV) or DEFAULT_SERVICE_URL).strip()
+def _portfolio_client() -> PortfolioManagementClient:
     try:
-        parsed = urllib.parse.urlsplit(raw)
-        port = parsed.port
-    except ValueError as exc:
-        raise AgentToolError(code="CONFIG_ERROR", message=f"invalid {SERVICE_URL_ENV}: {exc}") from exc
+        return PortfolioManagementClient(urlopen_fn=urllib.request.urlopen)
+    except PortfolioManagementConfigError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"{SERVICE_URL_ENV} must be an http(s) loopback URL",
-        )
-    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"{SERVICE_URL_ENV} must contain only a loopback origin",
-        )
 
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname != "localhost":
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-        if not is_loopback:
-            raise AgentToolError(
-                code="CONFIG_ERROR",
-                message=f"{SERVICE_URL_ENV} must use localhost or a loopback IP address",
-            )
-
-    host = f"[{hostname}]" if ":" in hostname else hostname
-    authority = f"{host}:{port}" if port is not None else host
-    return urllib.parse.urlunsplit((parsed.scheme, authority, "", "", ""))
+def _map_client_error(exc: PortfolioManagementError) -> AgentToolError:
+    details = {"status": exc.status} if isinstance(exc, PortfolioManagementHTTPError) else {}
+    return AgentToolError(code="READ_ERROR", message=str(exc), details=details)
 
 
 def _bool_query(payload: dict[str, Any], name: str, query: dict[str, str]) -> None:
@@ -146,44 +109,18 @@ def _validate_input(payload: dict[str, Any]) -> None:
         raise AgentToolError(code="INPUT_ERROR", message=f"portfolio_query account is required for view={view}")
 
 
-def _read_json(url: str, *, timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read(MAX_RESPONSE_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        raise AgentToolError(
-            code="READ_ERROR",
-            message=f"portfolio-management HTTP {exc.code}",
-            details={"status": exc.code},
-        ) from exc
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
-        raise AgentToolError(code="READ_ERROR", message=f"portfolio-management request failed: {exc}") from exc
-
-    if len(body) > MAX_RESPONSE_BYTES:
-        raise AgentToolError(code="READ_ERROR", message="portfolio-management response exceeds 8 MiB")
-    try:
-        decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AgentToolError(code="READ_ERROR", message="portfolio-management returned invalid JSON") from exc
-    if not isinstance(decoded, dict):
-        raise AgentToolError(code="READ_ERROR", message="portfolio-management JSON response must be an object")
-    if decoded.get("success") is False:
-        message = str(decoded.get("error") or decoded.get("message") or "portfolio-management read failed")
-        raise AgentToolError(code="READ_ERROR", message=message)
-    return decoded
-
-
 def _portfolio_query(payload: dict[str, Any]):
     view = str(payload.get("view") or "health").strip()
-    base_url = _loopback_service_url()
     query, scope = _request_scope(view, payload)
-    url = f"{base_url}{_VIEW_PATHS[view]}"
-    if query:
-        url = f"{url}?{urllib.parse.urlencode(query)}"
-
     price_timeout = int(payload.get("price_timeout") or 30)
-    response = _read_json(url, timeout=float(min(max(price_timeout + 5, 10), 120)))
+    try:
+        response = _portfolio_client().read_view(
+            view,
+            query=query,
+            timeout=float(min(max(price_timeout + 5, 10), 120)),
+        )
+    except PortfolioManagementError as exc:
+        raise _map_client_error(exc) from exc
     data = dict(response)
     data["source"] = {
         "service": "portfolio-management",
@@ -198,23 +135,23 @@ def _portfolio_query(payload: dict[str, Any]):
 
 
 def _read_capital_facts(*, account: str, period: str, as_of_month: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode(
-        {"account": account, "period": period, "as_of_month": as_of_month}
-    )
-    return _read_json(
-        f"{_loopback_service_url()}/analysis/capital-facts?{query}",
-        timeout=30.0,
-    )
+    try:
+        return _portfolio_client().read_capital_facts(
+            account=account,
+            period=period,
+            as_of_month=as_of_month,
+        )
+    except PortfolioManagementError as exc:
+        raise _map_client_error(exc) from exc
 
 
 
 def _read_cash_facts(*, account: str, period: str, as_of_month: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode(
-        {"account": account, "period": period, "as_of_month": as_of_month}
-    )
-    return _read_json(
-        f"{_loopback_service_url()}/analysis/cash-facts?{query}",
-        timeout=30.0,
+    del account, period, as_of_month
+    raise AgentToolError(
+        code="CAPABILITY_UNAVAILABLE",
+        message="portfolio cash facts are not onboarded",
+        details={"capability": "portfolio_cash_facts", "endpoint": None},
     )
 
 
@@ -335,7 +272,7 @@ def _portfolio_cash_bridge(payload: dict[str, Any]):
             account=account,
             period=period,
             as_of_month=as_of_month,
-            unavailable_reason="portfolio_cash_facts_unavailable",
+            unavailable_reason="portfolio_cash_facts_not_onboarded",
         )
         for account in accounts
     }

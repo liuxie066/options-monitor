@@ -1,0 +1,1125 @@
+{
+  "components": {
+    "schemas": {
+      "CapitalFactsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "amounts": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amounts"
+          },
+          "period": {
+            "additionalProperties": true,
+            "title": "Period",
+            "type": "object"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "schema_version",
+          "status",
+          "account",
+          "period"
+        ],
+        "title": "CapitalFactsResponse",
+        "type": "object"
+      },
+      "FutuHoldingsSyncRequest": {
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account"
+          },
+          "allow_empty_stock_snapshot": {
+            "default": false,
+            "title": "Allow Empty Stock Snapshot",
+            "type": "boolean"
+          },
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "FutuHoldingsSyncRequest",
+        "type": "object"
+      },
+      "PublicErrorResponse": {
+        "properties": {
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "success": {
+            "const": false,
+            "default": false,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "error_code",
+          "message",
+          "request_id"
+        ],
+        "title": "PublicErrorResponse",
+        "type": "object"
+      },
+      "PublicResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "title": "PublicResponse",
+        "type": "object"
+      },
+      "ValuationEvidenceRequest": {
+        "properties": {
+          "accounts": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Accounts",
+            "type": "array"
+          },
+          "price_timeout": {
+            "default": 30,
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Price Timeout",
+            "type": "integer"
+          },
+          "supplemental_codes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Supplemental Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "accounts"
+        ],
+        "title": "ValuationEvidenceRequest",
+        "type": "object"
+      },
+      "ValuationEvidenceResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "account_status": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Account Status",
+            "type": "array"
+          },
+          "holdings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Holdings",
+            "type": "array"
+          },
+          "quotes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Quotes",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "title": "Scope",
+            "type": "object"
+          },
+          "snapshot": {
+            "additionalProperties": true,
+            "title": "Snapshot",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "schema_version",
+          "status",
+          "scope",
+          "snapshot",
+          "holdings",
+          "quotes",
+          "account_status",
+          "warnings"
+        ],
+        "title": "ValuationEvidenceResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Service-first API for portfolio accounts, holdings, NAV, and reports.",
+    "title": "Portfolio Management Service",
+    "version": "0.1.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/accounts": {
+      "get": {
+        "operationId": "list_accounts_api_v1_accounts_get",
+        "parameters": [
+          {
+            "description": "Include configured default account even if empty.",
+            "in": "query",
+            "name": "include_default",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "Include configured default account even if empty.",
+              "title": "Include Default",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Accounts",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/v1/accounts/overview": {
+      "get": {
+        "operationId": "multi_account_overview_api_v1_accounts_overview_get",
+        "parameters": [
+          {
+            "description": "Comma-separated accounts. Empty means auto-discover.",
+            "in": "query",
+            "name": "accounts",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated accounts. Empty means auto-discover.",
+              "title": "Accounts"
+            }
+          },
+          {
+            "in": "query",
+            "name": "price_timeout",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 300,
+              "minimum": 1,
+              "title": "Price Timeout",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_details",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Details",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Multi Account Overview",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/v1/analysis/capital-facts": {
+      "get": {
+        "operationId": "get_capital_facts_query_api_v1_analysis_capital_facts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "title": "Account",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "period",
+            "required": true,
+            "schema": {
+              "enum": [
+                "mtd",
+                "ytd"
+              ],
+              "title": "Period",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "as_of_month",
+            "required": true,
+            "schema": {
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+              "title": "As Of Month",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapitalFactsResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Capital Facts Query",
+        "tags": [
+          "analysis"
+        ]
+      }
+    },
+    "/api/v1/analysis/valuation-evidence": {
+      "post": {
+        "operationId": "get_valuation_evidence_query_api_v1_analysis_valuation_evidence_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValuationEvidenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValuationEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Valuation Evidence Query",
+        "tags": [
+          "analysis"
+        ]
+      }
+    },
+    "/api/v1/cash": {
+      "get": {
+        "operationId": "get_cash_query_api_v1_cash_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "title": "Account",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Cash Query",
+        "tags": [
+          "cash"
+        ]
+      }
+    },
+    "/api/v1/distribution": {
+      "get": {
+        "operationId": "get_distribution_query_api_v1_distribution_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account"
+            }
+          },
+          {
+            "description": "Comma-separated accounts; overrides account.",
+            "in": "query",
+            "name": "accounts",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated accounts; overrides account.",
+              "title": "Accounts"
+            }
+          },
+          {
+            "description": "Group distribution by asset code.",
+            "in": "query",
+            "name": "by_asset",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Group distribution by asset code.",
+              "title": "By Asset",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Include market value and ratio fields.",
+            "in": "query",
+            "name": "include_value",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "Include market value and ratio fields.",
+              "title": "Include Value",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Collapse cash and MMF into one row.",
+            "in": "query",
+            "name": "group_cash",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Collapse cash and MMF into one row.",
+              "title": "Group Cash",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Distribution Query",
+        "tags": [
+          "positions"
+        ]
+      }
+    },
+    "/api/v1/futu/holdings/sync": {
+      "post": {
+        "operationId": "sync_futu_holdings_query_api_v1_futu_holdings_sync_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FutuHoldingsSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Sync Futu Holdings Query",
+        "tags": [
+          "holdings"
+        ]
+      }
+    },
+    "/api/v1/holdings": {
+      "get": {
+        "operationId": "get_holdings_query_api_v1_holdings_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "title": "Account",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_cash",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Include Cash",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "group_by_market",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Group By Market",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_price",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Price",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Holdings Query",
+        "tags": [
+          "holdings"
+        ]
+      }
+    },
+    "/api/v1/nav": {
+      "get": {
+        "operationId": "get_nav_query_api_v1_nav_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "title": "Account",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Nav Query",
+        "tags": [
+          "nav"
+        ]
+      }
+    },
+    "/api/v1/report/full": {
+      "get": {
+        "operationId": "full_report_query_api_v1_report_full_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "title": "Account",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "price_timeout",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 300,
+              "minimum": 1,
+              "title": "Price Timeout",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Full Report Query",
+        "tags": [
+          "reports"
+        ]
+      }
+    }
+  }
+}
