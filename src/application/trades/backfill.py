@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.trades.deal_identity import completed_ledger_deal_ids
 from src.application.trades.history_backfill import fetch_opend_history_deals
+from src.application.trades.inbox import (
+    enqueue_trade_payload,
+    mark_trade_payload_handled,
+    mark_trade_payload_retryable,
+    settle_trade_payload_result,
+)
 from src.application.trades.state import (
     append_trade_intake_audit,
     is_retryable_unresolved_deal,
@@ -14,7 +21,7 @@ from src.application.trades.state import (
     upsert_deal_state,
     write_trade_intake_state,
 )
-from src.infrastructure.io_utils import utc_now
+from src.infrastructure.io_utils import atomic_write_json, read_json, utc_now
 
 
 def payload_deal_id(payload: dict[str, Any] | None) -> str:
@@ -45,12 +52,25 @@ def run_history_backfill(
     process_payload_fn: Callable[..., dict[str, Any]],
     on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     process_lock: Any | None = None,
+    inbox_path: Path | None = None,
+    checkpoint_path: Path | None = None,
     history_deals_fn: Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]] = fetch_opend_history_deals,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now()
     now = now_fn() if callable(now_fn) else datetime.now(timezone.utc)
-    lookback_hours = float(backfill_config.get("lookback_hours") or 6)
+    configured_lookback_hours = float(backfill_config.get("lookback_hours") or 6)
+    checkpoint_file = Path(
+        checkpoint_path
+        or state_path.with_name("trade_intake_backfill_checkpoint.json")
+    )
+    checkpoint = read_json(checkpoint_file, default={})
+    checkpoint_payload = checkpoint if isinstance(checkpoint, dict) else {}
+    lookback_hours = _effective_lookback_hours(
+        configured_lookback_hours=configured_lookback_hours,
+        checkpoint=checkpoint_payload,
+        now=now,
+    )
     append_trade_intake_audit(
         audit_path,
         {
@@ -58,6 +78,11 @@ def run_history_backfill(
             "source": "backfill",
             "started_at_utc": started_at,
             "lookback_hours": lookback_hours,
+            "configured_lookback_hours": configured_lookback_hours,
+            "checkpoint_path": str(checkpoint_file),
+            "checkpoint_window_end_utc": checkpoint_payload.get(
+                "last_successful_window_end_utc"
+            ),
         },
     )
     try:
@@ -67,6 +92,17 @@ def run_history_backfill(
             futu_account_ids=futu_account_ids,
             lookback_hours=lookback_hours,
             now=now,
+        )
+        diagnostics = dict(diagnostics or {})
+        diagnostics.update(
+            {
+                "configured_lookback_hours": configured_lookback_hours,
+                "effective_lookback_hours": lookback_hours,
+                "checkpoint_path": str(checkpoint_file),
+                "checkpoint_window_end_utc": checkpoint_payload.get(
+                    "last_successful_window_end_utc"
+                ),
+            }
         )
     except Exception as exc:
         finished_at = utc_now()
@@ -98,11 +134,34 @@ def run_history_backfill(
     failed_count = 0
     unresolved_count = 0
     last_result: dict[str, Any] | None = None
+    durable_queue_complete = True
     lock_context = process_lock if process_lock is not None else contextlib.nullcontext()
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
         deal_id = payload_deal_id(payload)
+        inbox_id: str | None = None
+        if apply_changes:
+            try:
+                inbox_id = enqueue_trade_payload(
+                    inbox_path
+                    or state_path.with_name("trade_intake_inbox.sqlite3"),
+                    payload=payload,
+                    source="backfill",
+                )
+            except Exception as exc:
+                durable_queue_complete = False
+                failed_count += 1
+                append_trade_intake_audit(
+                    audit_path,
+                    {
+                        "phase": "backfill_inbox_failed",
+                        "source": "backfill",
+                        "deal_id": deal_id or None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                continue
         append_trade_intake_audit(
             audit_path,
             {
@@ -142,25 +201,68 @@ def run_history_backfill(
                     "deal_id": deal_id or None,
                     "account": None,
                 }
+                if inbox_id:
+                    mark_trade_payload_handled(
+                        inbox_path
+                        or state_path.with_name("trade_intake_inbox.sqlite3"),
+                        inbox_id=inbox_id,
+                        result=last_result,
+                    )
                 continue
 
-            result = process_payload_fn(
-                payload,
-                repo=repo,
-                state_path=state_path,
-                audit_path=audit_path,
-                account_mapping=account_mapping,
-                futu_account_ids=futu_account_ids,
-                apply_changes=apply_changes,
-                host=host,
-                port=port,
-                config=config,
-                config_path=config_path,
-                runtime_root=runtime_root,
-                on_result_fn=on_result_fn,
-                on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
-                source="backfill",
-            )
+            try:
+                result = process_payload_fn(
+                    payload,
+                    repo=repo,
+                    state_path=state_path,
+                    audit_path=audit_path,
+                    account_mapping=account_mapping,
+                    futu_account_ids=futu_account_ids,
+                    apply_changes=apply_changes,
+                    host=host,
+                    port=port,
+                    config=config,
+                    config_path=config_path,
+                    runtime_root=runtime_root,
+                    on_result_fn=on_result_fn,
+                    on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
+                    source="backfill",
+                )
+            except Exception as exc:
+                failed_count += 1
+                error = f"{type(exc).__name__}: {exc}"
+                last_result = {
+                    "status": "failed",
+                    "action": None,
+                    "reason": "backfill_pipeline_exception",
+                    "deal_id": deal_id or None,
+                    "account": None,
+                    "error": error,
+                }
+                if inbox_id:
+                    mark_trade_payload_retryable(
+                        inbox_path
+                        or state_path.with_name("trade_intake_inbox.sqlite3"),
+                        inbox_id=inbox_id,
+                        error=error,
+                    )
+                append_trade_intake_audit(
+                    audit_path,
+                    {
+                        "phase": "backfill_pipeline_failed",
+                        "source": "backfill",
+                        "deal_id": deal_id or None,
+                        "error": error,
+                    },
+                )
+                continue
+            if inbox_id:
+                settle_trade_payload_result(
+                    inbox_path
+                    or state_path.with_name("trade_intake_inbox.sqlite3"),
+                    inbox_id=inbox_id,
+                    result=result,
+                )
         last_result = dict(result)
         status = str(result.get("status") or "").strip().lower()
         if status == "applied":
@@ -191,9 +293,33 @@ def run_history_backfill(
         elif status == "failed":
             failed_count += 1
 
+    checkpoint_advanced = False
+    history_query_complete = _history_query_complete(
+        diagnostics,
+        expected_account_ids=futu_account_ids,
+    )
+    if apply_changes and durable_queue_complete and history_query_complete:
+        window_end_utc = str(
+            diagnostics.get("window_end_utc")
+            or now.astimezone(timezone.utc).isoformat()
+        )
+        atomic_write_json(
+            checkpoint_file,
+            {
+                "last_successful_window_end_utc": window_end_utc,
+                "configured_lookback_hours": configured_lookback_hours,
+                "last_effective_lookback_hours": lookback_hours,
+                "updated_at_utc": utc_now(),
+            },
+        )
+        checkpoint_advanced = True
+    diagnostics["history_query_complete"] = history_query_complete
+    diagnostics["durable_queue_complete"] = durable_queue_complete
+    diagnostics["checkpoint_advanced"] = checkpoint_advanced
+
     finished_at = utc_now()
     out = {
-        "ok": True,
+        "ok": bool(history_query_complete and durable_queue_complete),
         "started_at_utc": started_at,
         "finished_at_utc": finished_at,
         "deal_count": len(payloads),
@@ -204,6 +330,10 @@ def run_history_backfill(
         "diagnostics": diagnostics,
         "last_result": _result_summary(last_result or {}),
     }
+    if not history_query_complete:
+        out["error"] = "history_query_incomplete"
+    elif not durable_queue_complete:
+        out["error"] = "durable_inbox_incomplete"
     append_trade_intake_audit(
         audit_path,
         {
@@ -213,6 +343,57 @@ def run_history_backfill(
         },
     )
     return out
+
+
+def _effective_lookback_hours(
+    *,
+    configured_lookback_hours: float,
+    checkpoint: dict[str, Any],
+    now: datetime,
+) -> float:
+    configured = float(configured_lookback_hours)
+    raw_cursor = str(checkpoint.get("last_successful_window_end_utc") or "").strip()
+    if not raw_cursor:
+        return configured
+    try:
+        cursor = datetime.fromisoformat(raw_cursor.replace("Z", "+00:00"))
+    except ValueError:
+        return configured
+    if cursor.tzinfo is None:
+        cursor = cursor.replace(tzinfo=timezone.utc)
+    now_utc = now.astimezone(timezone.utc)
+    elapsed_hours = (now_utc - cursor.astimezone(timezone.utc)).total_seconds() / 3600
+    if elapsed_hours <= 0:
+        return configured
+    return max(configured, elapsed_hours + 1.0)
+
+
+def _history_query_complete(
+    diagnostics: dict[str, Any],
+    *,
+    expected_account_ids: list[str],
+) -> bool:
+    rows = diagnostics.get("account_results")
+    if not isinstance(rows, list):
+        return True
+    expected = {
+        str(value or "").strip()
+        for value in expected_account_ids
+        if str(value or "").strip()
+    }
+    successful: set[str] = set()
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        account_id = str(raw.get("futu_account_id") or "").strip()
+        if (
+            account_id
+            and not raw.get("skipped")
+            and not str(raw.get("error") or "").strip()
+            and raw.get("ret") in (0, "0")
+        ):
+            successful.add(account_id)
+    return not expected or expected.issubset(successful)
 
 
 def _state_duplicate_reason(state: dict[str, Any], deal_id: str) -> str | None:
@@ -255,33 +436,9 @@ def _ledger_recorded_deal_ids(repo: Any) -> set[str]:
     list_trade_events = getattr(repo, "list_trade_events", None)
     if not callable(list_trade_events):
         return set()
-    out: set[str] = set()
-    for event in list_trade_events():
-        if isinstance(event, dict):
-            out.update(_deal_ids_from_ledger_event(event))
-    return out
-
-
-def _deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
-    out: set[str] = set()
-    event_id = str(event.get("event_id") or "").strip()
-    if event_id:
-        out.add(event_id)
-        for token in event_id.replace(":", "-").split("-"):
-            if token.isdigit() and len(token) >= 12:
-                out.add(token)
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    for key in ("source_deal_id", "deal_id", "futu_deal_id"):
-        value = str(raw_payload.get(key) or "").strip()
-        if value:
-            out.add(value)
-    stock_settlement = raw_payload.get("stock_settlement")
-    if isinstance(stock_settlement, dict):
-        value = str(stock_settlement.get("source_event_id") or "").strip()
-        if value:
-            out.add(value)
-    return out
+    return completed_ledger_deal_ids(
+        item for item in list_trade_events() if isinstance(item, dict)
+    )
 
 
 def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:

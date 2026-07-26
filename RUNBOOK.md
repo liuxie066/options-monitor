@@ -70,11 +70,17 @@ cd "$REPO_ROOT"
 | `./om run tick --config ...` | 是 | 可能 | 否 | 人工扫描入口；普通 Tick 通知只由 cron trigger 发送 |
 | `./om run tick-cron --market ... --config ...` | 是 | 可能 | 是 | 正式定时扫描/通知入口 |
 | `./om run trade-intake --config ... --mode apply --yes` | 是 | 否 | 是 | 会写 canonical ledger、intake 状态；启用 `holdings_sync` 时异步触发 PM 绝对持仓同步，并默认发送入账回执 |
+| `./om run trade-intake --config ... --reconcile-state --dry-run` | 否 | 否 | 否 | 默认逐一核对所有启用账户的独立 state；可用 `--account lx` 缩小范围 |
+| `./om run trade-intake --config ... --reconcile-state --account lx --apply` | 是 | 否 | 否 | 只更新指定账户 intake state；输出对应 backup path，执行前必须先看 dry-run |
 | `./om option-positions auto-close-expired --config ... --apply --yes` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
 
 判断原则：
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
 - 只要命令会写本地、写远端或发通知，就不要把它当成“只读检查”来使用
+
+trade-intake 的每账户运行目录同时保存 durable inbox 与 backfill checkpoint。push
+回调在进入解析器前先落 inbox；backfill 从上次成功窗口继续并保留一小时重叠，因此
+服务中断超过配置的快速 lookback 后不会直接形成永久盲区。
 
 ## 定时任务（systemd / launchd）
 

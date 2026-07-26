@@ -6,8 +6,78 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.ledger.api import assigned_stock_event_log
+from src.application.ledger.api import (
+    assigned_stock_event_log,
+    open_trade_reconciliation_evidence_repo,
+)
+from src.application.trades.deal_identity import (
+    active_ledger_events,
+    completed_ledger_deal_ids,
+    structured_deal_ids_from_assigned_stock_event,
+    structured_deal_ids_from_ledger_event,
+)
 from src.application.trades.state import load_trade_intake_state, upsert_deal_state, write_trade_intake_state
+
+
+TERMINAL_EVIDENCE_REASONS = {
+    "ledger_event_already_recorded",
+    "assigned_stock_sale_event_recorded",
+    "lifecycle_case_already_recorded",
+}
+
+
+def preview_trade_intake_reconciliation_from_sqlite(
+    *,
+    state_path: str | Path,
+    sqlite_path: str | Path,
+    audit_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Summarize stale intake state against the canonical ledger without opening a write-capable repo."""
+    ledger_path = Path(sqlite_path)
+    if not ledger_path.exists() or not ledger_path.is_file():
+        return {
+            "available": False,
+            "reason": "ledger_sqlite_not_found",
+            "terminal_evidence_found": False,
+            "terminal_evidence_count": 0,
+            "stale_state_count": 0,
+        }
+    result = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=open_trade_reconciliation_evidence_repo(ledger_path),
+        audit_path=audit_path,
+        apply_changes=False,
+    )
+    actions = [item for item in result.get("actions") or [] if isinstance(item, dict)]
+    terminal_count = sum(
+        1
+        for item in actions
+        if str(item.get("reason") or "") in TERMINAL_EVIDENCE_REASONS
+    )
+    ignored_count = sum(
+        1
+        for item in actions
+        if str(item.get("reason") or "") == "not_option_deal"
+    )
+    pending_before = result.get("pending_before") if isinstance(result.get("pending_before"), dict) else {}
+    pending_after = result.get("pending_after") if isinstance(result.get("pending_after"), dict) else {}
+    return {
+        "available": True,
+        "reason": None,
+        "terminal_evidence_found": terminal_count > 0,
+        "terminal_evidence_count": terminal_count,
+        "ignored_non_option_count": ignored_count,
+        "stale_state_count": int(result.get("planned_count") or 0),
+        "pending_before_count": _pending_bucket_count(pending_before),
+        "pending_after_reconcile_count": _pending_bucket_count(pending_after),
+    }
+
+
+def _pending_bucket_count(counts: dict[str, Any]) -> int:
+    return sum(
+        int(counts.get(name) or 0)
+        for name in ("failed_deal_ids", "unresolved_deal_ids")
+    )
 
 
 def reconcile_trade_intake_state(
@@ -205,11 +275,15 @@ def _ledger_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
     list_trade_events = getattr(repo, "list_trade_events", None)
     if not callable(list_trade_events):
         return {}
+    rows = [item for item in list_trade_events() if isinstance(item, dict)]
+    complete_ids = completed_ledger_deal_ids(rows)
     out: dict[str, list[dict[str, Any]]] = {}
-    for event in list_trade_events():
+    for event in active_ledger_events(rows):
         if not isinstance(event, dict):
             continue
         for deal_id in _deal_ids_from_ledger_event(event):
+            if deal_id not in complete_ids:
+                continue
             out.setdefault(deal_id, []).append(event)
     return out
 
@@ -270,22 +344,7 @@ def _evidence_source(event: dict[str, Any]) -> str:
 
 
 def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    values = [
-        raw_payload.get("source_deal_id"),
-        raw_payload.get("deal_id"),
-        raw_payload.get("futu_deal_id"),
-    ]
-    stock_settlement = raw_payload.get("stock_settlement")
-    if isinstance(stock_settlement, dict):
-        values.append(stock_settlement.get("source_event_id"))
-    out = _normalize_deal_ids([str(item) for item in values if item not in (None, "")])
-    event_id = str(event.get("event_id") or "").strip()
-    for token in event_id.replace(":", "-").split("-"):
-        if token.isdigit() and len(token) >= 12 and token not in out:
-            out.append(token)
-    return out
+    return sorted(structured_deal_ids_from_ledger_event(event))
 
 
 def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
@@ -297,13 +356,7 @@ def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]
 
 
 def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
-    values = [event.get("source_deal_id"), event.get("deal_id"), event.get("futu_deal_id")]
-    out = _normalize_deal_ids([str(item) for item in values if item not in (None, "")])
-    event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
-    for token in event_id.replace(":", "-").split("-"):
-        if token.isdigit() and len(token) >= 12 and token not in out:
-            out.append(token)
-    return out
+    return sorted(structured_deal_ids_from_assigned_stock_event(event))
 
 
 def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:

@@ -125,6 +125,12 @@ def _is_ignored_non_option_result(result_dict: dict[str, Any]) -> bool:
     return status == "skipped" and reason == "not_option_deal"
 
 
+def _is_terminal_ledger_result(result_dict: dict[str, Any]) -> bool:
+    status = str(result_dict.get("status") or "").strip().lower()
+    reason = str(result_dict.get("reason") or "").strip().lower()
+    return status == "skipped" and reason == "lifecycle_already_written"
+
+
 def _attach_projection_check_fields(out: dict[str, Any]) -> None:
     diagnostics_raw = out.get("diagnostics")
     diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
@@ -522,17 +528,26 @@ def process_trade_payload(
         )
 
     if apply_changes and deal.deal_id:
-        if result.status == "applied":
+        if result.status == "applied" or _is_terminal_ledger_result(result_dict):
+            reconciled_terminal = result.status != "applied"
             state = upsert_deal_state_fn(
                 state,
                 bucket="processed_deal_ids",
                 deal_id=deal.deal_id,
                 payload={
-                    "status": "applied",
+                    "status": "reconciled" if reconciled_terminal else "applied",
                     "action": result.action,
                     "account": result.account,
                     "applied_record_ids": [op.record_id for op in result.operations if op.record_id],
                     "reason": result.reason,
+                    "diagnostics": (
+                        {
+                            "reconciled_from": "terminal_ledger_result",
+                            **dict(result_dict.get("diagnostics") or {}),
+                        }
+                        if reconciled_terminal
+                        else {}
+                    ),
                 },
             )
             write_trade_intake_state_fn(state_path, state)

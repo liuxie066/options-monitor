@@ -25,6 +25,7 @@ from src.application.ledger.api import (
     record_lifecycle_exercise,
     record_lifecycle_expire_close,
 )
+from src.application.trades.deal_identity import active_ledger_events
 from src.application.trades.normalizer import NormalizedTradeDeal
 
 
@@ -98,6 +99,64 @@ def _resolve_zero_price_option_close(
             diagnostics={**diagnostics, "retryable": False},
         )
     stock_evidence = _find_matching_stock_evidence(repo, option_case=case)
+    adopted_events = _find_adoptable_expire_close_events(repo, case=case)
+    if adopted_events and stock_evidence is None:
+        target_lot_ids = [
+            str(item.get("target_lot_id") or "").strip()
+            for item in adopted_events
+            if str(item.get("target_lot_id") or "").strip()
+        ]
+        adopted_event_ids = [
+            str(item.get("event_id") or "").strip()
+            for item in adopted_events
+            if str(item.get("event_id") or "").strip()
+        ]
+        adopted_case = _case_with_decision(
+            case,
+            status="ledger_written",
+            decision_type="expire_close",
+            target_lot_ids=target_lot_ids,
+        )
+        adopted_case["adopted_event_ids"] = adopted_event_ids
+        diagnostics = {
+            "lifecycle_case": adopted_case,
+            "lifecycle_evidence": evidence,
+            "adopted_expire_close_event_ids": adopted_event_ids,
+            "adoption_basis": "exact_contract_quantity_and_target_lots",
+        }
+        operations = [
+            BrokerTradeOperation(
+                action="adopt_expire_close_evidence",
+                record_id=str(item.get("target_lot_id") or "").strip() or None,
+                contracts_to_close=int(item.get("contracts") or 0),
+                event_id=str(item.get("event_id") or "").strip() or None,
+                details={
+                    "case_id": adopted_case["case_id"],
+                    "evidence_id": evidence["evidence_id"],
+                    "adopted_existing_event": True,
+                },
+            )
+            for item in adopted_events
+        ]
+        if not apply_changes:
+            return LifecycleTradeResolution(
+                handled=True,
+                status="dry_run",
+                action="expire_close",
+                reason="preview_adopt_existing_expire_close",
+                operations=operations,
+                diagnostics=diagnostics,
+            )
+        _upsert_evidence(repo, evidence)
+        _upsert_case(repo, adopted_case)
+        return LifecycleTradeResolution(
+            handled=True,
+            status="applied",
+            action="expire_close",
+            reason="expire_close_evidence_adopted",
+            operations=operations,
+            diagnostics=diagnostics,
+        )
     decision = _lifecycle_decision(case, stock_evidence=stock_evidence)
     diagnostics = {
         "lifecycle_case": case,
@@ -804,6 +863,90 @@ def _find_conflicting_expire_close_event(repo: Any, case: dict[str, Any]) -> dic
             continue
         return dict(event)
     return None
+
+
+def _find_adoptable_expire_close_events(
+    repo: Any,
+    *,
+    case: dict[str, Any],
+) -> list[dict[str, Any]]:
+    list_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_events):
+        return []
+    try:
+        rows = active_ledger_events(list_events())
+    except Exception:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for event in rows:
+        if str(event.get("event_type") or "").strip().lower() != "expire_close":
+            continue
+        raw = event.get("raw_payload")
+        raw_payload = raw if isinstance(raw, dict) else {}
+        if any(
+            str(raw_payload.get(key) or "").strip()
+            for key in ("source_deal_id", "deal_id", "futu_deal_id")
+        ):
+            continue
+        if not _event_matches_lifecycle_case(event, case=case):
+            continue
+        target_lot_id = str(
+            event.get("target_lot_id")
+            or raw_payload.get("target_lot_id")
+            or raw_payload.get("record_id")
+            or ""
+        ).strip()
+        if not target_lot_id:
+            return []
+        normalized = dict(event)
+        normalized["target_lot_id"] = target_lot_id
+        matches.append(normalized)
+
+    expected_contracts = int(case.get("contracts") or 0)
+    if expected_contracts <= 0 or not matches:
+        return []
+    if len({str(item["target_lot_id"]) for item in matches}) != len(matches):
+        return []
+    if sum(int(item.get("contracts") or 0) for item in matches) != expected_contracts:
+        return []
+    return sorted(
+        matches,
+        key=lambda item: (
+            int(item.get("event_time_ms") or item.get("trade_time_ms") or 0),
+            str(item.get("event_id") or ""),
+        ),
+    )
+
+
+def _event_matches_lifecycle_case(
+    event: dict[str, Any],
+    *,
+    case: dict[str, Any],
+) -> bool:
+    contract_key = event.get("contract_key")
+    key = contract_key if isinstance(contract_key, dict) else {}
+    if normalize_account(event.get("account") or key.get("account")) != normalize_account(case.get("account")):
+        return False
+    if canonical_contract_symbol(event.get("symbol") or key.get("underlying_symbol")) != canonical_contract_symbol(case.get("symbol")):
+        return False
+    if normalize_option_type(event.get("option_type") or key.get("option_type")) != normalize_option_type(case.get("option_type")):
+        return False
+    event_side = str(
+        event.get("position_side")
+        or key.get("position_side")
+        or ""
+    ).strip().lower()
+    if event_side != str(case.get("position_side") or "").strip().lower():
+        return False
+    if normalize_contract_expiration(
+        event.get("expiration_ymd") or key.get("expiration_ymd")
+    ) != normalize_contract_expiration(case.get("expiration_ymd")):
+        return False
+    try:
+        return abs(float(event.get("strike") or key.get("strike")) - float(case.get("strike"))) <= 1e-9
+    except (TypeError, ValueError):
+        return False
 
 
 def _lifecycle_close_type(case: dict[str, Any]) -> str | None:

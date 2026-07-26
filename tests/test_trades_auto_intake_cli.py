@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import src.application.trades.auto_intake as auto_intake
 
 from src.application.layered_config import build_layered_runtime_config_from_user_config
 from src.application.runtime_config_freshness import GENERATED_KEY, build_inline_generated_metadata
@@ -227,6 +228,55 @@ def test_auto_trade_intake_once_accepts_explicit_runtime_root_over_env(tmp_path:
     assert payload["state_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_state.json").resolve())
     assert payload["audit_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_audit.jsonl").resolve())
     assert payload["status_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
+
+
+def test_reconcile_intake_sources_defaults_to_every_account(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[Path] = []
+
+    def _reconcile(**kwargs):
+        calls.append(Path(kwargs["state_path"]))
+        return {
+            "planned_count": 1,
+            "applied_count": 0,
+            "backup_path": None,
+        }
+
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", _reconcile)
+    sources = [
+        {
+            "id": "lx",
+            "account": "lx",
+            "state_path": tmp_path / "lx" / "state.json",
+            "audit_path": tmp_path / "lx" / "audit.jsonl",
+        },
+        {
+            "id": "sy",
+            "account": "sy",
+            "state_path": tmp_path / "sy" / "state.json",
+            "audit_path": tmp_path / "sy" / "audit.jsonl",
+        },
+    ]
+
+    out = auto_intake._reconcile_intake_sources(
+        sources=sources,
+        repo=object(),
+        account=None,
+        deal_ids=[],
+        apply_changes=False,
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+    )
+
+    assert calls == [
+        tmp_path / "lx" / "state.json",
+        tmp_path / "sy" / "state.json",
+    ]
+    assert out["source_count"] == 2
+    assert out["planned_count"] == 2
+    assert out["dry_run"] is True
 
 
 def test_auto_trade_intake_once_reports_multiple_account_sources(tmp_path: Path) -> None:
