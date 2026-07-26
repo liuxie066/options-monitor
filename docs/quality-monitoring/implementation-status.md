@@ -143,7 +143,7 @@ Exit gate 判定：
 
 完成证据：
 
-- Hub commit：`426caf07f80a201eb436cd2edf256b220837aaac`
+- Hub commit：`bcb583af32386df438d27eda6b46b91c38cb799e`
 - Hub version：`0.2.0`
 - OM/PM 使用独立 loopback base URL 和只读 token；配置缺失、token/endpoint 复用或非法 boolean 均 fail closed
 - producer client 区分 timeout、transport、auth、HTTP、Schema、identity、stale 和 clock skew；支持 ETag/304，重启后 304 无缓存时不会猜测
@@ -163,7 +163,8 @@ Exit gate 判定：
 - systemd renderer 只生成不安装；使用专用 `investment-quality` 用户/组、`0077` umask 和 `0700` StateDirectory
 - canonical Schema 四份副本 SHA-256 仍为 `8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338`
 - Hub 完整 pytest：66 项通过；Ruff、compileall、`git diff --check` 通过
-- `investment_quality-0.2.0` wheel 构建并隔离安装成功；wheel SHA-256：`4a4b6e3ad0df567c0defcc35aa425603ece149ad8bd2cea2f822c86eb9e7fbfb`
+- `investment_quality-0.2.0` wheel 从已提交源码隔离构建并安装成功；wheel
+  SHA-256：`357046ad163b46253653bf693939a7ac133057e2341610086e583c981ccaadc4`
 
 Exit gate 判定：
 
@@ -198,8 +199,10 @@ Exit gate 判定：
   holdings 时间字段写路径；生产尚未升级，失败同步尚未重跑；
 - PM 完整 pytest：755 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
   仍有 52 个既有未使用导入告警，不属于本 work unit。
+- PM 发布准备：`feat/quality-monitoring@ab027d4`，目标版本 `0.1.27`。
 - OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
   `--check` 与 diff check 通过。
+- OM 发布元数据提交：`3a443dc4`，目标版本 `1.4.31`。
 
 所需证据：
 
