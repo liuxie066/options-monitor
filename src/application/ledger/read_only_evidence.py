@@ -29,6 +29,40 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
     def list_assigned_stock_events(self) -> list[dict[str, Any]]:
         return self._read_json_column("assigned_stock_events", "event_json")
 
+    def list_position_lots(self) -> list[dict[str, Any]]:
+        uri = f"{self.path.as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                ("position_lots",),
+            ).fetchone()
+            if exists is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT record_id, fields_json, expiration, strike, multiplier
+                FROM position_lots
+                ORDER BY updated_at_ms DESC, record_id DESC
+                """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                fields = json.loads(str(row["fields_json"]) or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(fields, dict):
+                continue
+            out.append(
+                {
+                    "record_id": str(row["record_id"] or ""),
+                    "fields": fields,
+                }
+            )
+        return out
+
     def list_trade_lifecycle_cases(self) -> list[dict[str, Any]]:
         return self._read_json_column("trade_lifecycle_cases", "raw_json")
 
