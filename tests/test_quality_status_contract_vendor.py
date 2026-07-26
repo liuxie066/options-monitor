@@ -17,7 +17,8 @@ def test_vendored_quality_status_schema_matches_manifest() -> None:
     schema_bytes = schema_path.read_bytes()
 
     assert hashlib.sha256(schema_bytes).hexdigest() == manifest["sha256"]
-    assert str(manifest["upstream_contract_release"]).startswith("contract-v")
+    assert manifest["upstream_release_state"] == "unpublished"
+    assert str(manifest["planned_upstream_contract_release"]).startswith("contract-v")
     assert len(manifest["upstream_commit"]) == 40
 
     schema = json.loads(schema_bytes)
