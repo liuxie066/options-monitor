@@ -16,6 +16,16 @@ def add_quality_commands(subparsers: Any) -> None:
     refresh.add_argument("--config-key", action="append", choices=("us", "hk"), dest="config_keys")
     refresh.add_argument("--no-deep", action="store_true", help="skip authoritative OpenD reads")
     refresh.add_argument("--day-end-strict", action="store_true")
+    recheck = commands.add_parser(
+        "recheck-due",
+        help="run a refresh only when ledger or convergence evidence is due",
+    )
+    recheck.add_argument(
+        "--config-key",
+        action="append",
+        choices=("us", "hk"),
+        dest="config_keys",
+    )
     serve = commands.add_parser("serve", help="serve the latest artifact over a loopback-only HTTP endpoint")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8792)
@@ -40,6 +50,8 @@ def handle_quality_command(args: argparse.Namespace) -> dict[str, Any] | int:
             deep=not bool(args.no_deep),
             day_end_strict=bool(args.day_end_strict),
         )
+    if args.quality_command == "recheck-due":
+        return service.refresh_if_due(config_keys=args.config_keys)
     if args.quality_command == "serve":
         serve_quality_http(service=service, host=args.host, port=args.port)
         return 0

@@ -20,9 +20,13 @@ class QualityControlStateRepository:
                 "schema_version": "om.quality_control_state.v1",
                 "position_mismatches": {},
                 "lifecycle_first_deep_reconcile": {},
+                "trading_days_by_market": {},
+                "last_probe_ledger_revision": None,
             }
         payload.setdefault("position_mismatches", {})
         payload.setdefault("lifecycle_first_deep_reconcile", {})
+        payload.setdefault("trading_days_by_market", {})
+        payload.setdefault("last_probe_ledger_revision", None)
         return payload
 
     def write(self, payload: dict[str, Any]) -> Path:
@@ -31,6 +35,22 @@ class QualityControlStateRepository:
             "updated_at_utc": payload.get("updated_at_utc"),
             "position_mismatches": dict(payload.get("position_mismatches") or {}),
             "lifecycle_first_deep_reconcile": dict(payload.get("lifecycle_first_deep_reconcile") or {}),
+            "trading_days_by_market": {
+                str(market): [
+                    str(value)
+                    for value in values
+                    if str(value)
+                ]
+                for market, values in (
+                    payload.get("trading_days_by_market") or {}
+                ).items()
+                if isinstance(values, list)
+            },
+            "last_probe_ledger_revision": (
+                str(payload["last_probe_ledger_revision"])
+                if payload.get("last_probe_ledger_revision")
+                else None
+            ),
         }
         return self._artifact.write_atomic(safe)
 

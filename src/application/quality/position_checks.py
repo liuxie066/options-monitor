@@ -150,6 +150,7 @@ def build_position_dataset(
     control_state: dict[str, Any],
     day_end_strict: bool = False,
     persistent_after_seconds: int = 300,
+    next_authoritative_refresh_due_utc: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     scope = {"account": account, "market": market}
     source_ok = bool(snapshot.complete and snapshot.refresh_cache and snapshot.environment == "REAL")
@@ -209,6 +210,12 @@ def build_position_dataset(
         for key in sorted(set(local) | set(broker))
         if local.get(key, Decimal(0)) != broker.get(key, Decimal(0))
     }
+    local_fingerprint = sha256_json(
+        {key: format(value, "f") for key, value in sorted(local.items())}
+    )
+    opend_fingerprint = sha256_json(
+        {key: format(value, "f") for key, value in sorted(broker.items())}
+    )
     mismatch_fingerprint = sha256_json(comparison)
     evidence = evidence_ref(
         kind="option-position-reconciliation",
@@ -318,6 +325,17 @@ def build_position_dataset(
             reason_codes=[item["reason_code"] for item in (source_check, convergence) if item["status"] != "pass"],
             extensions={
                 "convergence": dict(mismatches.get(state_key) or {}),
+                "local_position_fingerprint": local_fingerprint,
+                "opend_position_fingerprint": opend_fingerprint,
+                **(
+                    {
+                        "next_authoritative_refresh_due_utc": (
+                            next_authoritative_refresh_due_utc
+                        )
+                    }
+                    if next_authoritative_refresh_due_utc
+                    else {}
+                ),
             },
         ),
         control_state,

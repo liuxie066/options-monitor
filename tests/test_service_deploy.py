@@ -788,6 +788,86 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
 
 
+def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    default_bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us", "hk"],
+    )
+    default_files = {item["relative_path"]: item for item in default_bundle["files"]}
+    assert "systemd/options-monitor-quality-http.service" not in default_files
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us", "hk"],
+        include_opend=True,
+        include_quality_monitoring=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    quality_http = files["systemd/options-monitor-quality-http.service"]["content"]
+    refresh = files["systemd/options-monitor-quality-refresh.service"]["content"]
+    refresh_timer = files["systemd/options-monitor-quality-refresh.timer"]["content"]
+    recheck = files["systemd/options-monitor-quality-recheck.service"]["content"]
+    recheck_timer = files["systemd/options-monitor-quality-recheck.timer"]["content"]
+    day_end_us = files["systemd/options-monitor-quality-day-end-us.service"]["content"]
+    day_end_us_timer = files["systemd/options-monitor-quality-day-end-us.timer"]["content"]
+    day_end_hk_timer = files["systemd/options-monitor-quality-day-end-hk.timer"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert str(repo / "om") + " quality serve --host 127.0.0.1 --port 8792" in quality_http
+    assert "Type=simple" in quality_http
+    assert "Restart=always" in quality_http
+    assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
+    assert "RuntimeMaxSec=300" in refresh
+    assert "OnUnitActiveSec=15min" in refresh_timer
+    assert str(repo / "om") + " quality recheck-due --config-key us --config-key hk" in recheck
+    assert "After=network-online.target options-monitor-opend.service" in recheck
+    assert "OnUnitActiveSec=1min" in recheck_timer
+    assert str(repo / "om") + " quality refresh --config-key us --day-end-strict" in day_end_us
+    assert "OnCalendar=Mon..Fri *-*-* 16:30:00 America/New_York" in day_end_us_timer
+    assert "OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong" in day_end_hk_timer
+    assert "systemctl enable --now options-monitor-quality-http.service" in bundle["commands"]["enable"]
+    assert profile["quality_monitoring"] == {
+        "enabled": True,
+        "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),
+        "http": {
+            "host": "127.0.0.1",
+            "port": 8792,
+            "token_env": "OM_QUALITY_READ_TOKEN",
+        },
+        "regular_refresh_interval": "15min",
+        "recheck_interval": "1min",
+        "day_end_calendars": {
+            "us": "Mon..Fri *-*-* 16:30:00 America/New_York",
+            "hk": "Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong",
+        },
+    }
+
+
+def test_render_launchd_bundle_rejects_quality_monitoring(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    repo.mkdir()
+
+    with pytest.raises(ValueError, match="supported only for systemd"):
+        render_service_bundle(
+            target="launchd",
+            repo_root=repo,
+            include_quality_monitoring=True,
+        )
+
+
 def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
