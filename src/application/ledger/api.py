@@ -95,6 +95,7 @@ from src.application.ledger.store_resolution import (
     ledger_store_payload,
     resolve_ledger_store,
 )
+from src.application.ledger.projection_verify import compare_projection_lots
 
 __all__ = [
     "AssignedStockEventLog",
@@ -106,6 +107,7 @@ __all__ = [
     "BrokerTradeOpenPreviewResult",
     "BrokerTradeOperation",
     "CloseTargetResolution",
+    "compare_projection_lots",
     "ExpiredCloseDecision",
     "ExpiredCloseRunResult",
     "LotCloseCandidate",
