@@ -38,4 +38,8 @@ jobs:
       - name: Minimal regression
         run: |
           ./.venv/bin/python tests/run_smoke.py
-          ./.venv/bin/python -m pytest tests/test_release_check.py tests/test_release_version_recommendation.py tests/test_version_check.py
+          ./.venv/bin/python -m pytest \
+            tests/test_quality_status_contract_vendor.py \
+            tests/test_release_check.py \
+            tests/test_release_version_recommendation.py \
+            tests/test_version_check.py

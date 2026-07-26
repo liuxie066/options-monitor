@@ -1,0 +1,673 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:investment:quality-status:v1",
+  "title": "Investment Quality Status v1",
+  "description": "Versioned read-only runtime and data-quality status emitted by OM, PM, or investment-quality.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "producer",
+    "observed_at_utc",
+    "runtime",
+    "datasets",
+    "incidents"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "investment.quality_status.v1"
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "observed_at_utc": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtimeStatus"
+    },
+    "datasets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/datasetStatus"
+      }
+    },
+    "incidents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/incident"
+      }
+    },
+    "components": {
+      "description": "Optional component states emitted by the aggregate Quality Hub.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/componentStatus"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Producer-specific additive fields. Consumers must not require extensions for v1 semantics.",
+      "additionalProperties": true
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "producer_version",
+        "policy_version",
+        "instance_id"
+      ],
+      "properties": {
+        "service": {
+          "type": "string",
+          "enum": [
+            "options-monitor",
+            "portfolio-management",
+            "investment-quality"
+          ]
+        },
+        "producer_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "policy_summary": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "market": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "dataset": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "security_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "lifecycle_case_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "period": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "evidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "kind",
+        "observed_at_utc"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "artifact_ref": {
+          "description": "Opaque service-local reference. It must not contain credentials or an exposed business database path.",
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "redacted": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "checkResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_id",
+        "status",
+        "severity",
+        "scope",
+        "observed_at_utc",
+        "reason_code",
+        "message",
+        "evidence_refs"
+      ],
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "warn",
+            "fail",
+            "unknown"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "observed": true,
+        "expected": true,
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceReference"
+          }
+        },
+        "first_seen_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "last_seen_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "runtimeStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "as_of_utc",
+        "checks"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "healthy",
+            "degraded",
+            "unhealthy",
+            "unknown"
+          ]
+        },
+        "as_of_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/checkResult"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "observed_at_utc"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown"
+          ]
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "expected_by_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "age_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "grace_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "sourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "snapshot_id",
+        "observed_at_utc",
+        "complete"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "refresh_cache": {
+          "type": "boolean"
+        },
+        "account_fingerprint": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "environment": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "market": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_currency": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "datasetStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_id",
+        "scope",
+        "status",
+        "as_of_utc",
+        "required_evidence_complete",
+        "freshness",
+        "checks",
+        "evidence_refs",
+        "usable_for",
+        "blocked_consumers",
+        "blocked_by",
+        "reason_codes"
+      ],
+      "properties": {
+        "dataset_id": {
+          "type": "string",
+          "pattern": "^(om|pm|hub)\\.[a-z][a-z0-9_.-]*$"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "trusted",
+            "partial",
+            "untrusted",
+            "unavailable"
+          ]
+        },
+        "as_of_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "required_evidence_complete": {
+          "type": "boolean"
+        },
+        "freshness": {
+          "$ref": "#/$defs/freshness"
+        },
+        "source_snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceSnapshot"
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/checkResult"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceReference"
+          }
+        },
+        "usable_for": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "blocked_consumers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "blocked_by": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "reason_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "blocking"
+      ]
+    },
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor",
+        "acknowledged_at_utc",
+        "comment"
+      ],
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "acknowledged_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "comment": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incident_id",
+        "fingerprint",
+        "subject_id",
+        "scope",
+        "state",
+        "severity",
+        "reason_code",
+        "first_seen_at_utc",
+        "last_seen_at_utc",
+        "occurrence_count",
+        "preexisting",
+        "blocked_consumers",
+        "evidence_refs"
+      ],
+      "properties": {
+        "incident_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "subject_id": {
+          "description": "Check ID, dataset ID, or runtime subject that owns the incident.",
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "new",
+            "persistent",
+            "acknowledged",
+            "recovered"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "first_seen_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "last_seen_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "preexisting": {
+          "type": "boolean"
+        },
+        "acknowledgement": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/acknowledgement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovered_at_utc": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/dateTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocked_consumers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceReference"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "componentStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "status",
+        "observed_at_utc",
+        "reason_code"
+      ],
+      "properties": {
+        "service": {
+          "type": "string",
+          "enum": [
+            "options-monitor",
+            "portfolio-management",
+            "investment-quality"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "onboarded",
+            "not_onboarded",
+            "available",
+            "unavailable",
+            "incompatible"
+          ]
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "producer_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_status",
+        "dataset_counts",
+        "blocking_consumers"
+      ],
+      "properties": {
+        "runtime_status": {
+          "type": "string",
+          "enum": [
+            "healthy",
+            "degraded",
+            "unhealthy",
+            "unknown"
+          ]
+        },
+        "dataset_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trusted",
+            "partial",
+            "untrusted",
+            "unavailable"
+          ],
+          "properties": {
+            "trusted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "partial": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "untrusted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unavailable": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "blocking_consumers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "message": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    }
+  }
+}

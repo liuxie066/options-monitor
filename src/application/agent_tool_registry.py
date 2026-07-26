@@ -15,6 +15,7 @@ from src.application.agent_tools import (
     notifications,
     positions,
     portfolio,
+    quality,
     runtime,
 )
 from src.application.agent_tools.base import AgentTool
@@ -32,6 +33,7 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     candidate,
     positions,
     portfolio,
+    quality,
     close_advice,
     notifications,
     notification_perception,

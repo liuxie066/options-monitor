@@ -21,6 +21,8 @@ from src.application.pipeline_context import load_portfolio_context
 from src.application.agent_tool_config import load_runtime_config
 from src.application.config_loader import load_config as load_runtime_pipeline_config
 from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.agent_tool_config import repo_base
@@ -128,6 +130,22 @@ def _close_advice_tool(
 def _get_close_advice_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    try:
+        assert_quality_allows(
+            "close_advice",
+            account=str(payload.get("account") or "").strip().lower() or None,
+            market=str(payload.get("config_key") or "").strip().lower() or None,
+        )
+    except QualityGateBlocked as exc:
+        raise AgentToolError(
+            code="QUALITY_GATE_BLOCKED",
+            message=str(exc),
+            details={
+                "consumer": exc.consumer,
+                "reason_code": exc.reason_code,
+                "blocked_by": list(exc.blocked_by),
+            },
+        ) from exc
     return get_close_advice_tool(
         payload,
         prepare_close_advice_inputs_tool_fn=lambda tool_payload: _prepare_close_advice_inputs_tool(tool_payload),

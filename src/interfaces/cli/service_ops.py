@@ -79,6 +79,11 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="render opt-in Strategy Lab dataset build, mark sampling, and settlement timers",
     )
     service_render.add_argument(
+        "--include-quality-monitoring",
+        action="store_true",
+        help="render opt-in systemd quality API, refresh, recheck, and day-end reconciliation units",
+    )
+    service_render.add_argument(
         "--strategy-lab-recorder-source",
         default="opend",
         choices=("local", "opend"),
@@ -243,6 +248,7 @@ def handle_service_update_command(
             strategy_lab_recorder_source=args.strategy_lab_recorder_source,
             strategy_lab_recorder_max_datasets=args.strategy_lab_recorder_max_datasets,
             strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
+            include_quality_monitoring=bool(args.include_quality_monitoring),
             include_content=(not bool(args.no_content)) or bool(args.output_dir),
         )
         if args.output_dir:
