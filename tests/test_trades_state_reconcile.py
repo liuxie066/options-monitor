@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
-from src.application.trades.state_reconcile import reconcile_trade_intake_state
+from src.application.trades.state_reconcile import (
+    preview_trade_intake_reconciliation_from_sqlite,
+    reconcile_trade_intake_state,
+)
 
 
 class FakeRepo:
@@ -45,6 +50,75 @@ class FakeRepo:
         if symbol:
             rows = [item for item in rows if str(item.get("symbol") or "") == str(symbol)]
         return rows
+
+
+def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {
+                "deal-close-1": {
+                    "status": "failed",
+                    "action": "close",
+                    "account": "lx",
+                },
+                "deal-still-pending": {
+                    "status": "unresolved",
+                    "action": "close",
+                    "account": "lx",
+                },
+            },
+            "unresolved_deal_ids": {},
+        },
+    )
+    original_state = state_path.read_bytes()
+    ledger_path = tmp_path / "ledger.sqlite3"
+    event = {
+        "event_id": "broker-close-deal-close-1-lot-1",
+        "event_type": "close",
+        "account": "lx",
+        "position_effect": "close",
+        "target_lot_id": "lot-1",
+        "raw_payload": {
+            "source_deal_id": "deal-close-1",
+            "record_id": "lot-1",
+        },
+    }
+    with closing(sqlite3.connect(ledger_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE trade_events (
+                    event_id TEXT PRIMARY KEY,
+                    event_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO trade_events (event_id, event_json) VALUES (?, ?)",
+                (event["event_id"], json.dumps(event)),
+            )
+
+    out = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path,
+        sqlite_path=ledger_path,
+    )
+
+    assert out == {
+        "available": True,
+        "reason": None,
+        "terminal_evidence_found": True,
+        "terminal_evidence_count": 1,
+        "ignored_non_option_count": 0,
+        "stale_state_count": 1,
+        "pending_before_count": 2,
+        "pending_after_reconcile_count": 1,
+    }
+    assert state_path.read_bytes() == original_state
 
 
 def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Path) -> None:
@@ -540,3 +614,48 @@ def test_reconcile_trade_intake_state_keeps_pending_without_evidence(tmp_path: P
     assert out["applied_count"] == 0
     assert out["actions"][0]["action"] == "keep_pending"
     assert "deal-failed-1" in load_trade_intake_state(state_path)["failed_deal_ids"]
+
+
+def test_reconcile_does_not_complete_deal_from_numeric_target_lot_lineage(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    opening_deal_id = "9162790356868244299"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {
+                opening_deal_id: {
+                    "status": "failed",
+                    "action": "open",
+                    "account": "lx",
+                    "reason": "exception:RuntimeError",
+                }
+            },
+            "unresolved_deal_ids": {},
+        },
+    )
+    repo = FakeRepo(
+        [
+            {
+                "event_id": (
+                    "futu:lx:281756479859383816:495287541148725639:"
+                    f"close:lot_futu:lx:281756479859383816:{opening_deal_id}"
+                ),
+                "event_type": "close",
+                "account": "lx",
+                "raw_payload": {"source_deal_id": "495287541148725639"},
+            }
+        ]
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=True,
+    )
+
+    assert out["planned_count"] == 0
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+    assert opening_deal_id in load_trade_intake_state(state_path)["failed_deal_ids"]

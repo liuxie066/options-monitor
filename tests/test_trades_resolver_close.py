@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
+import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_expiration_ymd
@@ -387,6 +388,196 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     lots = repo.list_position_lots()
     assert all(item["fields"]["status"] == "close" for item in lots)
     assert all(item["fields"]["contracts_open"] == 0 for item in lots)
+
+
+def test_multi_lot_broker_close_rolls_back_every_split_when_second_write_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for opened_at, contracts in ((100, 1), (200, 2)):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="0700.HK",
+                option_type="put",
+                side="short",
+                contracts=contracts,
+                currency="HKD",
+                strike=480.0,
+                multiplier=100,
+                expiration_ymd="2026-04-29",
+                premium_per_share=3.93,
+                opened_at_ms=opened_at,
+            ),
+        )
+
+    original_upsert = repo.upsert_trade_event
+    close_write_count = 0
+
+    def _fail_second_close(event, *, conn=None):
+        nonlocal close_write_count
+        if str(getattr(event, "event_type", "")) == "close":
+            close_write_count += 1
+            if close_write_count == 2:
+                raise RuntimeError("injected second split failure")
+        return original_upsert(event, conn=conn)
+
+    monkeypatch.setattr(repo, "upsert_trade_event", _fail_second_close)
+
+    with pytest.raises(RuntimeError, match="injected second split failure"):
+        resolve_trade_deal(
+            _deal(contracts=3, trade_time_ms=5000),
+            repo=repo,
+            state={},
+            apply_changes=True,
+        )
+
+    close_events = [
+        item for item in repo.list_trade_events()
+        if item["position_effect"] == "close"
+    ]
+    assert close_events == []
+    assert [item["fields"]["contracts_open"] for item in repo.list_position_lots()] == [1, 2]
+
+
+def test_multi_lot_broker_close_declares_complete_deal_split_metadata(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.trades.deal_identity import completed_ledger_deal_ids
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for opened_at, contracts in ((100, 1), (200, 2)):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="0700.HK",
+                option_type="put",
+                side="short",
+                contracts=contracts,
+                currency="HKD",
+                strike=480.0,
+                multiplier=100,
+                expiration_ymd="2026-04-29",
+                premium_per_share=3.93,
+                opened_at_ms=opened_at,
+            ),
+        )
+
+    result = resolve_trade_deal(
+        _deal(contracts=3, trade_time_ms=5000),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert result.status == "applied"
+    close_events = [
+        item for item in repo.list_trade_events()
+        if item["position_effect"] == "close"
+    ]
+    assert sorted(
+        item["raw_payload"]["broker_deal_completion"]["split_index"]
+        for item in close_events
+    ) == [1, 2]
+    assert {
+        item["raw_payload"]["broker_deal_completion"]["expected_contracts"]
+        for item in close_events
+    } == {3}
+    assert "deal-close-1" in completed_ledger_deal_ids(close_events)
+
+
+def test_late_zero_price_evidence_adopts_exact_existing_expire_close(
+    tmp_path,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="generic-expire-close-before-broker-evidence",
+            event_type="expire_close",
+            event_time_ms=1779468400000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="TIGR",
+                option_type="put",
+                position_side="short",
+                strike=6.0,
+                expiration_ymd="2026-05-22",
+            ),
+            contracts=1,
+            price=0.0,
+            currency="USD",
+            source="auto_close_expired",
+            multiplier=100,
+            target_lot_id=lot_id,
+            raw_payload={
+                "record_id": lot_id,
+                "target_lot_id": lot_id,
+                "close_type": "expire_auto_close",
+            },
+        ),
+    )
+    event_count_before = len(repo.list_trade_events())
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="late-option-zero-price",
+            symbol="TIGR",
+            contracts=1,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468600000,
+            raw_payload={
+                "deal_id": "late-option-zero-price",
+                "code": "US.TIGR260522P6000",
+            },
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert result.status == "applied"
+    assert result.reason == "expire_close_evidence_adopted"
+    assert len(repo.list_trade_events()) == event_count_before
+    case = repo.list_trade_lifecycle_cases()[0]
+    assert case["status"] == "ledger_written"
+    assert case["decision_type"] == "expire_close"
+    assert case["target_lot_ids"] == [lot_id]
+    assert case["adopted_event_ids"] == [
+        "generic-expire-close-before-broker-evidence"
+    ]
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case["case_id"])
+    assert evidence[0]["source_event_id"] == "late-option-zero-price"
 
 
 def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_stock_settlement(tmp_path) -> None:

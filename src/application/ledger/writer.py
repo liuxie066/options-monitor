@@ -160,6 +160,111 @@ def persist_trade_event(repo: Any, deal: Any) -> LedgerWriteResult:
     return persist_trade_event_object(repo, _trade_event_from_normalized_deal(deal))
 
 
+def persist_normalized_trade_events_atomically(
+    repo: Any,
+    deals: Sequence[Any],
+) -> list[LedgerWriteResult]:
+    """Persist explicitly targeted broker-event splits in one transaction."""
+
+    return persist_trade_event_objects_atomically(
+        repo,
+        [_trade_event_from_normalized_deal(deal) for deal in deals],
+    )
+
+
+def persist_trade_event_objects_atomically(
+    repo: Any,
+    events: Sequence[Any],
+) -> list[LedgerWriteResult]:
+    """Persist explicitly targeted canonical events in one transaction."""
+
+    events = list(events)
+    if not events:
+        raise ValueError("atomic trade persistence requires at least one event")
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
+        storage_events: list[TradeEvent] = []
+        for event in events:
+            expanded = [
+                _canonical_storage_event(item)
+                for item in _events_for_storage(sqlite_repo, event)
+            ]
+            if len(expanded) != 1:
+                raise ValueError(
+                    "atomic trade persistence requires explicitly targeted events"
+                )
+            storage_events.append(expanded[0])
+
+        event_ids = [event.event_id for event in storage_events]
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError("atomic trade persistence contains duplicate event_id")
+
+        existing_events = (
+            sqlite_repo.list_trade_events(conn=conn)
+            if conn is not None
+            else sqlite_repo.list_trade_events()
+        )
+        existing_by_id = {
+            str(item.get("event_id") or ""): item
+            for item in existing_events
+            if isinstance(item, dict) and str(item.get("event_id") or "")
+        }
+        fx_payload = load_cash_fx_payload(sqlite_repo)
+        observed_at_ms = utc_now_ms()
+        storage_events = [
+            _event_with_existing_cash_conversions(event, existing_by_id[event.event_id])
+            if event.event_id in existing_by_id
+            else attach_trade_event_cash_conversions(
+                event,
+                fx_payload=fx_payload,
+                observed_at_ms=observed_at_ms,
+            )
+            for event in storage_events
+        ]
+        created_flags = [
+            (
+                sqlite_repo.upsert_trade_event(event, conn=conn)
+                if conn is not None
+                else sqlite_repo.upsert_trade_event(event)
+            )
+            for event in storage_events
+        ]
+        stored = (
+            sqlite_repo.list_trade_events(conn=conn)
+            if conn is not None
+            else sqlite_repo.list_trade_events()
+        )
+        projection = project_stored_trade_events_to_position_lots(stored)
+        lot_count = (
+            sqlite_repo.replace_position_lots(projection.lots, conn=conn)
+            if conn is not None
+            else sqlite_repo.replace_position_lots(projection.lots)
+        )
+        diagnostics = projection_diagnostics_summary(projection.diagnostics)
+        return [
+            LedgerWriteResult.from_payload(
+                {
+                    "event_id": event.event_id,
+                    "record_id": (
+                        str(
+                            (event.raw_payload or {}).get("record_id")
+                            or (event.raw_payload or {}).get("target_lot_id")
+                            or event.target_lot_id
+                            or ""
+                        ).strip()
+                        or None
+                    ),
+                    "created": bool(created),
+                    "position_lot_count": int(lot_count),
+                    **diagnostics,
+                }
+            )
+            for event, created in zip(storage_events, created_flags, strict=True)
+        ]
+
+    return with_sqlite_repo_transaction(repo, _run)
+
+
 def _events_for_storage(repo: Any, event: Any) -> list[Any]:
     if hasattr(event, "event_type") and not hasattr(event, "position_effect"):
         if bool(getattr(event, "is_close", False)) and not getattr(event, "target_lot_id", None):

@@ -20,7 +20,7 @@ from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.lot_resolver import CloseTargetResolution
 from src.application.ledger.preflight import _current_record_fields, preflight_broker_trade_close
 from src.application.ledger.results import BrokerTradeOperation, LedgerWriteResult
-from src.application.ledger.writer import persist_trade_event_object
+from src.application.ledger.writer import persist_trade_event_objects_atomically
 
 
 @dataclass(frozen=True)
@@ -135,7 +135,7 @@ def _persist_lifecycle_close_events(
         close_target_resolution=close_target_resolution,
         contracts_to_close=contracts_to_close,
     )
-    writes: list[LifecycleLedgerWrite] = []
+    prepared: list[tuple[Any, int, Any, TradeEvent]] = []
     as_of_ms = int(event_time_ms) if event_time_ms is not None else None
     evidence_tuple = tuple(str(item) for item in (evidence_ids or []) if str(item or "").strip())
     for match in close_target_resolution.matches:
@@ -167,7 +167,20 @@ def _persist_lifecycle_close_events(
             stock_settlement=dict(stock_settlement or {}),
             close_reason=close_reason,
         )
-        result = persist_trade_event_object(repo, event)
+        prepared.append((match, contracts, ledger_preflight, event))
+        as_of_ms = int(ledger_preflight.event_time_ms) + 1
+
+    persisted = persist_trade_event_objects_atomically(
+        repo,
+        [event for _match, _contracts, _preflight, event in prepared],
+    )
+    writes: list[LifecycleLedgerWrite] = []
+    for (match, contracts, ledger_preflight, _event), result in zip(
+        prepared,
+        persisted,
+        strict=True,
+    ):
+        record_id = str(match.record_id or "").strip()
         result_payload = _ledger_write_result(result).to_dict()
         operation = BrokerTradeOperation(
             action=normalized_event_type,
@@ -192,7 +205,6 @@ def _persist_lifecycle_close_events(
                 evidence_ids=evidence_tuple,
             )
         )
-        as_of_ms = int(ledger_preflight.event_time_ms) + 1
     return writes
 
 

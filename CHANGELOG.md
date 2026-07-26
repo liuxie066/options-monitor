@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.4.30 - 2026-07-26
+
+### Fixed
+- Made broker-deal completion use only authoritative structured deal IDs and require complete split metadata, avoiding false duplicate suppression from unrelated numeric identifiers.
+- Made multi-lot broker closes and lifecycle closes atomic so a failed later split cannot leave a partially written ledger or projection.
+- Adopted late zero-price Futu close evidence into an exact existing generic expiry close without creating duplicate trade events, and made terminal lifecycle results converge stale intake state.
+- Added a durable per-source trade inbox and successful-backfill checkpoint so push/history overlap is idempotent and OpenD downtime longer than the configured lookback is recovered after restart.
+- Reconciled every configured trade source by default, reused OpenD history contexts safely, and exposed pending, stale-state, checkpoint, inbox, and callback-error diagnostics through runtime status.
+
 ## 1.4.29 - 2026-07-25
 
 ### Changed

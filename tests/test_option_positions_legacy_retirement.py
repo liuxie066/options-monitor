@@ -820,5 +820,5 @@ def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None
     ledger_lifecycle_text = (repo_root / "src" / "application" / "ledger" / "lifecycle.py").read_text(
         encoding="utf-8"
     )
-    assert "persist_trade_event_object(repo, event)" in ledger_lifecycle_text
+    assert "persist_trade_event_objects_atomically(" in ledger_lifecycle_text
     assert offenders == []

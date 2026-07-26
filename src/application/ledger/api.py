@@ -47,6 +47,9 @@ from src.application.ledger.commands import (
     verify_position_lot_projection,
 )
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.read_only_evidence import (
+    open_trade_reconciliation_evidence_repo,
+)
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.cash_conversion_migration import (
     CashConversionBackfillResult,
@@ -132,6 +135,7 @@ __all__ = [
     "open_position_ledger",
     "open_position_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
+    "open_trade_reconciliation_evidence_repo",
     "plan_expired_position_closes",
     "position_lot_context_view",
     "position_lot_risk_view",

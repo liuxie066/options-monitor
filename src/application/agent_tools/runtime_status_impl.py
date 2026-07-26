@@ -24,6 +24,7 @@ from src.application.service_drift import service_drift_status
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -167,9 +168,54 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
         "processed_count": len(processed),
         "failed_count": len(failed),
         "unresolved_count": len(unresolved),
+        "pending_count": len(failed) + len(unresolved),
         "receipt_count": len(receipt_items),
         "receipt_confirmed_count": sum(1 for item in receipt_items if bool(item.get("delivery_confirmed"))),
         "receipt_failed_count": sum(1 for item in receipt_items if str(item.get("status") or "") in {"failed", "unconfirmed"}),
+    }
+
+
+def _trade_intake_reconciliation_summary(
+    *,
+    state_path: Path,
+    audit_path: Path,
+    ledger_store: dict[str, Any],
+) -> dict[str, Any]:
+    sqlite_path_raw = ledger_store.get("sqlite_path")
+    if sqlite_path_raw in (None, ""):
+        return {
+            "reconciliation_preview_available": False,
+            "reconciliation_preview_reason": "ledger_sqlite_path_unavailable",
+            "terminal_evidence_found": False,
+            "terminal_evidence_count": 0,
+            "stale_state_count": 0,
+        }
+    try:
+        preview = preview_trade_intake_reconciliation_from_sqlite(
+            state_path=state_path,
+            audit_path=audit_path,
+            sqlite_path=Path(str(sqlite_path_raw)).expanduser(),
+        )
+    except Exception as exc:
+        return {
+            "reconciliation_preview_available": False,
+            "reconciliation_preview_reason": f"{type(exc).__name__}: {exc}",
+            "terminal_evidence_found": False,
+            "terminal_evidence_count": 0,
+            "stale_state_count": 0,
+        }
+    return {
+        "reconciliation_preview_available": bool(preview.get("available")),
+        "reconciliation_preview_reason": preview.get("reason"),
+        "terminal_evidence_found": bool(preview.get("terminal_evidence_found")),
+        "terminal_evidence_count": int(preview.get("terminal_evidence_count") or 0),
+        "ignored_non_option_count": int(preview.get("ignored_non_option_count") or 0),
+        "stale_state_count": int(preview.get("stale_state_count") or 0),
+        "pending_after_reconcile_count": (
+            int(preview.get("pending_after_reconcile_count") or 0)
+            if preview.get("available")
+            else None
+        ),
     }
 
 
@@ -181,9 +227,14 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "processed_count",
         "failed_count",
         "unresolved_count",
+        "pending_count",
         "receipt_count",
         "receipt_confirmed_count",
         "receipt_failed_count",
+        "terminal_evidence_count",
+        "ignored_non_option_count",
+        "stale_state_count",
+        "pending_after_reconcile_count",
         "last_backfill_deal_count",
         "last_backfill_applied_count",
         "last_backfill_skipped_duplicate_count",
@@ -200,6 +251,7 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "last_backfill_window_start_utc",
         "last_backfill_window_end_utc",
         "last_backfill_error",
+        "reconciliation_preview_reason",
         "last_deal_result",
         "last_backfill_result",
         "last_receipt_result",
@@ -217,6 +269,19 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
     out: dict[str, Any] = {
         "listener_status": listener_status,
         "source_count": len(summaries),
+        "reconciliation_preview_available": all(
+            bool(item.get("reconciliation_preview_available"))
+            for item in summaries
+        ),
+        "reconciliation_preview_available_source_count": sum(
+            1
+            for item in summaries
+            if bool(item.get("reconciliation_preview_available"))
+        ),
+        "terminal_evidence_found": any(
+            bool(item.get("terminal_evidence_found"))
+            for item in summaries
+        ),
     }
     for key in count_keys:
         out[key] = sum(int(item.get(key) or 0) for item in summaries)
@@ -2027,24 +2092,47 @@ def runtime_status_tool(
             for source in sources:
                 if not isinstance(source, dict):
                     continue
+                source_status_path = _trade_intake_source_path(
+                    source.get("status_path"),
+                    base=base,
+                    state_dir=state_dir,
+                )
+                source_state_path = _trade_intake_source_path(
+                    source.get("state_path"),
+                    base=base,
+                    state_dir=state_dir,
+                )
+                source_audit_path = _trade_intake_source_path(
+                    source.get("audit_path"),
+                    base=base,
+                    state_dir=state_dir,
+                )
                 status_info = _json_file_info(
-                    _trade_intake_source_path(source.get("status_path"), base=base, state_dir=state_dir),
+                    source_status_path,
                     base=base,
                     read_json_object_or_empty=read_json_object_or_empty,
                 )
                 state_info = _json_file_info(
-                    _trade_intake_source_path(source.get("state_path"), base=base, state_dir=state_dir),
+                    source_state_path,
                     base=base,
                     read_json_object_or_empty=read_json_object_or_empty,
                 )
                 audit_info = _file_info(
-                    _trade_intake_source_path(source.get("audit_path"), base=base, state_dir=state_dir),
+                    source_audit_path,
                     base=base,
                 )
                 state_json = state_info.get("json")
                 status_json = status_info.get("json")
                 state_payload: dict[str, Any] = state_json if isinstance(state_json, dict) else {}
                 status_payload: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
+                source_summary = _trade_intake_summary(state_payload, status_payload)
+                source_summary.update(
+                    _trade_intake_reconciliation_summary(
+                        state_path=source_state_path,
+                        audit_path=source_audit_path,
+                        ledger_store=ledger_store,
+                    )
+                )
                 source_infos.append(
                     {
                         "id": source.get("id"),
@@ -2056,7 +2144,7 @@ def runtime_status_tool(
                         "status": status_info,
                         "state": state_info,
                         "audit": audit_info,
-                        "summary": _trade_intake_summary(state_payload, status_payload),
+                        "summary": source_summary,
                     }
                 )
 
@@ -2100,6 +2188,23 @@ def runtime_status_tool(
             trade_intake_state_payload: dict[str, Any] = trade_intake_state_json if isinstance(trade_intake_state_json, dict) else {}
             trade_intake_status_payload: dict[str, Any] = trade_intake_status_json if isinstance(trade_intake_status_json, dict) else {}
             trade_intake_summary = _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload)
+            resolved_legacy_state_path = (
+                _path_from_config(payload.get("trade_intake_state_path"), base=base)
+                if payload.get("trade_intake_state_path")
+                else default_intake_state_path
+            )
+            resolved_legacy_audit_path = (
+                _path_from_config(payload.get("trade_intake_audit_path"), base=base)
+                if payload.get("trade_intake_audit_path")
+                else default_intake_audit_path
+            )
+            trade_intake_summary.update(
+                _trade_intake_reconciliation_summary(
+                    state_path=resolved_legacy_state_path,
+                    audit_path=resolved_legacy_audit_path,
+                    ledger_store=ledger_store,
+                )
+            )
         trade_intake = {
             "enabled": bool(intake_cfg["enabled"]),
             "mode": intake_cfg["mode"],

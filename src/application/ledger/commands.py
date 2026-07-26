@@ -87,6 +87,7 @@ from src.application.ledger.results import (
     TradeEventInterventionLedgerResult,
 )
 from src.application.ledger.writer import (
+    persist_normalized_trade_events_atomically,
     persist_trade_event,
     rebuild_position_lots_from_trade_events,
 )
@@ -355,7 +356,7 @@ def persist_trade_close_events_with_ledger(
     persist_trade_event_fn: Any,
     close_target_resolution: dict[str, Any] | None = None,
 ) -> list[BrokerTradeOperation]:
-    operations: list[BrokerTradeOperation] = []
+    prepared: list[tuple[Any, Any, LedgerPreflightResult]] = []
     close_action = "buy_close" if str(getattr(deal, "side", "") or "").strip().lower() == "buy" else "sell_close"
     broker_close_event_type = _broker_close_event_type(deal)
     broker_close_type = EXPIRE_AUTO_CLOSE if broker_close_event_type == "expire_close" else None
@@ -364,7 +365,19 @@ def persist_trade_close_events_with_ledger(
         if broker_close_event_type == "expire_close"
         else None
     )
-    for match in matches:
+    split_count = len(matches)
+    expected_contracts = int(getattr(deal, "contracts", 0) or 0)
+    source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
+    allocated_contracts = sum(
+        int(getattr(match, "contracts_to_close", 0) or 0)
+        for match in matches
+    )
+    if split_count <= 0 or expected_contracts <= 0 or allocated_contracts != expected_contracts:
+        raise ValueError(
+            "broker close split allocation must exactly match the source deal contracts "
+            f"(expected={expected_contracts}, allocated={allocated_contracts}, splits={split_count})"
+        )
+    for split_index, match in enumerate(matches, start=1):
         record_id = str(getattr(match, "record_id", "") or "").strip()
         contracts_to_close = int(getattr(match, "contracts_to_close", 0) or 0)
         fields = _current_record_fields(repo, record_id=record_id)
@@ -391,7 +404,40 @@ def persist_trade_close_events_with_ledger(
             if broker_close_reason:
                 raw_payload.setdefault("broker_close_reason", broker_close_reason)
             split_deal = replace(split_deal, raw_payload=raw_payload)
-        result = persist_trade_event_fn(repo, split_deal)
+        raw_payload = dict(getattr(split_deal, "raw_payload", {}) or {})
+        raw_payload["broker_deal_completion"] = {
+            "source_deal_id": source_deal_id or None,
+            "expected_contracts": expected_contracts,
+            "split_count": split_count,
+            "split_index": split_index,
+            "allocated_contracts": contracts_to_close,
+        }
+        split_deal = replace(split_deal, raw_payload=raw_payload)
+        prepared.append((match, split_deal, ledger_preflight))
+
+    if persist_trade_event_fn in {record_normalized_trade_event, persist_trade_event}:
+        persisted = persist_normalized_trade_events_atomically(
+            repo,
+            [split_deal for _match, split_deal, _preflight in prepared],
+        )
+    else:
+        persisted = [
+            _ledger_write_result_from_any(
+                persist_trade_event_fn(repo, split_deal),
+                event_id=f"{getattr(deal, 'deal_id', '')}:close:{getattr(match, 'record_id', '')}",
+                record_id=str(getattr(match, "record_id", "") or "").strip(),
+            )
+            for match, split_deal, _preflight in prepared
+        ]
+
+    operations: list[BrokerTradeOperation] = []
+    for (match, _split_deal, ledger_preflight), result in zip(
+        prepared,
+        persisted,
+        strict=True,
+    ):
+        record_id = str(getattr(match, "record_id", "") or "").strip()
+        contracts_to_close = int(getattr(match, "contracts_to_close", 0) or 0)
         result_payload = _ledger_write_result_from_any(
             result,
             event_id=f"{getattr(deal, 'deal_id', '')}:close:{record_id}",
