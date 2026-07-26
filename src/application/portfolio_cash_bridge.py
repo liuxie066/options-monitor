@@ -65,7 +65,9 @@ def build_portfolio_cash_bridge(
             "portfolio": {
                 "service": "portfolio-management",
                 "transport": "loopback_http",
-                "endpoint": "/analysis/cash-facts",
+                "capability": "portfolio_cash_facts",
+                "status": "not_onboarded",
+                "endpoint": None,
             },
             "option_cash": {
                 "service": "options-monitor",
