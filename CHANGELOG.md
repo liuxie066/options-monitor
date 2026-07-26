@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Separated validated development delivery from VERSION-driven publication, standardized future release notes as New Features, Improvements, and Bug Fixes, and kept production upgrades behind a separate explicit action.
+
 ## 1.4.30 - 2026-07-26
 
 ### Fixed
