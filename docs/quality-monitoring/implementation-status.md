@@ -139,14 +139,44 @@ Exit gate 判定：
 
 ## Phase 4 — 集成、依赖、告警
 
-状态：**未完成**
+状态：**代码与本地验证完成；生产 onboarding/真实投递待 Phase 5**
 
-所需证据：
+完成证据：
 
-- Hub clients、dependency engine、incident/outbox
-- 使用同一个飞书机器人但独立 notification type
-- Host Watchdog 和 external dead-man
-- 重启、去重、恢复通知与敏感信息检查
+- Hub commit：`426caf07f80a201eb436cd2edf256b220837aaac`
+- Hub version：`0.2.0`
+- OM/PM 使用独立 loopback base URL 和只读 token；配置缺失、token/endpoint 复用或非法 boolean 均 fail closed
+- producer client 区分 timeout、transport、auth、HTTP、Schema、identity、stale 和 clock skew；支持 ETag/304，重启后 304 无缓存时不会猜测
+- 最近 valid snapshot 与最近 poll result 分开持久化；拉取失败保留旧值用于诊断，但 component 和正式依赖保持 unavailable
+- 固定依赖注册表逐项验证完整性；必要 dataset 缺失输出 `DEPENDENCY_DATASET_MISSING`，不能用 trusted 子集误判消费者可信
+- dependency 以 consumer/account/market 分组；PM 故障不污染无关 OM consumer，`lx` 不污染 `sy`
+- incident fingerprint 固定，状态覆盖 new/persistent/acknowledged/recovered；只有成功重验证可以 recovery
+- pull、producer 和 Watchdog incident 使用独立所有权；`RT-OM-*`/`RT-PM-*` 归目标服务，Watchdog artifact 不可用时不误恢复旧事件
+- blocking 首次、2 小时提醒/每日最多 3 次、warning 每日摘要和 recovery 均使用稳定 outbox ID
+- 飞书使用同一机器人身份与收件人配置，但 notification type 独立；1/5/15 分钟重试，连续三次失败令 `RT-HUB-002` unhealthy，recovery supersede 未发送故障
+- scheduler/dispatcher/Watchdog 状态持久化并检查新鲜度；新 CLI 进程不再用内存 `starting` 虚报健康，`iq check` degraded 时退出码为 1
+- incident API 已实现 service/account/dataset 过滤和 opaque cursor；status projection 不混入未请求的数据集
+- maintenance 禁止空范围全局静默，只抑制范围内通知，不改变 incident/gate
+- Host Watchdog 只读取 systemd unit/timer 状态和 artifact mtime；目标、权限、路径非法时 fail closed，公开结果不含路径/命令输出
+- dead-man heartbeat 仅包含 `service/status`，endpoint/secret 配置 fail closed，不保存业务数据
+- normal snapshot 30 天、blocking/control evidence 400 天；active incident 和未发送/失败通知不被 retention 删除
+- systemd renderer 只生成不安装；使用专用 `investment-quality` 用户/组、`0077` umask 和 `0700` StateDirectory
+- canonical Schema 四份副本 SHA-256 仍为 `8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338`
+- Hub 完整 pytest：64 项通过；Ruff、compileall、`git diff --check` 通过
+- `investment_quality-0.2.0` wheel 构建并隔离安装成功；wheel SHA-256：`4a4b6e3ad0df567c0defcc35aa425603ece149ad8bd2cea2f822c86eb9e7fbfb`
+
+Exit gate 判定：
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| 两 producer unavailable 不互相污染 | pass | retained snapshot / PM-to-OM isolation tests |
+| dependency propagation 与矩阵一致 | pass | required-completeness + account scope tests |
+| notification dedup/retry/recovery | pass | stable ID、1/5/15、supersession、same-bot envelope tests |
+| Hub restart 恢复 incident/outbox/runtime | pass | SQLite migration 1→2、restart、persisted runtime tests |
+| maintenance/ack audit | pass | API、idempotency、scope 和 audit event tests |
+| external heartbeat payload 不泄露数据 | pass（本地 adapter canary） | exact payload + safe failure tests |
+| 真实飞书 incident/recovery | pending Phase 5 | 需要生产机器人配置和受控真实状态转换批准 |
+| 真实 external missed-heartbeat | pending Phase 5 | 需要选定 provider endpoint/secret 并批准上线 |
 
 ## Phase 5 — 生产上线与基线
 
