@@ -41,10 +41,10 @@ Hub 检查分为两类：`RT-*` 和 `HUB-DEP-001` 是持续状态检查，会出
 
 - Hub 完整 pytest：`66 passed`；
 - Ruff、compileall、`git diff --check`：通过；
-- 使用 commit time `SOURCE_DATE_EPOCH=1785060380` 连续隔离构建两次，
+- 使用 commit time `SOURCE_DATE_EPOCH=1785064563` 连续隔离构建两次，
   wheel SHA 一致；全新 venv install/import 与 packaged Schema：通过；
-- Hub commit：`bcb583af32386df438d27eda6b46b91c38cb799e`；
+- Hub commit：`b7f2ca94735b5f5209eca1ab3f6d615d1f8826ab`；
 - Hub version：`0.2.0`；
-- candidate wheel SHA-256：`8f358e196ba59a7ab32b7f8dae89faab33276e24d46512c0dfacc7a64082fe5e`。
+- candidate wheel SHA-256：`aac156209f8ad40434603be4a6a732e436d94af77e08f125d82bee86cde1ba35`。
 
 真实 producer pull、Watchdog、飞书 incident/recovery、external missed-heartbeat、retention canary 和 rollback 属于 Phase 5，不能由本地测试替代。
