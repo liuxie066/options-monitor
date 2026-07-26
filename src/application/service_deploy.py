@@ -40,6 +40,13 @@ DEFAULT_STRATEGY_LAB_RECORDER_SOURCE = "opend"
 DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS = 5
 DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS = 2
 DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
+QUALITY_HTTP_PORT = 8792
+QUALITY_REFRESH_INTERVAL_SYSTEMD = "15min"
+QUALITY_RECHECK_INTERVAL_SYSTEMD = "1min"
+QUALITY_DAY_END_SYSTEMD_CALENDARS = {
+    "us": "Mon..Fri *-*-* 16:30:00 America/New_York",
+    "hk": "Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong",
+}
 
 
 @dataclass(frozen=True)
@@ -538,6 +545,7 @@ def build_service_profile(
     feishu_ws: dict[str, Any] | None = None,
     wechat_clawbot: dict[str, Any] | None = None,
     strategy_lab_recorder: dict[str, Any] | None = None,
+    quality_monitoring: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
@@ -549,6 +557,7 @@ def build_service_profile(
                 or "trade-intake" in str(name)
                 or "feishu-ws" in str(name)
                 or "wechat-clawbot" in str(name)
+                or "quality-http" in str(name)
             )
         )
     ]
@@ -612,6 +621,8 @@ def build_service_profile(
         profile["wechat_clawbot"] = dict(wechat_clawbot)
     if strategy_lab_recorder is not None:
         profile["strategy_lab_recorder"] = dict(strategy_lab_recorder)
+    if quality_monitoring is not None:
+        profile["quality_monitoring"] = dict(quality_monitoring)
     return profile
 
 
@@ -643,9 +654,12 @@ def render_service_bundle(
     strategy_lab_recorder_source: str | None = DEFAULT_STRATEGY_LAB_RECORDER_SOURCE,
     strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
+    include_quality_monitoring: bool = False,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
+    if include_quality_monitoring and target_key != "systemd":
+        raise ValueError("quality monitoring service rendering is currently supported only for systemd")
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
@@ -972,6 +986,149 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
+        if include_quality_monitoring:
+            quality_config_args = [
+                arg
+                for market in market_values
+                for arg in ("--config-key", market)
+            ]
+            quality_http_service = "options-monitor-quality-http.service"
+            add(
+                f"systemd/{quality_http_service}",
+                _systemd_unit(
+                    description="Options Monitor quality artifact HTTP endpoint",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "quality",
+                        "serve",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(QUALITY_HTTP_PORT),
+                    ],
+                    service_type="simple",
+                    restart="always",
+                ),
+                install_path=f"/etc/systemd/system/{quality_http_service}",
+                kind="systemd_service",
+                service_name=quality_http_service,
+            )
+
+            quality_refresh_service = "options-monitor-quality-refresh.service"
+            quality_refresh_timer = "options-monitor-quality-refresh.timer"
+            add(
+                f"systemd/{quality_refresh_service}",
+                _systemd_unit(
+                    description="Options Monitor regular quality artifact refresh",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "quality",
+                        "refresh",
+                        *quality_config_args,
+                        "--no-deep",
+                    ],
+                    runtime_max_sec=300,
+                ),
+                install_path=f"/etc/systemd/system/{quality_refresh_service}",
+                kind="systemd_service",
+                service_name=quality_refresh_service,
+            )
+            add(
+                f"systemd/{quality_refresh_timer}",
+                _systemd_timer(
+                    description="Options Monitor regular quality artifact refresh timer",
+                    unit_name=quality_refresh_service,
+                    interval=QUALITY_REFRESH_INTERVAL_SYSTEMD,
+                ),
+                install_path=f"/etc/systemd/system/{quality_refresh_timer}",
+                kind="systemd_timer",
+                service_name=quality_refresh_timer,
+            )
+
+            quality_recheck_service = "options-monitor-quality-recheck.service"
+            quality_recheck_timer = "options-monitor-quality-recheck.timer"
+            add(
+                f"systemd/{quality_recheck_service}",
+                _systemd_unit(
+                    description="Options Monitor due quality reconciliation probe",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "quality",
+                        "recheck-due",
+                        *quality_config_args,
+                    ],
+                    after=opend_dependency_units or None,
+                    runtime_max_sec=300,
+                ),
+                install_path=f"/etc/systemd/system/{quality_recheck_service}",
+                kind="systemd_service",
+                service_name=quality_recheck_service,
+            )
+            add(
+                f"systemd/{quality_recheck_timer}",
+                _systemd_timer(
+                    description="Options Monitor due quality reconciliation probe timer",
+                    unit_name=quality_recheck_service,
+                    interval=QUALITY_RECHECK_INTERVAL_SYSTEMD,
+                ),
+                install_path=f"/etc/systemd/system/{quality_recheck_timer}",
+                kind="systemd_timer",
+                service_name=quality_recheck_timer,
+            )
+
+            for market in market_values:
+                quality_day_end_service = f"options-monitor-quality-day-end-{market}.service"
+                quality_day_end_timer = f"options-monitor-quality-day-end-{market}.timer"
+                add(
+                    f"systemd/{quality_day_end_service}",
+                    _systemd_unit(
+                        description=f"Options Monitor {market.upper()} day-end authoritative quality reconciliation",
+                        repo_root=repo,
+                        runtime_root=runtime,
+                        env_file=env_file_path,
+                        deploy_user=systemd_user,
+                        deploy_home=systemd_home,
+                        exec_args=[
+                            om,
+                            "quality",
+                            "refresh",
+                            "--config-key",
+                            market,
+                            "--day-end-strict",
+                        ],
+                        after=opend_dependency_units or None,
+                        runtime_max_sec=300,
+                    ),
+                    install_path=f"/etc/systemd/system/{quality_day_end_service}",
+                    kind="systemd_service",
+                    service_name=quality_day_end_service,
+                )
+                add(
+                    f"systemd/{quality_day_end_timer}",
+                    _systemd_timer(
+                        description=f"Options Monitor {market.upper()} day-end authoritative quality reconciliation timer",
+                        unit_name=quality_day_end_service,
+                        calendar=QUALITY_DAY_END_SYSTEMD_CALENDARS[market],
+                    ),
+                    install_path=f"/etc/systemd/system/{quality_day_end_timer}",
+                    kind="systemd_timer",
+                    service_name=quality_day_end_timer,
+                )
         if include_strategy_lab_recorder:
             profile_path = str(runtime / "service.profile.json")
             recorder_build_service = "options-monitor-strategy-lab-build.service"
@@ -1669,6 +1826,21 @@ def render_service_bundle(
             "sample_interval": STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
             "settle_schedule_beijing": "07:20",
         } if include_strategy_lab_recorder else None,
+        quality_monitoring={
+            "enabled": True,
+            "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),
+            "http": {
+                "host": "127.0.0.1",
+                "port": QUALITY_HTTP_PORT,
+                "token_env": "OM_QUALITY_READ_TOKEN",
+            },
+            "regular_refresh_interval": QUALITY_REFRESH_INTERVAL_SYSTEMD,
+            "recheck_interval": QUALITY_RECHECK_INTERVAL_SYSTEMD,
+            "day_end_calendars": {
+                market: QUALITY_DAY_END_SYSTEMD_CALENDARS[market]
+                for market in market_values
+            },
+        } if include_quality_monitoring else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -1719,6 +1891,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
                 or "trade-intake" in item.install_path
                 or "feishu-ws" in item.install_path
                 or "wechat-clawbot" in item.install_path
+                or "quality-http" in item.install_path
             )
         ]
         return {
