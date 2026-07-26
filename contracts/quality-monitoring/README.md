@@ -5,7 +5,8 @@ by Options Monitor tests and its future quality producer.
 
 The canonical contract belongs to the independent `investment-quality`
 repository. Do not edit the Schema locally. Refresh it from the upstream
-contract release, update `vendor-manifest.json`, and run
+commit pin while the manifest is `unpublished`, or from the upstream contract
+release after its tag exists; update `vendor-manifest.json`, and run
 `tests/test_quality_status_contract_vendor.py`.
 
 Producer-specific fields must use the public `extensions` object. OM runtime

@@ -237,7 +237,10 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "investigation_recipes[].name" not in tools["analysis_catalog"]["output_contract"]["fact_fields"]
     assert tools["portfolio_query"]["output_contract"]["freshness_fields"] == [
         "freshness.status",
-        "freshness.observed_at",
+        "freshness.trust_status",
+        "freshness.observed_at_utc",
+        "freshness.dataset_ids",
+        "freshness.reason_codes",
     ]
     assert tools["preview_notification"]["input_schema"]["render_style"]["enum"] == ["compact", "legacy"]
     assert "renderer" in tools["preview_notification"]["output_contract"]["fact_fields"]
