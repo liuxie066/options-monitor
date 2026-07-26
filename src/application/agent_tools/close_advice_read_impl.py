@@ -21,6 +21,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.position_query import PositionExpirationQuery, PositionQuery
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 
 
 CLOSE_ADVICE_CSV = "close_advice.csv"
@@ -43,6 +44,22 @@ def close_advice_read_tool(
         config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
 
     query = _query_from_payload(payload)
+    try:
+        assert_quality_allows(
+            "close_advice",
+            account=str(query.account or "").strip().lower() or None,
+            market=str(payload.get("config_key") or "").strip().lower() or None,
+        )
+    except QualityGateBlocked as exc:
+        raise AgentToolError(
+            code="QUALITY_GATE_BLOCKED",
+            message=str(exc),
+            details={
+                "consumer": exc.consumer,
+                "reason_code": exc.reason_code,
+                "blocked_by": list(exc.blocked_by),
+            },
+        ) from exc
     config_market = _desired_market(payload, cfg=cfg, config_path=config_path)
     query_market = None if _has_explicit_source_scope(payload) else _query_market(query)
     payload_market_scope = _payload_market_scope(payload)

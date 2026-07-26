@@ -1,6 +1,6 @@
 # 运行与数据质量监控 — 分阶段实施计划
 
-- **状态**：已确认设计，待实施
+- **状态**：实施中；Phase 0–3 代码与本地验证完成
 - **日期**：2026-07-26
 - **涉及仓库**：options-monitor、portfolio-management、待创建的 investment-quality
 - **总设计**：[architecture.md](architecture.md)

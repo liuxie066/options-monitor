@@ -63,6 +63,7 @@ from src.interfaces.cli.portfolio_ops import (
     add_portfolio_commands,
     handle_portfolio_command,
 )
+from src.interfaces.quality.cli import add_quality_commands, handle_quality_command
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
     add_runtime_observability_commands,
@@ -155,6 +156,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_portfolio_commands(sub)
 
     add_daily_brief_commands(sub)
+    add_quality_commands(sub)
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -318,6 +320,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "daily-brief":
             return handle_daily_brief_command(args, repo_base_fn=repo_base)
+
+        if args.command == "quality":
+            result = handle_quality_command(args)
+            return int(result) if isinstance(result, int) else _print(result)
 
         if args.command in {"scheduler", "sell-put-cash"}:
             return handle_scheduler_command(

@@ -643,11 +643,30 @@ def option_performance_report_tool(
     mask_path,
     now_ms: int | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+
     request, window = normalize_option_performance_request(
         payload,
         normalize_broker=normalize_broker,
         now_ms=now_ms,
     )
+    try:
+        assert_quality_allows(
+            "option_performance",
+            account=str(request.get("account") or "").strip().lower() or None,
+            market=str(request.get("config_key") or "").strip().lower() or None,
+        )
+    except QualityGateBlocked as exc:
+        raise AgentToolError(
+            code="QUALITY_GATE_BLOCKED",
+            message=str(exc),
+            details={
+                "consumer": exc.consumer,
+                "reason_code": exc.reason_code,
+                "blocked_by": list(exc.blocked_by),
+            },
+        ) from exc
     config_path, cfg = load_runtime_config(
         config_key=request["config_key"],
         config_path=request.get("config_path"),

@@ -106,15 +106,36 @@ Exit gate 判定：
 
 ## Phase 3 — OM
 
-状态：**未完成**
+状态：**代码与本地验证完成；生产 canary/onboarding 待 Phase 5**
 
-所需证据：
+完成证据：
 
-- evidence/check facade
-- trade intake/full replay checks
-- OpenD option-position convergence
-- lifecycle policy 与 11 条 stale 回归
-- OM Quality API/artifact 与本地门禁
+- 完整实现映射：[om-check-implementation.md](om-check-implementation.md)
+- producer 覆盖 `RT-OM-001` 至 `RT-OM-004` 及全部 11 个 OM 数据检查 ID
+- trade intake 复用现有 runtime/checkpoint/audit/reconciliation evidence，不建立平行 intake 状态
+- ledger full replay 只经 `src.application.ledger.api` 公共边界读取，并按账户比较 materialized projection
+- duplicate broker identity、economic conflict 和 projection conservation 分账户判定，不跨账户污染
+- OpenD option snapshot 要求显式账户、`REAL`、`refresh_cache=True`、完整 snapshot；normalized identity 包含方向、数量和 multiplier
+- position divergence 执行首次、+1 分钟、+5 分钟状态机；transient 不阻断，persistent 才 untrusted
+- lifecycle deadline 使用市场交易日及首次 deep reconcile +2 小时；11 条 overdue case 固定回归全部判定 stale
+- external adjustment、legacy evidence gap 与实时 lifecycle pending 分开建模
+- artifact 原子发布；HTTP 只读已发布 artifact，独立 bearer token、ETag、`no-store` 和安全错误 envelope
+- 本地 gate 在 onboarding 前不生效；onboarding 后按 account/market/consumer fail closed，且不依赖 Hub 在线
+- 普通候选扫描不受无关持仓异常影响
+- OM 完整 pytest：`3234 passed, 10 skipped`；touched Ruff 通过；production module cycles 为 0
+
+Exit gate 判定：
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| OM 检查矩阵有实现/测试映射 | pass | `om-check-implementation.md` |
+| 11 条 lifecycle stale 回归 | pass | `test_regression_eleven_overdue_lifecycle_cases_are_classified_stale` |
+| full replay/duplicate identity/convergence 回归 | pass | `tests/quality/test_om_quality_checks.py` |
+| `/health` 与 `/quality/status` 分离 | pass | HTTP auth/ETag/只读 artifact tests |
+| producer payload 通过 canonical Schema | pass | `OMQualityService` Draft 2020-12 validation |
+| 本地门禁不依赖 Hub 且按 scope 隔离 | pass | quality gate tests |
+| 生产只读 canary | pending Phase 5 | 需要目标实例当前配置与只读执行批准 |
+| Hub onboard 后真实告警和本地门禁 | pending Phase 5 | 需要生产 token/onboarded 配置与真实恢复测试 |
 
 ## Phase 4 — 集成、依赖、告警
 
