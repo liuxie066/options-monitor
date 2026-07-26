@@ -11,8 +11,8 @@
 
 | 仓库 | 分支 | 当前用途 |
 |---|---|---|
-| `options-monitor` | `feat/quality-monitoring` | OM producer、本地门禁、设计与完成证据 |
-| `portfolio-management` | `feat/quality-monitoring` | PM 前置修复、producer、本地门禁 |
+| `options-monitor` | `main`（合并进行中） | OM producer、本地门禁、设计与完成证据 |
+| `portfolio-management` | `main@c66422a` | PM 前置修复、producer、本地门禁 |
 | `investment-quality` | `main` | canonical contract、Hub、incident/outbox/watchdog |
 
 ## Phase 0 — 契约与测试工具包
@@ -97,7 +97,7 @@ Exit gate 判定：
 - producer 覆盖 `PM-ACC-001` 至 `PM-NAV-002` 的 17 个 PM 检查 ID
 - artifact 原子发布；`GET /quality/status` 只读已发布 artifact，独立 bearer token、ETag、`no-store` 和安全错误 envelope
 - `pm quality status --json` 与 HTTP 使用同一 application payload；`pm quality refresh` 只发布控制面 artifact
-- PM focused 46 项、完整 761 项测试通过；触及文件 Ruff 通过（仓库全量 Ruff 仍有既存基线问题，不属于本 work unit）
+- PM focused 46 项、完整 765 项测试通过；触及文件 Ruff 通过（仓库全量 Ruff 仍有既存基线问题，不属于本 work unit）
 
 Exit gate 判定：
 
@@ -213,11 +213,12 @@ Exit gate 判定：
   authority 字段，空/不完整/重复列表 fail closed，不读取余额/持仓或写业务数据；
 - PM 完整 pytest：765 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
   仍有 52 个既有未使用导入告警，不属于本 work unit。
-- PM 发布准备：`feat/quality-monitoring@c66422a`，目标版本 `0.1.27`。
+- PM 已 fast-forward 合入远端 `main@c66422a`，目标版本 `0.1.27` 尚未发布。
 - OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
   `--check` 与 diff check 通过。
-- OM 发布元数据提交：`3a443dc4`；执行 `AUTH-REL` 前记录最终
-  release-candidate head；目标版本 `1.4.31`。
+- OM 质量代码合入 main 时保持当前已发布版本 `1.4.30`，变更记录位于
+  `Unreleased`；执行 `AUTH-REL` 时才生成 `1.4.31` 发布元数据，并记录
+  最终 release-candidate head。
 
 所需证据：
 
