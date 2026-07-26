@@ -15,7 +15,9 @@ def test_vendored_pm_openapi_matches_manifest_and_client_operations() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     contract_path = ROOT / manifest["contract_path"]
     assert manifest["api_version"] == "portfolio.api.v1"
-    assert manifest["upstream_contract_release"] == "pm-api-v1.0.0"
+    assert manifest["upstream_release_state"] == "unpublished"
+    assert manifest["planned_upstream_contract_release"] == "pm-api-v1.0.0"
+    assert manifest["upstream_commit"] == "7c406e5f70e7b10e17d74b1f1ed242b4262e8ca3"
     assert len(manifest["upstream_commit"]) == 40
     assert all(character in "0123456789abcdef" for character in manifest["upstream_commit"])
     assert hashlib.sha256(contract_path.read_bytes()).hexdigest() == manifest["sha256"]
@@ -41,3 +43,22 @@ def test_vendored_pm_openapi_declares_version_and_error_contracts() -> None:
             == "portfolio.api.v1"
         )
         assert operation["responses"]["503"]["content"]["application/json"]["schema"]
+
+
+def test_vendored_pm_openapi_requires_core_success_and_freshness_fields() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document = json.loads((ROOT / manifest["contract_path"]).read_text(encoding="utf-8"))
+    schemas = document["components"]["schemas"]
+    assert {
+        "success",
+        "accounts",
+        "count",
+        "freshness",
+        "retrieved_at_utc",
+    } <= set(schemas["AccountsResponse"]["required"])
+    assert {
+        "success",
+        "count",
+        "freshness",
+        "retrieved_at_utc",
+    } <= set(schemas["HoldingsResponse"]["required"])

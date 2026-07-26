@@ -31,6 +31,8 @@ from src.infrastructure.portfolio_management_client import (
 
 _ACCOUNT_REQUIRED_VIEWS = frozenset({"holdings", "cash", "nav", "full_report"})
 _FORBIDDEN_ENDPOINT_FIELDS = frozenset({"base_url", "endpoint", "service_url", "url"})
+_PM_FRESHNESS_STATUSES = frozenset({"fresh", "stale", "unknown", "unavailable"})
+_PM_TRUST_STATUSES = frozenset({"trusted", "partial", "untrusted", "unavailable"})
 
 
 def _portfolio_client() -> PortfolioManagementClient:
@@ -127,11 +129,47 @@ def _portfolio_query(payload: dict[str, Any]):
         "transport": "loopback_http",
     }
     data["scope"] = scope
-    data["freshness"] = {
-        "status": "live",
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+    if view == "health":
+        data["freshness"] = {
+            "status": "fresh",
+            "trust_status": "trusted",
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "dataset_ids": ["pm.runtime"],
+            "reason_codes": [],
+        }
+        return data, [], {}
+
+    freshness, warning = _validate_pm_freshness(response.get("freshness"))
+    data["freshness"] = freshness
+    return data, ([warning] if warning else []), {}
+
+
+def _validate_pm_freshness(value: Any) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(value, dict):
+        return _unavailable_pm_freshness(), "PM freshness evidence is missing; data is unavailable"
+    status = str(value.get("status") or "")
+    trust_status = str(value.get("trust_status") or "")
+    dataset_ids = value.get("dataset_ids")
+    reason_codes = value.get("reason_codes")
+    if (
+        status not in _PM_FRESHNESS_STATUSES
+        or trust_status not in _PM_TRUST_STATUSES
+        or not isinstance(dataset_ids, list)
+        or not dataset_ids
+        or not isinstance(reason_codes, list)
+    ):
+        return _unavailable_pm_freshness(), "PM freshness evidence is invalid; data is unavailable"
+    return dict(value), None
+
+
+def _unavailable_pm_freshness() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "trust_status": "unavailable",
+        "observed_at_utc": None,
+        "dataset_ids": [],
+        "reason_codes": ["PM_FRESHNESS_EVIDENCE_MISSING"],
     }
-    return data, [], {}
 
 
 def _read_capital_facts(*, account: str, period: str, as_of_month: str) -> dict[str, Any]:
@@ -368,7 +406,13 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
     ),
     output_contract={
         "fact_fields": ["success", "source", "scope", "freshness"],
-        "freshness_fields": ["freshness.status", "freshness.observed_at"],
+        "freshness_fields": [
+            "freshness.status",
+            "freshness.trust_status",
+            "freshness.observed_at_utc",
+            "freshness.dataset_ids",
+            "freshness.reason_codes",
+        ],
         "notes": ["Portfolio payload fields vary by selected view and are preserved at the top level."],
     },
     copilot_input_fields=(

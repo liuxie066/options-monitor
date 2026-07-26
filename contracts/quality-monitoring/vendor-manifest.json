@@ -2,7 +2,8 @@
   "schema_version": "investment.quality_status.v1",
   "schema_id": "urn:investment:quality-status:v1",
   "upstream_repository": "investment-quality",
-  "upstream_contract_release": "contract-v1",
+  "upstream_release_state": "unpublished",
+  "planned_upstream_contract_release": "contract-v1",
   "upstream_commit": "36c9910bc67c941c04f0768f201aadab32f8749a",
   "schema_path": "contracts/quality-monitoring/quality_status.v1.schema.json",
   "sha256": "8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338"
