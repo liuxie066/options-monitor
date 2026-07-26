@@ -8,6 +8,7 @@
 - **HTTP/API 契约**：[api-contract.md](api-contract.md)
 - **状态 Payload Schema**：[quality_status.v1.schema.json](quality_status.v1.schema.json)
 - **实施状态与证据**：[implementation-status.md](implementation-status.md)
+- **Phase 5 Runbook**：[phase5-runbook.md](phase5-runbook.md)
 
 ## 1. 交付目标
 

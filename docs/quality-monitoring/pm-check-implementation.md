@@ -43,6 +43,7 @@
 | 能力 | 实现 | 约束 |
 |---|---|---|
 | OpenD 权威查询 | `FutuOpenApiBalanceProvider.from_account` | 显式 account-scoped `acc_id`；查询前验证 OpenD account list；生产只允许 REAL |
+| 账户映射发现 | `pm futu accounts --market US\|HK --json` | 本机只读 `get_acc_list`；仅返回 acc_id/fingerprint/env/market，异常安全失败；结果不得记录或提交 |
 | 来源快照 | `FutuBalanceSnapshot` / `FutuPortfolioSnapshot` | 公开 evidence 不含 acc_id、金额或持仓；只公开 fingerprint、完整性标志和 payload SHA-256 |
 | 同步 receipt | `src/app/futu_sync_evidence.py` | latest/history 原子持久化；写前明确失败也覆盖 latest 为脱敏失败事实 |
 | 写后对账 | `src/app/futu_sync_reconciler.py` | 首次比较；仅在不一致时等待 30 秒后只读重查，不重复业务写 |
@@ -54,9 +55,9 @@
 
 - canonical Schema 校验：通过；
 - focused PM 质量/OpenD/receipt/mapping 回归：`46 passed`；
-- 完整 pytest：`761 passed`；
+- 完整 pytest：`765 passed`；
 - touched Ruff 与 `git diff --check`：通过；
-- 当前 PM 质量分支提交：`c67ccf4`；
+- 当前 PM 质量分支提交：`c66422a`；
 - 目标版本：`0.1.27`。
 
 生产只读 canary、真实 OpenD baseline、失败数据重跑、Hub onboard、真实告警/恢复和 rollback 属于 Phase 5，不能由本地测试替代。

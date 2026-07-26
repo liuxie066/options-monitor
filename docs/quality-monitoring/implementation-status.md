@@ -191,6 +191,8 @@ Exit gate 判定：
 
 已完成的上线前准备：
 
+- 已固化唯一跨仓库执行顺序、授权边界、证据规则和首次回滚隔离：
+  [phase5-runbook.md](phase5-runbook.md)；
 - OM 非深度刷新会保留仍有效的权威 OpenD 证据，不再把它覆盖为
   `unavailable`；
 - OM 只在首次 baseline、本地 `position_lots` revision 变化、差异复查到期、
@@ -203,9 +205,11 @@ Exit gate 判定：
 - PM production `portfolio-futu-evening.service` 的
   `DatetimeFieldConvFail` 根因已在 `feat/quality-monitoring` 修复并覆盖所有
   holdings 时间字段写路径；生产尚未升级，失败同步尚未重跑；
-- PM 完整 pytest：761 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
+- PM 提供只读 `pm futu accounts --market ... --json`，仅返回显式映射所需
+  authority 字段，空/不完整/重复列表 fail closed，不读取余额/持仓或写业务数据；
+- PM 完整 pytest：765 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
   仍有 52 个既有未使用导入告警，不属于本 work unit。
-- PM 发布准备：`feat/quality-monitoring@c67ccf4`，目标版本 `0.1.27`。
+- PM 发布准备：`feat/quality-monitoring@c66422a`，目标版本 `0.1.27`。
 - OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
   `--check` 与 diff check 通过。
 - OM 发布元数据提交：`3a443dc4`，目标版本 `1.4.31`。
