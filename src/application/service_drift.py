@@ -303,6 +303,8 @@ def _expected_bundle_from_profile(
     wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
     strategy_lab_recorder_raw = profile.get("strategy_lab_recorder")
     strategy_lab_recorder = strategy_lab_recorder_raw if isinstance(strategy_lab_recorder_raw, dict) else {}
+    quality_monitoring_raw = profile.get("quality_monitoring")
+    quality_monitoring = quality_monitoring_raw if isinstance(quality_monitoring_raw, dict) else {}
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -333,6 +335,10 @@ def _expected_bundle_from_profile(
         or "com.options-monitor.strategy-lab-build" in services
         or "com.options-monitor.strategy-lab-sample" in services
         or "com.options-monitor.strategy-lab-settle" in services
+    )
+    include_quality_monitoring = bool(
+        quality_monitoring.get("enabled")
+        or any(name.startswith("options-monitor-quality-") for name in services)
     )
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
@@ -375,6 +381,7 @@ def _expected_bundle_from_profile(
         strategy_lab_recorder_source=str(strategy_lab_recorder.get("source") or "opend"),
         strategy_lab_recorder_max_datasets=int(strategy_lab_recorder.get("max_datasets") or 5),
         strategy_lab_recorder_mark_stale_hours=int(strategy_lab_recorder.get("mark_stale_hours") or 2),
+        include_quality_monitoring=include_quality_monitoring,
         include_content=True,
     )
 
@@ -520,6 +527,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "feishu_ws",
         "wechat_clawbot",
         "strategy_lab_recorder",
+        "quality_monitoring",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
