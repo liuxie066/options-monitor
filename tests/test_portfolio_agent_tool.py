@@ -92,11 +92,24 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
 
 def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatch) -> None:
     monkeypatch.delenv(portfolio.SERVICE_URL_ENV, raising=False)
+    pm_freshness = {
+        "status": "stale",
+        "trust_status": "partial",
+        "observed_at_utc": "2026-07-25T21:00:00Z",
+        "dataset_ids": ["pm.holdings_quantity", "pm.prices"],
+        "reason_codes": ["SOURCE_STALE"],
+    }
 
     data, warnings, meta, seen = _call(
         {"view": "overview", "accounts": ["lx", "sy"], "include_details": True},
         monkeypatch,
-        {"success": True, "accounts": ["lx", "sy"], "total_value": 123.45},
+        {
+            "success": True,
+            "accounts": ["lx", "sy"],
+            "total_value": 123.45,
+            "freshness": pm_freshness,
+            "retrieved_at_utc": "2026-07-26T01:00:00Z",
+        },
     )
 
     parsed = urlsplit(seen["request"].full_url)
@@ -109,10 +122,23 @@ def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatc
     assert data["total_value"] == 123.45
     assert data["source"] == {"service": "portfolio-management", "transport": "loopback_http"}
     assert data["scope"] == {"view": "overview", "accounts": ["lx", "sy"]}
-    assert data["freshness"]["status"] == "live"
-    assert data["freshness"]["observed_at"].endswith("+00:00")
+    assert data["freshness"] == pm_freshness
+    assert data["retrieved_at_utc"] == "2026-07-26T01:00:00Z"
     assert warnings == []
     assert meta == {}
+
+
+def test_portfolio_query_marks_business_data_unavailable_without_pm_freshness(monkeypatch) -> None:
+    data, warnings, _, _ = _call(
+        {"view": "cash", "account": "lx"},
+        monkeypatch,
+        {"success": True, "items": []},
+    )
+
+    assert data["freshness"]["status"] == "unavailable"
+    assert data["freshness"]["trust_status"] == "unavailable"
+    assert data["freshness"]["reason_codes"] == ["PM_FRESHNESS_EVIDENCE_MISSING"]
+    assert warnings == ["PM freshness evidence is missing; data is unavailable"]
 
 
 @pytest.mark.parametrize(
