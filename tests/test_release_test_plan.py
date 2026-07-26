@@ -26,8 +26,9 @@ def test_release_test_plan_maps_event_and_service_changes() -> None:
     assert "git diff --check" in plan["commands"]
     assert "./.venv/bin/python -m pytest tests/test_event_prefetch.py tests/test_event_source_futu.py tests/test_event_risk_warn.py" in plan["commands"]
     assert (
-        "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_version_recommendation.py "
-        "tests/test_version_check.py tests/test_install_script.py tests/test_release_test_plan.py"
+        "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
+        "tests/test_release_version_recommendation.py tests/test_version_check.py "
+        "tests/test_install_script.py tests/test_release_test_plan.py"
     ) in plan["commands"]
     assert "./.venv/bin/python scripts/generate_dependency_graph.py --check" in plan["commands"]
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"event_source", "service_release"}
@@ -77,6 +78,20 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
     assert all("test_assistant_evidence_session.py" not in command for command in plan["commands"])
     assert all("test_assistant_context_projection.py" not in command for command in plan["commands"])
     assert all("test_assistant_context_validation.py" not in command for command in plan["commands"])
+
+
+def test_release_test_plan_requires_current_taxonomy_when_version_changes() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(
+        changed_files=["VERSION", "CHANGELOG.md"],
+        mode="standard",
+        version="1.5.0",
+    )
+
+    assert plan["commands"][0] == (
+        "./.venv/bin/python scripts/release_check.py --tag v1.5.0 --require-current-taxonomy"
+    )
 
 
 def test_release_test_plan_maps_current_copilot_design_doc() -> None:
