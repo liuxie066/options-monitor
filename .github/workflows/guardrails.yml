@@ -40,6 +40,8 @@ jobs:
           ./.venv/bin/python tests/run_smoke.py
           ./.venv/bin/python -m pytest \
             tests/test_quality_status_contract_vendor.py \
+            tests/test_quality_document_ownership.py \
+            tests/test_portfolio_management_contract_vendor.py \
             tests/test_release_check.py \
             tests/test_release_version_recommendation.py \
             tests/test_version_check.py

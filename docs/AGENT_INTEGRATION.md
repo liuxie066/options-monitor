@@ -100,12 +100,15 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assi
 
 `portfolio_pnl_bridge` 和 `portfolio_cash_bridge` 都要求
 `period=mtd|ytd`、`as_of_month=YYYY-MM` 和账户列表，并使用 PM 返回的实际期末日期
-调用只读的 `option_performance_report`。PnL 桥使用 PM `/analysis/capital-facts` 的
+调用只读的 `option_performance_report`。PnL 桥使用 PM
+`/api/v1/analysis/capital-facts` 的
 期初/期末总资产、外部出入金和期间盈亏，以及
 `pnl.period_total_net`；指派股票本金不会进入 PnL 方程。Cash 桥只使用 PM
-`/analysis/cash-facts` 的期初/期末现金和外部现金流，以及
-`cash.total_cash_change_net`，不会拿总资产代替现金。两者都要求 CNY、期末日期、
-FX 和实际费用覆盖对齐；缺失或不完整证据保持 `amount=null`，不会按 0 处理。
+现金事实尚未由 PM onboarding，因此 Cash 桥直接返回
+`portfolio_cash_facts_not_onboarded`，不会请求占位接口，也不会拿总资产代替现金。
+未来只有在 PM 独立交付 cash/MMF、期初期末和外部现金流契约后才启用该桥。
+两者都要求 CNY、期末日期、FX 和实际费用覆盖对齐；缺失或不完整证据保持
+`amount=null`，不会按 0 处理。
 输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
 
 `portfolio_assignment_scenario` 只接受 `accounts`。它通过 PM 的
