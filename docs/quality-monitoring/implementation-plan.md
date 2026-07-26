@@ -1,8 +1,8 @@
 # 运行与数据质量监控 — 分阶段实施计划
 
-- **状态**：实施中；Phase 0–3 代码与本地验证完成
+- **状态**：实施中；Phase 0–4 代码与本地验证完成，Phase 5 生产上线待授权
 - **日期**：2026-07-26
-- **涉及仓库**：options-monitor、portfolio-management、待创建的 investment-quality
+- **涉及仓库**：options-monitor、portfolio-management、investment-quality
 - **总设计**：[architecture.md](architecture.md)
 - **检查矩阵**：[check-matrix.md](check-matrix.md)
 - **HTTP/API 契约**：[api-contract.md](api-contract.md)

@@ -1,7 +1,7 @@
 # 运行与数据质量监控 — 实施状态与完成证据
 
 - **目标**：严格实施 [implementation-plan.md](implementation-plan.md) 的 Phase 0–5
-- **状态**：实施中
+- **状态**：Phase 0–4 本地完成；Phase 5 生产上线待授权
 - **开始日期**：2026-07-26
 - **完成标准**：所有 phase exit gate 有当前代码、测试和运行证据；生产阶段完成真实只读基线与回滚验证
 
@@ -50,6 +50,7 @@ Exit gate 判定：
 
 完成证据：
 
+- 完整实现映射：[hub-check-implementation.md](hub-check-implementation.md)
 - Hub 在无 producer 情况下稳定返回 `not_onboarded`，不创建 incident 或通知
 - SQLite migrations 可重复执行
 - restart 后 incident/outbox 不丢失
@@ -62,12 +63,13 @@ Exit gate 判定：
 - API 具备 read/operator 权限分离、安全错误 envelope、ETag 和 no-store
 - scheduler 真实运行状态可由 `/health` 查询
 - listener 默认 loopback，非 loopback 配置 fail closed
-- `investment-quality` 共 38 项测试和 Ruff 通过
+- `investment-quality` 共 66 项测试和 Ruff 通过
 
 Exit gate 判定：
 
 | Gate | 状态 | 证据 |
 |---|---|---|
+| Hub 检查矩阵有实现/测试映射 | pass | `hub-check-implementation.md` |
 | 无 producer 稳定运行 | pass | Hub API + scheduler tests |
 | 不发送 not_onboarded 告警 | pass | empty scheduler/incident test |
 | service/DB/scheduler/outbox health 可查询 | pass | lifespan health test |
@@ -80,10 +82,14 @@ Exit gate 判定：
 
 完成证据：
 
-- PM commit：`80d51e0`（叠加前置 commits `26dc4da`、`0c3448c`、`fe83d63`）
+- 完整实现映射：[pm-check-implementation.md](pm-check-implementation.md)
+- PM commit：`c67ccf4`（叠加前置质量 commits，目标版本 `0.1.27`）
 - `lx`/`sy` 使用显式账户级 `acc_id`、`REAL`、market、CNH source contract；不回退全局 `acc_id` 或 `acc_index`
 - `accinfo.cash` 与 `fund_assets` 分别成为 securities cash/MMF 唯一权威字段；0 与 missing 分离
 - positions/cash/MMF 使用同一 source snapshot，保存 durable latest/history receipt 和 dataset-scoped partial-write 状态
+- OpenD source 证据要求 forced refresh、账户验证、完整 position snapshot/分页和脱敏 payload digest；balance-only 回执不能冒充完整 portfolio sync
+- PM producer 产出 `RT-PM-002/003`；按早晚调度 deadline+15 分钟判断回执，过期后相关 replica 全部 unavailable
+- OpenD 查询、来源验证或 position diff 在写前失败时也保存脱敏失败尝试，避免旧 success latest 掩盖明确故障
 - 写后立即对账；不一致时 30 秒后只读重查，不重复写
 - quantity 精确比较、cost basis 按 PM 存储精度比较；cost mismatch 不单独阻断 NAV
 - NAV 写入边界复用当前 valuation evidence 和最近一次 durable reconciliation receipt；producer onboarding 后 fail closed，且不依赖 Hub 在线
@@ -91,13 +97,13 @@ Exit gate 判定：
 - producer 覆盖 `PM-ACC-001` 至 `PM-NAV-002` 的 17 个 PM 检查 ID
 - artifact 原子发布；`GET /quality/status` 只读已发布 artifact，独立 bearer token、ETag、`no-store` 和安全错误 envelope
 - `pm quality status --json` 与 HTTP 使用同一 application payload；`pm quality refresh` 只发布控制面 artifact
-- PM focused 74 项、完整 753 项测试通过；触及文件 Ruff 通过（仓库全量 Ruff 仍有既存基线问题，不属于本 work unit）
+- PM focused 46 项、完整 761 项测试通过；触及文件 Ruff 通过（仓库全量 Ruff 仍有既存基线问题，不属于本 work unit）
 
 Exit gate 判定：
 
 | Gate | 状态 | 证据 |
 |---|---|---|
-| PM 检查矩阵有实现/测试映射 | pass | producer check ID 集合回归 |
+| PM 检查矩阵有实现/测试映射 | pass | `pm-check-implementation.md` |
 | partial-write 数据集级 untrusted | pass | cash success + MMF failure receipt/status 回归 |
 | `/health` 与 `/quality/status` 分离 | pass | HTTP auth/ETag/503/只读 artifact tests |
 | producer payload 通过 canonical Schema | pass | `PMQualityService` Draft 2020-12 validation |
@@ -122,7 +128,7 @@ Exit gate 判定：
 - artifact 原子发布；HTTP 只读已发布 artifact，独立 bearer token、ETag、`no-store` 和安全错误 envelope
 - 本地 gate 在 onboarding 前不生效；onboarding 后按 account/market/consumer fail closed，且不依赖 Hub 在线
 - 普通候选扫描不受无关持仓异常影响
-- OM 完整 pytest：`3234 passed, 10 skipped`；touched Ruff 通过；production module cycles 为 0
+- OM 完整 pytest：`3238 passed, 10 skipped`；touched Ruff 通过；production module cycles 为 0
 
 Exit gate 判定：
 
@@ -197,9 +203,9 @@ Exit gate 判定：
 - PM production `portfolio-futu-evening.service` 的
   `DatetimeFieldConvFail` 根因已在 `feat/quality-monitoring` 修复并覆盖所有
   holdings 时间字段写路径；生产尚未升级，失败同步尚未重跑；
-- PM 完整 pytest：755 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
+- PM 完整 pytest：761 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
   仍有 52 个既有未使用导入告警，不属于本 work unit。
-- PM 发布准备：`feat/quality-monitoring@ab027d4`，目标版本 `0.1.27`。
+- PM 发布准备：`feat/quality-monitoring@c67ccf4`，目标版本 `0.1.27`。
 - OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
   `--check` 与 diff check 通过。
 - OM 发布元数据提交：`3a443dc4`，目标版本 `1.4.31`。
