@@ -149,7 +149,7 @@ Exit gate 判定：
 
 完成证据：
 
-- Hub commit：`bcb583af32386df438d27eda6b46b91c38cb799e`
+- Hub commit：`b7f2ca94735b5f5209eca1ab3f6d615d1f8826ab`
 - Hub version：`0.2.0`
 - OM/PM 使用独立 loopback base URL 和只读 token；配置缺失、token/endpoint 复用或非法 boolean 均 fail closed
 - producer client 区分 timeout、transport、auth、HTTP、Schema、identity、stale 和 clock skew；支持 ETag/304，重启后 304 无缓存时不会猜测
@@ -164,15 +164,17 @@ Exit gate 判定：
 - incident API 已实现 service/account/dataset 过滤和 opaque cursor；status projection 不混入未请求的数据集
 - maintenance 禁止空范围全局静默，只抑制范围内通知，不改变 incident/gate
 - Host Watchdog 只读取 systemd unit/timer 状态和 artifact mtime；目标、权限、路径非法时 fail closed，公开结果不含路径/命令输出
-- dead-man heartbeat 仅包含 `service/status`，endpoint/secret 配置 fail closed，不保存业务数据
+- dead-man heartbeat 仅包含 `service/status`；支持 secret ping URL 和可选
+  Bearer token，token 无 endpoint 时 fail closed，endpoint/secret 不保存
+  到状态或业务数据
 - normal snapshot 30 天、blocking/control evidence 400 天；active incident 和未发送/失败通知不被 retention 删除
 - systemd renderer 只生成不安装；使用专用 `investment-quality` 用户/组、`0077` umask 和 `0700` StateDirectory
 - canonical Schema 四份副本 SHA-256 仍为 `8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338`
 - Hub 完整 pytest：66 项通过；Ruff、compileall、`git diff --check` 通过
 - `investment_quality-0.2.0` wheel 从已提交源码以
-  `SOURCE_DATE_EPOCH=1785060380` 连续隔离构建两次，SHA 一致；全新 venv
+  `SOURCE_DATE_EPOCH=1785064563` 连续隔离构建两次，SHA 一致；全新 venv
   安装/import 及 packaged Schema 验证成功；候选 wheel SHA-256：
-  `8f358e196ba59a7ab32b7f8dae89faab33276e24d46512c0dfacc7a64082fe5e`
+  `aac156209f8ad40434603be4a6a732e436d94af77e08f125d82bee86cde1ba35`
 
 Exit gate 判定：
 
@@ -185,7 +187,7 @@ Exit gate 判定：
 | maintenance/ack audit | pass | API、idempotency、scope 和 audit event tests |
 | external heartbeat payload 不泄露数据 | pass（本地 adapter canary） | exact payload + safe failure tests |
 | 真实飞书 incident/recovery | pending Phase 5 | 需要生产机器人配置和受控真实状态转换批准 |
-| 真实 external missed-heartbeat | pending Phase 5 | 需要选定 provider endpoint/secret 并批准上线 |
+| 真实 external missed-heartbeat | pending Phase 5 | 需要选定 provider secret ping URL 或 endpoint/可选 Bearer token，并批准上线 |
 
 ## Phase 5 — 生产上线与基线
 

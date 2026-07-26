@@ -18,7 +18,7 @@
 | `AUTH-SVC` | 创建用户/目录、安装依赖、修改 env/config/systemd、启停服务 | 目标实例生产变更 |
 | `AUTH-DATA` | PM OpenD 全量同步并写 holdings/cash/MMF | 指定账户业务数据写入 |
 | `AUTH-NOTIFY` | 使用真实飞书机器人发送 incident/recovery | 真实质量通知 |
-| `AUTH-DEADMAN` | 配置外部 endpoint/token、执行 missed-heartbeat | 外部 dead-man |
+| `AUTH-DEADMAN` | 配置外部 secret ping URL 或 endpoint/可选 Bearer token、执行 missed-heartbeat | 外部 dead-man |
 | `AUTH-RB` | 停止正式消费者、切换旧版本、再升级恢复 | 生产回滚演练 |
 
 任何 secret、真实 `acc_id`、持仓、现金、MMF、NAV 或原始 broker payload 均不得写入 Git、本文、质量状态、命令输出归档或飞书告警。
@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | OM | `1.4.30` | `1.4.31` | 当前批准的 `feat/quality-monitoring` head，且包含发布元数据 `3a443dc4` | `1.4.30` |
 | PM | `v0.1.26@c6288e7` | `v0.1.27` | `feat/quality-monitoring@c66422a` | `v0.1.26@c6288e7` |
-| Hub | 未安装 | `v0.2.0` | `main@bcb583a` | 停止 Hub 并恢复部署前备份 |
+| Hub | 未安装 | `v0.2.0` | `main@b7f2ca9` | 停止 Hub 并恢复部署前备份 |
 
 发布后必须记录最终 tag SHA，并证明目标 tag 包含表中提交。tag、Release、安装包 SHA 或版本任一不一致立即停止。
 
@@ -104,7 +104,7 @@ loopback listeners
 ### 5.3 Hub
 
 1. 创建私有仓库 `investment-quality`；
-2. 推送 `main@bcb583a`；
+2. 推送 `main@b7f2ca9`；
 3. 创建 `v0.2.0` tag 和非 draft Release；
 4. 使用 tag commit time 作为 `SOURCE_DATE_EPOCH`，上传从该 tag 双构建一致的
    wheel及其 SHA-256；
@@ -329,10 +329,13 @@ baseline 接受后：
 
 ### 10.3 External dead-man
 
-1. endpoint 必须为无 query/fragment/userinfo 的 HTTPS URL；
-2. token 只进入 root-only env；
+1. endpoint 必须为无 query/fragment/userinfo 的 HTTPS URL，并按 secret
+   管理；
+2. provider 使用 secret ping URL 时只配置 `IQ_DEADMAN_ENDPOINT`；仅当
+   provider 明确要求 Bearer 鉴权时才配置 `IQ_DEADMAN_TOKEN`，二者都只
+   进入 root-only env；
 3. provider 的 15 分钟 missed-heartbeat 告警必须在 Hub 外部；
-4. 正常验证 payload 只有 `service`/`alive`；
+4. 正常验证 payload 只有 `service` 和 `status=alive`；
 5. 经 `AUTH-RB` 停止 Hub超过 provider 阈值，验证外部告警；
 6. 恢复 Hub并验证 heartbeat/recovery。
 

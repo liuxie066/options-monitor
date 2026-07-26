@@ -218,7 +218,11 @@ Hub 每 5 分钟拉取 OM/PM，验证 Schema，更新 incident 和告警状态�
 
 Hub 每 5 分钟发送无业务数据的出站 heartbeat。连续 15 分钟未收到 heartbeat 时，外部服务发送 `[基础设施失联]` 告警。
 
-外部服务只接收随机 monitor ID 和时间，不接收账户、持仓、金额或质量明细。具体 provider 在生产集成前选择，不阻碍核心开发。
+适配器同时支持 provider 生成的 secret ping URL，以及显式要求 Bearer
+鉴权的 HTTPS endpoint；后者才配置独立 bearer token。请求正文只包含静态
+`service=investment-quality` 和 `status=alive`，不接收账户、持仓、金额或
+质量明细。endpoint 本身也按 secret 管理，不进入状态、日志或告警。具体
+provider 在生产集成前选择，不阻碍核心开发。
 
 ## 6. 服务内部分层
 
