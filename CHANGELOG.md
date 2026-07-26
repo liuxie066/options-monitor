@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.5.2 - 2026-07-27
+
+### Bug Fixes
+- Treated normally inactive systemd services triggered by active timers as healthy while continuing to fail closed when a timer-triggered service actually enters the failed state.
+
 ## 1.5.1 - 2026-07-27
 
 ### Bug Fixes
