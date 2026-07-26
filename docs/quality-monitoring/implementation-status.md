@@ -46,15 +46,33 @@ Exit gate 判定：
 
 ## Phase 1 — investment-quality Hub
 
-状态：**未完成**
+状态：**完成**
 
-所需证据：
+完成证据：
 
-- Hub 在无 producer 情况下返回 `not_onboarded`
+- Hub 在无 producer 情况下稳定返回 `not_onboarded`，不创建 incident 或通知
 - SQLite migrations 可重复执行
 - restart 后 incident/outbox 不丢失
-- API/CLI、鉴权、脱敏、maintenance、dead-man adapter 测试通过
-- listener 默认 loopback
+- fingerprint 去重，acknowledgement 在重复拉取后保持，recovery 正确转换
+- notification ID 稳定，recovery supersede 尚未发送的 failure notification
+- acknowledge 和 maintenance window 幂等、鉴权且有 audit event
+- maintenance 只抑制 scope 内通知，不修改 incident 或 gate
+- producer client 对 V1、未知版本、auth、timeout 使用稳定 reason code
+- dead-man payload 不包含业务数据，错误不泄露 token/上游详情
+- API 具备 read/operator 权限分离、安全错误 envelope、ETag 和 no-store
+- scheduler 真实运行状态可由 `/health` 查询
+- listener 默认 loopback，非 loopback 配置 fail closed
+- `investment-quality` 共 38 项测试和 Ruff 通过
+
+Exit gate 判定：
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| 无 producer 稳定运行 | pass | Hub API + scheduler tests |
+| 不发送 not_onboarded 告警 | pass | empty scheduler/incident test |
+| service/DB/scheduler/outbox health 可查询 | pass | lifespan health test |
+| restart 不丢 incident/outbox | pass | SQLite restart test |
+| 所有 API 默认 loopback | pass | Settings fail-closed tests |
 
 ## Phase 2 — PM
 
