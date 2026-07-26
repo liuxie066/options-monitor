@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import argparse
-import re
+import sys
 from pathlib import Path
 
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.application.release_notes import parse_version_categories, render_release_notes
+from src.application.release_target import VERSION_RE
 
 
 def repo_base() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return BASE_DIR
 
 
 def read_text(path: Path) -> str:
@@ -25,35 +30,21 @@ def current_version(base: Path) -> str:
 
 
 def changelog_section(changelog_text: str, version: str) -> str:
-    target = f"## {version}"
-    lines = changelog_text.splitlines()
-    capture = False
-    out: list[str] = []
-    for line in lines:
-        if line.startswith("## "):
-            if capture:
-                break
-            if line.strip().startswith(target):
-                capture = True
-                out.append(line)
-                continue
-        elif capture:
-            out.append(line)
-    return "\n".join(out).strip()
-
-
-def render_release_notes(*, version: str, section: str) -> str:
-    body = section.splitlines()
-    if body and body[0].startswith("## "):
-        body = body[1:]
-    cleaned = "\n".join(body).strip()
-    return f"# options-monitor {version}\n\n{cleaned}\n"
+    parsed = parse_version_categories(changelog_text, version, allow_legacy=True)
+    if parsed["status"] != "ok":
+        return ""
+    return "\n".join([parsed["section_heading"], parsed["canonical_text"]]).strip()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="validate release metadata and optionally render release notes")
     parser.add_argument("--tag", default=None, help="optional git tag such as v0.1.0-beta.1")
     parser.add_argument("--render-notes-out", default=None, help="optional output markdown path for release notes")
+    parser.add_argument(
+        "--require-current-taxonomy",
+        action="store_true",
+        help="reject legacy Added/Changed/Fixed headings in the target release section",
+    )
     return parser.parse_args()
 
 
@@ -68,13 +59,17 @@ def main() -> int:
             raise SystemExit(f"[RELEASE_ERROR] tag {tag} does not match VERSION {version}")
 
     changelog_path = (base / "CHANGELOG.md").resolve()
-    section = changelog_section(read_text(changelog_path), version)
-    if not section:
-        raise SystemExit(f"[RELEASE_ERROR] CHANGELOG.md missing section for {version}")
+    parsed = parse_version_categories(
+        read_text(changelog_path),
+        version,
+        allow_legacy=not args.require_current_taxonomy,
+    )
+    if parsed["status"] != "ok":
+        raise SystemExit(f"[RELEASE_ERROR] {parsed['reason_code']}: {parsed['message']}")
 
     if args.render_notes_out:
         out_path = Path(args.render_notes_out).expanduser().resolve()
-        out_path.write_text(render_release_notes(version=version, section=section), encoding="utf-8")
+        out_path.write_text(render_release_notes(version=version, evidence=parsed["evidence"]), encoding="utf-8")
 
     print(f"[OK] release metadata valid for {version}")
     return 0

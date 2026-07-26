@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 772 (`src`: 421, `domain`: 64, `scripts`: 7, `tests`: 280)
-- Internal import edges: 4488 total, 1972 production/script edges excluding tests
+- Python files scanned: 774 (`src`: 422, `domain`: 64, `scripts`: 7, `tests`: 281)
+- Internal import edges: 4495 total, 1976 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -40,15 +40,15 @@ flowchart LR
   infrastructure -->|2| domain
   interfaces -->|125| application
   interfaces -->|2| domain
-  scripts -->|8| application
+  scripts -->|10| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1774| application
+  tests -->|1776| application
   tests -->|381| domain
   tests -->|2| domain_services
   tests -->|115| infrastructure
   tests -->|189| interfaces
-  tests -->|10| scripts
+  tests -->|11| scripts
   tests -->|16| storage
 ```
 
@@ -60,7 +60,7 @@ flowchart LR
 | interfaces | application | 125 |
 | application | infrastructure | 103 |
 | application | storage | 36 |
-| scripts | application | 8 |
+| scripts | application | 10 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
 | infrastructure | domain | 2 |
@@ -73,12 +73,12 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1774 |
+| tests | application | 1776 |
 | tests | domain | 381 |
 | tests | interfaces | 189 |
 | tests | infrastructure | 115 |
 | tests | storage | 16 |
-| tests | scripts | 10 |
+| tests | scripts | 11 |
 | tests | domain_services | 2 |
 
 ## Compressed Production Package Graph
@@ -107,13 +107,13 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.domain | 12 |
 | domain.domain | domain.domain.ledger | 11 |
 | src.application.trades | src.infrastructure | 9 |
+| scripts | src.application | 9 |
 | src.application.positions | domain.domain.ledger | 8 |
 | src.application | domain.domain.ledger | 7 |
 | src.application.ledger | src.infrastructure | 7 |
 | src.application.multi_tick | src.infrastructure | 7 |
 | src.application.positions | domain.storage | 7 |
 | src.application.trades | src.application.ledger | 7 |
-| scripts | src.application | 7 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | src.infrastructure | 6 |
 | domain.domain.ledger | domain.domain | 6 |

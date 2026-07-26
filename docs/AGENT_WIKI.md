@@ -451,15 +451,29 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 
 ### Release Request
 
-When the user asks to commit, push, and publish a remote release, assume the full release bundle:
+Development delivery and release publication are separate:
+
+- `commit and push` / `提交并推送` means validate, commit, and push the named development change. Update
+  `CHANGELOG.md / Unreleased` when the change belongs in user-facing release notes, but do not modify
+  `VERSION`, create a tag or Release, or upgrade production.
+- `merge main` / `合并 main` integrates a complete, green change into the next release candidate. It still
+  does not publish or deploy a version.
+- `release` / `发布` means prepare and publish the VERSION-driven GitHub Release. It does not upgrade
+  production unless the request explicitly includes the remote upgrade.
+- `release and upgrade` / `发布并升级远端` includes the controlled production upgrade and post-upgrade
+  runtime verification.
+
+When the user explicitly asks to publish a release, execute the full publication bundle:
 
 1. Confirm intended file set with `git status --short`.
-2. Update `VERSION` and `CHANGELOG.md`.
-3. Run focused tests and release check.
-4. Commit intended files only.
-5. Push `main`.
-6. Watch the `Release from VERSION` workflow.
-7. Verify GitHub release and remote tag.
+2. Review all commits since the latest release tag against `CHANGELOG.md / Unreleased`.
+3. Preview the automatic version recommendation and rendered release notes.
+4. Move `Unreleased` items into the dated target-version section and update `VERSION`.
+5. Run focused tests and strict release checks.
+6. Commit the version metadata as `chore: release <version>`.
+7. Push `main`.
+8. Watch the `Release from VERSION` workflow.
+9. Verify the GitHub Release, remote tag, target commit, and assets.
 
 Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, `publishedAt`, `targetCommitish`, `isDraft`, and `isPrerelease`.
 

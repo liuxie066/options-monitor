@@ -107,7 +107,9 @@ TEST_RULES: tuple[TestRule, ...] = (
         patterns=(
             ".github/workflows/**",
             "scripts/install*",
+            "scripts/release_check.py",
             "scripts/release_test_plan.py",
+            "src/application/release_notes.py",
             "src/application/release_test_plan.py",
             "src/application/release_version_recommendation.py",
             "src/application/release_target.py",
@@ -120,10 +122,13 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_release_version_recommendation.py",
             "tests/test_version_check.py",
             "tests/test_install_script.py",
+            "tests/test_release_check.py",
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
-            "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_version_recommendation.py tests/test_version_check.py tests/test_install_script.py tests/test_release_test_plan.py",
+            "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
+            "tests/test_release_version_recommendation.py tests/test_version_check.py "
+            "tests/test_install_script.py tests/test_release_test_plan.py",
         ),
     ),
     TestRule(
@@ -177,7 +182,7 @@ def build_release_test_plan(
     selected_mode = _normalize_mode(mode)
     files = _normalize_changed_files(changed_files)
     commands = [
-        _release_check_command(version),
+        _release_check_command(version, require_current_taxonomy="VERSION" in files),
         "git diff --check",
     ]
     reasons: list[str] = []
@@ -246,12 +251,13 @@ def _normalize_mode(mode: str) -> str:
     return selected
 
 
-def _release_check_command(version: str | None) -> str:
+def _release_check_command(version: str | None, *, require_current_taxonomy: bool) -> str:
     text = str(version or "").strip()
+    taxonomy_flag = " --require-current-taxonomy" if require_current_taxonomy else ""
     if not text:
-        return "./.venv/bin/python scripts/release_check.py"
+        return f"./.venv/bin/python scripts/release_check.py{taxonomy_flag}"
     tag = text if text.startswith("v") else f"v{text}"
-    return f"./.venv/bin/python scripts/release_check.py --tag {tag}"
+    return f"./.venv/bin/python scripts/release_check.py --tag {tag}{taxonomy_flag}"
 
 
 def _normalize_changed_files(changed_files: Sequence[str]) -> list[str]:

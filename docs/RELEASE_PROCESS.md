@@ -2,6 +2,23 @@
 
 这份文档只面向维护者。
 
+## 开发与发布分离
+
+`main` 是下一个版本的可发布候选，生产环境只消费已经发布的 release tag，不追随 `main`。
+
+每个完整开发单元应当：
+
+1. 在独立分支实现并通过对应测试；
+2. 在 `CHANGELOG.md / Unreleased` 中记录需要对外说明的变化；
+3. 提交、推送并合并到 `main`；
+4. 不修改 `VERSION`，不创建 tag 或 GitHub Release，也不升级生产。
+
+积累到一个完整批次后再执行独立发布。默认可以按一个完整主题、2–5 个有意义的变化或不超过
+一周的等待时间组成批次；生产阻断、安全问题和高严重度缺陷可以单独走 hotfix。
+
+发布说明以人工确认的 `Unreleased` 为语义真源，不从 commit message 自动猜测或改写。
+纯内部重构如果没有用户或运营价值，可以只保留在提交历史中。
+
 ## 版本规则
 
 - 稳定版：`MAJOR.MINOR.PATCH`
@@ -20,22 +37,31 @@
 ### Breaking Changes
 - 删除或不兼容地改变公开契约。
 
-### Added
-- 增加向后兼容的新能力。
+### New Features
+- 增加向后兼容的用户或运营能力。
 
-### Changed
-- 调整已有行为但保持兼容。
+### Improvements
+- 改进已有功能的体验、性能、可读性、可靠性或操作效率。
 
-### Fixed
-- 修复缺陷。
+### Bug Fixes
+- 修复实际行为与预期契约不一致的问题。
 ```
 
 推荐优先级：
 
 - `Breaking Changes` 非空：`major`；
-- 否则 `Added` 非空：`minor`；
-- 否则只有 `Changed` / `Fixed`：`patch`；
+- 否则 `New Features` 非空：`minor`；
+- 否则只有 `Improvements` / `Bug Fixes`：`patch`；
 - `Unreleased` 为空或包含未知标题、普通段落、嵌套列表等无法归类内容：返回 `needs_input`，不猜版本。
+
+分类边界：
+
+- `New Features`：用户或运营人员可以完成以前不能完成的事情；内部新增类、字段或测试工具不自动算新功能。
+- `Improvements`：已有行为本来正确，现在变得更清晰、更快、更稳定或更容易操作。
+- `Bug Fixes`：修复已经存在的错误、遗漏、重复、错误计算或状态不一致。
+- `Breaking Changes`：删除公开能力，或者以旧调用无法继续工作的方式改变命令、配置或工具契约。
+
+历史版本中的 `Added` / `Changed` / `Fixed` 保持不变；新分类只用于 `Unreleased` 和未来版本。
 
 先只读预览：
 
@@ -59,8 +85,36 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 ```
 
 apply 会重新计算证据；发生变化时返回 `stale` 且不写入。成功时只更新 `VERSION`，不会修改
-Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产。手动
+Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产。正常发布还必须把
+已确认的 `Unreleased` 内容移动到 `## <version> - <date>`，并保留一个空的 `## Unreleased`。手动
 `bump=patch|minor|major` 与 `target_version` 流程保持可用。
+
+---
+
+## 准备发布
+
+从最新、干净的 `origin/main` 开始：
+
+1. 确认当前 `VERSION` 与远端最新稳定 tag 一致；
+2. 检查从最新 tag 到 `main` 的所有提交，确认 `Unreleased` 没有遗漏、重复或错误分类；
+3. 运行只读自动版本建议并由维护者确认 major、minor 或 patch；
+4. 将 `Unreleased` 移入日期化的目标版本段落，并更新 `VERSION`；
+5. 渲染最终 Release Notes，确认只包含目标版本且分类顺序正确；
+6. 运行发布前检查；
+7. 把 `VERSION` 和 `CHANGELOG.md` 作为独立的 `chore: release <version>` 提交推送到 `main`。
+
+Release Notes 预览：
+
+```bash
+VERSION="$(cat VERSION)"
+./.venv/bin/python scripts/release_check.py \
+  --tag "v${VERSION}" \
+  --require-current-taxonomy \
+  --render-notes-out /tmp/options-monitor-release-notes.md
+```
+
+输出分类顺序固定为：存在时的 `Breaking Changes`、`New Features`、`Improvements`、`Bug Fixes`；
+空分类不输出。
 
 ---
 
@@ -98,7 +152,7 @@ make release-preflight ARGS="--full --require-clean"
 
 ```bash
 VERSION="$(cat VERSION)"
-./.venv/bin/python scripts/release_check.py --tag "v${VERSION}"
+./.venv/bin/python scripts/release_check.py --tag "v${VERSION}" --require-current-taxonomy
 ./.venv/bin/python scripts/generate_dependency_graph.py --check
 ./.venv/bin/python tests/run_smoke.py
 ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
@@ -125,11 +179,13 @@ VERSION="$(cat VERSION)"
 合并到 `main` 的版本提交如果修改了顶层 `VERSION`，GitHub Actions 会自动：
 
 - 读取 `VERSION` 生成 `v<version>` tag
-- 校验 `CHANGELOG.md` 是否存在对应版本段落
+- 精确匹配对应的日期化版本段落并严格校验新分类
+- 渲染只包含目标版本的 Release Notes
 - 运行 smoke / agent plugin 测试
 - 发布对应 GitHub Release
 
 因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打上同名 tag。
+普通开发提交因为不修改 `VERSION`，不会触发这条发布工作流。
 
 ---
 

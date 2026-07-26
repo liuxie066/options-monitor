@@ -16,15 +16,10 @@ from src.application.release_target import (
     parse_remote_stable_tag_identities,
     parse_version,
 )
+from src.application.release_notes import parse_unreleased_categories
 
 SCHEMA_VERSION = "release_version_recommendation.v1"
 DIGEST_SCHEMA_VERSION = "release_version_recommendation.digest.v1"
-SUPPORTED_UNRELEASED_HEADINGS = {
-    "Breaking Changes": "breaking_changes",
-    "Added": "added",
-    "Changed": "changed",
-    "Fixed": "fixed",
-}
 SENSITIVE_PATH_PATTERNS = (
     "src/interfaces/**",
     "src/application/agent_tools/**",
@@ -222,69 +217,22 @@ def recommend_release_version(
 
 
 def parse_unreleased(text: str) -> dict[str, Any]:
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    indexes = [index for index, line in enumerate(lines) if line == "## Unreleased"]
-    if len(indexes) != 1:
-        return {
-            "status": "needs_input",
-            "reason_code": "MALFORMED_UNRELEASED_SECTION",
-            "message": "CHANGELOG.md must contain exactly one exact '## Unreleased' heading",
-            "canonical_text": "",
-            "evidence": _empty_evidence(),
-        }
-
-    start = indexes[0] + 1
-    end = len(lines)
-    for index in range(start, len(lines)):
-        if lines[index].startswith("## "):
-            end = index
-            break
-    section = lines[start:end]
+    parsed = parse_unreleased_categories(text)
     evidence = _empty_evidence()
-    unsupported: list[str] = []
-    current_key: str | None = None
-    seen_headings: set[str] = set()
-    for line in section:
-        if not line.strip():
-            continue
-        if line in (f"### {name}" for name in SUPPORTED_UNRELEASED_HEADINGS):
-            heading = line[4:]
-            if heading in seen_headings:
-                unsupported.append(line)
-                continue
-            seen_headings.add(heading)
-            current_key = SUPPORTED_UNRELEASED_HEADINGS[heading]
-            continue
-        if line.startswith("### "):
-            current_key = None
-        if line.startswith("- ") and line[2:].strip() and current_key is not None:
-            evidence[current_key].append(line[2:].strip())
-            continue
-        unsupported.append(line)
-
-    canonical = "\n".join(section).strip()
-    if unsupported:
-        evidence["unsupported"] = unsupported
+    evidence.update(parsed["evidence"])
+    if parsed["status"] != "ok":
         return {
             "status": "needs_input",
-            "reason_code": "UNSUPPORTED_UNRELEASED_CONTENT",
-            "message": "Unreleased contains content outside the supported release-intent grammar",
-            "canonical_text": canonical,
-            "evidence": evidence,
-        }
-    if not any(evidence[key] for key in SUPPORTED_UNRELEASED_HEADINGS.values()):
-        return {
-            "status": "needs_input",
-            "reason_code": "UNRELEASED_IMPACT_REQUIRED",
-            "message": "Unreleased contains no declared release impact",
-            "canonical_text": canonical,
+            "reason_code": parsed["reason_code"],
+            "message": parsed["message"],
+            "canonical_text": parsed["canonical_text"],
             "evidence": evidence,
         }
     return {
         "status": "ok",
         "reason_code": None,
         "message": "release intent parsed",
-        "canonical_text": canonical,
+        "canonical_text": parsed["canonical_text"],
         "evidence": evidence,
     }
 
