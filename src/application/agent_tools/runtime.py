@@ -255,8 +255,8 @@ VERSION_UPDATE_TOOL = build_agent_tool(
     name="version_update",
     description=(
         "Preview or update local VERSION. bump=auto recommends major|minor|patch from CHANGELOG.md Unreleased "
-        "and remote stable tags; remote access is used only in auto mode. Does not create git tags, commit, push, "
-        "or run release workflows."
+        "(Breaking Changes, New Features, Improvements, Bug Fixes) and remote stable tags; remote access is used "
+        "only in auto mode. Does not create git tags, commit, push, or run release workflows."
     ),
     requires=("local_repo", "git_remote"),
     capabilities=("version_update", "local_write", "release_metadata"),

@@ -65,7 +65,9 @@ When a dry-run or read-only surface exists, use it first.
 | User intent | Repo-specific default |
 |---|---|
 | explain / look into / check / why / how does this work | Start read-only; inspect source, docs, configs, tests, and runtime artifacts before proposing changes |
-| release / 提交并推送 / 远端 release | Treat as full VERSION-driven release bundle unless the user says otherwise |
+| commit and push / 提交并推送 | Commit and push the named development change only; do not modify `VERSION`, publish a Release, or upgrade production unless explicitly requested |
+| release / 发布 | Prepare and publish the full VERSION-driven GitHub Release; production upgrade remains a separate explicit action |
+| release and upgrade / 发布并升级远端 | Publish the VERSION-driven Release, then use the controlled remote upgrade and runtime verification flow |
 | diagnostic only / 不要改文件 | Keep commands read-only and do not edit files |
 
 Do not run Python scripts just to see what happens.
