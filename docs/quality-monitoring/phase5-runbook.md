@@ -27,8 +27,8 @@
 
 | 系统 | 当前生产 | 目标 | 目标代码必须包含 | 首次回滚锚点 |
 |---|---|---|---|---|
-| OM | `1.4.30` | `1.4.31` | 当前批准的 `feat/quality-monitoring` head，且包含发布元数据 `3a443dc4` | `1.4.30` |
-| PM | `v0.1.26@c6288e7` | `v0.1.27` | `feat/quality-monitoring@c66422a` | `v0.1.26@c6288e7` |
+| OM | `1.4.30` | `1.4.31` | `main` 必须包含已验证的质量监控提交；合入 main 时保持 `VERSION=1.4.30`，发布授权后才生成 1.4.31 元数据 | `1.4.30` |
+| PM | `v0.1.26@c6288e7` | `v0.1.27` | `main@c66422a` 或其后继 | `v0.1.26@c6288e7` |
 | Hub | 未安装 | `v0.2.0` | `main@b7f2ca9` | 停止 Hub 并恢复部署前备份 |
 
 发布后必须记录最终 tag SHA，并证明目标 tag 包含表中提交。tag、Release、安装包 SHA 或版本任一不一致立即停止。
@@ -53,7 +53,9 @@
 
 必须同时满足：
 
-- OM 工作区干净，`VERSION=1.4.31`，release metadata、dependency graph、focused/full tests 通过；
+- OM 工作区干净，`VERSION=1.4.30`，质量变更位于 `Unreleased`；dependency
+  graph、focused/full tests 通过，1.4.31 release metadata 仅在后续
+  `AUTH-REL` 中生成；
 - PM `feat/quality-monitoring` 工作区干净，`VERSION=0.1.27`，完整 tests 与 touched Ruff 通过；
 - Hub `main` 工作区干净，`version=0.2.0`，tests/Ruff/compileall 通过；
 - canonical Schema 四份副本 SHA 相同；
@@ -84,18 +86,20 @@ loopback listeners
 
 按 [RELEASE_PROCESS.md](../RELEASE_PROCESS.md) 执行 VERSION-driven Release：
 
-1. 将已验证质量分支合并到目标 `main`，不改写无关提交；
-2. 推送后等待 `release-from-version` workflow；
-3. 验证 `v1.4.31` tag、Release 非 draft、tag SHA 等于执行前记录的已批准
-   release-candidate head，并包含 `3a443dc4`；
-4. 重新渲染并核对只含 `1.4.31` 的 Release Notes。
+1. 以已合并并验证的 `main` 为基础，将质量监控条目从 `Unreleased` 移入
+   日期化 `1.4.31` 段并把 `VERSION` 更新为 `1.4.31`；
+2. 运行严格 release preflight，提交独立的 release metadata commit；
+3. 推送该 release commit 后等待 `release-from-version` workflow；
+4. 验证 `v1.4.31` tag、Release 非 draft、tag SHA 等于 release metadata
+   commit，且该 commit 包含已验证的质量监控 main；
+5. 重新渲染并核对只含 `1.4.31` 的 Release Notes。
 
 不得在本步骤升级生产。
 
 ### 5.2 PM
 
-1. 将 `feat/quality-monitoring@c66422a` 合并到目标 `main`；
-2. 完整测试通过后创建并推送 `v0.1.27`；
+1. 确认目标 `main` 包含 `c66422a`，且完整测试仍通过；
+2. 创建并推送 `v0.1.27`；
 3. 等待 tag-triggered Release workflow；
 4. 验证 Release 非 draft、tag SHA 包含 `c66422a`。
 
@@ -103,12 +107,11 @@ loopback listeners
 
 ### 5.3 Hub
 
-1. 创建私有仓库 `investment-quality`；
-2. 推送 `main@b7f2ca9`；
-3. 创建 `v0.2.0` tag 和非 draft Release；
-4. 使用 tag commit time 作为 `SOURCE_DATE_EPOCH`，上传从该 tag 双构建一致的
+1. 确认私有仓库 `investment-quality` 的 `main@b7f2ca9` 与本地一致；
+2. 创建 `v0.2.0` tag 和非 draft Release；
+3. 使用 tag commit time 作为 `SOURCE_DATE_EPOCH`，上传从该 tag 双构建一致的
    wheel及其 SHA-256；
-5. 从 Release 重新下载、校验 SHA、隔离安装并确认 `investment_quality.__version__ == 0.2.0`。
+4. 从 Release 重新下载、校验 SHA、隔离安装并确认 `investment_quality.__version__ == 0.2.0`。
 
 ## 6. Step 2 — 部署 Hub scaffold
 
