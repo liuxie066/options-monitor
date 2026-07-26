@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.5.0 - 2026-07-27
+
 ### New Features
 - Added the versioned OM runtime and data-quality producer, atomic local artifacts, an independently authenticated loopback status endpoint, and local fail-closed gates for position-dependent advice and official option performance.
 - Added opt-in systemd units for the quality HTTP endpoint, 15-minute regular checks, one-minute due probes, and market-local US/HK day-end authoritative reconciliation.
