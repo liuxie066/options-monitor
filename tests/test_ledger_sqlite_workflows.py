@@ -2153,6 +2153,85 @@ def test_lifecycle_close_rejects_resolution_quantity_mismatch_before_write(tmp_p
     assert [item for item in repo.list_trade_events() if item.get("event_type") == "expire_close"] == []
 
 
+def test_multi_lot_lifecycle_close_rolls_back_all_events_on_second_write_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.lifecycle import persist_expire_close_events
+    from src.application.ledger.lot_resolver import (
+        LotCloseSelector,
+        resolve_fifo_close_targets,
+    )
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    for opened_at_ms in (1000, 1100):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=100.0,
+                multiplier=100,
+                expiration_ymd="2026-06-19",
+                premium_per_share=2.5,
+                opened_at_ms=opened_at_ms,
+            ),
+        )
+    resolution = resolve_fifo_close_targets(
+        repo,
+        LotCloseSelector.from_values(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            position_side="short",
+            strike=100.0,
+            expiration_ymd="2026-06-19",
+            contracts_to_close=2,
+        ),
+        source="test",
+    )
+    original_upsert = repo.upsert_trade_event
+    close_write_count = 0
+
+    def _fail_second_close(event, *, conn=None):
+        nonlocal close_write_count
+        if str(getattr(event, "event_type", "")) == "expire_close":
+            close_write_count += 1
+            if close_write_count == 2:
+                raise RuntimeError("injected lifecycle split failure")
+        return original_upsert(event, conn=conn)
+
+    monkeypatch.setattr(repo, "upsert_trade_event", _fail_second_close)
+
+    with pytest.raises(RuntimeError, match="injected lifecycle split failure"):
+        persist_expire_close_events(
+            repo,
+            close_target_resolution=resolution,
+            contracts_to_close=2,
+            event_time_ms=2000,
+            case_id="case-atomic",
+        )
+
+    assert [
+        item
+        for item in repo.list_trade_events()
+        if item.get("event_type") == "expire_close"
+    ] == []
+    assert [
+        item["fields"]["contracts_open"]
+        for item in repo.list_position_lots()
+    ] == [1, 1]
+
+
 def test_single_lifecycle_assignment_rejects_multi_target_resolution_before_write(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.lifecycle import persist_assignment_event

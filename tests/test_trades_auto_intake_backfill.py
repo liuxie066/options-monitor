@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from src.application.trades.backfill import run_history_backfill
+from src.application.trades.inbox import (
+    list_retryable_trade_payloads,
+    trade_inbox_summary,
+)
 from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
 
 
@@ -187,3 +191,231 @@ def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(
     state = load_trade_intake_state(tmp_path / "state.json")
     assert state["processed_deal_ids"]["deal-1"]["status"] == "reconciled"
     assert state["processed_deal_ids"]["deal-1"]["reason"] == "ledger_event_already_recorded"
+
+
+def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
+    tmp_path: Path,
+) -> None:
+    processed: list[str] = []
+    opening_deal_id = "9162790356868244299"
+    closing_deal_id = "495287541148725639"
+
+    def _history_deals_fn(**_kwargs):
+        return ([{"deal_id": opening_deal_id}], {})
+
+    def _process_payload_fn(payload: dict[str, Any], **_kwargs):
+        processed.append(str(payload["deal_id"]))
+        return {
+            "status": "applied",
+            "action": "open",
+            "reason": "applied_open",
+            "deal_id": payload["deal_id"],
+            "account": "lx",
+        }
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["repo"] = _FakeRepo(
+        [
+            {
+                "event_id": (
+                    "futu:lx:281756479859383816:"
+                    f"{closing_deal_id}:close:lot_futu:lx:281756479859383816:{opening_deal_id}"
+                ),
+                "event_type": "close",
+                "raw_payload": {"source_deal_id": closing_deal_id},
+            }
+        ]
+    )
+
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=_process_payload_fn,
+    )
+
+    assert out["applied_count"] == 1
+    assert processed == [opening_deal_id]
+
+
+def test_history_backfill_does_not_skip_incomplete_broker_close_split(
+    tmp_path: Path,
+) -> None:
+    processed: list[str] = []
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["repo"] = _FakeRepo(
+        [
+            {
+                "event_id": "broker-close-deal-split-lot-1",
+                "event_type": "close",
+                "contracts": 1,
+                "target_lot_id": "lot-1",
+                "raw_payload": {
+                    "source_deal_id": "deal-split",
+                    "broker_deal_completion": {
+                        "source_deal_id": "deal-split",
+                        "expected_contracts": 2,
+                        "split_count": 2,
+                        "split_index": 1,
+                        "allocated_contracts": 1,
+                    },
+                },
+            }
+        ]
+    )
+
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=lambda **_kwargs: ([{"deal_id": "deal-split"}], {}),
+        process_payload_fn=lambda payload, **_kwargs: (
+            processed.append(str(payload["deal_id"]))
+            or {
+                "status": "applied",
+                "action": "close",
+                "reason": "applied_close",
+                "deal_id": payload["deal_id"],
+                "account": "lx",
+            }
+        ),
+    )
+
+    assert out["applied_count"] == 1
+    assert processed == ["deal-split"]
+
+
+def test_history_backfill_extends_window_from_persisted_checkpoint(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+    checkpoint_path = tmp_path / "backfill_checkpoint.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "last_successful_window_end_utc": "2026-06-01T00:00:00+00:00"
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _history_deals_fn(**kwargs):
+        captured.update(kwargs)
+        return (
+            [],
+            {
+                "window_start_utc": "2026-05-31T23:00:00+00:00",
+                "window_end_utc": "2026-06-03T06:00:00+00:00",
+                "account_results": [
+                    {
+                        "futu_account_id": "REAL_1",
+                        "ret": 0,
+                        "row_count": 0,
+                    }
+                ],
+            },
+        )
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        checkpoint_path=checkpoint_path,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=lambda *_args, **_kwargs: {},
+    )
+
+    assert captured["lookback_hours"] == 55.0
+    assert out["ok"] is True
+    assert out["diagnostics"]["checkpoint_advanced"] is True
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert (
+        checkpoint["last_successful_window_end_utc"]
+        == "2026-06-03T06:00:00+00:00"
+    )
+
+
+def test_history_backfill_does_not_advance_checkpoint_on_partial_account_query(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "backfill_checkpoint.json"
+    original = {
+        "last_successful_window_end_utc": "2026-06-01T00:00:00+00:00"
+    }
+    checkpoint_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def _history_deals_fn(**_kwargs):
+        return (
+            [],
+            {
+                "window_end_utc": "2026-06-03T06:00:00+00:00",
+                "account_results": [
+                    {
+                        "futu_account_id": "REAL_1",
+                        "ret": -1,
+                        "row_count": 0,
+                        "error": "trade context unavailable",
+                    }
+                ],
+            },
+        )
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        checkpoint_path=checkpoint_path,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=lambda *_args, **_kwargs: {},
+    )
+
+    assert out["ok"] is False
+    assert out["error"] == "history_query_incomplete"
+    assert out["diagnostics"]["checkpoint_advanced"] is False
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == original
+
+
+def test_history_backfill_keeps_unexpected_pipeline_exception_in_durable_inbox(
+    tmp_path: Path,
+) -> None:
+    inbox_path = tmp_path / "trade_inbox.sqlite3"
+
+    def _history_deals_fn(**_kwargs):
+        return ([{"deal_id": "deal-crash"}], {})
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        inbox_path=inbox_path,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("unexpected pipeline crash")
+        ),
+    )
+
+    assert out["failed_count"] == 1
+    assert trade_inbox_summary(inbox_path)["pending_count"] == 1
+    retry_rows = list_retryable_trade_payloads(
+        inbox_path,
+        retry_delay_sec=0,
+    )
+    assert retry_rows[0]["payload"]["deal_id"] == "deal-crash"
+    assert "unexpected pipeline crash" in retry_rows[0]["last_error"]
+
+
+def test_history_backfill_keeps_retryable_unresolved_result_in_durable_inbox(
+    tmp_path: Path,
+) -> None:
+    inbox_path = tmp_path / "trade_inbox.sqlite3"
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        inbox_path=inbox_path,
+        history_deals_fn=lambda **_kwargs: ([{"deal_id": "deal-waiting"}], {}),
+        process_payload_fn=lambda *_args, **_kwargs: {
+            "status": "unresolved",
+            "action": "lifecycle",
+            "reason": "waiting_settlement_evidence",
+            "deal_id": "deal-waiting",
+            "account": "lx",
+            "diagnostics": {"retryable": True},
+        },
+    )
+
+    assert out["unresolved_count"] == 1
+    assert trade_inbox_summary(inbox_path)["pending_count"] == 1
+    retry_rows = list_retryable_trade_payloads(inbox_path, retry_delay_sec=0)
+    assert retry_rows[0]["deal_id"] == "deal-waiting"

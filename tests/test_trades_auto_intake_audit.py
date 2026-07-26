@@ -593,6 +593,98 @@ def test_attach_receipt_state_preserves_confirmed_receipt_on_unresolved_skip() -
     assert receipt["attempt_count"] == 1
 
 
+def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
+    tmp_path: Path,
+) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-lifecycle-final",
+        order_id="order-lifecycle-final",
+        symbol="TIGR",
+        option_type="put",
+        side="buy",
+        position_effect="close",
+        contracts=1,
+        price=0.0,
+        strike=6.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-05-22",
+        currency="USD",
+        trade_time_ms=1779468493916,
+        raw_payload={"deal_id": "deal-lifecycle-final"},
+    )
+
+    class _Result:
+        status = "skipped"
+        action = "expire_close"
+        reason = "lifecycle_already_written"
+        deal_id = deal.deal_id
+        account = "lx"
+        operations = [
+            BrokerTradeOperation(
+                action="lifecycle_already_written",
+                record_id="lot-final",
+            )
+        ]
+        diagnostics = {
+            "lifecycle_case": {
+                "case_id": "lc-final",
+                "status": "ledger_written",
+                "decision_type": "expire_close",
+            }
+        }
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": [item.to_payload() for item in self.operations],
+                "diagnostics": self.diagnostics,
+            }
+
+    writes: list[dict] = []
+    out = process_trade_payload(
+        {"deal_id": deal.deal_id},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                deal.deal_id: {
+                    "status": "unresolved",
+                    "retryable": True,
+                    "attempt_count": 7,
+                }
+            },
+        },
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda *_args, **_kwargs: None,
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+    )
+
+    assert out["status"] == "skipped"
+    state = writes[-1]
+    assert deal.deal_id not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"][deal.deal_id]
+    assert processed["status"] == "reconciled"
+    assert processed["reason"] == "lifecycle_already_written"
+    assert processed["applied_record_ids"] == ["lot-final"]
+    assert processed["diagnostics"]["reconciled_from"] == "terminal_ledger_result"
+
+
 def test_process_payload_passes_retry_failed_to_resolver(tmp_path: Path) -> None:
     deal = NormalizedTradeDeal(
         broker="富途",

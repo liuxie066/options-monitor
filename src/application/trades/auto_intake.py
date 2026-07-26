@@ -29,6 +29,7 @@ from src.application.trades.state import (
     write_trade_intake_state,
 )
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
+from src.application.trades.history_backfill import OpenDHistoryDealClient
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
 from src.application.trades.push_listener import (
     OpenDTradePushListener,
@@ -36,6 +37,13 @@ from src.application.trades.push_listener import (
     TradeIntakeStartCancelled,
 )
 from src.application.trades.receipt import send_trade_intake_receipt
+from src.application.trades.inbox import (
+    enqueue_trade_payload,
+    list_retryable_trade_payloads,
+    mark_trade_payload_retryable,
+    settle_trade_payload_result,
+    trade_inbox_summary,
+)
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.runtime_paths import resolve_runtime_root
@@ -66,6 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
     ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
+    ap.add_argument("--account", default=None, help="Limit --reconcile-state to one configured intake account")
     ap.add_argument("--deal-id", action="append", default=None, help="Limit --reconcile-state to a specific deal_id; repeatable")
     ap.add_argument("--apply", action="store_true", help="Apply --reconcile-state local state changes; dry-run by default")
     ap.add_argument("--dry-run", action="store_true", help="Preview --reconcile-state without writing")
@@ -260,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.deal_id and not args.reconcile_state:
         print("--deal-id is only supported with --reconcile-state")
         return 2
+    if args.account and not args.reconcile_state:
+        print("--account is only supported with --reconcile-state")
+        return 2
     if args.apply and not args.reconcile_state:
         print("--apply is only supported with --reconcile-state; use --mode apply for trade-event writes")
         return 2
@@ -274,21 +286,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.reconcile_state:
         _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
-        result = reconcile_trade_intake_state(
-            state_path=state_path,
-            audit_path=audit_path,
+        result = _reconcile_intake_sources(
+            sources=sources,
             repo=repo,
+            account=args.account,
             deal_ids=list(args.deal_id or []),
             apply_changes=bool(args.apply),
-        )
-        result["runtime_root"] = str(runtime_root)
-        result["runtime_root_source"] = runtime_resolution.source
-        result = attach_write_contract(
-            result,
-            dry_run=not bool(args.apply),
-            write_applied=bool(args.apply) and int(result.get("applied_count") or 0) > 0,
-            backup_path=result.get("backup_path"),
-            rollback_hint="restore the auto_trade_intake_state.json backup",
+            runtime_root=runtime_root,
+            runtime_root_source=runtime_resolution.source,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -586,6 +591,7 @@ def _select_source_for_payload(
 
 
 def _legacy_override_sources(intake_cfg: dict[str, Any], *, host: str | None, port: int | None) -> list[dict[str, Any]]:
+    state_path = Path(intake_cfg["state_path"])
     return [
         {
             "id": "legacy",
@@ -597,6 +603,10 @@ def _legacy_override_sources(intake_cfg: dict[str, Any], *, host: str | None, po
             "state_path": intake_cfg["state_path"],
             "audit_path": intake_cfg["audit_path"],
             "status_path": intake_cfg["status_path"],
+            "inbox_path": state_path.with_name("trade_intake_inbox.sqlite3"),
+            "backfill_checkpoint_path": state_path.with_name(
+                "trade_intake_backfill_checkpoint.json"
+            ),
             "reconnect_sec": int(intake_cfg.get("reconnect_sec") or 5),
             "receipt": dict(intake_cfg.get("receipt") or {}),
             "backfill": dict(intake_cfg.get("backfill") or {}),
@@ -608,13 +618,95 @@ def _legacy_override_sources(intake_cfg: dict[str, Any], *, host: str | None, po
 
 def _resolve_source_paths(source: dict[str, Any], *, runtime_root: Path) -> dict[str, Any]:
     out = dict(source)
-    for key in ("state_path", "audit_path", "status_path"):
+    for key in (
+        "state_path",
+        "audit_path",
+        "status_path",
+        "inbox_path",
+        "backfill_checkpoint_path",
+    ):
         path = out.get(key)
         resolved = path if isinstance(path, Path) else Path(str(path or ""))
         if not resolved.is_absolute():
             resolved = (runtime_root / resolved).resolve()
         out[key] = resolved
     return out
+
+
+def _reconcile_intake_sources(
+    *,
+    sources: list[dict[str, Any]],
+    repo: Any,
+    account: str | None,
+    deal_ids: list[str],
+    apply_changes: bool,
+    runtime_root: Path,
+    runtime_root_source: str,
+) -> dict[str, Any]:
+    requested_account = str(account or "").strip().lower()
+    selected = [
+        source
+        for source in sources
+        if not requested_account
+        or str(source.get("account") or "").strip().lower() == requested_account
+    ]
+    if requested_account and not selected:
+        configured = sorted(
+            {
+                str(source.get("account") or "").strip().lower()
+                for source in sources
+                if str(source.get("account") or "").strip()
+            }
+        )
+        raise SystemExit(
+            f"unknown trade-intake account={requested_account}; configured={','.join(configured) or '-'}"
+        )
+    if not selected:
+        raise SystemExit("no configured trade-intake sources to reconcile")
+
+    results: list[dict[str, Any]] = []
+    for source in selected:
+        state_path = Path(source["state_path"])
+        audit_path = Path(source["audit_path"])
+        item = reconcile_trade_intake_state(
+            state_path=state_path,
+            audit_path=audit_path,
+            repo=repo,
+            deal_ids=list(deal_ids),
+            apply_changes=apply_changes,
+        )
+        item.update(
+            {
+                "source_id": source.get("id"),
+                "account": source.get("account"),
+                "state_path": str(state_path),
+                "audit_path": str(audit_path),
+            }
+        )
+        results.append(item)
+
+    backup_paths = [
+        str(item.get("backup_path"))
+        for item in results
+        if str(item.get("backup_path") or "").strip()
+    ]
+    out = {
+        "runtime_root": str(runtime_root),
+        "runtime_root_source": str(runtime_root_source),
+        "account": requested_account or None,
+        "source_count": len(results),
+        "planned_count": sum(int(item.get("planned_count") or 0) for item in results),
+        "applied_count": sum(int(item.get("applied_count") or 0) for item in results),
+        "sources": results,
+        "backup_paths": backup_paths,
+    }
+    return attach_write_contract(
+        out,
+        dry_run=not apply_changes,
+        write_applied=apply_changes and int(out["applied_count"]) > 0,
+        backup_path=backup_paths[0] if len(backup_paths) == 1 else None,
+        rollback_hint="restore each source state backup listed in backup_paths",
+    )
 
 
 def _source_status_payload(source: dict[str, Any]) -> dict[str, Any]:
@@ -627,6 +719,8 @@ def _source_status_payload(source: dict[str, Any]) -> dict[str, Any]:
         "state_path": str(source.get("state_path")),
         "audit_path": str(source.get("audit_path")),
         "status_path": str(source.get("status_path")),
+        "inbox_path": str(source.get("inbox_path")),
+        "backfill_checkpoint_path": str(source.get("backfill_checkpoint_path")),
         "mapped_accounts": sorted(dict(source.get("account_mapping") or {}).values()),
         "futu_account_ids": list(source.get("futu_account_ids") or []),
     }
@@ -641,6 +735,13 @@ def _status_base_for_source(
     runtime_root_source: str,
 ) -> dict[str, Any]:
     source_cfg = dict(intake_cfg)
+    source_state_path = Path(source["state_path"])
+    inbox_path = source.get("inbox_path") or source_state_path.with_name(
+        "trade_intake_inbox.sqlite3"
+    )
+    backfill_checkpoint_path = source.get(
+        "backfill_checkpoint_path"
+    ) or source_state_path.with_name("trade_intake_backfill_checkpoint.json")
     source_cfg["account_mapping"] = dict(source.get("account_mapping") or {})
     source_cfg["futu_account_ids"] = list(source.get("futu_account_ids") or [])
     source_cfg["receipt"] = dict(source.get("receipt") or intake_cfg.get("receipt") or {})
@@ -657,6 +758,11 @@ def _status_base_for_source(
         runtime_root_source=runtime_root_source,
     )
     out["source_id"] = source.get("id")
+    out["inbox_path"] = str(inbox_path)
+    out["backfill_checkpoint_path"] = str(
+        backfill_checkpoint_path
+    )
+    out["inbox"] = trade_inbox_summary(inbox_path)
     if source.get("account"):
         out["account"] = source.get("account")
     return out
@@ -680,6 +786,12 @@ def _run_listener_source_loop(
     state_path = source["state_path"]
     audit_path = source["audit_path"]
     status_path = source["status_path"]
+    inbox_path = source.get("inbox_path") or Path(state_path).with_name(
+        "trade_intake_inbox.sqlite3"
+    )
+    backfill_checkpoint_path = source.get(
+        "backfill_checkpoint_path"
+    ) or Path(state_path).with_name("trade_intake_backfill_checkpoint.json")
     host = str(source.get("host") or "127.0.0.1")
     port = int(source.get("port") or 11111)
     account_mapping = dict(source.get("account_mapping") or {})
@@ -693,26 +805,81 @@ def _run_listener_source_loop(
     )
     stop = stop_event or threading.Event()
 
+    def _process_inbox_payload(
+        payload: dict[str, Any],
+        *,
+        inbox_id: str,
+        intake_source: str,
+    ) -> dict[str, Any]:
+        try:
+            with process_lock:
+                result = _process_payload(
+                    payload,
+                    repo=repo,
+                    state_path=state_path,
+                    audit_path=audit_path,
+                    account_mapping=account_mapping,
+                    futu_account_ids=futu_account_ids,
+                    apply_changes=apply_changes,
+                    host=host,
+                    port=port,
+                    config=cfg,
+                    config_path=cfg_path,
+                    runtime_root=runtime_root,
+                    on_result_fn=receipt_callback,
+                    on_stock_holdings_sync_fn=stock_holdings_sync_callback,
+                    source=intake_source,
+                )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            mark_trade_payload_retryable(
+                inbox_path,
+                inbox_id=inbox_id,
+                error=error,
+            )
+            raise
+        settle_trade_payload_result(
+            inbox_path,
+            inbox_id=inbox_id,
+            result=result,
+        )
+        return result
+
     def _on_deal(payload: dict[str, Any]) -> None:
         push_received_at = utc_now()
-        with process_lock:
-            result = _process_payload(
+        inbox_id = enqueue_trade_payload(
+            inbox_path,
+            payload=payload,
+            source="push",
+        )
+        try:
+            result = _process_inbox_payload(
                 payload,
-                repo=repo,
-                state_path=state_path,
-                audit_path=audit_path,
-                account_mapping=account_mapping,
-                futu_account_ids=futu_account_ids,
-                apply_changes=apply_changes,
-                host=host,
-                port=port,
-                config=cfg,
-                config_path=cfg_path,
-                runtime_root=runtime_root,
-                on_result_fn=receipt_callback,
-                on_stock_holdings_sync_fn=stock_holdings_sync_callback,
-                source="push",
+                inbox_id=inbox_id,
+                intake_source="push",
             )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            status_state.update(
+                {
+                    "last_error": error,
+                    "last_error_at": utc_now(),
+                    "last_push_received_utc": push_received_at,
+                    "last_push_deal_id": payload_deal_id(payload) or None,
+                    "inbox": trade_inbox_summary(inbox_path),
+                }
+            )
+            _write_listener_status(
+                status_path,
+                status_state,
+                status="listening",
+                stage="deal_queued_after_callback_error",
+            )
+            _log(
+                f"[WARN] trade push queued for retry source={source.get('id')} "
+                f"deal_id={payload_deal_id(payload) or '-'} error={error}"
+            )
+            return
         status_state.update(
             {
                 "last_push_received_utc": push_received_at,
@@ -724,15 +891,18 @@ def _run_listener_source_loop(
                     if isinstance(result.get("stock_holdings_sync"), dict)
                     else None
                 ),
+                "inbox": trade_inbox_summary(inbox_path),
             }
         )
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
 
     listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
+    history_client = OpenDHistoryDealClient(host=host, port=port)
     restart_count = 0
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
+    last_inbox_retry_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
@@ -741,14 +911,48 @@ def _run_listener_source_loop(
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
             listener.start(cancel_event=stop)
             _log(f"[OK] auto trade intake listener started source={source.get('id')} {host}:{port}")
+            if status_state.get("last_error"):
+                status_state["recovered_at"] = utc_now()
+            status_state.pop("last_error", None)
             _write_listener_status(status_path, status_state, status="listening", stage="listener_started", restart_count=restart_count)
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
                 last_backfill_monotonic = time.monotonic()
             while not stop.is_set():
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
-                should_backfill = bool(backfill_cfg.get("enabled", True))
                 now_mono = time.monotonic()
+                inbox_retry_due = (
+                    last_inbox_retry_monotonic is None
+                    or now_mono - last_inbox_retry_monotonic >= 60
+                )
+                if inbox_retry_due:
+                    retry_rows = list_retryable_trade_payloads(
+                        inbox_path,
+                        retry_delay_sec=60,
+                    )
+                    for retry_row in retry_rows:
+                        try:
+                            _process_inbox_payload(
+                                dict(retry_row["payload"]),
+                                inbox_id=str(retry_row["inbox_id"]),
+                                intake_source="inbox_retry",
+                            )
+                        except Exception as exc:
+                            status_state["last_inbox_retry_error"] = (
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            break
+                    last_inbox_retry_monotonic = now_mono
+                    status_state["inbox"] = trade_inbox_summary(inbox_path)
+                    if (
+                        int(status_state["inbox"].get("pending_count") or 0) == 0
+                        and status_state.get("last_error")
+                    ):
+                        status_state["recovered_at"] = utc_now()
+                        status_state.pop("last_error", None)
+                    if int(status_state["inbox"].get("pending_count") or 0) == 0:
+                        status_state.pop("last_inbox_retry_error", None)
+                should_backfill = bool(backfill_cfg.get("enabled", True))
                 if should_backfill:
                     interval_sec = int(backfill_cfg.get("interval_sec") or 300)
                     startup_check = bool(backfill_cfg.get("startup_check", True))
@@ -774,6 +978,9 @@ def _run_listener_source_loop(
                                 process_payload_fn=_process_payload,
                                 on_stock_holdings_sync_fn=stock_holdings_sync_callback,
                                 process_lock=process_lock,
+                                inbox_path=inbox_path,
+                                checkpoint_path=backfill_checkpoint_path,
+                                history_deals_fn=history_client.fetch,
                             )
                         except Exception as exc:
                             result = {
@@ -806,10 +1013,12 @@ def _run_listener_source_loop(
         except KeyboardInterrupt:
             stop.set()
             listener.close()
+            history_client.close()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
         except TradeIntakeStartCancelled:
             listener.close()
+            history_client.close()
             _write_listener_status(
                 status_path,
                 status_state,
@@ -820,8 +1029,10 @@ def _run_listener_source_loop(
             return 0
         except TradeIntakeAuthRequired as exc:
             listener.close()
+            history_client.close()
             stop.set()
             status_state["last_error"] = str(exc)
+            status_state["last_error_at"] = utc_now()
             _write_listener_status(
                 status_path,
                 status_state,
@@ -838,6 +1049,7 @@ def _run_listener_source_loop(
             listener.close()
             restart_count += 1
             status_state["last_error"] = f"{type(exc).__name__}: {exc}"
+            status_state["last_error_at"] = utc_now()
             _write_listener_status(
                 status_path,
                 status_state,
@@ -852,6 +1064,7 @@ def _run_listener_source_loop(
                 break
             reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()
+    history_client.close()
     _write_listener_status(status_path, status_state, status="stopped", stage="stop_event", restart_count=restart_count)
     return 0
 
@@ -919,6 +1132,15 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
             "last_backfill_check_utc": result.get("finished_at_utc"),
             "last_backfill_window_start_utc": diagnostics.get("window_start_utc"),
             "last_backfill_window_end_utc": diagnostics.get("window_end_utc"),
+            "last_backfill_configured_lookback_hours": diagnostics.get(
+                "configured_lookback_hours"
+            ),
+            "last_backfill_effective_lookback_hours": diagnostics.get(
+                "effective_lookback_hours"
+            ),
+            "last_backfill_checkpoint_advanced": diagnostics.get(
+                "checkpoint_advanced"
+            ),
             "last_backfill_deal_count": result.get("deal_count"),
             "last_backfill_applied_count": result.get("applied_count"),
             "last_backfill_skipped_duplicate_count": result.get("skipped_duplicate_count"),

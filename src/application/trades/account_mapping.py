@@ -311,6 +311,10 @@ def resolve_trade_intake_sources(
                 "state_path": Path(f"output_shared/state/trade_intake/{account}/state.json"),
                 "audit_path": Path(f"output_shared/state/trade_intake/{account}/audit.jsonl"),
                 "status_path": Path(f"output_shared/state/trade_intake/{account}/status.json"),
+                "inbox_path": Path(f"output_shared/state/trade_intake/{account}/inbox.sqlite3"),
+                "backfill_checkpoint_path": Path(
+                    f"output_shared/state/trade_intake/{account}/backfill_checkpoint.json"
+                ),
                 "reconnect_sec": base_reconnect_sec,
                 "receipt": base_receipt,
                 "backfill": base_backfill,
@@ -324,6 +328,10 @@ def resolve_trade_intake_sources(
         source["state_path"] = base_state_path
         source["audit_path"] = base_audit_path
         source["status_path"] = base_status_path
+        source["inbox_path"] = base_state_path.with_name("trade_intake_inbox.sqlite3")
+        source["backfill_checkpoint_path"] = base_state_path.with_name(
+            "trade_intake_backfill_checkpoint.json"
+        )
         return [source]
     if account_sources:
         return account_sources
@@ -339,6 +347,10 @@ def resolve_trade_intake_sources(
             "state_path": base_state_path,
             "audit_path": base_audit_path,
             "status_path": base_status_path,
+            "inbox_path": base_state_path.with_name("trade_intake_inbox.sqlite3"),
+            "backfill_checkpoint_path": base_state_path.with_name(
+                "trade_intake_backfill_checkpoint.json"
+            ),
             "reconnect_sec": base_reconnect_sec,
             "receipt": base_receipt,
             "backfill": base_backfill,
