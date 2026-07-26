@@ -12,6 +12,7 @@ from src.infrastructure.portfolio_holdings_sync_client import (
 class _Response:
     def __init__(self, payload: dict) -> None:
         self._body = json.dumps(payload).encode("utf-8")
+        self.headers = {"X-PM-API-Version": "portfolio.api.v1"}
 
     def __enter__(self):
         return self
@@ -42,7 +43,7 @@ def test_sync_portfolio_holdings_posts_fail_closed_absolute_sync() -> None:
 
     assert out == {"success": True, "account": "lx"}
     assert observed == {
-        "url": "http://127.0.0.1:8765/futu/holdings/sync",
+        "url": "http://127.0.0.1:8765/api/v1/futu/holdings/sync",
         "method": "POST",
         "timeout": 30.0,
         "body": {

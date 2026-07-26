@@ -98,7 +98,13 @@ def test_cash_bridge_derives_period_change_from_cash_balances_without_asset_subs
     assert _step(account, "portfolio_and_other_cash_change")["amount"] == 150.0
     assert _step(account, "reconciliation_residual")["amount"] == 0.0
     assert all("assets" not in item["key"] for item in account["steps"])
-    assert result["source"]["portfolio"]["endpoint"] == "/analysis/cash-facts"
+    assert result["source"]["portfolio"] == {
+        "service": "portfolio-management",
+        "transport": "loopback_http",
+        "capability": "portfolio_cash_facts",
+        "status": "not_onboarded",
+        "endpoint": None,
+    }
     assert "### MTD 现金余额桥" in result["fallback_text"]
 
 
