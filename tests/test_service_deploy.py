@@ -868,6 +868,48 @@ def test_render_launchd_bundle_rejects_quality_monitoring(tmp_path: Path) -> Non
         )
 
 
+def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_drift(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us", "hk"],
+        include_quality_monitoring=True,
+    )
+    profile_item = {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]
+    profile = json.loads(profile_item["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    clean = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert clean["summary"]["status"] == "ok"
+    assert clean["profile_content_changed"] is False
+    assert clean["extra_profile_units"] == []
+    assert clean["extra_installed_units"] == []
+    assert "options-monitor-quality-http.service" in clean["expected_services"]
+    assert "options-monitor-quality-day-end-us.timer" in clean["expected_services"]
+    assert "options-monitor-quality-day-end-hk.timer" in clean["expected_services"]
+
+    profile["quality_monitoring"]["http"]["port"] = 9999
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+
+    drifted = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert drifted["summary"]["status"] == "warn"
+    assert drifted["profile_content_changed"] is True
+    assert drifted["mismatched_units"] == []
+
+
 def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
