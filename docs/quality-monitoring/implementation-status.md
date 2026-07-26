@@ -169,8 +169,10 @@ Exit gate 判定：
 - systemd renderer 只生成不安装；使用专用 `investment-quality` 用户/组、`0077` umask 和 `0700` StateDirectory
 - canonical Schema 四份副本 SHA-256 仍为 `8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338`
 - Hub 完整 pytest：66 项通过；Ruff、compileall、`git diff --check` 通过
-- `investment_quality-0.2.0` wheel 从已提交源码隔离构建并安装成功；wheel
-  SHA-256：`357046ad163b46253653bf693939a7ac133057e2341610086e583c981ccaadc4`
+- `investment_quality-0.2.0` wheel 从已提交源码以
+  `SOURCE_DATE_EPOCH=1785060380` 连续隔离构建两次，SHA 一致；全新 venv
+  安装/import 及 packaged Schema 验证成功；候选 wheel SHA-256：
+  `8f358e196ba59a7ab32b7f8dae89faab33276e24d46512c0dfacc7a64082fe5e`
 
 Exit gate 判定：
 
@@ -212,7 +214,8 @@ Exit gate 判定：
 - PM 发布准备：`feat/quality-monitoring@c66422a`，目标版本 `0.1.27`。
 - OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
   `--check` 与 diff check 通过。
-- OM 发布元数据提交：`3a443dc4`，目标版本 `1.4.31`。
+- OM 发布元数据提交：`3a443dc4`；执行 `AUTH-REL` 前记录最终
+  release-candidate head；目标版本 `1.4.31`。
 
 所需证据：
 

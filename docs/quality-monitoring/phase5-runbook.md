@@ -27,7 +27,7 @@
 
 | 系统 | 当前生产 | 目标 | 目标代码必须包含 | 首次回滚锚点 |
 |---|---|---|---|---|
-| OM | `1.4.30` | `1.4.31` | `feat/quality-monitoring@c5cc3384` | `1.4.30` |
+| OM | `1.4.30` | `1.4.31` | 当前批准的 `feat/quality-monitoring` head，且包含发布元数据 `3a443dc4` | `1.4.30` |
 | PM | `v0.1.26@c6288e7` | `v0.1.27` | `feat/quality-monitoring@c66422a` | `v0.1.26@c6288e7` |
 | Hub | 未安装 | `v0.2.0` | `main@bcb583a` | 停止 Hub 并恢复部署前备份 |
 
@@ -57,7 +57,8 @@
 - PM `feat/quality-monitoring` 工作区干净，`VERSION=0.1.27`，完整 tests 与 touched Ruff 通过；
 - Hub `main` 工作区干净，`version=0.2.0`，tests/Ruff/compileall 通过；
 - canonical Schema 四份副本 SHA 相同；
-- Hub wheel 从已提交源码隔离构建、安装和 import 成功。
+- Hub wheel 从已提交源码隔离构建；以 tag commit time 作为
+  `SOURCE_DATE_EPOCH` 连续构建两次 SHA 相同，并在全新 venv 安装/import 成功。
 
 ### 4.2 生产现状
 
@@ -85,7 +86,8 @@ loopback listeners
 
 1. 将已验证质量分支合并到目标 `main`，不改写无关提交；
 2. 推送后等待 `release-from-version` workflow；
-3. 验证 `v1.4.31` tag、Release 非 draft、tag SHA 包含 `c5cc3384`；
+3. 验证 `v1.4.31` tag、Release 非 draft、tag SHA 等于执行前记录的已批准
+   release-candidate head，并包含 `3a443dc4`；
 4. 重新渲染并核对只含 `1.4.31` 的 Release Notes。
 
 不得在本步骤升级生产。
@@ -104,7 +106,8 @@ loopback listeners
 1. 创建私有仓库 `investment-quality`；
 2. 推送 `main@bcb583a`；
 3. 创建 `v0.2.0` tag 和非 draft Release；
-4. 上传从该 tag 隔离构建的 wheel及其 SHA-256；
+4. 使用 tag commit time 作为 `SOURCE_DATE_EPOCH`，上传从该 tag 双构建一致的
+   wheel及其 SHA-256；
 5. 从 Release 重新下载、校验 SHA、隔离安装并确认 `investment_quality.__version__ == 0.2.0`。
 
 ## 6. Step 2 — 部署 Hub scaffold
