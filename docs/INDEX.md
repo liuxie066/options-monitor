@@ -48,6 +48,8 @@
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：exit state、报价证据和组合动作。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：period、PnL、cash、activity 和 bridge 合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
+- [Runtime and Data Quality Monitoring](quality-monitoring/architecture.md)：OM/PM/Hub 运行监控、数据可信状态、检查矩阵、接口契约和实施证据。
+- [Quality Monitoring Phase 5 Runbook](quality-monitoring/phase5-runbook.md)：三仓库发布、生产 baseline、onboarding、真实告警、dead-man 和回滚顺序。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
 ## Tool Gateway、Copilot 与消息入口

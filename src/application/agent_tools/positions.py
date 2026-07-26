@@ -10,7 +10,8 @@ from src.application.positions.inspection import inspect_projection_state
 from src.application.ledger.api import list_position_rows
 from src.application.ledger.api import open_performance_evidence_repository
 from src.application.agent_tool_config import load_runtime_config
-from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_contracts import AgentToolError, mask_path
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from domain.domain.option_position_identity import normalize_account
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
@@ -194,6 +195,22 @@ def _option_performance_report_tool(
 def _option_positions_read_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    try:
+        assert_quality_allows(
+            "option_position_report",
+            account=str(payload.get("account") or "").strip().lower() or None,
+            market=str(payload.get("config_key") or "").strip().lower() or None,
+        )
+    except QualityGateBlocked as exc:
+        raise AgentToolError(
+            code="QUALITY_GATE_BLOCKED",
+            message=str(exc),
+            details={
+                "consumer": exc.consumer,
+                "reason_code": exc.reason_code,
+                "blocked_by": list(exc.blocked_by),
+            },
+        ) from exc
     return option_positions_read_tool(
         payload,
         load_runtime_config=load_runtime_config,
