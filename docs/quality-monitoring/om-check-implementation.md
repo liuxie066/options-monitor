@@ -49,7 +49,7 @@
 
 - canonical Schema 校验：通过；
 - focused quality/contract/agent/ledger/consumer 回归：通过；
-- 完整 pytest：`3234 passed, 10 skipped`；
+- 完整 pytest：`3238 passed, 10 skipped`；
 - touched Ruff：通过；
 - dependency graph：`production_modules=512`，`cycles=0`。
 

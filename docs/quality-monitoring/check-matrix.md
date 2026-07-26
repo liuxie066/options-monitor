@@ -1,9 +1,12 @@
 # 运行与数据质量检查矩阵
 
-- **状态**：已确认
+- **状态**：已确认；本地实现映射完成，生产证据待 Phase 5
 - **日期**：2026-07-26
 - **总设计**：[architecture.md](architecture.md)
 - **HTTP/API 契约**：[api-contract.md](api-contract.md)
+- **实现映射**：[OM](om-check-implementation.md) · [PM](pm-check-implementation.md) · [Quality Hub](hub-check-implementation.md)
+
+本矩阵共 46 个正式检查 ID：运行检查 10 个、OM 数据检查 11 个、PM 数据检查 17 个、Hub 检查 8 个。每个 ID 必须在对应实现映射中拥有唯一实现边界和确定性验证证据；Phase 5 再补充真实生产运行证据，不以生产 canary 替代本地契约测试。
 - **状态 Payload Schema**：[quality_status.v1.schema.json](quality_status.v1.schema.json)
 - **实施计划**：[implementation-plan.md](implementation-plan.md)
 

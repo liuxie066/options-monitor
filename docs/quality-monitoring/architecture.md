@@ -1,6 +1,6 @@
 # 投资系统运行与数据质量监控 — 正式设计
 
-- **状态**：已确认
+- **状态**：已确认；Phase 0–4 已本地实现，生产上线待 Phase 5
 - **日期**：2026-07-26
 - **适用系统**：options-monitor（OM）、portfolio-management（PM）、investment-quality（Quality Hub）
 - **HTTP/API 契约**：[api-contract.md](api-contract.md)
