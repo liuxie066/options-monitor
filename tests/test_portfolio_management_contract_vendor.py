@@ -43,3 +43,22 @@ def test_vendored_pm_openapi_declares_version_and_error_contracts() -> None:
             == "portfolio.api.v1"
         )
         assert operation["responses"]["503"]["content"]["application/json"]["schema"]
+
+
+def test_vendored_pm_openapi_requires_core_success_and_freshness_fields() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    document = json.loads((ROOT / manifest["contract_path"]).read_text(encoding="utf-8"))
+    schemas = document["components"]["schemas"]
+    assert {
+        "success",
+        "accounts",
+        "count",
+        "freshness",
+        "retrieved_at_utc",
+    } <= set(schemas["AccountsResponse"]["required"])
+    assert {
+        "success",
+        "count",
+        "freshness",
+        "retrieved_at_utc",
+    } <= set(schemas["HoldingsResponse"]["required"])
