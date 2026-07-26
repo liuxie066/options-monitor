@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.5.1 - 2026-07-27
+
+### Bug Fixes
+- Preserved opt-in quality monitoring services during systemd service-profile reconstruction so drift checks no longer misclassify installed quality units or discard their metadata.
+
 ## 1.5.0 - 2026-07-27
 
 ### New Features
