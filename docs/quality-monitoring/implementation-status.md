@@ -162,7 +162,7 @@ Exit gate 判定：
 - normal snapshot 30 天、blocking/control evidence 400 天；active incident 和未发送/失败通知不被 retention 删除
 - systemd renderer 只生成不安装；使用专用 `investment-quality` 用户/组、`0077` umask 和 `0700` StateDirectory
 - canonical Schema 四份副本 SHA-256 仍为 `8635a4b5b134fc911b4b5f68beb36cbe87f43e0ef4d6ca31c44e98c9bfd43338`
-- Hub 完整 pytest：64 项通过；Ruff、compileall、`git diff --check` 通过
+- Hub 完整 pytest：66 项通过；Ruff、compileall、`git diff --check` 通过
 - `investment_quality-0.2.0` wheel 构建并隔离安装成功；wheel SHA-256：`4a4b6e3ad0df567c0defcc35aa425603ece149ad8bd2cea2f822c86eb9e7fbfb`
 
 Exit gate 判定：
@@ -180,7 +180,26 @@ Exit gate 判定：
 
 ## Phase 5 — 生产上线与基线
 
-状态：**未完成**
+状态：**本地发布/部署准备进行中；生产未变更**
+
+已完成的上线前准备：
+
+- OM 非深度刷新会保留仍有效的权威 OpenD 证据，不再把它覆盖为
+  `unavailable`；
+- OM 只在首次 baseline、本地 `position_lots` revision 变化、差异复查到期、
+  日终 deadline 或人工强制时访问 OpenD；
+- OM 单市场日终刷新保留另一市场已发布数据集；
+- OM systemd renderer 以 opt-in 方式生成质量 HTTP、15 分钟常规刷新、
+  1 分钟轻量到期探测及 US/HK 日终深度对账单元；
+- PM Linux installer 以独立 opt-in `--enable-quality-timer` 生成并启用
+  `portfolio-quality-refresh.timer`，默认 15 分钟；
+- PM production `portfolio-futu-evening.service` 的
+  `DatetimeFieldConvFail` 根因已在 `feat/quality-monitoring` 修复并覆盖所有
+  holdings 时间字段写路径；生产尚未升级，失败同步尚未重跑；
+- PM 完整 pytest：755 项通过；变更文件 Ruff 与 diff check 通过。全仓 Ruff
+  仍有 52 个既有未使用导入告警，不属于本 work unit。
+- OM 完整 pytest：3238 项通过、10 项跳过；变更文件 Ruff、dependency graph
+  `--check` 与 diff check 通过。
 
 所需证据：
 
