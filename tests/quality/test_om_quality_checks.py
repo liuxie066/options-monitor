@@ -283,3 +283,85 @@ def test_runtime_service_and_timer_checks_require_checked_active_units() -> None
     failed_by_id = {item["check_id"]: item for item in failed}
     assert failed_by_id["RT-OM-001"]["status"] == "fail"
     assert failed_by_id["RT-OM-003"]["status"] == "fail"
+
+
+def test_runtime_service_check_accepts_inactive_timer_triggered_oneshot() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    checks = build_runtime_checks(
+        runtime_statuses=[
+            {
+                "service_profile": {
+                    "loaded": True,
+                    "status_checked": True,
+                    "services": [
+                        {
+                            "name": "options-monitor-quality-refresh.service",
+                            "status": "warn",
+                            "returncode": 3,
+                            "stdout": "inactive",
+                        },
+                        {
+                            "name": "options-monitor-quality-refresh.timer",
+                            "status": "ok",
+                            "returncode": 0,
+                            "stdout": "active",
+                        },
+                        {
+                            "name": "options-monitor-quality-http.service",
+                            "status": "ok",
+                            "returncode": 0,
+                            "stdout": "active",
+                        },
+                    ],
+                },
+                "trade_intake": {"enabled": False},
+            }
+        ],
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    by_id = {item["check_id"]: item for item in checks}
+    assert by_id["RT-OM-001"]["status"] == "pass"
+    assert by_id["RT-OM-001"]["reason_code"] == "OM_SERVICES_ACTIVE"
+    assert by_id["RT-OM-001"]["observed"] == {
+        "service_count": 2,
+        "statuses": ["ok"],
+        "normally_inactive_timer_service_count": 1,
+    }
+    assert by_id["RT-OM-003"]["status"] == "pass"
+
+
+def test_runtime_service_check_rejects_failed_timer_triggered_oneshot() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    checks = build_runtime_checks(
+        runtime_statuses=[
+            {
+                "service_profile": {
+                    "loaded": True,
+                    "status_checked": True,
+                    "services": [
+                        {
+                            "name": "options-monitor-quality-refresh.service",
+                            "status": "warn",
+                            "returncode": 3,
+                            "stdout": "failed",
+                        },
+                        {
+                            "name": "options-monitor-quality-refresh.timer",
+                            "status": "ok",
+                            "returncode": 0,
+                            "stdout": "active",
+                        },
+                    ],
+                },
+                "trade_intake": {"enabled": False},
+            }
+        ],
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    by_id = {item["check_id"]: item for item in checks}
+    assert by_id["RT-OM-001"]["status"] == "fail"
+    assert by_id["RT-OM-001"]["reason_code"] == "OM_SERVICE_INACTIVE"

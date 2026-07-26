@@ -37,7 +37,24 @@ def build_runtime_checks(
             name = str(row.get("name") or "").strip()
             (timer_rows if name.endswith(".timer") else service_rows).append(row)
 
-    service_statuses = {str(item.get("status") or "").strip().lower() for item in service_rows}
+    timer_names = {
+        str(item.get("name") or "").strip()
+        for item in timer_rows
+        if str(item.get("name") or "").strip()
+    }
+    inactive_oneshot_rows = [
+        item
+        for item in service_rows
+        if _is_normally_inactive_timer_service(item, timer_names=timer_names)
+    ]
+    service_statuses = {
+        (
+            "ok"
+            if _is_normally_inactive_timer_service(item, timer_names=timer_names)
+            else str(item.get("status") or "").strip().lower()
+        )
+        for item in service_rows
+    }
     if service_rows and service_statuses == {"ok"}:
         service_status, service_reason, service_message = (
             "pass",
@@ -67,6 +84,7 @@ def build_runtime_checks(
             observed={
                 "service_count": len(service_rows),
                 "statuses": sorted(service_statuses),
+                "normally_inactive_timer_service_count": len(inactive_oneshot_rows),
             },
             expected={"statuses": ["ok"]},
             evidence_refs=[],
@@ -185,6 +203,22 @@ def build_runtime_checks(
         )
     )
     return checks
+
+
+def _is_normally_inactive_timer_service(
+    row: dict[str, Any],
+    *,
+    timer_names: set[str],
+) -> bool:
+    name = str(row.get("name") or "").strip()
+    if not name.endswith(".service"):
+        return False
+    paired_timer = f"{name.removesuffix('.service')}.timer"
+    return (
+        paired_timer in timer_names
+        and str(row.get("status") or "").strip().lower() == "warn"
+        and str(row.get("stdout") or "").strip().lower() == "inactive"
+    )
 
 
 def runtime_verdict(checks: list[dict[str, Any]]) -> str:
