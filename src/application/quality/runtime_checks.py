@@ -45,12 +45,12 @@ def build_runtime_checks(
     inactive_oneshot_rows = [
         item
         for item in service_rows
-        if _is_normally_inactive_timer_service(item, timer_names=timer_names)
+        if _is_nonfailed_timer_triggered_service(item, timer_names=timer_names)
     ]
     service_statuses = {
         (
             "ok"
-            if _is_normally_inactive_timer_service(item, timer_names=timer_names)
+            if _is_nonfailed_timer_triggered_service(item, timer_names=timer_names)
             else str(item.get("status") or "").strip().lower()
         )
         for item in service_rows
@@ -205,7 +205,7 @@ def build_runtime_checks(
     return checks
 
 
-def _is_normally_inactive_timer_service(
+def _is_nonfailed_timer_triggered_service(
     row: dict[str, Any],
     *,
     timer_names: set[str],
@@ -217,7 +217,7 @@ def _is_normally_inactive_timer_service(
     return (
         paired_timer in timer_names
         and str(row.get("status") or "").strip().lower() == "warn"
-        and str(row.get("stdout") or "").strip().lower() == "inactive"
+        and str(row.get("stdout") or "").strip().lower() in {"activating", "inactive"}
     )
 
 

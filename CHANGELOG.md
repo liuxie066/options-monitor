@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.5.3 - 2026-07-27
+
+### Bug Fixes
+- Treated a timer-triggered oneshot service that is still activating during its own runtime check as healthy, while continuing to fail closed for an actual failed service.
+
 ## 1.5.2 - 2026-07-27
 
 ### Bug Fixes
