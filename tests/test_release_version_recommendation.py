@@ -86,9 +86,9 @@ def test_existing_prerelease_parser_facade_is_unchanged() -> None:
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        ("### Breaking Changes\n- Removed an API.\n\n### Added\n- New feature.", "major"),
-        ("### Added\n- New feature.\n\n### Fixed\n- Bug fix.", "minor"),
-        ("### Changed\n- Internal behavior.\n\n### Fixed\n- Bug fix.", "patch"),
+        ("### Breaking Changes\n- Removed an API.\n\n### New Features\n- New feature.", "major"),
+        ("### New Features\n- New feature.\n\n### Bug Fixes\n- Bug fix.", "minor"),
+        ("### Improvements\n- Existing behavior is clearer.\n\n### Bug Fixes\n- Bug fix.", "patch"),
     ],
 )
 def test_recommendation_classification(tmp_path: Path, body: str, expected: str) -> None:
@@ -115,13 +115,73 @@ def test_empty_unreleased_requires_input(tmp_path: Path) -> None:
 
 def test_unknown_unreleased_content_is_not_silently_classified(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Added\n- New feature.\n\nRemoved legacy behavior.")
+    _write_unreleased(repo, "### New Features\n- New feature.\n\nRemoved legacy behavior.")
 
     result = recommend_release_version(base_dir=repo)
 
     assert result["status"] == "needs_input"
     assert result["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
     assert result["evidence"]["unsupported"] == ["Removed legacy behavior."]
+
+
+@pytest.mark.parametrize("heading", ["Added", "Changed", "Fixed"])
+def test_legacy_unreleased_headings_require_migration(heading: str) -> None:
+    parsed = parse_unreleased(
+        f"# Changelog\n\n## Unreleased\n\n### {heading}\n- Legacy item.\n\n## 1.0.0 - 2026-07-20\n"
+    )
+
+    assert parsed["status"] == "needs_input"
+    assert parsed["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
+    assert parsed["evidence"]["unsupported"] == [f"### {heading}", "- Legacy item."]
+
+
+def test_unknown_h2_cannot_escape_unreleased_validation() -> None:
+    parsed = parse_unreleased(
+        "# Changelog\n\n"
+        "## Unreleased\n\n"
+        "### Bug Fixes\n"
+        "- Fixed a defect.\n\n"
+        "## Removed\n"
+        "- Hidden release intent.\n\n"
+        "## 1.0.0 - 2026-07-20\n"
+    )
+
+    assert parsed["status"] == "needs_input"
+    assert parsed["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
+    assert parsed["evidence"]["unsupported"] == ["## Removed"]
+
+
+def test_duplicate_category_heading_is_unsupported() -> None:
+    parsed = parse_unreleased(
+        "# Changelog\n\n"
+        "## Unreleased\n\n"
+        "### Improvements\n"
+        "- First improvement.\n\n"
+        "### Improvements\n"
+        "- Second improvement.\n\n"
+        "## 1.0.0 - 2026-07-20\n"
+    )
+
+    assert parsed["status"] == "needs_input"
+    assert parsed["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
+    assert parsed["evidence"]["unsupported"] == ["### Improvements", "- Second improvement."]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "- Heading-free item.",
+        "### Improvements\n  - Nested item.",
+        "### Improvements\nParagraph outside the bullet grammar.",
+    ],
+)
+def test_unowned_or_nested_unreleased_content_is_unsupported(body: str) -> None:
+    parsed = parse_unreleased(
+        f"# Changelog\n\n## Unreleased\n\n{body}\n\n## 1.0.0 - 2026-07-20\n"
+    )
+
+    assert parsed["status"] == "needs_input"
+    assert parsed["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
 
 
 def test_duplicate_unreleased_is_malformed() -> None:
@@ -132,7 +192,7 @@ def test_duplicate_unreleased_is_malformed() -> None:
 
 def test_sensitive_path_sets_review_flag(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Added\n- New tool behavior.")
+    _write_unreleased(repo, "### New Features\n- New tool behavior.")
     path = repo / "src" / "application" / "agent_tools" / "new_tool.py"
     path.parent.mkdir(parents=True)
     path.write_text("VALUE = 1\n", encoding="utf-8")
@@ -146,7 +206,7 @@ def test_sensitive_path_sets_review_flag(tmp_path: Path) -> None:
 
 def test_recommendation_digest_changes_with_untracked_content(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Fixed\n- Bug fix.")
+    _write_unreleased(repo, "### Bug Fixes\n- Bug fix.")
     extra = repo / "notes.txt"
     extra.write_text("one\n", encoding="utf-8")
     first = recommend_release_version(base_dir=repo)
@@ -160,7 +220,7 @@ def test_recommendation_digest_changes_with_untracked_content(tmp_path: Path) ->
 
 def test_remote_baseline_must_match_local_version(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Fixed\n- Bug fix.")
+    _write_unreleased(repo, "### Bug Fixes\n- Bug fix.")
     (repo / "VERSION").write_text("1.0.1\n", encoding="utf-8")
 
     result = recommend_release_version(base_dir=repo)
@@ -171,7 +231,7 @@ def test_remote_baseline_must_match_local_version(tmp_path: Path) -> None:
 
 def test_untracked_symlink_fails_closed(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Fixed\n- Bug fix.")
+    _write_unreleased(repo, "### Bug Fixes\n- Bug fix.")
     (repo / "target.txt").write_text("target\n", encoding="utf-8")
     (repo / "link.txt").symlink_to("target.txt")
 
@@ -185,7 +245,7 @@ def test_auto_preview_then_confirm_apply_end_to_end(tmp_path: Path) -> None:
     from src.application.version_check import update_local_version
 
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Added\n- New feature.")
+    _write_unreleased(repo, "### New Features\n- New feature.")
     before_changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
 
     preview = update_local_version(base_dir=repo, bump="auto", apply=False)
@@ -220,7 +280,7 @@ def test_auto_apply_fails_stale_when_workspace_changes_after_preview(tmp_path: P
     from src.application.version_check import update_local_version
 
     repo = _repo(tmp_path)
-    _write_unreleased(repo, "### Fixed\n- Bug fix.")
+    _write_unreleased(repo, "### Bug Fixes\n- Bug fix.")
     preview = update_local_version(base_dir=repo, bump="auto", apply=False)
     (repo / "notes.txt").write_text("changed after preview\n", encoding="utf-8")
 
