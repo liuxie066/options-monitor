@@ -15,6 +15,7 @@ from src.application.agent_tools import portfolio
 class _Response:
     def __init__(self, payload):
         self.body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        self.headers = {"X-PM-API-Version": "portfolio.api.v1"}
 
     def __enter__(self):
         return self
@@ -101,7 +102,7 @@ def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatc
     parsed = urlsplit(seen["request"].full_url)
     assert parsed.scheme == "http"
     assert parsed.netloc == "127.0.0.1:8765"
-    assert parsed.path == "/accounts/overview"
+    assert parsed.path == "/api/v1/accounts/overview"
     assert parse_qs(parsed.query) == {"accounts": ["lx,sy"], "include_details": ["true"]}
     assert seen["request"].get_method() == "GET"
     assert data["success"] is True
@@ -118,12 +119,12 @@ def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatc
     ("payload", "path"),
     [
         ({"view": "health"}, "/health"),
-        ({"view": "accounts", "include_default": False}, "/accounts"),
-        ({"view": "holdings", "account": "lx"}, "/holdings"),
-        ({"view": "cash", "account": "lx"}, "/cash"),
-        ({"view": "nav", "account": "lx", "days": 14}, "/nav"),
-        ({"view": "distribution", "accounts": ["lx", "sy"]}, "/distribution"),
-        ({"view": "full_report", "account": "lx"}, "/report/full"),
+        ({"view": "accounts", "include_default": False}, "/api/v1/accounts"),
+        ({"view": "holdings", "account": "lx"}, "/api/v1/holdings"),
+        ({"view": "cash", "account": "lx"}, "/api/v1/cash"),
+        ({"view": "nav", "account": "lx", "days": 14}, "/api/v1/nav"),
+        ({"view": "distribution", "accounts": ["lx", "sy"]}, "/api/v1/distribution"),
+        ({"view": "full_report", "account": "lx"}, "/api/v1/report/full"),
     ],
 )
 def test_portfolio_query_maps_supported_views_to_get_endpoints(monkeypatch, payload, path) -> None:
@@ -290,25 +291,21 @@ def _option_performance(account: str, *, end_date: str = "2026-07-16") -> dict:
 
 
 
-def test_portfolio_cash_bridge_reads_cash_facts_endpoint(monkeypatch) -> None:
-    seen = {}
+def test_portfolio_cash_bridge_reports_cash_facts_not_onboarded_without_http(monkeypatch) -> None:
+    monkeypatch.setattr(
+        portfolio.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("HTTP must not be called")),
+    )
 
-    def fake_urlopen(request, timeout):
-        seen["request"] = request
-        seen["timeout"] = timeout
-        return _Response(_cash_bridge_facts("lx"))
+    with pytest.raises(AgentToolError) as raised:
+        portfolio._read_cash_facts(account="lx", period="mtd", as_of_month="2026-07")
 
-    monkeypatch.delenv(portfolio.SERVICE_URL_ENV, raising=False)
-    monkeypatch.setattr(portfolio.urllib.request, "urlopen", fake_urlopen)
-
-    result = portfolio._read_cash_facts(account="lx", period="mtd", as_of_month="2026-07")
-
-    parsed = urlsplit(seen["request"].full_url)
-    assert parsed.path == "/analysis/cash-facts"
-    assert parse_qs(parsed.query) == {"account": ["lx"], "period": ["mtd"], "as_of_month": ["2026-07"]}
-    assert seen["request"].get_method() == "GET"
-    assert seen["timeout"] == 30.0
-    assert result["status"] == "ok"
+    assert raised.value.code == "CAPABILITY_UNAVAILABLE"
+    assert raised.value.details == {
+        "capability": "portfolio_cash_facts",
+        "endpoint": None,
+    }
 
 
 @pytest.mark.parametrize("tool_name", ["portfolio_pnl_bridge", "portfolio_cash_bridge"])
@@ -389,7 +386,7 @@ def test_cash_facts_404_returns_structured_unavailable_without_option_fallback(m
 
     assert data["success"] is True
     assert data["status"] == "unavailable"
-    assert data["accounts"][0]["reason"] == "portfolio_cash_facts_unavailable"
+    assert data["accounts"][0]["reason"] == "portfolio_cash_facts_not_onboarded"
     assert data["accounts"][0]["steps"] == []
     assert data["combined"]["reason"] == "account_bridge_unavailable"
     assert warnings == []

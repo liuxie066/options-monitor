@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
-import os
-import socket
-import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -24,11 +19,15 @@ from src.application.ledger.api import (
     list_open_short_assignment_rows,
     open_position_ledger_from_runtime_config,
 )
+from src.infrastructure.portfolio_management_client import (
+    SERVICE_URL_ENV,
+    PortfolioManagementClient,
+    PortfolioManagementConfigError,
+    PortfolioManagementError,
+    PortfolioManagementHTTPError,
+)
 
 
-DEFAULT_SERVICE_URL = "http://127.0.0.1:8765"
-SERVICE_URL_ENV = "PORTFOLIO_SERVICE_URL"
-MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ACCOUNTS = 20
 MAX_SUPPLEMENTAL_CODES = 500
 
@@ -65,106 +64,28 @@ def normalize_assignment_accounts(accounts: Sequence[str]) -> list[str]:
     return normalized
 
 
-def _loopback_service_url() -> str:
-    raw = str(os.environ.get(SERVICE_URL_ENV) or DEFAULT_SERVICE_URL).strip()
-    try:
-        parsed = urllib.parse.urlsplit(raw)
-        port = parsed.port
-    except ValueError as exc:
-        raise PortfolioEvidenceReadError(f"invalid {SERVICE_URL_ENV}: {exc}") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise PortfolioEvidenceReadError(
-            f"{SERVICE_URL_ENV} must be an http(s) loopback URL"
-        )
-    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise PortfolioEvidenceReadError(
-            f"{SERVICE_URL_ENV} must contain only a loopback origin"
-        )
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname != "localhost":
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-        if not is_loopback:
-            raise PortfolioEvidenceReadError(
-                f"{SERVICE_URL_ENV} must use localhost or a loopback IP address"
-            )
-    host = f"[{hostname}]" if ":" in hostname else hostname
-    authority = f"{host}:{port}" if port is not None else host
-    return urllib.parse.urlunsplit((parsed.scheme, authority, "", "", ""))
-
-
 def read_portfolio_valuation_evidence(
     *,
     accounts: Sequence[str],
     supplemental_codes: Sequence[str],
     price_timeout: int = 30,
+    client: PortfolioManagementClient | None = None,
 ) -> dict[str, Any]:
-    payload = json.dumps(
-        {
-            "accounts": list(accounts),
-            "supplemental_codes": list(supplemental_codes),
-            "price_timeout": int(price_timeout),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{_loopback_service_url()}/analysis/valuation-evidence",
-        data=payload,
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=float(min(max(int(price_timeout) + 10, 15), 180)),
-        ) as response:
-            body = response.read(MAX_RESPONSE_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read(MAX_RESPONSE_BYTES).decode("utf-8"))
-        except Exception:
-            detail = {}
-        message = str(
-            (
-                detail.get("error")
-                or detail.get("message")
-                or detail.get("detail")
-                if isinstance(detail, dict)
-                else None
-            )
-            or f"portfolio-management HTTP {exc.code}"
+        resolved_client = client or PortfolioManagementClient(
+            urlopen_fn=urllib.request.urlopen
         )
-        if isinstance(detail, dict) and str(detail.get("error_code") or "").strip().upper() == "INPUT_ERROR":
-            raise AssignmentScenarioInputError(message) from exc
-        raise PortfolioEvidenceReadError(message) from exc
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
-        raise PortfolioEvidenceReadError(
-            f"portfolio-management request failed: {exc}"
-        ) from exc
-    if len(body) > MAX_RESPONSE_BYTES:
-        raise PortfolioEvidenceReadError(
-            "portfolio-management response exceeds 16 MiB"
+        return resolved_client.read_valuation_evidence(
+            accounts=list(accounts),
+            supplemental_codes=list(supplemental_codes),
+            price_timeout=int(price_timeout),
         )
-    try:
-        decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PortfolioEvidenceReadError(
-            "portfolio-management returned invalid JSON"
-        ) from exc
-    if not isinstance(decoded, dict):
-        raise PortfolioEvidenceReadError(
-            "portfolio-management JSON response must be an object"
-        )
-    if decoded.get("success") is False:
-        code = str(decoded.get("error_code") or "").strip().upper()
-        message = str(decoded.get("error") or decoded.get("message") or "portfolio evidence read failed")
-        if code == "INPUT_ERROR":
-            raise AssignmentScenarioInputError(message)
-        raise PortfolioEvidenceReadError(message)
-    return decoded
+    except PortfolioManagementHTTPError as exc:
+        if exc.error_code == "INPUT_ERROR":
+            raise AssignmentScenarioInputError(str(exc)) from exc
+        raise PortfolioEvidenceReadError(str(exc)) from exc
+    except PortfolioManagementError as exc:
+        raise PortfolioEvidenceReadError(str(exc)) from exc
 
 
 def _load_runtime_and_positions(
