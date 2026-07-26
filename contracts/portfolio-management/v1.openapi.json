@@ -1,6 +1,110 @@
 {
   "components": {
     "schemas": {
+      "AccountsOverviewResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "account_count": {
+            "title": "Account Count",
+            "type": "integer"
+          },
+          "accounts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          },
+          "successful_count": {
+            "title": "Successful Count",
+            "type": "integer"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "title": "Summary",
+            "type": "object"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "status",
+          "accounts",
+          "account_count",
+          "successful_count",
+          "failed_count",
+          "summary",
+          "items"
+        ],
+        "title": "AccountsOverviewResponse",
+        "type": "object"
+      },
+      "AccountsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "accounts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "accounts",
+          "count"
+        ],
+        "title": "AccountsResponse",
+        "type": "object"
+      },
       "CapitalFactsResponse": {
         "additionalProperties": true,
         "properties": {
@@ -20,10 +124,17 @@
             ],
             "title": "Amounts"
           },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
           "period": {
             "additionalProperties": true,
             "title": "Period",
             "type": "object"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
           },
           "schema_version": {
             "title": "Schema Version",
@@ -34,18 +145,279 @@
             "type": "string"
           },
           "success": {
+            "const": true,
             "title": "Success",
             "type": "boolean"
           }
         },
         "required": [
           "success",
+          "freshness",
+          "retrieved_at_utc",
           "schema_version",
           "status",
           "account",
           "period"
         ],
         "title": "CapitalFactsResponse",
+        "type": "object"
+      },
+      "CashResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "by_currency": {
+            "additionalProperties": true,
+            "title": "By Currency",
+            "type": "object"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "by_currency",
+          "items",
+          "count"
+        ],
+        "title": "CashResponse",
+        "type": "object"
+      },
+      "DistributionResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "accounts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accounts"
+          },
+          "by_asset": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By Asset"
+          },
+          "by_type": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By Type"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          },
+          "total_quantity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Quantity"
+          },
+          "total_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Value"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc"
+        ],
+        "title": "DistributionResponse",
+        "type": "object"
+      },
+      "FreshnessEvidence": {
+        "properties": {
+          "dataset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dataset Ids",
+            "type": "array"
+          },
+          "observed_at_utc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At Utc"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "fresh",
+              "stale",
+              "unknown",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trust_status": {
+            "enum": [
+              "trusted",
+              "partial",
+              "untrusted",
+              "unavailable"
+            ],
+            "title": "Trust Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "trust_status",
+          "dataset_ids"
+        ],
+        "title": "FreshnessEvidence",
+        "type": "object"
+      },
+      "FullReportResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "distribution": {
+            "additionalProperties": true,
+            "title": "Distribution",
+            "type": "object"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "nav": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nav"
+          },
+          "overview": {
+            "additionalProperties": true,
+            "title": "Overview",
+            "type": "object"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "returns": {
+            "additionalProperties": true,
+            "title": "Returns",
+            "type": "object"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          },
+          "top_holdings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Top Holdings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "generated_at",
+          "overview",
+          "returns",
+          "top_holdings",
+          "distribution"
+        ],
+        "title": "FullReportResponse",
         "type": "object"
       },
       "FutuHoldingsSyncRequest": {
@@ -80,6 +452,167 @@
         "title": "FutuHoldingsSyncRequest",
         "type": "object"
       },
+      "FutuHoldingsSyncResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "broker": {
+            "title": "Broker",
+            "type": "string"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "positions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_snapshot_id": {
+            "title": "Source Snapshot Id",
+            "type": "string"
+          },
+          "stages": {
+            "additionalProperties": true,
+            "title": "Stages",
+            "type": "object"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          },
+          "sync_run_id": {
+            "title": "Sync Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "account",
+          "broker",
+          "dry_run",
+          "source",
+          "source_snapshot_id",
+          "sync_run_id",
+          "stages",
+          "positions"
+        ],
+        "title": "FutuHoldingsSyncResponse",
+        "type": "object"
+      },
+      "HoldingsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "by_market": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By Market"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "holdings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holdings"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "count"
+        ],
+        "title": "HoldingsResponse",
+        "type": "object"
+      },
+      "NavResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
+          "history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "latest": {
+            "additionalProperties": true,
+            "title": "Latest",
+            "type": "object"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "freshness",
+          "retrieved_at_utc",
+          "latest",
+          "history"
+        ],
+        "title": "NavResponse",
+        "type": "object"
+      },
       "PublicErrorResponse": {
         "properties": {
           "details": {
@@ -112,20 +645,6 @@
           "request_id"
         ],
         "title": "PublicErrorResponse",
-        "type": "object"
-      },
-      "PublicResponse": {
-        "additionalProperties": true,
-        "properties": {
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success"
-        ],
-        "title": "PublicResponse",
         "type": "object"
       },
       "ValuationEvidenceRequest": {
@@ -172,6 +691,9 @@
             "title": "Account Status",
             "type": "array"
           },
+          "freshness": {
+            "$ref": "#/components/schemas/FreshnessEvidence"
+          },
           "holdings": {
             "items": {
               "additionalProperties": true,
@@ -187,6 +709,10 @@
             },
             "title": "Quotes",
             "type": "array"
+          },
+          "retrieved_at_utc": {
+            "title": "Retrieved At Utc",
+            "type": "string"
           },
           "schema_version": {
             "title": "Schema Version",
@@ -207,6 +733,7 @@
             "type": "string"
           },
           "success": {
+            "const": true,
             "title": "Success",
             "type": "boolean"
           },
@@ -220,6 +747,8 @@
         },
         "required": [
           "success",
+          "freshness",
+          "retrieved_at_utc",
           "schema_version",
           "status",
           "scope",
@@ -263,7 +792,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/AccountsResponse"
                 }
               }
             },
@@ -365,7 +894,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/AccountsOverviewResponse"
                 }
               }
             },
@@ -600,7 +1129,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/CashResponse"
                 }
               }
             },
@@ -732,7 +1261,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/DistributionResponse"
                 }
               }
             },
@@ -802,7 +1331,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/FutuHoldingsSyncResponse"
                 }
               }
             },
@@ -903,7 +1432,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/HoldingsResponse"
                 }
               }
             },
@@ -986,7 +1515,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/NavResponse"
                 }
               }
             },
@@ -1069,7 +1598,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicResponse"
+                  "$ref": "#/components/schemas/FullReportResponse"
                 }
               }
             },
