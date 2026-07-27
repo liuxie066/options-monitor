@@ -164,7 +164,7 @@ def _event_reasons(item: dict[str, Any]) -> list[str]:
     sell_put = item.get("sell_put") if isinstance(item.get("sell_put"), dict) else {}
     sell_call = item.get("sell_call") if isinstance(item.get("sell_call"), dict) else {}
     combo_yield = resolve_yield_enhancement_cfg(item)
-    yield_policy = derive_yield_enhancement_policy(combo_yield, sell_put)
+    yield_policy = derive_yield_enhancement_policy(combo_yield)
     put_event = item.get("_global_sell_put_event_risk") if isinstance(item.get("_global_sell_put_event_risk"), dict) else {}
     call_event = item.get("_global_sell_call_event_risk") if isinstance(item.get("_global_sell_call_event_risk"), dict) else {}
     if bool(sell_put.get("enabled", True)) and bool(put_event.get("enabled", True)):

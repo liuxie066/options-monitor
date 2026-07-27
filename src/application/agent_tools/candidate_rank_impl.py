@@ -262,6 +262,7 @@ def _row_uses_underwriting(row: dict[str, Any]) -> bool:
     underwriting_fields = {
         "insurance_underwriting_mode",
         "premium_edge_score",
+        "net_assignment_discount_pct",
         "strike_safety_margin_pct",
         "strike_upside_margin_pct",
     }
@@ -290,18 +291,11 @@ def _partition_rows_by_ranking_policy(rows: list[dict[str, Any]]) -> list[list[d
 
 
 def _underwriting_margin_key(*, mode: str) -> str:
-    return "strike_safety_margin_pct" if mode == "put" else "strike_upside_margin_pct"
+    return "net_assignment_discount_pct" if mode == "put" else "strike_upside_margin_pct"
 
 
 def _rank_underwriting_rows_for_explain(rows: list[dict[str, Any]], *, mode: str) -> list[dict[str, Any]]:
     margin_key = _underwriting_margin_key(mode=mode)
-    has_any_persisted_rank_field = any(
-        _number_or_none(row.get("premium_edge_score")) is not None or _number_or_none(row.get(margin_key)) is not None
-        for row in rows
-    )
-    if not has_any_persisted_rank_field:
-        return rank_underwriting_candidates(rows, mode=mode, cfg=InsuranceUnderwritingConfig())
-
     rows_for_sort = [dict(row) for row in rows]
     if any(
         _number_or_none(row.get("premium_edge_score")) is None or _number_or_none(row.get(margin_key)) is None
@@ -324,35 +318,28 @@ def _rank_underwriting_rows_for_explain(rows: list[dict[str, Any]], *, mode: str
                 if not str(row.get(key) or "").strip() and key in fallback:
                     row[key] = fallback.get(key)
 
-    return sorted(
-        rows_for_sort,
-        key=lambda item: (
-            -_sort_number(item.get(margin_key)),
-            -_sort_number(item.get("premium_edge_score")),
-            _sort_number(item.get("spread_ratio")),
-            -_sort_number(item.get("open_interest")),
-            -_sort_number(_first_number(item, "net_income_cny", "net_income")),
-        ),
-    )
+    return rank_underwriting_candidates(rows_for_sort, mode=mode)
 
 
 def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     margin_key = _underwriting_margin_key(mode=mode_norm)
-    margin_label = "strike 安全距离" if mode_norm == "put" else "strike 上行距离"
-    compensation_label = "去重补偿分"
+    margin_label = "净接货折价" if mode_norm == "put" else "strike 上行距离"
+    annualized_return = _first_number(
+        row,
+        "annualized_net_return_on_cash_basis" if mode_norm == "put" else "annualized_net_premium_return",
+        "annualized_return",
+    )
     score_components = {
+        "annualized_return": _sort_number(annualized_return),
         "premium_edge_score": _sort_number(row.get("premium_edge_score")),
         margin_key: _sort_number(row.get(margin_key)),
+        "concentration_score": _sort_number(row.get("concentration_score")),
         "net_income": _sort_number(_first_number(row, "net_income_cny", "net_credit", "net_income")),
         "spread_ratio": _sort_number(row.get("spread_ratio")),
     }
     score_inputs = {
-        "annualized_return": _first_number(
-            row,
-            "annualized_net_return_on_cash_basis" if mode_norm == "put" else "annualized_net_premium_return",
-            "annualized_return",
-        ),
+        "annualized_return": annualized_return,
         "net_income": _first_number(row, "net_income_cny", "net_credit", "net_income"),
         "spread_ratio": _first_number(row, "spread_ratio"),
         "iv_rv_ratio": _first_number(row, "iv_rv_ratio"),
@@ -368,21 +355,27 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "expiration": str(row.get("expiration") or "").strip() or None,
         "strike": _first_number(row, "strike"),
         "strategy_score": _sort_number(row.get("premium_edge_score")),
+        "strategy_score_role": "diagnostic_only",
         "annualized_return": score_inputs["annualized_return"],
         "net_income": score_inputs["net_income"],
         "score_components": score_components,
         "score_component_labels": {
-            "premium_edge_score": compensation_label,
+            "annualized_return": "年化净收益",
+            "premium_edge_score": "承保补偿诊断分",
             margin_key: margin_label,
+            "concentration_score": "集中度",
             "net_income": "净收入",
             "spread_ratio": "价差",
         },
         "score_inputs": score_inputs,
         "score_warnings": [],
         "risk_notes": [],
-        "primary_drivers": [margin_key, "premium_edge_score"],
-        "primary_driver_labels": [margin_label, compensation_label],
-        "rank_reason": f"按承保策略排序：先看{margin_label}，再看{compensation_label}，随后比较价差、未平仓量和净收入",
+        "primary_drivers": ["annualized_return", margin_key, "concentration_score"],
+        "primary_driver_labels": ["年化净收益", margin_label, "集中度"],
+        "rank_reason": (
+            f"硬门槛通过后先按年化净收益排序；收益相同时再比较{margin_label}和集中度，"
+            "随后比较价差、未平仓量和净收入"
+        ),
     }
 
 

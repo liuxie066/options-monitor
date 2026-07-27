@@ -203,7 +203,7 @@ def run_combo_yield_scan_and_summarize(
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
         event_risk_cfg=event_risk,
-        score_weights=yield_sp.get("score_weights"),
+        score_weights=None,
         strategy_family=COMBO_YIELD_FAMILY,
         strategy_profile=yield_enhancement_policy.mode,
         quiet=True,
@@ -422,7 +422,7 @@ def run_combo_yield_for_symbol_and_summarize(
     """Symbol-level Combo Yield facade with independent config and artifact ownership."""
 
     yield_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    policy = derive_yield_enhancement_policy(yield_cfg, sell_put_cfg, market=symbol_market(symbol))
+    policy = derive_yield_enhancement_policy(yield_cfg, market=symbol_market(symbol))
     if not policy.enabled:
         materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower=symbol_lower)
         return None
@@ -431,6 +431,8 @@ def run_combo_yield_for_symbol_and_summarize(
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     event_risk = resolve_event_risk_config(global_sell_put_event_risk)
     yield_window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
+    funding_put_cfg = dict(sell_put_cfg)
+    funding_put_cfg["strategy"] = policy.derived_from_sell_put_strategy
     sell_put_labeled_path = (report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve()
     df_sell_put_labeled = (
         safe_read_csv(sell_put_labeled_path)
@@ -445,7 +447,7 @@ def run_combo_yield_for_symbol_and_summarize(
         symbol_lower=symbol_lower,
         symbol_cfg=symbol_cfg,
         yield_enhancement_cfg=yield_cfg,
-        yield_sp=dict(sell_put_cfg),
+        yield_sp=funding_put_cfg,
         yield_enhancement_policy=policy,
         df_sell_put_labeled=df_sell_put_labeled,
         sell_put_labeled_path=sell_put_labeled_path,

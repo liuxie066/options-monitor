@@ -5,11 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.strategy_policy import (
-    RETURN_FIRST_PROFILE,
-    SELL_PUT_FAMILY,
+    INSURANCE_UNDERWRITING_PROFILE,
     YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
-    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE,
-    strategy_semantics_for_profile,
 )
 
 
@@ -17,6 +14,8 @@ YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_FUNDING_MODES: set[str] = {"credit_or_even", "max_debit"}
 YIELD_ENHANCEMENT_STRUCTURE_MODES: set[str] = {"same_expiry_pair", "staggered_expiry_pair"}
+DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS = 1
+DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS = 90
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
     "optimizer_enabled",
     "max_downside_worsen_pct",
@@ -53,6 +52,7 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "min_combo_net_credit": None,
     "min_net_credit_annualized": 0.08,
     "max_call_cost_to_put_credit": None,
+    "min_net_credit_retention": 0.60,
     "min_open_interest": 100,
     "min_volume": 5,
     "max_spread_ratio": 0.35,
@@ -67,8 +67,10 @@ YIELD_ENHANCEMENT_STRUCTURE_DEFAULTS: dict[str, dict[str, Any]] = {
         "funding_mode": "credit_or_even",
         "min_combo_net_credit": 0.0,
         "min_net_credit_annualized": None,
-        "max_call_cost_to_put_credit": 1.0,
-        "min_net_credit_retention": None,
+        "max_call_cost_to_put_credit": None,
+        "min_net_credit_retention": 0.60,
+        "min_expiry_gap_days": DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS,
+        "max_expiry_gap_days": DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS,
     },
 }
 YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -80,20 +82,9 @@ YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
 YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
     YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE: {
         "funding_mode": "credit_or_even",
-        "min_net_credit_retention": 0.80,
         "call": {
             "min_delta": 0.05,
             "max_delta": 0.20,
-        },
-    },
-    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE: {
-        "funding_mode": "credit_or_even",
-        "min_combo_net_credit": 0.0,
-        "max_call_cost_to_put_credit": 0.35,
-        "min_net_credit_retention": None,
-        "call": {
-            "min_delta": 0.15,
-            "max_delta": 0.30,
         },
     },
 }
@@ -171,14 +162,27 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
     return out
 
 
-def yield_enhancement_mode_for_sell_put_strategy(strategy: Any) -> str:
-    return str(
-        strategy_semantics_for_profile(
-            family=SELL_PUT_FAMILY,
-            profile=strategy,
-        ).yield_enhancement_mode
-        or YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
-    )
+def resolve_staggered_expiry_gap_days(cfg: dict[str, Any] | None) -> tuple[int, int]:
+    raw = _as_dict(cfg)
+    try:
+        min_gap = int(
+            raw.get(
+                "min_expiry_gap_days",
+                DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS,
+            )
+        )
+    except Exception:
+        min_gap = DEFAULT_STAGGERED_MIN_EXPIRY_GAP_DAYS
+    try:
+        max_gap = int(
+            raw.get(
+                "max_expiry_gap_days",
+                DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS,
+            )
+        )
+    except Exception:
+        max_gap = DEFAULT_STAGGERED_MAX_EXPIRY_GAP_DAYS
+    return max(1, min_gap), max(1, max_gap)
 
 
 def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str, Any]:
@@ -200,14 +204,13 @@ def apply_yield_enhancement_defaults(cfg: dict[str, Any] | None, *, market: str 
 
 def derive_yield_enhancement_policy(
     yield_enhancement_cfg: dict[str, Any] | None,
-    sell_put_cfg: dict[str, Any] | None,
     *,
     market: str | None = None,
 ) -> YieldEnhancementPolicy:
     raw_cfg = _as_dict(yield_enhancement_cfg)
     explicit_fields = _explicit_fields(raw_cfg)
     enabled = bool(raw_cfg.get("enabled", False))
-    combo_strategy = RETURN_FIRST_PROFILE
+    combo_strategy = INSURANCE_UNDERWRITING_PROFILE
     mode = YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 
     base = yield_enhancement_defaults_for_market(market)
@@ -220,7 +223,10 @@ def derive_yield_enhancement_policy(
     cfg["enabled"] = bool(enabled)
     cfg["yield_enhancement_mode"] = mode
     cfg["derived_from_sell_put_strategy"] = combo_strategy
-    cfg["yield_enhancement_requires_rv"] = False
+    # Combo Yield owns its Funding Put scan even when the standalone Sell Put
+    # step is disabled. That leg still runs the canonical insurance
+    # underwriting gate, so realized volatility is required by the strategy.
+    cfg["yield_enhancement_requires_rv"] = True
     cfg["yield_enhancement_uses_short_vol_gate"] = False
     output_mode = str(cfg.get("output_mode") or "").strip().lower()
     cfg["output_mode"] = output_mode if output_mode in YIELD_ENHANCEMENT_OUTPUT_MODES else "separate"
@@ -228,7 +234,7 @@ def derive_yield_enhancement_policy(
         enabled=bool(enabled),
         mode=mode,
         derived_from_sell_put_strategy=combo_strategy,
-        requires_realized_volatility=False,
+        requires_realized_volatility=True,
         uses_short_vol_gate=False,
         config=cfg,
         explicit_fields=explicit_fields,

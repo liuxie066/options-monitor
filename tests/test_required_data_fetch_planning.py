@@ -4,6 +4,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -61,6 +63,48 @@ def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: 
     assert resolved["lx"]["explicit_expirations"] == ["2026-08-21", "2026-09-18"]
 
 
+def test_exact_dte_window_preserves_empty_expiration_set() -> None:
+    from src.application.opend_symbol_chain_fetching import select_symbol_expirations
+
+    assert select_symbol_expirations(
+        expirations_all=["2026-12-18", "2027-01-15"],
+        explicit_expirations_norm=[],
+        limit_expirations=0,
+        min_dte=7,
+        max_dte=45,
+        today=date(2026, 7, 28),
+    ) == []
+
+
+def test_required_data_plan_fails_closed_when_trading_date_cannot_be_resolved(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21"])
+    monkeypatch.setattr(
+        opend_utils,
+        "get_trading_date",
+        lambda market: (_ for _ in ()).throw(RuntimeError("calendar unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="failed to resolve trading date for NVDA"):
+        mod.build_required_data_fetch_plan(
+            base=tmp_path,
+            required_data_dir=tmp_path,
+            symbol="NVDA",
+            limit_expirations=0,
+            want_put=True,
+            want_call=False,
+            sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+            sell_call_cfg={"enabled": False},
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+        )
+
+
 def test_tcom_put_fetch_window_falls_back_to_configured_max_without_spot(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
@@ -115,7 +159,7 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert call_plan.strike_window.max_strike > 505.0
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 606.00
     assert "near/far bounds" in call_plan.planning_reason
-    assert plan.merged_specs[0].include_realized_volatility is False
+    assert plan.merged_specs[0].include_realized_volatility is True
 
 
 def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, tmp_path: Path) -> None:
@@ -193,6 +237,33 @@ def test_sell_put_underwriting_fetch_plan_requires_realized_volatility(monkeypat
 
     assert len(plan.merged_specs) == 1
     assert plan.merged_specs[0].option_types == ("put",)
+    assert plan.merged_specs[0].include_realized_volatility is True
+
+
+def test_combo_only_fetch_plan_requires_funding_put_realized_volatility(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="0700.HK",
+        limit_expirations=0,
+        want_put=False,
+        want_call=False,
+        sell_put_cfg={"enabled": False},
+        sell_call_cfg={"enabled": False},
+        yield_enhancement_cfg={"enabled": True},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert plan.merged_specs[0].option_types == ("put", "call")
     assert plan.merged_specs[0].include_realized_volatility is True
 
 

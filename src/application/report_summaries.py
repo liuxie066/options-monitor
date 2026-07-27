@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.engine import rank_yield_enhancement_rows
+from domain.domain.engine import rank_candidate_rows, rank_yield_enhancement_rows
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 
@@ -336,7 +336,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
     if df.empty:
         return row
 
-    top = _first_top(df)
+    ranked = rank_candidate_rows(df.to_dict("records"), mode="put")
+    top = pd.Series(ranked[0]) if ranked else None
     if top is None:
         row['candidate_count'] = len(df)
         return row
@@ -359,7 +360,8 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
     if df.empty:
         return row
 
-    top = _first_top(df)
+    ranked = rank_candidate_rows(df.to_dict("records"), mode="call")
+    top = pd.Series(ranked[0]) if ranked else None
     if top is None:
         row['candidate_count'] = len(df)
         return row

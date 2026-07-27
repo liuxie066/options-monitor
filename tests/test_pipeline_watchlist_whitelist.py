@@ -112,7 +112,7 @@ def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
     assert len(out) == 1
 
 
-def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
+def test_watchlist_global_liquidity_excludes_underwriting_income_threshold() -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     seen: dict[str, dict] = {}
@@ -166,8 +166,8 @@ def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
         build_symbols_digest_fn=_noop,
     )
 
-    assert seen['put']['min_net_income'] == 100
-    assert seen['call']['min_net_income'] == 200
+    assert seen['put'] == {'min_open_interest': 50}
+    assert seen['call'] == {'min_volume': 12}
 
 
 def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
@@ -393,7 +393,7 @@ def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() 
     assert resolved['sell_call']['min_annualized_net_premium_return'] == 0.11
     assert resolved['sell_call']['min_strike_cost_multiplier'] == 1.02
     assert 'min_annualized_net_return' not in resolved['sell_call']
-    assert resolved['_global_sell_put_liquidity'] == {'min_net_income': 100, 'min_open_interest': 50}
+    assert resolved['_global_sell_put_liquidity'] == {'min_open_interest': 50}
     assert resolved['_global_sell_call_liquidity'] == {'min_volume': 12}
     assert resolved['_global_sell_put_event_risk'] == {'enabled': True, 'mode': 'warn'}
 

@@ -44,6 +44,136 @@ def _patch_0700_plan_discovery(monkeypatch, expirations: list[str] | None = None
     monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 6, 8))
 
 
+def _patch_us_budget_plan_discovery(monkeypatch) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+
+    monkeypatch.setattr(
+        planning,
+        "list_option_expirations",
+        lambda *args, **kwargs: [
+            "2026-06-19",
+            "2026-07-17",
+            "2026-08-21",
+            "2026-09-18",
+        ],
+    )
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 6, 1))
+
+
+def test_prefetch_builds_complete_global_plan_before_first_chain_fetch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+
+    watchlist = [
+        {
+            "symbol": "AAPL",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+            "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 200},
+        },
+        {
+            "symbol": "MSFT",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+            "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 500},
+        },
+    ]
+    events: list[str] = []
+
+    def discover(symbol: str, **kwargs):
+        events.append(f"plan:{symbol}")
+        return ["2026-06-19", "2026-07-17"]
+
+    def fetch(symbol: str, **kwargs):
+        events.append(f"fetch:{symbol}")
+        return {
+            "symbol": symbol,
+            "rows": [
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "strike": 100,
+                }
+            ],
+            "meta": {"status": "ok", "error": "", "source": "opend"},
+        }
+
+    monkeypatch.setattr(planning, "list_option_expirations", discover)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 6, 1))
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
+        lambda **kwargs: _Gateway(),
+    )
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fetch)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "adapt_opend_tool_payload",
+        lambda payload: {"source_name": "opend", "payload": payload},
+    )
+    monkeypatch.setattr(
+        mod.state_repo,
+        "append_source_snapshot_event",
+        lambda *args, **kwargs: None,
+    )
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert events[:2] == ["plan:AAPL", "plan:MSFT"]
+    assert all(item.startswith("fetch:") for item in events[2:])
+    assert result["global_required_data_plan"]["discovery_complete"] is True
+    assert result["global_required_data_plan"]["strategy_expiration_limit"] is None
+    assert [
+        item["expiration_count"]
+        for item in result["global_required_data_plan"]["symbols"]
+    ] == [2, 2]
+
+
+def test_prefetch_fails_closed_when_global_expiration_discovery_is_incomplete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    watchlist = [
+        {
+            "symbol": "AAPL",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+            "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 200},
+        }
+    ]
+    fetch_calls: list[str] = []
+
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(
+        "src.application.required_data_planning.list_option_expirations",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("discovery unavailable")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "fetch_symbol",
+        lambda symbol, **kwargs: fetch_calls.append(symbol),
+    )
+
+    with pytest.raises(RuntimeError, match="global required-data plan incomplete"):
+        mod.prefetch_required_data(
+            vpy=tmp_path / "python",
+            base=tmp_path,
+            cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
+            shared_required=tmp_path / "shared_required",
+        )
+
+    assert fetch_calls == []
+
+
 def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
         {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
@@ -255,11 +385,11 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
     assert out["include_realized_volatility"] is True
 
 
-def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_return_first() -> None:
+def test_strategy_prefetch_kwargs_fetches_combo_call_with_underwriting_rv() -> None:
     out = strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
-            "sell_put": {"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "max_strike": 95},
+            "sell_put": {"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60, "max_strike": 95},
             "sell_call": {"enabled": False},
             "combo_yield": {"enabled": True, "call": {"min_delta": 0.08, "max_delta": 0.20}},
         },
@@ -271,7 +401,7 @@ def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_
     assert out["max_dte"] == 60
     assert out["side_strike_windows"]["put"]["max_strike"] == 95
     assert "call" in out["side_strike_windows"]
-    assert out["include_realized_volatility"] is False
+    assert out["include_realized_volatility"] is True
 
 
 def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() -> None:
@@ -362,7 +492,7 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     assert captured["min_dte"] == 20
     assert captured["max_dte"] == 60
     assert captured["side_strike_windows"] == {"put": {"min_strike": 360.0, "max_strike": 450.0}}
-    assert captured["include_realized_volatility"] is False
+    assert captured["include_realized_volatility"] is True
 
 
 def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_path: Path, monkeypatch) -> None:
@@ -373,7 +503,7 @@ def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_
             "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
             "sell_put": {
                 "enabled": True,
-                "strategy": "return_first",
+                "strategy": "insurance_underwriting",
                 "min_dte": 20,
                 "max_dte": 90,
                 "max_strike": 450,
@@ -484,7 +614,7 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     assert len(captured_calls) == 1
     captured = captured_calls[0]
     assert captured["symbol"] == "0700.HK"
-    assert captured["limit_expirations"] == 8
+    assert captured["limit_expirations"] == 0
     assert captured["option_types"] == "put,call"
     assert captured["min_dte"] == 20
     assert captured["max_dte"] == 90
@@ -514,7 +644,7 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
             "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
             "sell_put": {
                 "enabled": True,
-                "strategy": "return_first",
+                "strategy": "insurance_underwriting",
                 "min_dte": 20,
                 "max_dte": 90,
                 "max_strike": 450,
@@ -543,6 +673,7 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
                     "contract_symbol": "HK.TCH260629P360000",
                     "strike": 360,
                     "spot": 444.8,
+                    "realized_volatility_estimate": 0.25,
                 },
                 {
                     "symbol": symbol,
@@ -618,9 +749,9 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
 
 def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
-        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 200}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 500}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 200}},
     ]
     captured_calls: list[dict[str, object]] = []
 
@@ -643,6 +774,7 @@ def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit
     monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+    _patch_us_budget_plan_discovery(monkeypatch)
 
     result = mod.prefetch_required_data(
         vpy=tmp_path / "python",
@@ -665,9 +797,9 @@ def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit
 
 def test_inprocess_prefetch_waits_after_rate_limited_wave_before_next_wave(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
-        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 200}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 500}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 120, "max_strike": 200}},
     ]
     sleeps: list[float] = []
 
@@ -703,6 +835,7 @@ def test_inprocess_prefetch_waits_after_rate_limited_wave_before_next_wave(tmp_p
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "_sleep_after_rate_limit_wave", lambda wait_sec: sleeps.append(float(wait_sec)))
+    _patch_us_budget_plan_discovery(monkeypatch)
 
     result = mod.prefetch_required_data(
         vpy=tmp_path / "python",
@@ -796,13 +929,13 @@ def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tm
     (shared_required / "parsed" / "0700.HK_required_data.csv").write_text(
         "\n".join(
             [
-                "symbol,option_type,expiration,dte,strike",
-                "0700.HK,put,2026-06-19,30,360",
-                "0700.HK,put,2026-06-19,30,400",
-                "0700.HK,put,2026-06-19,30,450",
-                "0700.HK,put,2026-07-17,60,360",
-                "0700.HK,put,2026-07-17,60,400",
-                "0700.HK,put,2026-07-17,60,450",
+                "symbol,option_type,expiration,dte,strike,realized_volatility_estimate",
+                "0700.HK,put,2026-06-19,30,360,0.25",
+                "0700.HK,put,2026-06-19,30,400,0.25",
+                "0700.HK,put,2026-06-19,30,450,0.25",
+                "0700.HK,put,2026-07-17,60,360,0.25",
+                "0700.HK,put,2026-07-17,60,400,0.25",
+                "0700.HK,put,2026-07-17,60,450,0.25",
             ]
         )
         + "\n",
@@ -855,12 +988,12 @@ def test_prefetch_cache_check_reads_required_data_csv_once(tmp_path: Path, monke
         read_calls.append(path)
         return pd.DataFrame(
             [
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 360},
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 400},
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 450},
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 360},
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 400},
-                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 450},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 360, "realized_volatility_estimate": 0.25},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 400, "realized_volatility_estimate": 0.25},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 450, "realized_volatility_estimate": 0.25},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 360, "realized_volatility_estimate": 0.25},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 400, "realized_volatility_estimate": 0.25},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 450, "realized_volatility_estimate": 0.25},
             ]
         )
 
@@ -1014,7 +1147,8 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
             "combo_yield": {
                 "enabled": True,
                 "structure_mode": "staggered_expiry_pair",
-                "call": {"min_dte": 61, "max_dte": 90},
+                "min_expiry_gap_days": 1,
+                "max_expiry_gap_days": 30,
             },
         },
         enabled=True,
@@ -1025,3 +1159,4 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
     assert out["max_dte"] == 90
     assert out["side_strike_windows"]["put"]["min_strike"] == 90.0
     assert out["side_strike_windows"]["put"]["max_strike"] == 96.0
+    assert out["include_realized_volatility"] is True

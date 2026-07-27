@@ -37,16 +37,6 @@ LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_volume',
     'max_spread_ratio',
 )
-SCORE_WEIGHT_FIELDS = (
-    'annualized_return',
-    'net_income',
-    'liquidity',
-    'risk_distance',
-    'vol_edge',
-    'delta_target',
-    'concentration',
-    'path_risk',
-)
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
 )
@@ -332,22 +322,6 @@ def validate_assistant_config(cfg: dict) -> None:
     _validate_assistant_config(cfg)
 
 
-def _validate_score_weights(cfg: dict, path: str) -> None:
-    if 'score_weights' not in cfg or cfg.get('score_weights') is None:
-        return
-    raw = cfg.get('score_weights')
-    if not isinstance(raw, dict):
-        die(f'{path}.score_weights must be an object')
-    unsupported = [str(k) for k in raw.keys() if k not in SCORE_WEIGHT_FIELDS]
-    if unsupported:
-        die(
-            f"{path}.score_weights has unsupported keys: {', '.join(unsupported)}; "
-            f"allowed keys: {', '.join(SCORE_WEIGHT_FIELDS)}"
-        )
-    for key in SCORE_WEIGHT_FIELDS:
-        _validate_optional_non_negative_number(raw, key, f'{path}.score_weights')
-
-
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     _validate_optional_bool(cfg, 'enabled', path)
     if 'strategy_profile' in cfg:
@@ -356,6 +330,11 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
         die(f'{path}.pricing has been removed; put opening thresholds directly on {path}')
     if 'premium_score_cap' in cfg:
         die(f'{path}.premium_score_cap is not a supported opening config field')
+    if cfg.get('score_weights') is not None:
+        die(
+            f'{path}.score_weights has been removed from opening config; '
+            'formal recommendation ranking uses annualized net return with fixed tie-breaks'
+        )
     _validate_optional_dte_window(cfg, path)
     _validate_optional_strike_bounds(cfg, path)
     for key in ('min_open_interest', 'min_volume', 'max_spread_ratio', 'min_net_income'):
@@ -363,15 +342,14 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     for key in ('min_annualized_net_return', 'min_annualized_net_premium_return'):
         _validate_optional_unit_interval_number(cfg, key, path)
 
-    strategy = None
+    strategy = 'insurance_underwriting'
     if 'strategy' in cfg and cfg.get('strategy') is not None:
         strategy = str(cfg.get('strategy') or '').strip().lower()
-        if strategy == 'short_vol':
-            die(f'{path}.strategy=short_vol is no longer supported for opening config; use insurance_underwriting')
-        if strategy not in {'return_first', 'insurance_underwriting'}:
-            die(f'{path}.strategy must be one of: return_first, insurance_underwriting')
-    if strategy == 'insurance_underwriting' and cfg.get('score_weights') is not None:
-        die(f'{path}.score_weights is not used by insurance_underwriting; remove it or use return_first')
+        if strategy != 'insurance_underwriting':
+            die(
+                f'{path}.strategy={strategy or "<empty>"} is no longer supported for opening config; '
+                'use insurance_underwriting'
+            )
     event_risk = cfg.get('event_risk')
     if event_risk is not None:
         if not isinstance(event_risk, dict):
@@ -413,7 +391,6 @@ def validate_resolved_watchlist_item_runtime_config(item: dict) -> None:
         side_cfg = item.get(side) or {}
         if not isinstance(side_cfg, dict):
             die(f'{symbol}.{side} must be an object after template merge')
-        _validate_score_weights(side_cfg, f'{symbol}.{side}')
         _validate_opening_strategy_config(side_cfg, f'{symbol}.{side}')
         if side == 'sell_call':
             _validate_optional_positive_number(
@@ -548,6 +525,25 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         structure_mode = str(cfg.get('structure_mode') or '').strip().lower()
         if structure_mode not in YIELD_ENHANCEMENT_STRUCTURE_MODES:
             die(f"{path}.structure_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_STRUCTURE_MODES))}")
+    else:
+        structure_mode = str(cfg.get('structure_mode') or 'same_expiry_pair').strip().lower()
+    for key in ('min_expiry_gap_days', 'max_expiry_gap_days'):
+        if cfg.get(key) is not None:
+            validate_non_negative_integer(cfg.get(key), f'{path}.{key}')
+            if int(cfg.get(key)) < 1:
+                die(f'{path}.{key} must be >= 1')
+    min_expiry_gap_days = cfg.get('min_expiry_gap_days')
+    max_expiry_gap_days = cfg.get('max_expiry_gap_days')
+    if (
+        min_expiry_gap_days is not None
+        and max_expiry_gap_days is not None
+        and int(min_expiry_gap_days) > int(max_expiry_gap_days)
+    ):
+        die(f'{path}.min_expiry_gap_days > {path}.max_expiry_gap_days')
+    if structure_mode != 'staggered_expiry_pair' and (
+        min_expiry_gap_days is not None or max_expiry_gap_days is not None
+    ):
+        die(f'{path}.min_expiry_gap_days/max_expiry_gap_days require structure_mode=staggered_expiry_pair')
     for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (
@@ -572,6 +568,15 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if call_leg is not None and not isinstance(call_leg, dict):
         die(f'{path}.call must be an object')
     if isinstance(call_leg, dict):
+        redundant_call_dte_keys = [
+            key for key in ('min_dte', 'max_dte') if call_leg.get(key) is not None
+        ]
+        if redundant_call_dte_keys:
+            die(
+                f"{path}.call has unsupported absolute DTE fields: "
+                f"{', '.join(redundant_call_dte_keys)}; "
+                "use min_expiry_gap_days/max_expiry_gap_days for staggered expiry"
+            )
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')
         legacy_call_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS if k in call_leg]
@@ -1033,7 +1038,6 @@ def validate_config(cfg: dict):
                         f"templates.{profile_name}.{side} has unsupported strategy filter keys: "
                         f"{', '.join(bad_keys)}; only {', '.join(LIQUIDITY_ALLOWED_GLOBAL_FIELDS)} are allowed"
                     )
-                _validate_score_weights(side_cfg, f'templates.{profile_name}.{side}')
                 if side == 'sell_call':
                     _validate_optional_positive_number(
                         side_cfg,
@@ -1101,12 +1105,16 @@ def validate_config(cfg: dict):
                 die(f"{sym}.fetch.source unsupported: {src_raw}; use futu")
             if str(src_raw or '').strip().lower() == 'opend':
                 warn(f"{sym}.fetch.source=opend is legacy; prefer futu")
+            if fetch.get('limit_expirations') is not None:
+                warn(
+                    f"{sym}.fetch.limit_expirations is ignored by strategy required-data "
+                    "planning; it remains a generic compatibility-fetch limit only"
+                )
 
         # sell_put basic checks if enabled
         sp = item.get('sell_put') or {}
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
-        _validate_score_weights(sp, f'{sym}.sell_put')
         _validate_opening_strategy_config(sp, f'{sym}.sell_put')
         unsupported_put_otm_keys = [k for k in LEGACY_SELL_PUT_OTM_FIELDS if k in sp]
         if unsupported_put_otm_keys:
@@ -1159,7 +1167,6 @@ def validate_config(cfg: dict):
         sc = item.get('sell_call') or {}
         if sc and not isinstance(sc, dict):
             die(f"{sym}.sell_call must be an object")
-        _validate_score_weights(sc, f'{sym}.sell_call')
         _validate_opening_strategy_config(sc, f'{sym}.sell_call')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
         if bad_keys:

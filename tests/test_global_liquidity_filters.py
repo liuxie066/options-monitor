@@ -110,7 +110,7 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         assert 'min_iv' in msg
 
 
-def test_validate_config_accepts_candidate_score_weights() -> None:
+def test_validate_config_rejects_candidate_score_weights() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -161,7 +161,11 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
         ],
     }
 
-    validate_config(cfg)
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'score_weights has been removed from opening config' in str(e)
 
 
 def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config() -> None:
@@ -241,6 +245,43 @@ def test_validate_config_rejects_underwriting_fail_closed_with_disabled_event_ri
         assert 'templates.put_base.sell_put.event_source_fail_closed=true' in msg
 
 
+def test_validate_config_applies_underwriting_default_before_event_conflict_check() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'event_risk': {'enabled': False},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as exc:
+        assert 'templates.put_base.sell_put.event_risk.enabled=false conflicts with' in str(exc)
+
+    cfg['templates']['put_base']['sell_put']['event_source_fail_closed'] = False
+    validate_config(cfg)
+
+
 def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
@@ -303,7 +344,7 @@ def test_validate_config_rejects_underwriting_score_weights() -> None:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.put_base.sell_put.score_weights is not used by insurance_underwriting' in str(e)
+        assert 'templates.put_base.sell_put.score_weights has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_opening_concentration_config() -> None:
@@ -449,7 +490,7 @@ def test_validate_config_rejects_sell_call_short_vol_opening_config_even_when_le
         assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
-def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
+def test_validate_config_rejects_return_first_opening_strategy() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -461,7 +502,6 @@ def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
                     'min_open_interest': 60,
                     'min_volume': 10,
                     'max_spread_ratio': 0.3,
-                    'score_weights': {'liquidity': -0.01},
                 }
             },
         },
@@ -486,7 +526,7 @@ def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
         msg = str(e)
-        assert 'templates.put_base.sell_put.score_weights.liquidity must be >= 0' in msg
+        assert 'templates.put_base.sell_put.strategy=return_first is no longer supported' in msg
 
 
 def test_validate_config_rejects_removed_sell_put_min_otm_pct() -> None:
@@ -968,7 +1008,6 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
                 'max_strike': 200,
                 'min_annualized_net_return': 0.1,
                 'min_open_interest': 999,
-                'score_weights': {'liquidity': 0.02, 'risk_distance': 0.03},
             },
             top_n=3,
             required_data_dir=base / 'output',
@@ -996,7 +1035,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 50.0
     assert kwargs['min_volume'] == 12.0
     assert kwargs['max_spread_ratio'] == 0.31
-    assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.03}
+    assert kwargs['score_weights'] is None
     assert 'min_iv' not in kwargs
     assert 'require_bid_ask' not in kwargs
 
@@ -1028,7 +1067,7 @@ def test_sell_put_steps_does_not_trigger_combo_yield() -> None:
             symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
             sp={
                 "enabled": True,
-                "strategy": "return_first",
+                "strategy": "insurance_underwriting",
                 "min_dte": 7,
                 "max_dte": 45,
                 "min_strike": 1,
@@ -1050,8 +1089,8 @@ def test_sell_put_steps_does_not_trigger_combo_yield() -> None:
 
     assert [row["strategy"] for row in out] == ["sell_put"]
     assert len(calls) == 1
-    assert calls[0]["min_annualized_net_return"] == 0.25
-    assert calls[0]["min_net_income"] == 70.0
+    assert calls[0]["min_annualized_net_return"] == 0.0
+    assert calls[0]["min_net_income"] == 0.0
 
 
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
@@ -1379,7 +1418,6 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
                 'min_strike': 110,
                 'min_open_interest': 999,
                 'min_annualized_net_premium_return': 0.12,
-                'score_weights': {'liquidity': 0.02, 'risk_distance': 0.015},
             },
             top_n=3,
             required_data_dir=base / 'output',
@@ -1405,60 +1443,9 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 60.0
     assert kwargs['min_volume'] == 8.0
     assert kwargs['max_spread_ratio'] == 0.22
-    assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.015}
+    assert kwargs['score_weights'] is None
     assert 'min_delta' not in kwargs
     assert 'max_delta' not in kwargs
-
-
-def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_put_steps as steps
-    import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    calls: list[dict] = []
-    orig_run_sell_put_scan = steps.run_sell_put_scan
-    orig_add_labels = steps.add_sell_put_labels
-
-    def _fake_run_sell_put_scan(**kwargs):
-        calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
-
-    steps.run_sell_put_scan = _fake_run_sell_put_scan
-    steps.add_sell_put_labels = lambda *args, **kwargs: None
-    try:
-        out = steps.run_sell_put_scan_and_summarize(
-            py='python',
-            base=base,
-            sym='AAPL',
-            symbol='AAPL',
-            symbol_lower='aapl',
-            symbol_cfg={'symbol': 'AAPL', 'sell_put': {}},
-            sp={
-                'enabled': True,
-                'min_dte': 7,
-                'max_dte': 45,
-                'min_annualized_net_return': 0.1,
-            },
-            top_n=3,
-            required_data_dir=base / 'output',
-            report_dir=base / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
-            portfolio_ctx=None,
-            global_sell_put_liquidity={'min_net_income': 100},
-        )
-    finally:
-        steps.run_sell_put_scan = orig_run_sell_put_scan
-        steps.add_sell_put_labels = orig_add_labels
-
-    assert len(out) == 1
-    assert out[0]['strategy'] == 'sell_put'
-    assert calls
-    kwargs = calls[0]
-    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_put_underwriting_scan_bypasses_return_income_floor() -> None:
@@ -1513,48 +1500,6 @@ def test_sell_put_underwriting_scan_bypasses_return_income_floor() -> None:
     kwargs = calls[0]
     assert kwargs['min_annualized_net_return'] == 0.0
     assert kwargs['min_net_income'] == 0.0
-
-
-def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
-    base = _add_repo_to_syspath()
-    import src.application.sell_call_steps as steps
-    import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    calls: list[dict] = []
-    orig_run_sell_call_scan = steps.run_sell_call_scan
-
-    def _fake_run_sell_call_scan(**kwargs):
-        calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
-
-    steps.run_sell_call_scan = _fake_run_sell_call_scan
-    try:
-        out = steps.run_sell_call_scan_and_summarize(
-            py='python',
-            base=base,
-            symbol='AAPL',
-            symbol_lower='aapl',
-            symbol_cfg={'symbol': 'AAPL'},
-            cc={'enabled': True},
-            top_n=3,
-            required_data_dir=base / 'output',
-            report_dir=base / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
-            stock={'shares': 200, 'avg_cost': 100.0},
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
-            locked_shares_by_symbol={'AAPL': 0},
-            global_sell_call_liquidity={'min_net_income': 100},
-        )
-    finally:
-        steps.run_sell_call_scan = orig_run_sell_call_scan
-
-    assert out['strategy'] == 'sell_call'
-    assert calls
-    kwargs = calls[0]
-    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_call_underwriting_scan_bypasses_return_income_floor() -> None:

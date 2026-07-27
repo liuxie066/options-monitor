@@ -133,7 +133,7 @@ def test_strategy_param_table_v1_default_weights_split_put_call() -> None:
     assert call_cfg.score_weight_risk_distance == 0.0
 
 
-def test_score_candidates_uses_independent_strategy_score_method() -> None:
+def test_score_candidates_keeps_strategy_score_diagnostic_only() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import build_strategy_config, rank_candidates, score_candidates
 
@@ -161,7 +161,7 @@ def test_score_candidates_uses_independent_strategy_score_method() -> None:
 
     ranked = rank_candidates(score_candidates(df, cfg), cfg)
 
-    assert list(ranked["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
+    assert list(ranked["contract_symbol"]) == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
 
 
 def test_rank_candidates_delegates_to_candidate_engine_ranker(monkeypatch) -> None:
@@ -401,7 +401,7 @@ def test_run_candidate_scan_reuses_stage1_gate_once_per_contract(tmp_path: Path)
     assert len(calls) == 1
 
 
-def test_run_candidate_scan_uses_configured_score_weights(tmp_path: Path) -> None:
+def test_run_candidate_scan_keeps_configured_score_weights_diagnostic_only(tmp_path: Path) -> None:
     _add_repo_to_syspath()
     import src.application.candidate_scanning as scan
 
@@ -500,7 +500,7 @@ def test_run_candidate_scan_uses_configured_score_weights(tmp_path: Path) -> Non
         base_dir=tmp_path,
     )
 
-    assert list(out["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
+    assert list(out["contract_symbol"]) == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
 
 
 def test_run_candidate_scan_applies_sell_put_spot_ceiling(tmp_path: Path) -> None:
