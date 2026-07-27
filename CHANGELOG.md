@@ -2,8 +2,22 @@
 
 ## Unreleased
 
+## 1.6.0 - 2026-07-28
+
+### New Features
+- Added a fully funded staggered-expiry Combo Yield structure that selects one underwritten Funding Put per symbol and then maximizes Participation Call upside within expiry-gap and retained-premium constraints.
+
+### Improvements
+- Consolidated new Sell Put and Covered Call recommendations onto the single `insurance_underwriting` profile, removing configurable opening `return_first`, `short_vol`, and score-weight variants.
+- Ranked eligible Sell Put and Covered Call candidates first within each symbol and then across symbols by annualized net return, using assignment or strike margin and concentration only to break ties.
+- Made Combo Yield, Daily Brief, and agent-facing candidate selection reuse canonical domain ranking, including one best structure per symbol before cross-symbol truncation.
+- Planned option-chain and market-data fetching once from all enabled strategy requirements, using exact DTE-derived expirations instead of request-window counts as a business control.
+
 ### Bug Fixes
 - Kept Daily Brief event summaries outside Feishu candidate tables by explicitly ending the table block before rendering event prose.
+- Required independently enabled Combo Yield scans to execute Funding Put underwriting with realized-volatility evidence instead of bypassing the opening hard gates.
+- Preserved an empty exact-DTE result as no required option-chain fetch, preventing a missing window from expanding into a full-chain request.
+- Aligned config validation with the runtime default underwriting strategy and removed the unused global `min_net_income` liquidity side channel.
 
 ## 1.5.3 - 2026-07-27
 
