@@ -169,10 +169,10 @@ def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Pat
     brief = _assemble(tmp_path)
 
     assert brief["actionability"] == "live_actionable"
-    assert [item["contract_symbol"] for item in brief["candidates"]["sell_put"]] == ["NVDA_HIGH", "NVDA_LOW"]
+    assert [item["contract_symbol"] for item in brief["candidates"]["sell_put"]] == ["NVDA_HIGH"]
     assert brief["capacity"]["sell_put"]["contracts_available"] == 2
     assert brief["capacity"]["covered_call"]["contracts_available"] == 2
-    assert len([item for item in brief["actions"] if item["strategy_family"] == "sell_put"]) == 2
+    assert len([item for item in brief["actions"] if item["strategy_family"] == "sell_put"]) == 1
     assert all("fake" not in item.get("reason", "") for item in brief["actions"])
 
 
@@ -306,7 +306,7 @@ def test_missing_cash_context_blocks_snapshot_without_fabricating_zero(tmp_path:
     assert "cash_total_unavailable" in brief["actions"][0]["reason"]
 
 
-def test_candidate_index_uses_all_ranked_candidates_beyond_display_limit(tmp_path: Path) -> None:
+def test_candidate_index_uses_one_ranked_candidate_per_symbol_beyond_display_limit(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
@@ -323,7 +323,7 @@ def test_candidate_index_uses_all_ranked_candidates_beyond_display_limit(tmp_pat
     assert len(brief["candidates"]["sell_put"]) == 3
     assert len(brief["candidate_index"]) == 4
     by_symbol = {item["symbol"]: item for item in brief["candidate_index"]}
-    assert by_symbol["NVDA"]["contract_count"] == 2
+    assert by_symbol["NVDA"]["contract_count"] == 1
     assert by_symbol["NVDA"]["representative"]["contract_symbol"] == "NVDA_HIGH"
     assert set(by_symbol) == {"NVDA", "PDD", "FUTU", "GOOGL"}
 
@@ -463,11 +463,10 @@ def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp
     assert before == after
     assert [item["contract_symbol"] for item in with_snapshot["candidates"]["sell_put"]] == [
         "NVDA_HIGH",
-        "NVDA_LOW",
     ]
 
 
-def test_candidate_priority_reuses_tier_without_promoting_rank_one(tmp_path: Path) -> None:
+def test_candidate_priority_does_not_promote_lower_return_same_symbol_contract(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
@@ -480,7 +479,7 @@ def test_candidate_priority_reuses_tier_without_promoting_rank_one(tmp_path: Pat
     priorities = {item["contract_symbol"]: item["priority"] for item in brief["actions"] if item["action_type"] == "open_candidate"}
 
     assert priorities["NVDA_DEFAULT"] == "P1"
-    assert priorities["NVDA_STRONG"] == "P0"
+    assert "NVDA_STRONG" not in priorities
 
 
 def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> None:
@@ -617,7 +616,7 @@ def test_daily_brief_uses_only_v2_position_authority_when_promoted(
     assert brief["position_advice_preview"]["authority_mode"] == "v2"
 
 
-def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: Path) -> None:
+def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
@@ -630,7 +629,11 @@ def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: P
                 "call_expiration": "2026-09-18",
                 "put_strike": 95,
                 "call_strike": 130,
-                "annualized_net_credit_yield": 0.08,
+                "structure_mode": "staggered_expiry_pair",
+                "funding_accepted": True,
+                "put_only_annualized_net_return": 0.08,
+                "call_delta": 0.20,
+                "net_credit_retention": 0.70,
             },
             {
                 "symbol": "NVDA",
@@ -641,18 +644,26 @@ def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: P
                 "call_expiration": "2026-09-18",
                 "put_strike": 100,
                 "call_strike": 125,
-                "annualized_net_credit_yield": 0.20,
+                "structure_mode": "staggered_expiry_pair",
+                "funding_accepted": True,
+                "put_only_annualized_net_return": 0.20,
+                "call_delta": 0.15,
+                "net_credit_retention": 0.75,
             },
             {
-                "symbol": "NVDA",
-                "candidate_pair_id": "pair-b",
-                "put_contract_symbol": "NVDA_P95",
-                "call_contract_symbol": "NVDA_C130",
+                "symbol": "AAPL",
+                "candidate_pair_id": "pair-c",
+                "put_contract_symbol": "AAPL_P180",
+                "call_contract_symbol": "AAPL_C220",
                 "put_expiration": "2026-08-21",
                 "call_expiration": "2026-09-18",
-                "put_strike": 95,
-                "call_strike": 130,
-                "annualized_net_credit_yield": 0.50,
+                "put_strike": 180,
+                "call_strike": 220,
+                "structure_mode": "staggered_expiry_pair",
+                "funding_accepted": True,
+                "put_only_annualized_net_return": 0.30,
+                "call_delta": 0.10,
+                "net_credit_retention": 0.80,
             },
         ]
     ).to_csv(account_dir / "nvda_combo_yield_candidates.csv", index=False)
@@ -660,11 +671,11 @@ def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: P
     brief = _assemble(tmp_path)
     combos = brief["candidates"]["combo_yield"]
 
-    assert [item["strategy_group_id"] for item in combos] == ["pair-b", "pair-a"]
+    assert [item["strategy_group_id"] for item in combos] == ["pair-c", "pair-a"]
     assert combos[0]["put_leg_role"] == "funding_put"
     assert combos[0]["call_leg_role"] == "participation_call"
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
-    assert [item["strategy_group_id"] for item in combo_actions] == ["pair-b", "pair-a"]
+    assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
 
 
 def test_combo_yield_event_projection_relates_to_both_expirations(tmp_path: Path) -> None:
@@ -876,19 +887,17 @@ def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
     brief = _assemble(tmp_path, market="HK")
 
     assert {item["contract_symbol"] for item in brief["candidates"]["sell_put"]} == {
-        "0700_P430",
         "0700_P440",
     }
     assert {item["contract_symbol"] for item in brief["actions"] if item.get("contract_symbol")} == {
-        "0700_P430",
         "0700_P440",
     }
     assert "0700_P450_RAW_ONLY" not in json.dumps(brief, sort_keys=True)
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     assert "0700_P450_RAW_ONLY" not in render_full_brief(brief)
-    assert "有效行动 2 条" in brief["strategy_summary"]
-    assert "候选证据：Sell Put 2，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
+    assert "有效行动 1 条" in brief["strategy_summary"]
+    assert "候选证据：Sell Put 1，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
     assert "数据缺口" in brief["strategy_summary"]
     assert not any(item["path"].endswith("_sell_put_candidates.csv") for item in brief["source_artifacts"])
 

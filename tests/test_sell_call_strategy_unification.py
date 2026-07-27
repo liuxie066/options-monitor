@@ -38,7 +38,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
 
         pd.DataFrame(
             [
-                # pass; same score as B, so stable input order wins
+                    # pass; same annualized return as B, lower strike-upside tie-break
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -173,7 +173,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
             quiet=True,
         )
 
-        assert list(out["contract_symbol"]) == ["A", "B"]
+        assert list(out["contract_symbol"]) == ["B", "A"]
         reject_path = out_path.with_name(f"{out_path.stem}_reject_log.csv")
         reject_log = pd.read_csv(reject_path)
         assert not reject_log.empty

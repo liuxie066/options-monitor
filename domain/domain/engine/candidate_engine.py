@@ -349,6 +349,67 @@ def _candidate_score_inputs(src: dict[str, Any], *, mode: StrategyMode) -> dict[
     }
 
 
+def _candidate_tie_break_margin(src: dict[str, Any], *, mode: StrategyMode) -> float:
+    if mode == "put":
+        explicit = _first_float(src, "net_assignment_discount_pct")
+        if explicit is not None:
+            return float(explicit)
+        spot = _first_float(src, "spot")
+        breakeven = _first_float(src, "breakeven")
+        if spot is not None and spot > 0 and breakeven is not None:
+            return float((spot - breakeven) / spot)
+        return 0.0
+    return float(
+        _first_float(
+            src,
+            "strike_upside_margin_pct",
+            "strike_above_spot_pct",
+            "otm_pct",
+        )
+        or 0.0
+    )
+
+
+def _candidate_concentration_tie_break(src: dict[str, Any]) -> float:
+    score = _first_float(src, "concentration_score")
+    if score is not None:
+        return float(score)
+    exposures = [
+        value
+        for value in (
+            _first_float(src, "single_trade_concentration"),
+            _first_float(src, "symbol_concentration_after"),
+            _first_float(src, "total_short_put_concentration_after"),
+        )
+        if value is not None
+    ]
+    return -max(exposures) if exposures else 0.0
+
+
+def _candidate_recommendation_sort_tuple(
+    src: dict[str, Any],
+    *,
+    mode: StrategyMode,
+    annualized_return: float | None,
+    net_income: float | None,
+) -> tuple[Any, ...]:
+    annual_missing = annualized_return is None
+    concentration = _candidate_concentration_tie_break(src)
+    spread = _first_float(src, "spread_ratio")
+    open_interest = _first_float(src, "open_interest")
+    return (
+        annual_missing,
+        -float(annualized_return or 0.0),
+        -_candidate_tie_break_margin(src, mode=mode),
+        -float(concentration),
+        float("inf") if spread is None else float(spread),
+        -float(open_interest or 0.0),
+        -float(net_income or 0.0),
+        str(src.get("symbol") or "").strip().upper(),
+        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
+    )
+
+
 _SCORE_COMPONENT_LABELS: dict[str, str] = {
     "annualized_return": "年化收益",
     "net_income": "净收入",
@@ -363,43 +424,6 @@ _SCORE_COMPONENT_LABELS: dict[str, str] = {
 _SCORE_WARNING_LABELS: dict[str, str] = {
     "wide_spread": "价差偏宽",
 }
-
-
-def _primary_score_drivers(components: dict[str, float], *, limit: int = 2) -> list[str]:
-    positive = [
-        (name, float(value))
-        for name, value in components.items()
-        if _coerce_float(value) is not None and float(value) > 0.0
-    ]
-    positive.sort(key=lambda item: (-item[1], item[0]))
-    return [name for name, _value in positive[: max(1, int(limit or 1))]]
-
-
-def _rank_reason(primary_drivers: list[str], warnings: list[str]) -> str:
-    parts: list[str] = []
-    for driver in primary_drivers:
-        if driver == "annualized_return":
-            parts.append("年化收益贡献领先")
-        elif driver == "net_income":
-            parts.append("净收入贡献较高")
-        elif driver == "liquidity":
-            parts.append("流动性评分有正向贡献")
-        elif driver == "risk_distance":
-            parts.append("价外/Delta/DTE 风险距离有正向贡献")
-        elif driver == "vol_edge":
-            parts.append("IV/RV 波动率优势贡献领先")
-        elif driver == "delta_target":
-            parts.append("Delta 更接近目标区间")
-        elif driver == "concentration":
-            parts.append("组合集中度占用较低")
-        elif driver == "path_risk":
-            parts.append("压力/跳空路径风险较低")
-    if not parts:
-        parts.append("候选通过准入，排序分数主要由默认收益项决定")
-    if warnings:
-        warning_text = "、".join(_SCORE_WARNING_LABELS.get(item, item) for item in warnings)
-        parts.append(f"存在{warning_text}提示")
-    return "；".join(parts)
 
 
 def explain_candidate_rank(
@@ -417,7 +441,7 @@ def explain_candidate_rank(
         if _coerce_float(value) is not None
     }
     warnings = [str(item) for item in (rank_key.get("score_warnings") or []) if str(item).strip()]
-    primary_drivers = _primary_score_drivers(components)
+    primary_drivers = ["annualized_return"]
     score_inputs = _candidate_score_inputs(src, mode=mode_norm)
     return {
         "mode": mode_norm,
@@ -427,6 +451,7 @@ def explain_candidate_rank(
         "expiration": str(src.get("expiration") or "").strip() or None,
         "strike": _first_float(src, "strike"),
         "strategy_score": float(rank_key.get("strategy_score") or 0.0),
+        "strategy_score_role": "diagnostic_only",
         "annualized_return": rank_key.get("annualized_return"),
         "net_income": rank_key.get("net_income"),
         "score_components": components,
@@ -436,7 +461,10 @@ def explain_candidate_rank(
         "risk_notes": [_SCORE_WARNING_LABELS.get(item, item) for item in warnings],
         "primary_drivers": primary_drivers,
         "primary_driver_labels": [_SCORE_COMPONENT_LABELS.get(item, item) for item in primary_drivers],
-        "rank_reason": _rank_reason(primary_drivers, warnings),
+        "rank_reason": (
+            "硬门槛通过后按年化净收益排序；收益相同时再比较"
+            + ("净接货折价和集中度" if mode_norm == "put" else "strike 上行距离和集中度")
+        ),
     }
 
 
@@ -1304,7 +1332,12 @@ def build_candidate_rank_key(
             "net_income": net,
             "score_components": dict(score.components),
             "score_warnings": list(score.warnings),
-            "sort_tuple": (-score.total, -(annual or 0.0), -(net or 0.0)),
+            "sort_tuple": _candidate_recommendation_sort_tuple(
+                src,
+                mode=mode_norm,
+                annualized_return=annual,
+                net_income=net,
+            ),
         }
         return out
 
@@ -1333,7 +1366,12 @@ def build_candidate_rank_key(
         "net_income": net,
         "score_components": dict(score.components),
         "score_warnings": list(score.warnings),
-        "sort_tuple": (-score.total, -(annual or 0.0), -(net or 0.0)),
+        "sort_tuple": _candidate_recommendation_sort_tuple(
+            src,
+            mode=mode_norm,
+            annualized_return=annual,
+            net_income=net,
+        ),
     }
     return out
 
@@ -1349,3 +1387,23 @@ def rank_candidate_rows(
         [r for r in rows if isinstance(r, dict)],
         key=lambda row: build_candidate_rank_key(row, mode=mode_norm, score_weights=score_weights)["sort_tuple"],
     )
+
+
+def select_best_candidate_per_symbol(
+    rows: list[dict[str, Any]],
+    *,
+    mode: StrategyMode | str,
+    score_weights: CandidateScoreWeights | None = None,
+) -> list[dict[str, Any]]:
+    """Return one highest-ranked hard-gate-passing contract per underlying."""
+    ranked = rank_candidate_rows(rows, mode=mode, score_weights=score_weights)
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in ranked:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        key = symbol or str(row.get("contract_symbol") or row.get("option_symbol") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(row)
+    return selected

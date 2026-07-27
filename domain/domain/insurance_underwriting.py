@@ -127,6 +127,7 @@ def underwriting_fields(
     }
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)
+        out["net_assignment_discount_pct"] = _net_assignment_discount(row)
     else:
         out["strike_upside_margin_pct"] = _strike_upside_margin(row, cfg=cfg)
     return out
@@ -146,15 +147,23 @@ def rank_underwriting_candidates(
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 
-    margin_key = "strike_safety_margin_pct" if mode_norm == "put" else "strike_upside_margin_pct"
+    margin_key = "net_assignment_discount_pct" if mode_norm == "put" else "strike_upside_margin_pct"
     return sorted(
         enriched,
         key=lambda item: (
-            -_sort_number(item.get(margin_key)),
-            -_sort_number(item.get("premium_edge_score")),
+            _annualized_return(item, mode=mode_norm) is None,
+            -_sort_number(_annualized_return(item, mode=mode_norm)),
+            -_sort_number(
+                item.get(margin_key)
+                if _float(item.get(margin_key)) is not None
+                else (_net_assignment_discount(item) if mode_norm == "put" else None)
+            ),
+            -_concentration_tie_break(item),
             _sort_number(item.get("spread_ratio")),
             -_sort_number(item.get("open_interest")),
             -_sort_number(_first_present(item, "net_income_cny", "net_income")),
+            str(item.get("symbol") or "").strip().upper(),
+            str(item.get("contract_symbol") or item.get("option_symbol") or ""),
         ),
     )
 
@@ -229,6 +238,30 @@ def _strike_safety_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConf
     if max_strike is None or strike is None or max_strike <= 0:
         return None
     return round((max_strike - strike) / max_strike, 6)
+
+
+def _net_assignment_discount(row: dict[str, Any]) -> float | None:
+    spot = _first_float(row, "spot")
+    breakeven = _first_float(row, "breakeven")
+    if spot is None or spot <= 0 or breakeven is None:
+        return None
+    return round((spot - breakeven) / spot, 6)
+
+
+def _concentration_tie_break(row: dict[str, Any]) -> float:
+    score = _first_float(row, "concentration_score")
+    if score is not None:
+        return score
+    exposures = [
+        value
+        for value in (
+            _first_float(row, "single_trade_concentration"),
+            _first_float(row, "symbol_concentration_after"),
+            _first_float(row, "total_short_put_concentration_after"),
+        )
+        if value is not None
+    ]
+    return -max(exposures) if exposures else 0.0
 
 
 def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConfig) -> float | None:

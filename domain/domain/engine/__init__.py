@@ -63,6 +63,7 @@ from .candidate_engine import (
     normalize_legacy_reject_log_rows,
     normalize_strategy_mode,
     rank_candidate_rows,
+    select_best_candidate_per_symbol,
     validate_candidate_decision_payload,
 )
 from .candidate_strategy import (
@@ -91,6 +92,7 @@ from .yield_enhancement import (
     rank_yield_enhancement_calls_for_put,
     rank_yield_enhancement_rows,
     rank_yield_enhancement_shadow_rows,
+    select_best_yield_enhancement_per_symbol,
     validate_yield_enhancement_pair,
     yield_enhancement_rank_key,
 )
@@ -158,6 +160,7 @@ __all__ = [
     'normalize_legacy_reject_log_rows',
     'normalize_strategy_mode',
     'rank_candidate_rows',
+    'select_best_candidate_per_symbol',
     'validate_candidate_decision_payload',
     'REJECT_LOG_COLUMNS',
     'STRATEGY_PARAM_TABLE_V1',
@@ -182,6 +185,7 @@ __all__ = [
     'rank_yield_enhancement_calls_for_put',
     'rank_yield_enhancement_rows',
     'rank_yield_enhancement_shadow_rows',
+    'select_best_yield_enhancement_per_symbol',
     'validate_yield_enhancement_pair',
     'yield_enhancement_rank_key',
 ]

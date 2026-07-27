@@ -147,7 +147,7 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
     assert 'within [0, 1]' in (p.stderr or '')
 
 
-def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
+def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None:
     _add_repo_to_syspath()
 
     import src.application.sell_call_steps as steps
@@ -186,50 +186,10 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     assert out['strategy'] == 'sell_call'
     assert len(calls) >= 1
     kwargs = calls[0]
-    assert kwargs['min_annualized_net_return'] == 0.123
+    assert kwargs['min_annualized_net_return'] == 0.0
+    assert kwargs['min_net_income'] == 0.0
     assert kwargs['min_strike'] == 102.0
     assert kwargs['min_strike_cost_multiplier'] == 1.02
-
-
-def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
-    _add_repo_to_syspath()
-
-    import src.application.sell_call_steps as steps
-    import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    calls: list[dict] = []
-    orig_run_sell_call_scan = steps.run_sell_call_scan
-
-    def _fake_run_sell_call_scan(**kwargs):
-        calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
-
-    steps.run_sell_call_scan = _fake_run_sell_call_scan
-    try:
-        steps.run_sell_call_scan_and_summarize(
-            py='python',
-            base=BASE,
-            symbol='AAPL',
-            symbol_lower='aapl',
-            symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
-            cc={'enabled': True, 'min_net_income': 100},
-            top_n=3,
-            required_data_dir=BASE / 'output',
-            report_dir=BASE / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
-            stock={'shares': 300, 'avg_cost': 100},
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
-            locked_shares_by_symbol={'AAPL': 100},
-        )
-    finally:
-        steps.run_sell_call_scan = orig_run_sell_call_scan
-
-    assert calls
-    kwargs = calls[0]
-    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
@@ -269,44 +229,3 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
     assert out['strategy'] == 'sell_call'
     assert out['candidate_count'] == 0
     assert calls == []
-
-
-def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
-    _add_repo_to_syspath()
-
-    import src.application.sell_call_steps as steps
-    import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
-    calls: list[dict] = []
-    orig_run_sell_call_scan = steps.run_sell_call_scan
-
-    def _fake_run_sell_call_scan(**kwargs):
-        calls.append(kwargs)
-        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame().to_csv(kwargs["output"], index=False)
-
-    steps.run_sell_call_scan = _fake_run_sell_call_scan
-    try:
-        steps.run_sell_call_scan_and_summarize(
-            py='python',
-            base=BASE,
-            symbol='0700.HK',
-            symbol_lower='0700.hk',
-            symbol_cfg={'symbol': '0700.HK', 'sell_call': {}},
-            cc={'enabled': True, 'min_net_income': 100},
-            top_n=3,
-            required_data_dir=BASE / 'output',
-            report_dir=BASE / 'output' / 'reports',
-            timeout_sec=10,
-            is_scheduled=True,
-            stock={'shares': 300, 'avg_cost': 100},
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
-            locked_shares_by_symbol={'0700.HK': 100},
-        )
-    finally:
-        steps.run_sell_call_scan = orig_run_sell_call_scan
-
-    assert calls
-    kwargs = calls[0]
-    assert abs(float(kwargs['min_net_income']) - (100 / 0.92)) < 1e-9

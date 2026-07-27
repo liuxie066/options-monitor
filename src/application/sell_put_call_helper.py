@@ -17,6 +17,7 @@ from domain.domain.engine import (
     rank_yield_enhancement_calls_for_put,
     rank_yield_enhancement_rows,
     rank_yield_enhancement_shadow_rows,
+    select_best_yield_enhancement_per_symbol,
     validate_yield_enhancement_pair,
 )
 from domain.domain.candidate_defaults import (
@@ -31,7 +32,10 @@ from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_models import CandidateContractInput
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
-from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+from src.application.yield_enhancement_config import (
+    derive_yield_enhancement_policy,
+    resolve_staggered_expiry_gap_days,
+)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -307,6 +311,11 @@ def _build_pair_row(
         "net_income": metrics.net_credit,
         "cash_required": metrics.cash_required,
         "put_only_breakeven": metrics.put_only_breakeven,
+        "net_assignment_discount_pct": round(
+            (float(put_leg.spot) - float(metrics.put_only_breakeven))
+            / float(put_leg.spot),
+            6,
+        ),
         "combo_breakeven": metrics.combo_breakeven,
         "downside_breakeven_penalty": metrics.downside_breakeven_penalty,
         "lottery_budget_ratio": metrics.lottery_budget_ratio,
@@ -790,6 +799,8 @@ def _build_yield_enhancement_pair_rows(
     reject_counts: Counter[str],
     diagnostics: list[dict[str, Any]],
     structure_mode: str,
+    min_expiry_gap_days: int | None,
+    max_expiry_gap_days: int | None,
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
     diagnostic_policy = {
@@ -798,6 +809,8 @@ def _build_yield_enhancement_pair_rows(
         "policy_min_net_credit_retention": min_net_credit_retention,
         "policy_min_net_credit_annualized": _safe_float(cfg.get("min_net_credit_annualized")),
         "policy_max_combo_spread_ratio": _safe_float(cfg.get("max_combo_spread_ratio")),
+        "policy_min_expiry_gap_days": min_expiry_gap_days,
+        "policy_max_expiry_gap_days": max_expiry_gap_days,
     }
     for _, raw in df.iterrows():
         put_leg = _put_leg_from_sell_put_row(raw)
@@ -870,6 +883,8 @@ def _build_yield_enhancement_pair_rows(
                 put_leg,
                 call_leg,
                 structure_mode=structure_mode,
+                min_expiry_gap_days=min_expiry_gap_days,
+                max_expiry_gap_days=max_expiry_gap_days,
             )
             if pair_rejects:
                 reject_counts.update(pair_rejects)
@@ -963,7 +978,6 @@ def find_sell_put_yield_enhancement_pairs(
     df = df_candidates.copy()
     policy = derive_yield_enhancement_policy(
         yield_enhancement_cfg,
-        sell_put_cfg,
         market=symbol_market(symbol),
     )
     cfg = policy.to_config()
@@ -984,11 +998,19 @@ def find_sell_put_yield_enhancement_pairs(
         defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     )
     structure_mode = str(cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
-    call_window = (
-        resolve_candidate_window(call_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
-        if structure_mode == "staggered_expiry_pair"
-        else put_window
-    )
+    min_expiry_gap_days: int | None = None
+    max_expiry_gap_days: int | None = None
+    if structure_mode == "staggered_expiry_pair":
+        min_expiry_gap_days, max_expiry_gap_days = resolve_staggered_expiry_gap_days(cfg)
+        call_window = resolve_candidate_window(
+            {
+                "min_dte": int(put_window.min_dte) + int(min_expiry_gap_days),
+                "max_dte": int(put_window.max_dte) + int(max_expiry_gap_days),
+            },
+            defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+        )
+    else:
+        call_window = put_window
 
     funding_mode = str(cfg.get("funding_mode") or "credit_or_even").strip().lower()
     max_debit_native = _safe_float(cfg.get("max_debit_native"))
@@ -1024,6 +1046,8 @@ def find_sell_put_yield_enhancement_pairs(
         reject_counts=reject_counts,
         diagnostics=diagnostics,
         structure_mode=structure_mode,
+        min_expiry_gap_days=min_expiry_gap_days,
+        max_expiry_gap_days=max_expiry_gap_days,
     )
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)
@@ -1047,8 +1071,8 @@ def select_best_yield_enhancement_pairs(
         selected["call_candidate_count"] = int(len(group))
         selected_rows.append(selected)
 
-    ranked_selected = rank_yield_enhancement_rows(selected_rows)
-    return pd.DataFrame(ranked_selected) if ranked_selected else _empty_pairs_df()
+    best_by_symbol = select_best_yield_enhancement_per_symbol(selected_rows)
+    return pd.DataFrame(best_by_symbol) if best_by_symbol else _empty_pairs_df()
 
 
 def build_yield_enhancement_rank_shadow(pairs_df: pd.DataFrame) -> pd.DataFrame:

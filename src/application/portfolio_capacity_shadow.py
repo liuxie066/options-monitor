@@ -86,15 +86,15 @@ def _candidate_rows(report_dir: Path, *, account: str) -> list[dict[str, Any]]:
 
     puts = [row for row in out if row["strategy_family"] == "sell_put"]
     calls = [row for row in out if row["strategy_family"] == "covered_call"]
-    return [*_rank_sell_put_rows(puts), *calls]
+    return [*_rank_family_rows(puts, mode="put"), *_rank_family_rows(calls, mode="call")]
 
 
-def _rank_sell_put_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _rank_family_rows(rows: list[dict[str, Any]], *, mode: str) -> list[dict[str, Any]]:
     underwriting = [_uses_underwriting_rank(row) for row in rows]
     if rows and all(underwriting):
-        return rank_underwriting_candidates(rows, mode="put")
+        return rank_underwriting_candidates(rows, mode=mode)
     if not any(underwriting):
-        return rank_candidate_rows(rows, mode="put")
+        return rank_candidate_rows(rows, mode=mode)
     # ponytail: mixed policies stay stable until a cross-policy priority is defined.
     return rows
 

@@ -465,7 +465,7 @@ def test_candidate_engine_strategy_score_keeps_legacy_default_components() -> No
     assert score.components["risk_distance"] == 0.0
 
 
-def test_candidate_engine_rank_can_use_independent_liquidity_score() -> None:
+def test_candidate_engine_rank_keeps_annualized_return_primary_when_score_weights_change() -> None:
     from domain.domain.engine import CandidateScoreWeights, rank_candidate_rows
 
     rows = [
@@ -496,10 +496,10 @@ def test_candidate_engine_rank_can_use_independent_liquidity_score() -> None:
         mode="put",
         score_weights=CandidateScoreWeights(liquidity=0.02),
     )
-    assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
+    assert [r["contract_symbol"] for r in ranked] == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
 
 
-def test_candidate_engine_rank_can_use_path_risk_score_for_covered_call() -> None:
+def test_candidate_engine_path_risk_score_is_diagnostic_not_a_rank_override() -> None:
     from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, rank_candidate_rows
 
     rows = [
@@ -522,8 +522,73 @@ def test_candidate_engine_rank_can_use_path_risk_score_for_covered_call() -> Non
     high = build_candidate_rank_key(rows[0], mode="call", score_weights=weights)
     low = build_candidate_rank_key(rows[1], mode="call", score_weights=weights)
 
-    assert [r["contract_symbol"] for r in ranked] == ["LOW_RIGHT_TAIL_COST", "HIGH_RIGHT_TAIL_COST"]
+    assert [r["contract_symbol"] for r in ranked] == ["HIGH_RIGHT_TAIL_COST", "LOW_RIGHT_TAIL_COST"]
     assert low["score_components"]["path_risk"] > high["score_components"]["path_risk"]
+
+
+def test_candidate_engine_selects_one_best_contract_per_symbol() -> None:
+    from domain.domain.engine import select_best_candidate_per_symbol
+
+    rows = [
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "NVDA_HIGH",
+            "annualized_net_return_on_cash_basis": 0.20,
+            "breakeven": 95.0,
+            "spot": 110.0,
+        },
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "NVDA_LOW",
+            "annualized_net_return_on_cash_basis": 0.18,
+            "breakeven": 90.0,
+            "spot": 110.0,
+        },
+        {
+            "symbol": "AAPL",
+            "contract_symbol": "AAPL_ONLY",
+            "annualized_net_return_on_cash_basis": 0.19,
+            "breakeven": 180.0,
+            "spot": 200.0,
+        },
+    ]
+
+    selected = select_best_candidate_per_symbol(rows, mode="put")
+
+    assert [row["contract_symbol"] for row in selected] == ["NVDA_HIGH", "AAPL_ONLY"]
+
+
+def test_candidate_engine_uses_assignment_discount_and_concentration_only_as_ties() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    rows = [
+        {
+            "contract_symbol": "HIGHER_RETURN",
+            "annualized_net_return_on_cash_basis": 0.21,
+            "net_assignment_discount_pct": 0.01,
+            "symbol_concentration_after": 0.50,
+        },
+        {
+            "contract_symbol": "BETTER_DISCOUNT",
+            "annualized_net_return_on_cash_basis": 0.20,
+            "net_assignment_discount_pct": 0.10,
+            "symbol_concentration_after": 0.10,
+        },
+        {
+            "contract_symbol": "LOWER_CONCENTRATION",
+            "annualized_net_return_on_cash_basis": 0.20,
+            "net_assignment_discount_pct": 0.10,
+            "symbol_concentration_after": 0.05,
+        },
+    ]
+
+    ranked = rank_candidate_rows(rows, mode="put")
+
+    assert [row["contract_symbol"] for row in ranked] == [
+        "HIGHER_RETURN",
+        "LOWER_CONCENTRATION",
+        "BETTER_DISCOUNT",
+    ]
 
 
 def test_candidate_engine_explains_rank_score_components() -> None:
@@ -559,7 +624,7 @@ def test_candidate_engine_explains_rank_score_components() -> None:
     assert explanation["risk_notes"] == ["价差偏宽"]
     assert "annualized_return" in explanation["primary_drivers"]
     assert "年化收益" in explanation["primary_driver_labels"]
-    assert "年化收益" in explanation["rank_reason"]
+    assert "年化净收益" in explanation["rank_reason"]
 
 
 def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:

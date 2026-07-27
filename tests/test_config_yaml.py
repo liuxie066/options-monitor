@@ -192,20 +192,19 @@ markets:
         )
         policies[item["symbol"]] = derive_yield_enhancement_policy(
             resolved["combo_yield"],
-            resolved["sell_put"],
             market="us",
         )
 
     defaulted = policies["NVDA"]
     assert defaulted.explicit_fields == ("enabled",)
     assert defaulted.config["max_call_cost_to_put_credit"] is None
-    assert defaulted.config["min_net_credit_retention"] == 0.80
+    assert defaulted.config["min_net_credit_retention"] == 0.60
     assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
 
     overridden = policies["FUTU"]
     assert overridden.explicit_fields == ("enabled", "max_call_cost_to_put_credit", "call")
     assert overridden.config["max_call_cost_to_put_credit"] == 0.30
-    assert overridden.config["min_net_credit_retention"] == 0.80
+    assert overridden.config["min_net_credit_retention"] == 0.60
     assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
 
 
@@ -247,7 +246,7 @@ markets:
     )
     assert resolved["sell_put"]["min_annualized_net_return"] == 0.10
     assert resolved["sell_put"]["min_net_income"] == 50.0
-    assert resolved["_global_sell_put_liquidity"]["min_net_income"] == 50.0
+    assert "min_net_income" not in resolved["_global_sell_put_liquidity"]
     validate_config(json.loads(json.dumps(cfg)))
 
 

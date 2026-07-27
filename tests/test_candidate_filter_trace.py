@@ -679,19 +679,19 @@ def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> 
     assert meta["source_files"][0]["row_count"] == 1
 
 
-def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tmp_path: Path) -> None:
+def test_candidate_rank_explain_uses_annualized_return_for_underwriting_put(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
     candidate_path.write_text(
         (
             "symbol,option_type,contract_symbol,expiration,strike,max_strike,spot,strategy_profile,"
-            "premium_edge_score,strike_safety_margin_pct,net_income,spread_ratio,"
+            "premium_edge_score,strike_safety_margin_pct,net_assignment_discount_pct,net_income,spread_ratio,"
             "annualized_net_return_on_cash_basis,iv_rv_ratio,iv_minus_rv,dte\n"
             "NVDA,put,NVDA_NEAR,2026-06-19,105,110,110,insurance_underwriting,"
-            "1.50,0.045455,300,0.05,0.30,1.20,0.08,30\n"
+            "1.50,0.045455,0.02,300,0.05,0.30,1.20,0.08,30\n"
             "NVDA,put,NVDA_SAFE,2026-06-19,95,110,110,insurance_underwriting,"
-            "1.10,0.136364,180,0.05,0.12,1.20,0.08,30\n"
+            "1.10,0.136364,0.14,180,0.05,0.12,1.20,0.08,30\n"
         ),
         encoding="utf-8",
     )
@@ -705,15 +705,20 @@ def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tm
 
     assert warnings == []
     assert data["groups"][0]["ranking_policy"] == "insurance_underwriting"
-    assert data["ranked"][0]["contract_symbol"] == "NVDA_SAFE"
+    assert data["ranked"][0]["contract_symbol"] == "NVDA_NEAR"
     assert data["ranked"][0]["ranking_policy"] == "insurance_underwriting"
-    assert data["ranked"][0]["score_components"]["strike_safety_margin_pct"] > data["ranked"][1]["score_components"][
-        "strike_safety_margin_pct"
+    assert data["ranked"][0]["annualized_return"] > data["ranked"][1]["annualized_return"]
+    assert data["ranked"][0]["score_components"]["net_assignment_discount_pct"] < data["ranked"][1][
+        "score_components"
+    ]["net_assignment_discount_pct"]
+    assert data["ranked"][0]["primary_drivers"] == [
+        "annualized_return",
+        "net_assignment_discount_pct",
+        "concentration_score",
     ]
-    assert data["ranked"][0]["primary_drivers"] == ["strike_safety_margin_pct", "premium_edge_score"]
 
 
-def test_candidate_rank_explain_prioritizes_covered_call_upside_margin(tmp_path: Path) -> None:
+def test_candidate_rank_explain_uses_annualized_return_for_covered_call(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_call_candidates_labeled.csv"
@@ -738,8 +743,12 @@ def test_candidate_rank_explain_prioritizes_covered_call_upside_margin(tmp_path:
     )
 
     assert warnings == []
-    assert data["ranked"][0]["contract_symbol"] == "NVDA_UPSIDE"
-    assert data["ranked"][0]["primary_drivers"] == ["strike_upside_margin_pct", "premium_edge_score"]
+    assert data["ranked"][0]["contract_symbol"] == "NVDA_RICH"
+    assert data["ranked"][0]["primary_drivers"] == [
+        "annualized_return",
+        "strike_upside_margin_pct",
+        "concentration_score",
+    ]
 
 
 def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path) -> None:
