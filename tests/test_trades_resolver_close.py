@@ -6,6 +6,7 @@ import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_expiration_ymd
+from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.ledger.api import (
     find_unique_open_position_lot,
     summarize_broker_trade_close_candidates,
@@ -19,6 +20,7 @@ from src.application.trades.resolver import (
     resolve_trade_deal,
 )
 from src.application.trades.lifecycle import resolve_lifecycle_expired_unassigned
+from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 
 
 class FakeRepo:
@@ -1056,6 +1058,101 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
     assert len(assignment_events) == 1
     assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
     assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 1000
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
+
+
+def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    observation_start = expiration_observation_start_ms("2026-05-22", "US")
+    assert observation_start is not None
+
+    discovery = discover_lifecycle_cases(
+        repo,
+        account="lx",
+        observed_at_ms=observation_start,
+        apply_changes=True,
+    )
+    assert len(discovery["created_case_ids"]) == 1
+    v2_case_id = discovery["created_case_ids"][0]
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="option-leg-v2",
+            symbol="TIGR",
+            contracts=10,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=observation_start + 1_000,
+            raw_payload={"deal_id": "option-leg-v2", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert option_result.status == "unresolved"
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="stock-leg-v2",
+            order_id="stock-order-v2",
+            symbol="TIGR",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1000,
+            price=6.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=observation_start + 2_000,
+            raw_payload={"deal_id": "stock-leg-v2", "code": "US.TIGR"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "applied"
+    assert stock_result.action == "assignment"
+    assert stock_result.reason == "assignment_recorded_v2"
+    allocations = repo.list_trade_lifecycle_allocations(case_id=v2_case_id)
+    assert len(allocations) == 1
+    assert allocations[0]["target_lot_id"] == lot_id
+    assert allocations[0]["contracts_allocated"] == 10
+    terminal_event = next(
+        item
+        for item in repo.list_trade_events()
+        if item.get("event_id") == allocations[0]["canonical_terminal_event_id"]
+    )
+    assert terminal_event["event_type"] == "assignment"
+    assert terminal_event["raw_payload"]["schema_version"] == "lifecycle_terminal_event.v2"
+    v2_case = repo.get_trade_lifecycle_case(v2_case_id)
+    assert v2_case is not None
+    assert v2_case["status"] == "ledger_written"
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
     assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
 

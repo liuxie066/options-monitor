@@ -525,6 +525,98 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
     }
 
 
+def test_daily_brief_uses_only_v2_position_authority_when_promoted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    (account_dir / "state" / "position_advice_sources.v2.json").write_text(
+        json.dumps(
+            {
+                "account": "lx",
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "position_lot_id": "legacy-lot",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "tier": "strong",
+                "close_action": "close",
+            }
+        ]
+    ).to_csv(account_dir / "close_advice.csv", index=False)
+    monkeypatch.setattr(
+        service,
+        "read_position_advice_v2_from_ledger",
+        lambda **_kwargs: {
+            "availability_status": "available",
+            "freshness": {"status": "fresh", "reason_codes": []},
+            "authority_mode": "v2",
+            "portfolio_plan_id": "plan-v2",
+            "account_run_id": "run-1",
+            "row_count": 1,
+            "actionable_count": 1,
+            "model_actionable_count": 1,
+            "rows": [
+                {
+                    "position_id": "v2-lot",
+                    "strategy_family": "short_put",
+                    "strategy_group_id": None,
+                    "leg_role": None,
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "expiration": "2026-08-21",
+                    "strike": 100,
+                    "contract_symbol": "NVDA260821P00100000",
+                    "lifecycle_state": "open",
+                    "group_structure_state": "standalone",
+                    "recommendation": "roll",
+                    "actionable": True,
+                    "action_scope": "position",
+                    "reason_codes": ["positive_carry_improvement"],
+                    "portfolio_plan_id": "plan-v2",
+                    "execution_order": 1,
+                    "depends_on": [],
+                    "quote_as_of": "2026-07-17T13:59:30Z",
+                    "net_carry_improvement_H_base_cny": "120",
+                    "payback_days": "2",
+                }
+            ],
+        },
+    )
+
+    brief = _assemble(tmp_path)
+
+    position_actions = [
+        item
+        for item in brief["actions"]
+        if item["action_type"].startswith("position_")
+    ]
+    assert [item["position_lot_id"] for item in position_actions] == [
+        "v2-lot"
+    ]
+    assert not any(
+        item.get("position_lot_id") == "legacy-lot"
+        for item in brief["actions"]
+    )
+    assert brief["positions"][0]["recommendation"] == "roll"
+    assert brief["position_advice_preview"]["authority_mode"] == "v2"
+
+
 def test_combo_yield_preserves_pipeline_order_and_dedupes_group_legs(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(

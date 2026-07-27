@@ -15,6 +15,7 @@ from domain.domain.engine import (
 )
 from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 from src.application.close_advice_reallocation_shadow import write_close_advice_reallocation_shadow
@@ -22,7 +23,14 @@ from src.application.config_sections import (
     resolve_watchlist_config,
     set_watchlist_config,
 )
+from src.application.config_loader import resolve_data_config_path
 from src.application.close_advice_runner import run_close_advice
+from src.application.position_advice_account_sources import (
+    publish_account_position_advice_sources,
+)
+from src.application.position_advice_runner import (
+    run_position_advice_v2_from_account_run,
+)
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
@@ -159,6 +167,31 @@ def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[st
         if str(item).strip()
     }
     return {item for item in out if item} or None
+
+
+def _position_advice_markets(
+    cfg: dict[str, Any],
+    requested: list[str],
+) -> list[str]:
+    explicit = sorted(
+        {
+            str(item or "").strip().upper()
+            for item in requested
+            if str(item or "").strip().upper() in {"US", "HK"}
+        }
+    )
+    if explicit:
+        return explicit
+    inferred = sorted(
+        {
+            str(symbol_market(item.get("symbol")) or "").strip().upper()
+            for item in resolve_watchlist_config(cfg)
+            if isinstance(item, dict)
+            and str(symbol_market(item.get("symbol")) or "").strip().upper()
+            in {"US", "HK"}
+        }
+    )
+    return inferred or ["HK", "US"]
 
 
 def run_one_account(
@@ -362,6 +395,7 @@ def run_one_account(
             cfg=cfg,
             shared_required=request.shared_required,
             force_refresh=bool(request.force_mode),
+            producer_run_id=request.run_id,
         )
         audit_fn(
             "tool_call",
@@ -506,6 +540,7 @@ def run_one_account(
         shared_required_data=request.shared_required,
         shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id),
         symbols_arg=request.symbols_arg,
+        position_advice_account_run_id=request.run_id,
         capture_output=True,
         text=True,
         env=dict(os.environ, PYTHONPATH=str(repo_root)),
@@ -579,6 +614,160 @@ def run_one_account(
         duration_ms=acct_metrics["pipeline_ms"],
         data=_safe_runlog_data({"account": acct}),
     )
+
+    position_advice_sources: dict[str, Any] | None = None
+    try:
+        portfolio_cfg = (
+            cfg.get("portfolio")
+            if isinstance(cfg.get("portfolio"), dict)
+            else {}
+        )
+        data_config_path = resolve_data_config_path(
+            base=request.base,
+            data_config=portfolio_cfg.get("data_config"),
+        )
+        position_advice_sources = publish_account_position_advice_sources(
+            account_run_root=acct_report_dir,
+            account_state_dir=acct_state_dir,
+            quote_producer_root=request.shared_required,
+            data_config_path=data_config_path,
+            account_run_id=request.run_id,
+            account=acct,
+            broker=str(portfolio_cfg.get("broker") or "futu"),
+            included_markets=_position_advice_markets(
+                cfg,
+                request.markets_to_run,
+            ),
+        )
+        source_summary = {
+            key: value
+            for key, value in position_advice_sources.items()
+            if key
+            not in {
+                "decision_state_snapshot",
+                "cash_capacity",
+                "share_coverage",
+            }
+        }
+        source_summary["decision_state_fingerprint"] = (
+            position_advice_sources["decision_state_snapshot"].get(
+                "decision_state_fingerprint"
+            )
+        )
+        source_summary["cash_capacity_status"] = (
+            position_advice_sources["cash_capacity"].get("status")
+        )
+        source_summary["share_coverage_symbol_count"] = len(
+            (
+                position_advice_sources["share_coverage"].get("by_symbol")
+                or {}
+            )
+        )
+        _write_acct_run_state(
+            "position_advice_sources.v2.json",
+            source_summary,
+        )
+        audit_fn(
+            "write",
+            "position_advice_sources_v2",
+            run_id=request.run_id,
+            account=acct,
+            status="ok",
+            extra={
+                "portfolio_account_identity_hash": (
+                    position_advice_sources[
+                        "portfolio_account_identity_hash"
+                    ]
+                ),
+                "decision_state_fingerprint": source_summary[
+                    "decision_state_fingerprint"
+                ],
+            },
+        )
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="position_advice_sources_v2",
+            exc=exc,
+        )
+
+    if position_advice_sources is not None:
+        try:
+            position_advice_result = run_position_advice_v2_from_account_run(
+                base=request.base,
+                account_run_root=acct_report_dir,
+                account_run_id=request.run_id,
+                account=acct,
+                broker=str(position_advice_sources["broker"]),
+                included_markets=position_advice_sources[
+                    "included_markets"
+                ],
+                normalized_portfolio_source=str(
+                    position_advice_sources[
+                        "normalized_portfolio_source"
+                    ]
+                ),
+                portfolio_account_identity_hash=str(
+                    position_advice_sources[
+                        "portfolio_account_identity_hash"
+                    ]
+                ),
+                capacity_pool_authority_id=(
+                    str(
+                        position_advice_sources[
+                            "capacity_pool_authority_id"
+                        ]
+                    )
+                    if position_advice_sources.get(
+                        "capacity_pool_authority_id"
+                    )
+                    else None
+                ),
+                source_receipts=position_advice_sources[
+                    "source_receipts"
+                ],
+                data_config_path=data_config_path,
+            )
+            _write_acct_run_state(
+                "position_advice_v2_run.json",
+                position_advice_result,
+            )
+            audit_fn(
+                "write",
+                "position_advice_v2",
+                run_id=request.run_id,
+                account=acct,
+                status=(
+                    "ok"
+                    if position_advice_result.get("status")
+                    in {"published", "skipped_v1_authority"}
+                    else "error"
+                ),
+                extra={
+                    "result_status": position_advice_result.get("status"),
+                    "authority_mode": position_advice_result.get(
+                        "authority_mode"
+                    ),
+                    "portfolio_plan_id": position_advice_result.get(
+                        "portfolio_plan_id"
+                    ),
+                    "current_switched": position_advice_result.get(
+                        "current_switched"
+                    ),
+                },
+            )
+        except Exception as exc:
+            _record_account_run_degraded(
+                runlog=runlog,
+                audit_fn=audit_fn,
+                run_id=request.run_id,
+                account=acct,
+                action="position_advice_v2",
+                exc=exc,
+            )
 
     try:
         capacity_shadow = write_portfolio_capacity_shadow(report_dir=acct_report_dir, account=acct)

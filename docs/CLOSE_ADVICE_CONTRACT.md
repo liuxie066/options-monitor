@@ -3,6 +3,12 @@
 Close advice is an exit-decision system. It does not open positions, roll
 contracts, tune strategy parameters, or change ledger state.
 
+Position Advice v2 is a separate additive portfolio-level contract. It does not
+change this v1 CSV/read contract. Shared authority, mixed-version behavior, and
+rollout/rollback are documented in
+[Position Advice v2 Contract](POSITION_ADVICE_V2_CONTRACT.md) and
+[Position Advice Compatibility](POSITION_ADVICE_COMPATIBILITY.md).
+
 ## Goal
 
 For each open option lot, close advice answers:

@@ -116,6 +116,7 @@
 - `close_advice`
 - `get_close_advice`
 - `close_advice_read`
+- `position_advice_read`
 
 ### 通知
 
@@ -248,6 +249,24 @@
 ```
 
 前三个入口可能写本地 input/report/cache；`close_advice_read` 不生成新建议。
+
+读取当前 Position Advice v2 portfolio plan：
+
+```bash
+./om-agent run --tool position_advice_read \
+  --input-json '{"config_key":"us","account":"lx"}'
+```
+
+`position_advice_read` 是 pure-read。它不会刷新 broker/quote facts，而会重新校验
+shared authority、current manifest、artifact/source hash、分源 expiry 和完整 ledger
+decision fingerprint。任何 stale、superseded、identity conflict 或 projection drift
+都会返回零 actionable rows。`v2_shadow` 仅供观察，v1 仍是通知 authority。
+
+Authority mutation 不注册为 Agent Tool。人工操作者只通过
+`./om position-advice authority ...` 使用默认 dry-run、expected-policy-hash CAS 和
+显式 `--confirm`。完整合同与兼容矩阵见
+[Position Advice v2 Contract](POSITION_ADVICE_V2_CONTRACT.md) 和
+[Position Advice Compatibility](POSITION_ADVICE_COMPATIBILITY.md)。
 
 ### Daily Brief
 

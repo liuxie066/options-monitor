@@ -24,9 +24,11 @@ from src.application.positions.context_builder import (
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.infrastructure.io_utils import is_fresh, load_cached_json
 from src.application.ledger.api import (
+    decision_state_snapshot,
     list_position_lot_snapshots,
     open_position_ledger,
 )
+from domain.domain.position_advice_authority import scope_for
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
     load_holdings_portfolio_shared_context,
@@ -52,6 +54,28 @@ def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
 def _load_option_position_records(data_config: str) -> tuple[object, list[dict]]:
     repo = open_position_ledger(Path(data_config))
     return repo, list(list_position_lot_snapshots(repo))
+
+
+def _decision_snapshots_for_records(
+    repo: object,
+    records: list[dict],
+) -> dict[str, dict]:
+    accounts = sorted(
+        {
+            str((item.get("fields") or {}).get("account") or "").strip().lower()
+            for item in records
+            if isinstance(item, dict)
+            and str((item.get("fields") or {}).get("account") or "").strip()
+        }
+    )
+    return {
+        account: decision_state_snapshot(
+            repo,
+            account=account,
+            portfolio_scope_id=scope_for(account),
+        )
+        for account in accounts
+    }
 
 
 def load_portfolio_context(
@@ -145,7 +169,15 @@ def load_option_positions_context(
         try:
             _repo, records = _load_option_position_records(data_config)
             rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
-            shared_ctx = build_shared_option_positions_context(records, broker=str(market), rates=rates)
+            shared_ctx = build_shared_option_positions_context(
+                records,
+                broker=str(market),
+                rates=rates,
+                decision_snapshots_by_account=_decision_snapshots_for_records(
+                    _repo,
+                    records,
+                ),
+            )
             shared_path.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding='utf-8')
             ctx = dict(slice_shared_option_context_for_account(shared_ctx, account) or {})
             ctx = with_context_source(ctx, 'shared_refresh')
@@ -160,7 +192,23 @@ def load_option_positions_context(
         # Fallback: direct per-account fetch path.
         _repo, records = _load_option_position_records(data_config)
         rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
-        ctx = build_option_positions_context(records, broker=str(market), account=account, rates=rates)
+        normalized_account = str(account or "").strip().lower()
+        decision_snapshot = (
+            decision_state_snapshot(
+                _repo,
+                account=normalized_account,
+                portfolio_scope_id=scope_for(normalized_account),
+            )
+            if normalized_account
+            else None
+        )
+        ctx = build_option_positions_context(
+            records,
+            broker=str(market),
+            account=account,
+            rates=rates,
+            decision_snapshot=decision_snapshot,
+        )
         ctx = with_context_source(ctx, 'direct_fetch')
         opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
         log(f"[CTX] option_positions_context source=direct_fetch account={account or '-'}")

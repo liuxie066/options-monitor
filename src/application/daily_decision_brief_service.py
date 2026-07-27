@@ -19,6 +19,7 @@ from domain.domain.daily_decision_event_risk import build_candidate_event_risk
 from domain.domain.engine import rank_candidate_rows
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
+from domain.domain.position_advice_authority import scope_for
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
@@ -29,6 +30,16 @@ from src.application.strategy_scan_failures import (
     read_strategy_scan_failures,
 )
 from src.application.multi_tick.misc import AccountResult
+from src.application.config_loader import resolve_data_config_path
+from src.application.position_advice_reader import (
+    read_position_advice_v2_from_ledger,
+)
+from src.application.position_advice_notification_authority import (
+    build_notification_authority_token,
+)
+from src.infrastructure.position_advice_manifest_lock import (
+    position_advice_state_root,
+)
 
 
 _DEFAULT_MAX_CANDIDATES = 3
@@ -97,13 +108,64 @@ def assemble_daily_decision_brief(
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
-    close_rows, close_available = _load_close_advice(
-        path=run_account_dir / "close_advice.csv",
-        run_account_dir=run_account_dir,
-        market=market_norm,
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
+    advice_authority = _daily_brief_advice_authority(
+        base=base_path,
+        state_dir=state_dir,
+        account=account_norm,
+        config=config_map,
+        now_utc=effective_now,
     )
+    position_advice_rows: list[dict[str, Any]] = []
+    if advice_authority["mode"] == "v2":
+        position_advice_rows = [
+            dict(item)
+            for item in advice_authority.get("rows") or []
+            if isinstance(item, Mapping) and _row_market(item) == market_norm
+        ]
+        close_rows = []
+        close_available = bool(advice_authority.get("available"))
+        source_artifacts.append(
+            {
+                "kind": "position_advice_v2",
+                "path": (
+                    "current:"
+                    + str(advice_authority.get("portfolio_plan_id") or "")
+                ),
+                "row_count": len(position_advice_rows),
+            }
+        )
+        if not close_available:
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "strategy_family": "position_advice",
+                    "reason": str(
+                        advice_authority.get("blocker")
+                        or "position_advice_unavailable"
+                    ),
+                }
+            )
+    elif advice_authority["mode"] == "authority_conflict":
+        close_rows, close_available = [], False
+        position_advice_rows = []
+        data_gaps.append(
+            {
+                "scope": "authority",
+                "strategy_family": "position_advice",
+                "reason": str(
+                    advice_authority.get("blocker")
+                    or "position_advice_authority_conflict"
+                ),
+            }
+        )
+    else:
+        close_rows, close_available = _load_close_advice(
+            path=run_account_dir / "close_advice.csv",
+            run_account_dir=run_account_dir,
+            market=market_norm,
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+        )
 
     put_rows = _dedupe_rows(put_rows, family="sell_put")
     call_rows = _dedupe_rows(call_rows, family="covered_call")
@@ -246,9 +308,17 @@ def assemble_daily_decision_brief(
             )
         )
 
-    for row in close_rows:
-        positions.append(_position_view(row))
-        actions.append(_close_action(row, account=account_norm))
+    if advice_authority["mode"] == "v2":
+        for row in position_advice_rows:
+            positions.append(_position_advice_position_view(row))
+            if row.get("actionable") is True:
+                actions.append(
+                    _position_advice_action(row, account=account_norm)
+                )
+    else:
+        for row in close_rows:
+            positions.append(_position_view(row))
+            actions.append(_close_action(row, account=account_norm))
 
     portfolio_context = _load_json_artifact(
         path=state_dir / "portfolio_context.json",
@@ -345,6 +415,13 @@ def assemble_daily_decision_brief(
         blockers.append("all_required_account_capacity_sources_unavailable")
     if not cash_total_reliable:
         blockers.append("cash_total_unavailable")
+    if advice_authority["mode"] == "authority_conflict":
+        blockers.append(
+            str(
+                advice_authority.get("blocker")
+                or "position_advice_authority_conflict"
+            )
+        )
 
     if blockers:
         actionability = "blocked"
@@ -417,6 +494,14 @@ def assemble_daily_decision_brief(
             "events": events,
             "data_gaps": deduped_data_gaps,
             "source_artifacts": _dedupe_source_artifacts(source_artifacts),
+            "position_advice_preview": _json_safe(
+                advice_authority.get("preview") or {}
+            ),
+            "notification_authority": _daily_brief_notification_authority(
+                advice_authority,
+                account=account_norm,
+                account_run_id=run_id_norm,
+            ),
         }
     )
 
@@ -608,6 +693,214 @@ def _is_controlled_empty_candidate_artifact(path: Path) -> bool:
 def _has_minimum_candidate_columns(frame: pd.DataFrame) -> bool:
     columns = {str(column).strip() for column in frame.columns}
     return "symbol" in columns and bool(columns.intersection({"contract_symbol", "code"}))
+
+
+def _daily_brief_advice_authority(
+    *,
+    base: Path,
+    state_dir: Path,
+    account: str,
+    config: Mapping[str, Any],
+    now_utc: datetime,
+) -> dict[str, Any]:
+    summary_path = state_dir / "position_advice_sources.v2.json"
+    scope_id = scope_for(account)
+    if not summary_path.exists():
+        scope_dir = position_advice_state_root(base) / scope_id
+        historical = (
+            scope_dir.exists()
+            and scope_dir.is_dir()
+            and any(
+                item.name != ".current.lock" for item in scope_dir.iterdir()
+            )
+        )
+        if historical:
+            return {
+                "mode": "authority_conflict",
+                "available": False,
+                "blocker": "position_advice_identity_source_missing",
+                "rows": [],
+                "preview": {},
+            }
+        return {
+            "mode": "v1",
+            "available": True,
+            "blocker": None,
+            "rows": [],
+            "preview": {},
+        }
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            raise ValueError("position advice source summary is not an object")
+        if str(summary.get("account") or "").strip().lower() != account:
+            raise ValueError("position advice source account mismatch")
+        source = str(
+            summary.get("normalized_portfolio_source") or ""
+        ).strip()
+        identity_hash = str(
+            summary.get("portfolio_account_identity_hash") or ""
+        ).strip()
+        portfolio_cfg = (
+            config.get("portfolio")
+            if isinstance(config.get("portfolio"), Mapping)
+            else {}
+        )
+        data_config_path = resolve_data_config_path(
+            base=base,
+            data_config=portfolio_cfg.get("data_config"),
+        )
+        result = read_position_advice_v2_from_ledger(
+            base=base,
+            normalized_account=account,
+            normalized_portfolio_source=source,
+            portfolio_account_identity_hash=identity_hash,
+            data_config_path=data_config_path,
+            now=now_utc,
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {
+            "mode": "authority_conflict",
+            "available": False,
+            "blocker": "position_advice_authority_resolution_failed",
+            "rows": [],
+            "preview": {},
+        }
+
+    mode = str(result.get("authority_mode") or "").strip()
+    freshness = str(
+        dict(result.get("freshness") or {}).get("status") or ""
+    ).strip()
+    preview = {
+        "authority_mode": mode or None,
+        "availability_status": result.get("availability_status"),
+        "freshness": dict(result.get("freshness") or {}),
+        "portfolio_plan_id": result.get("portfolio_plan_id"),
+        "account_run_id": result.get("account_run_id"),
+        "row_count": result.get("row_count"),
+        "actionable_count": result.get("actionable_count"),
+        "model_actionable_count": result.get("model_actionable_count"),
+    }
+    authority_common = {
+        "resolved_mode": mode or None,
+        "authority_generation": result.get("authority_generation"),
+        "authority_policy_hash": result.get("authority_policy_hash"),
+        "normalized_portfolio_source": source,
+        "portfolio_account_identity_hash": identity_hash,
+    }
+    if mode == "v1":
+        return {
+            "mode": "v1",
+            "available": True,
+            "blocker": None,
+            "rows": [],
+            "preview": preview,
+            **authority_common,
+        }
+    if mode == "v2_shadow":
+        return {
+            "mode": "v1",
+            "available": True,
+            "blocker": None,
+            "rows": [],
+            "preview": preview,
+            **authority_common,
+        }
+    if mode != "v2":
+        return {
+            "mode": "authority_conflict",
+            "available": False,
+            "blocker": "position_advice_authority_conflict",
+            "rows": [],
+            "preview": preview,
+            **authority_common,
+        }
+    available = (
+        result.get("availability_status") == "available"
+        and freshness == "fresh"
+    )
+    return {
+        "mode": "v2",
+        "available": available,
+        "blocker": (
+            None if available else f"position_advice_{freshness or 'unavailable'}"
+        ),
+        "rows": (
+            [
+                dict(item)
+                for item in result.get("rows") or []
+                if isinstance(item, Mapping)
+            ]
+            if available
+            else []
+        ),
+        "portfolio_plan_id": result.get("portfolio_plan_id"),
+        "preview": preview,
+        **authority_common,
+    }
+
+
+def _daily_brief_notification_authority(
+    advice_authority: Mapping[str, Any],
+    *,
+    account: str,
+    account_run_id: str,
+) -> dict[str, Any]:
+    selected = str(advice_authority.get("mode") or "").strip()
+    available = bool(advice_authority.get("available"))
+    allowed = selected == "v1" or (selected == "v2" and available)
+    resolved_mode = str(
+        advice_authority.get("resolved_mode") or selected
+    ).strip()
+    token: dict[str, Any] | None = None
+    source = str(
+        advice_authority.get("normalized_portfolio_source") or ""
+    ).strip()
+    identity_hash = str(
+        advice_authority.get("portfolio_account_identity_hash") or ""
+    ).strip()
+    if allowed and source and len(identity_hash) == 64:
+        try:
+            token = build_notification_authority_token(
+                normalized_account=account,
+                normalized_portfolio_source=source,
+                portfolio_account_identity_hash=identity_hash,
+                selected_advice_contract=selected,
+                resolved_mode=resolved_mode,
+                authority_generation=advice_authority.get(
+                    "authority_generation"
+                ),
+                authority_policy_hash=advice_authority.get(
+                    "authority_policy_hash"
+                ),
+                account_run_id=account_run_id,
+            )
+        except (TypeError, ValueError):
+            allowed = False
+    if allowed and token is None:
+        allowed = False
+    return {
+        "selected_advice_contract": (
+            selected if selected in {"v1", "v2"} else None
+        ),
+        "resolved_mode": resolved_mode or None,
+        "authority_generation": advice_authority.get(
+            "authority_generation"
+        ),
+        "authority_policy_hash": advice_authority.get(
+            "authority_policy_hash"
+        ),
+        "notification_allowed": allowed,
+        "blocker": (
+            None
+            if allowed
+            else str(
+                advice_authority.get("blocker")
+                or "position_advice_notification_authority_unavailable"
+            )
+        ),
+        "token": token,
+    }
 
 
 def _load_close_advice(
@@ -1317,6 +1610,123 @@ def _position_view(row: Mapping[str, Any]) -> dict[str, Any]:
     out["strategy_family"] = _text(
         row.get("strategy_family") or row.get("strategy") or "close_advice"
     ).lower()
+    return out
+
+
+def _position_advice_action(
+    row: Mapping[str, Any],
+    *,
+    account: str,
+) -> dict[str, Any]:
+    recommendation = _text(row.get("recommendation")).lower()
+    action_labels = {
+        "roll": "滚动当前期权",
+        "replace": "替换当前期权腿",
+        "reallocate": "重新分配期权资金",
+        "review": "人工核查持仓事实",
+    }
+    reasons = [
+        str(item)
+        for item in row.get("reason_codes") or []
+        if str(item)
+    ]
+    return {
+        "priority": "P1" if recommendation != "review" else "P0",
+        "state": "active",
+        "action_type": f"position_{recommendation}",
+        "strategy_family": _text(row.get("strategy_family")).lower(),
+        "account": account,
+        "symbol": _text(row.get("symbol")).upper(),
+        "option_type": _text(row.get("option_type")).lower(),
+        "side": _text(row.get("side")).lower(),
+        "expiration": _text(row.get("expiration")),
+        "strike": row.get("strike"),
+        "contract_symbol": _text(row.get("contract_symbol")).upper(),
+        "position_lot_id": _text(row.get("position_id")),
+        "strategy_group_id": _text(row.get("strategy_group_id")),
+        "leg_role": _text(row.get("leg_role")).lower(),
+        "title": action_labels.get(recommendation, "持仓建议"),
+        "reason": "; ".join(reasons),
+        "recommendation": recommendation,
+        "portfolio_plan_id": row.get("portfolio_plan_id"),
+        "execution_order": row.get("execution_order"),
+        "depends_on": list(row.get("depends_on") or []),
+        "requires_user_confirmation": True,
+        "metrics": {
+            key: _json_safe(row.get(key))
+            for key in (
+                "current_daily_carry",
+                "candidate_daily_carry",
+                "friction",
+                "net_carry_improvement_H",
+                "net_carry_improvement_H_base_cny",
+                "payback_days",
+            )
+            if row.get(key) is not None
+        },
+        "source": {
+            "kind": "position_advice_v2",
+            "position_id": row.get("position_id"),
+            "portfolio_plan_id": row.get("portfolio_plan_id"),
+        },
+    }
+
+
+def _position_advice_position_view(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    out = {
+        key: _json_safe(row.get(key))
+        for key in (
+            "position_id",
+            "strategy_group_id",
+            "leg_role",
+            "symbol",
+            "option_type",
+            "side",
+            "expiration",
+            "strike",
+            "contract_symbol",
+            "strategy_family",
+            "lifecycle_state",
+            "group_structure_state",
+            "recommendation",
+            "actionable",
+            "action_scope",
+            "reason_codes",
+            "best_candidate",
+            "resource_deltas",
+            "leg_plan",
+            "execution_order",
+            "depends_on",
+            "promotion_scope_status",
+        )
+    }
+    out["position_lot_id"] = out.pop("position_id")
+    out["evaluation_status"] = (
+        "evaluable" if row.get("recommendation") != "not_evaluable"
+        else "not_evaluable"
+    )
+    out["quote_status"] = (
+        "fresh" if row.get("quote_as_of") else "unavailable"
+    )
+    out["close_action"] = row.get("recommendation")
+    out["metrics"] = {
+        key: _json_safe(row.get(key))
+        for key in (
+            "current_extrinsic",
+            "current_daily_carry",
+            "current_capital_efficiency",
+            "candidate_daily_carry",
+            "candidate_capital_efficiency",
+            "comparison_horizon_days",
+            "friction",
+            "net_carry_improvement_H",
+            "net_carry_improvement_H_base_cny",
+            "payback_days",
+        )
+        if row.get(key) is not None
+    }
     return out
 
 

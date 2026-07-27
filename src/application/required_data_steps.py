@@ -9,9 +9,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+from datetime import datetime, timezone
+from typing import Any
 
 from src.application import pipeline_fetch_models
-from src.application.opend_symbol_outputs import save_outputs
+from src.application.opend_symbol_outputs import (
+    publish_required_data_quote_snapshot,
+    resolve_exact_fresh_required_data_quote_receipt,
+    save_outputs,
+)
 from src.application.required_data_coverage import (
     build_required_data_coverage,
     load_required_data_payload_from_csv,
@@ -48,12 +54,13 @@ def ensure_required_data(
     fetch_plan: RequiredDataFetchPlanBundle | None = None,
     report_dir: Path | None = None,
     opend_fetch_config: dict[str, float | int] | None = None,
-) -> None:
+    position_advice_producer_run_id: str | None = None,
+) -> dict[str, Any] | None:
     sym = symbol
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
 
     if not (want_put or want_call):
-        return
+        return None
 
     src = 'opend'
 
@@ -94,7 +101,10 @@ def ensure_required_data(
                             fetch_plan=fetch_plan,
                             merged_payload=load_required_data_payload_from_csv(parsed=parsed, symbol=sym),
                         )
-                        return
+                        return resolve_exact_fresh_required_data_quote_receipt(
+                            producer_root=required_data_dir,
+                            symbol=sym,
+                        )
                 except Exception:
                     pass
             elif min_dte is not None:
@@ -104,12 +114,18 @@ def ensure_required_data(
                     df0 = pd.read_csv(parsed, usecols=['dte'])
                     mx = pd.to_numeric(df0['dte'], errors='coerce').max()
                     if mx is not None and mx >= float(min_dte):
-                        return
+                        return resolve_exact_fresh_required_data_quote_receipt(
+                            producer_root=required_data_dir,
+                            symbol=sym,
+                        )
                 except Exception:
                     # On read/parse failure, refetch to be safe.
                     pass
             else:
-                return
+                return resolve_exact_fresh_required_data_quote_receipt(
+                    producer_root=required_data_dir,
+                    symbol=sym,
+                )
 
     requests: list[RequiredDataFetchRequest]
     if fetch_plan is not None:
@@ -143,12 +159,15 @@ def ensure_required_data(
         ]
 
     try:
+        source_observed_at: datetime | None = None
+        saved_paths: tuple[Path, Path] | None = None
         if fetch_plan is None and len(requests) == 1:
             payload = execute_required_data_opend(
                 base=base,
                 request=requests[0],
             )
-            save_outputs(
+            source_observed_at = datetime.now(timezone.utc)
+            saved_paths = save_outputs(
                 Path(base),
                 str(sym),
                 payload,
@@ -164,6 +183,7 @@ def ensure_required_data(
                 )
                 for request in requests
             ]
+            source_observed_at = datetime.now(timezone.utc)
             merged_payload = merge_required_data_payloads(symbol=sym, payloads=payloads)
             fetch_error_message = _first_fetch_payload_error_message(symbol=sym, payloads=payloads)
             if fetch_error_message:
@@ -172,7 +192,7 @@ def ensure_required_data(
                 meta["status"] = "error"
                 meta["error"] = fetch_error_message
                 merged_payload["meta"] = meta
-            save_outputs(
+            saved_paths = save_outputs(
                 Path(base),
                 str(sym),
                 merged_payload,
@@ -194,6 +214,52 @@ def ensure_required_data(
                 source=src,
                 status='ok',
             )
+        producer_run_id = str(position_advice_producer_run_id or "").strip()
+        if producer_run_id and source_observed_at is not None and saved_paths:
+            receipt_path, _receipt = publish_required_data_quote_snapshot(
+                producer_root=required_data_dir,
+                producer_run_id=producer_run_id,
+                symbol=sym,
+                raw_path=saved_paths[0],
+                csv_path=saved_paths[1],
+                fetch_plan=(
+                    fetch_plan.to_debug_dict()
+                    if fetch_plan is not None
+                    else {}
+                ),
+                fetch_policy={
+                    "source": str(fetch_source or "opend"),
+                    "host": str(fetch_host),
+                    "port": int(fetch_port),
+                    "limit_expirations": int(limit_expirations),
+                    "max_strike": max_strike,
+                    "min_dte": min_dte,
+                    "max_dte": max_dte,
+                    "opend_fetch": dict(opend_fetch_config or {}),
+                    "execution_mode": "pipeline_fallback",
+                },
+                source_observed_at=source_observed_at,
+            )
+            evidence = resolve_exact_fresh_required_data_quote_receipt(
+                producer_root=required_data_dir,
+                symbol=sym,
+            )
+            if evidence is None:
+                raise RuntimeError(
+                    "published quote receipt does not bind current required-data bytes"
+                )
+            expected_relpath = (
+                receipt_path.resolve()
+                .relative_to(required_data_dir.resolve())
+                .as_posix()
+            )
+            if evidence.get("receipt_relpath") != expected_relpath:
+                raise RuntimeError("published quote receipt was not selected")
+            return evidence
+        return resolve_exact_fresh_required_data_quote_receipt(
+            producer_root=required_data_dir,
+            symbol=sym,
+        )
     except BaseException as e:
         if (not is_scheduled) and (state_dir is not None):
             pipeline_fetch_models.record_fetch_snapshot(

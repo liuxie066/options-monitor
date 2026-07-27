@@ -16,8 +16,10 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
-from typing import Callable
+from typing import Any, Callable, Mapping
 from urllib import request
+
+from src.infrastructure.io_utils import atomic_write_json
 
 
 @dataclass(frozen=True)
@@ -148,15 +150,25 @@ def _warn(log: Callable[[str], None] | None, message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _save_rates(path: Path, rates: dict[str, float], *, log: Callable[[str], None] | None = None) -> None:
+def _save_rates(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Persist the exact provider observation without refreshing its timestamp."""
     try:
         path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "rates": rates,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        value = dict(payload)
+        rates = value.get("rates")
+        if not isinstance(rates, dict) or not rates:
+            raise ValueError("exchange-rate payload rates are required")
+        if _payload_timestamp(value) is None:
+            raise ValueError("exchange-rate payload timestamp is required")
+        if not str(value.get("source") or "").strip():
+            raise ValueError("exchange-rate payload source is required")
+        atomic_write_json(path, value, sort_keys=True)
     except Exception as exc:
         _warn(log, f"[WARN] exchange_rate cache write failed: path={path} error={exc}")
 
@@ -244,13 +256,14 @@ def get_exchange_rates_or_fetch_latest(
     )
     latest = fetch_latest_exchange_rates(log=log)
     if latest is not None:
-        rates = latest.get('rates')
-        if write_cache and isinstance(rates, dict):
-            _save_rates(Path(write_through_path or cache_path), rates, log=log)
+        if write_cache:
+            _save_rates(Path(write_through_path or cache_path), latest, log=log)
         return latest
     if stale is not None:
         _warn(log, "[WARN] exchange_rate live fetch unavailable; fallback to stale cache")
-        return stale
+        fallback = dict(stale)
+        fallback["freshness_status"] = "stale_fallback"
+        return fallback
     _warn(log, "[WARN] exchange_rate live fetch unavailable and no local cache")
     return None
 

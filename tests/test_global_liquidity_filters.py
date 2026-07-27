@@ -658,6 +658,72 @@ def test_validate_config_rejects_close_advice_strategy_mode() -> None:
         assert 'close_advice.strategy is not supported' in msg
 
 
+def test_validate_config_rejects_market_local_position_advice_authority() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'close_advice': {
+            'enabled': True,
+            'position_advice_authority': 'v2',
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'close_advice.position_advice_authority is not supported' in msg
+
+
+def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
+    import pytest
+
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "symbols": [
+            {
+                "symbol": "AAPL",
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ]
+    }
+    cfg["accounts"] = ["lx", " LX "]
+    with pytest.raises(SystemExit) as exc:
+        validate_config(cfg)
+    assert "duplicate labels after trim + lowercase" in str(exc.value)
+
+    cfg = {
+        "symbols": [
+            {
+                "symbol": "AAPL",
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ]
+    }
+    cfg["accounts"] = ["lx"]
+    cfg["account_settings"] = {
+        "lx": {"type": "futu", "futu": {"account_id": "123"}},
+        " LX ": {"type": "futu", "futu": {"account_id": "123"}},
+    }
+    with pytest.raises(SystemExit) as exc:
+        validate_config(cfg)
+    assert "account_settings contains duplicate labels" in str(exc.value)
+
+
 def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config

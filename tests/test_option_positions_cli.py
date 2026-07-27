@@ -1257,6 +1257,100 @@ def test_option_positions_cli_lifecycle_confirm_expired_records_expire_close(
     assert events[0]["raw_payload"]["evidence_ids"] == ["ev_0700_option_zero"]
 
 
+def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from domain.domain.option_lifecycle import expiration_observation_start_ms
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=1,
+            opened_at_ms=1_700_000_000_000,
+        ),
+    )
+    observation_start = expiration_observation_start_ms("2026-08-21", "US")
+    assert observation_start is not None
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "reconcile",
+            "--account",
+            "lx",
+            "--observed-at-ms",
+            str(observation_start),
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+    )
+    cli_mod.main()
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["operation"] == "lifecycle_reconcile"
+    assert dry_run["dry_run"] is True
+    assert len(dry_run["discovery"]["would_create_case_ids"]) == 1
+    assert repo.list_trade_lifecycle_cases() == []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "reconcile",
+            "--account",
+            "lx",
+            "--observed-at-ms",
+            str(observation_start),
+            "--apply",
+            "--confirm",
+            "--format",
+            "json",
+        ],
+    )
+    cli_mod.main()
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["dry_run"] is False
+    assert applied["write_applied"] is True
+    assert len(applied["discovery"]["created_case_ids"]) == 1
+    assert applied["read_models"][0]["lifecycle_state"] == "settlement_pending"
+    assert len(repo.list_trade_lifecycle_cases()) == 1
+
+
 def test_option_positions_cli_lifecycle_confirm_expired_canonicalizes_futu_root_alias(
     monkeypatch,
     tmp_path: Path,

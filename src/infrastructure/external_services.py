@@ -88,6 +88,7 @@ def run_pipeline_script(
     shared_required_data: Path | None = None,
     shared_context_dir: Path | None = None,
     symbols_arg: str | None = None,
+    position_advice_account_run_id: str | None = None,
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
@@ -112,6 +113,13 @@ def run_pipeline_script(
         cmd.extend(['--shared-context-dir', str(shared_context_dir)])
     if str(symbols_arg or '').strip():
         cmd.extend(['--symbols', str(symbols_arg).strip()])
+    if str(position_advice_account_run_id or "").strip():
+        cmd.extend(
+            [
+                "--position-advice-account-run-id",
+                str(position_advice_account_run_id).strip(),
+            ]
+        )
     return run_command(
         cmd,
         cwd=base,

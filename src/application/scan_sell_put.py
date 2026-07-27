@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -259,6 +259,10 @@ def run_sell_put_scan(
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
     quiet: bool = False,
+    risk_policy_version: str | None = None,
+    quote_snapshot_id: str | None = None,
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    put_cash_capacity_fn: Callable[[CandidateContractInput], dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """执行卖出看跌期权扫描并写出候选 CSV。"""
     threshold = validate_min_annualized_net_return(
@@ -286,11 +290,17 @@ def run_sell_put_scan(
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
             quiet=bool(quiet),
+            risk_policy_version=risk_policy_version,
+            quote_snapshot_id=quote_snapshot_id,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=compute_metrics,
             build_row_fn=_build_candidate_row,
-            build_hard_constraint_kwargs_fn=lambda _contract: {},
+            build_hard_constraint_kwargs_fn=(
+                put_cash_capacity_fn
+                if put_cash_capacity_fn is not None
+                else (lambda _contract: {})
+            ),
             annualized_return_value_fn=lambda metrics: metrics.get("annualized_net_return_on_cash_basis"),
             annotate_event_risk_fn=lambda df, base_dir, cfg: annotate_candidates_with_event_risk(
                 df,
@@ -299,6 +309,7 @@ def run_sell_put_scan(
             ),
             print_summary_fn=_print_summary,
             metric_reject_reason_fn=explain_metrics_rejection,
+            all_decisions_sink_fn=all_decisions_sink_fn,
         ),
         event_risk_cfg=event_risk_cfg,
         base_dir=Path(__file__).resolve().parents[2],

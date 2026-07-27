@@ -15,7 +15,7 @@ from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 
 
 class OptionPositionsReadRepo(Protocol):
-    def list_position_lots(self) -> list[dict[str, Any]]: ...
+    def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]: ...
 
 
 class OptionPositionsEventReadRepo(OptionPositionsReadRepo, Protocol):
@@ -101,6 +101,16 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    row = conn.execute("PRAGMA foreign_keys").fetchone()
+    enabled = int(row[0]) if row is not None else 0
+    if enabled != 1:
+        raise RuntimeError("SQLite foreign key enforcement is required for the option ledger")
+    return conn
+
+
 class SQLiteOptionPositionsRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path).resolve()
@@ -112,7 +122,7 @@ class SQLiteOptionPositionsRepository:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        initialize_ledger_connection(conn)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -123,6 +133,8 @@ class SQLiteOptionPositionsRepository:
         owned = conn is None
         if conn is None:
             conn = self._connect()
+        else:
+            initialize_ledger_connection(conn)
         try:
             yield conn
             if owned and commit:
@@ -131,9 +143,9 @@ class SQLiteOptionPositionsRepository:
             if owned:
                 conn.close()
 
-    def _table_exists(self, name: str) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
+    def _table_exists(self, name: str, *, conn: sqlite3.Connection | None = None) -> bool:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
                 (str(name),),
             ).fetchone()
@@ -212,6 +224,15 @@ class SQLiteOptionPositionsRepository:
                 )
                 """
             )
+            _add_column_if_missing(conn, "trade_lifecycle_cases", "broker", "TEXT")
+            _add_column_if_missing(conn, "trade_lifecycle_cases", "contract_key", "TEXT")
+            _add_column_if_missing(
+                conn,
+                "trade_lifecycle_cases",
+                "target_contracts_by_lot_json",
+                "TEXT",
+            )
+            _add_column_if_missing(conn, "trade_lifecycle_cases", "observation_start_ms", "INTEGER")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_cases_lookup
@@ -246,7 +267,72 @@ class SQLiteOptionPositionsRepository:
                 WHERE source_event_id IS NOT NULL AND source_event_id != ''
                 """
             )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_lifecycle_evidence_case_id
+                ON trade_lifecycle_evidence(case_id, evidence_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_allocations (
+                  allocation_id TEXT PRIMARY KEY,
+                  case_id TEXT NOT NULL,
+                  evidence_id TEXT NOT NULL,
+                  target_lot_id TEXT NOT NULL,
+                  terminal_type TEXT NOT NULL,
+                  contracts_allocated INTEGER NOT NULL CHECK(contracts_allocated > 0),
+                  canonical_terminal_event_id TEXT NOT NULL,
+                  created_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL,
+                  UNIQUE(case_id, evidence_id, target_lot_id),
+                  FOREIGN KEY(case_id) REFERENCES trade_lifecycle_cases(case_id),
+                  FOREIGN KEY(case_id, evidence_id)
+                    REFERENCES trade_lifecycle_evidence(case_id, evidence_id),
+                  FOREIGN KEY(canonical_terminal_event_id)
+                    REFERENCES trade_events(event_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_allocations_case
+                ON trade_lifecycle_allocations(case_id, target_lot_id, allocation_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_group_identities (
+                  group_id TEXT PRIMARY KEY,
+                  schema_version TEXT NOT NULL,
+                  strategy TEXT NOT NULL,
+                  account TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  funding_put_record_id TEXT NOT NULL,
+                  funding_put_open_event_id TEXT NOT NULL,
+                  funding_put_contract_key TEXT NOT NULL,
+                  participation_call_record_id TEXT NOT NULL,
+                  participation_call_open_event_id TEXT NOT NULL,
+                  participation_call_contract_key TEXT NOT NULL,
+                  original_contracts INTEGER NOT NULL CHECK(original_contracts > 0),
+                  created_at_ms INTEGER NOT NULL,
+                  identity_hash TEXT NOT NULL,
+                  raw_json TEXT NOT NULL,
+                  FOREIGN KEY(funding_put_open_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(participation_call_open_event_id) REFERENCES trade_events(event_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_strategy_group_identities_account
+                ON strategy_group_identities(account, symbol, group_id)
+                """
+            )
             self._backfill_position_lot_contract_columns(conn)
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(f"SQLite foreign key check failed: {len(violations)} violation(s)")
             conn.commit()
 
     def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> None:
@@ -443,9 +529,9 @@ class SQLiteOptionPositionsRepository:
                 inserted += 1
         return inserted
 
-    def list_position_lots(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
+    def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
                 """
                 SELECT record_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
@@ -454,9 +540,14 @@ class SQLiteOptionPositionsRepository:
             ).fetchall()
         return [position_lot_row_to_record(row) for row in rows]
 
-    def get_position_lot_fields(self, record_id: str) -> dict[str, Any]:
-        with self._connect() as conn:
-            row = conn.execute(
+    def get_position_lot_fields(
+        self,
+        record_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
                 """
                 SELECT record_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
@@ -569,13 +660,18 @@ class SQLiteOptionPositionsRepository:
         self,
         *,
         status: str | None = None,
+        account: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
         params: list[Any] = []
-        where = ""
         if status:
-            where = "WHERE status = ?"
+            clauses.append("status = ?")
             params.append(str(status).strip().lower())
+        if account:
+            clauses.append("account = ?")
+            params.append(str(account).strip().lower())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
                 f"""
@@ -689,6 +785,454 @@ class SQLiteOptionPositionsRepository:
             if isinstance(payload, dict):
                 out.append(dict(payload))
         return out
+
+    def insert_trade_lifecycle_case_once(
+        self,
+        case: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(case or {})
+        case_id = str(payload.get("case_id") or "").strip()
+        case_key = str(payload.get("case_key") or "").strip()
+        account = str(payload.get("account") or "").strip().lower()
+        target_contracts = payload.get("target_contracts_by_lot")
+        if not case_id or not case_key or not account or not isinstance(target_contracts, dict) or not target_contracts:
+            raise ValueError("lifecycle_case.v2 requires case id, key, account and target manifest")
+        immutable = _lifecycle_case_immutable_payload(payload)
+        ts = int(now_ms())
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_cases WHERE case_id = ? OR case_key = ?",
+                (case_id, case_key),
+            ).fetchone()
+            if existing is not None:
+                existing_payload = json.loads(str(existing["raw_json"]) or "{}")
+                if not isinstance(existing_payload, dict) or _lifecycle_case_immutable_payload(existing_payload) != immutable:
+                    raise ValueError(f"lifecycle case immutable conflict for case_id={case_id}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_cases (
+                  case_id, case_key, account, broker, symbol, option_type, position_side,
+                  strike, expiration_ymd, contract_key, status, decision_type,
+                  target_lot_ids_json, target_contracts_by_lot_json, observation_start_ms,
+                  pending_until_ms, created_at_ms, updated_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    case_id,
+                    case_key,
+                    account,
+                    str(payload.get("broker") or "").strip().lower() or None,
+                    str(payload.get("symbol") or "").strip().upper(),
+                    str(payload.get("option_type") or "").strip().lower() or None,
+                    str(payload.get("position_side") or "").strip().lower() or None,
+                    float(payload["strike"]) if payload.get("strike") is not None else None,
+                    str(payload.get("expiration_ymd") or "").strip() or None,
+                    _json_text(payload.get("contract_key")),
+                    str(payload.get("status") or "waiting_settlement_evidence").strip().lower(),
+                    str(payload.get("decision_type") or "").strip().lower() or None,
+                    json.dumps(sorted(str(item) for item in target_contracts), ensure_ascii=False),
+                    json.dumps(target_contracts, ensure_ascii=False, sort_keys=True),
+                    int(payload["observation_start_ms"]) if payload.get("observation_start_ms") is not None else None,
+                    int(payload["pending_until_ms"]) if payload.get("pending_until_ms") is not None else None,
+                    ts,
+                    ts,
+                    raw_json,
+                ),
+            )
+        return True
+
+    def update_trade_lifecycle_case_derived_status(
+        self,
+        *,
+        case_id: str,
+        status: str,
+        derived_summary: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        case_id_value = str(case_id or "").strip()
+        status_value = str(status or "").strip().lower()
+        if not case_id_value or not status_value:
+            raise ValueError("case id and derived status are required")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json, status FROM trade_lifecycle_cases WHERE case_id = ?",
+                (case_id_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"lifecycle case not found: {case_id_value}")
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError(f"lifecycle case JSON invalid: {case_id_value}")
+            updated = {
+                **payload,
+                "status": status_value,
+                "derived_summary": dict(derived_summary or {}),
+            }
+            updated_json = json.dumps(updated, ensure_ascii=False, sort_keys=True)
+            if str(row["status"] or "") == status_value and str(row["raw_json"] or "") == updated_json:
+                return False
+            active_conn.execute(
+                """
+                UPDATE trade_lifecycle_cases
+                SET status = ?, updated_at_ms = ?, raw_json = ?
+                WHERE case_id = ?
+                """,
+                (status_value, int(now_ms()), updated_json, case_id_value),
+            )
+        return True
+
+    def insert_trade_lifecycle_evidence_once(
+        self,
+        evidence: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(evidence or {})
+        evidence_id = str(payload.get("evidence_id") or "").strip()
+        source_type = str(payload.get("source_type") or "").strip()
+        evidence_type = str(payload.get("evidence_type") or "").strip()
+        if not evidence_id or not source_type or not evidence_type:
+            raise ValueError("lifecycle evidence requires evidence_id, source_type and evidence_type")
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_evidence WHERE evidence_id = ?",
+                (evidence_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["raw_json"] or "") != raw_json:
+                    raise ValueError(f"lifecycle evidence immutable conflict for evidence_id={evidence_id}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_evidence (
+                  evidence_id, case_id, source_type, source_event_id, evidence_type,
+                  account, symbol, raw_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id,
+                    str(payload.get("case_id") or "").strip() or None,
+                    source_type,
+                    str(payload.get("source_event_id") or "").strip() or None,
+                    evidence_type,
+                    str(payload.get("account") or "").strip().lower() or None,
+                    str(payload.get("symbol") or "").strip().upper() or None,
+                    raw_json,
+                    int(now_ms()),
+                ),
+            )
+        return True
+
+    def bind_trade_lifecycle_evidence_case_once(
+        self,
+        *,
+        evidence_id: str,
+        case_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        evidence_id_value = str(evidence_id or "").strip()
+        case_id_value = str(case_id or "").strip()
+        if not evidence_id_value or not case_id_value:
+            raise ValueError("evidence_id and case_id are required")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                "SELECT case_id, raw_json FROM trade_lifecycle_evidence WHERE evidence_id = ?",
+                (evidence_id_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"lifecycle evidence not found: {evidence_id_value}")
+            existing_case = str(row["case_id"] or "").strip()
+            if existing_case:
+                if existing_case != case_id_value:
+                    raise ValueError(f"lifecycle evidence already bound to another case: {evidence_id_value}")
+                return False
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError(f"lifecycle evidence JSON invalid: {evidence_id_value}")
+            payload["case_id"] = case_id_value
+            active_conn.execute(
+                """
+                UPDATE trade_lifecycle_evidence
+                SET case_id = ?, raw_json = ?
+                WHERE evidence_id = ? AND case_id IS NULL
+                """,
+                (
+                    case_id_value,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    evidence_id_value,
+                ),
+            )
+        return True
+
+    def get_trade_lifecycle_evidence(
+        self,
+        evidence_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_evidence WHERE evidence_id = ?",
+                (str(evidence_id or "").strip(),),
+            ).fetchone()
+        return _json_object(row["raw_json"]) if row is not None else None
+
+    def insert_trade_lifecycle_allocation(
+        self,
+        allocation: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(allocation or {})
+        required = (
+            "allocation_id",
+            "case_id",
+            "evidence_id",
+            "target_lot_id",
+            "terminal_type",
+            "canonical_terminal_event_id",
+        )
+        values = {field: str(payload.get(field) or "").strip() for field in required}
+        if any(not value for value in values.values()):
+            raise ValueError("lifecycle allocation is missing required identity")
+        contracts = int(payload.get("contracts_allocated") or 0)
+        if contracts <= 0 or contracts != float(payload.get("contracts_allocated")):
+            raise ValueError("lifecycle allocation contracts must be a positive integer")
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_allocations WHERE allocation_id = ?",
+                (values["allocation_id"],),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["raw_json"] or "") != raw_json:
+                    raise ValueError(f"lifecycle allocation conflict for allocation_id={values['allocation_id']}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_allocations (
+                  allocation_id, case_id, evidence_id, target_lot_id, terminal_type,
+                  contracts_allocated, canonical_terminal_event_id, created_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["allocation_id"],
+                    values["case_id"],
+                    values["evidence_id"],
+                    values["target_lot_id"],
+                    values["terminal_type"].lower(),
+                    contracts,
+                    values["canonical_terminal_event_id"],
+                    int(now_ms()),
+                    raw_json,
+                ),
+            )
+        return True
+
+    def list_trade_lifecycle_allocations(
+        self,
+        *,
+        case_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE case_id = ?" if case_id else ""
+        params = (str(case_id).strip(),) if case_id else ()
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json
+                FROM trade_lifecycle_allocations
+                {where}
+                ORDER BY created_at_ms ASC, allocation_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
+    def insert_strategy_group_identity(
+        self,
+        identity: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(identity or {})
+        group_id = str(payload.get("group_id") or "").strip()
+        identity_hash = str(payload.get("identity_hash") or "").strip()
+        if not group_id or not identity_hash:
+            raise ValueError("strategy group identity requires group_id and identity_hash")
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT identity_hash FROM strategy_group_identities WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["identity_hash"] or "") != identity_hash:
+                    raise ValueError(f"strategy group identity conflict for group_id={group_id}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO strategy_group_identities (
+                  group_id, schema_version, strategy, account, symbol,
+                  funding_put_record_id, funding_put_open_event_id, funding_put_contract_key,
+                  participation_call_record_id, participation_call_open_event_id,
+                  participation_call_contract_key, original_contracts, created_at_ms,
+                  identity_hash, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group_id,
+                    str(payload.get("schema_version") or "").strip(),
+                    str(payload.get("strategy") or "").strip().lower(),
+                    str(payload.get("account") or "").strip().lower(),
+                    str(payload.get("symbol") or "").strip().upper(),
+                    str(payload.get("funding_put_record_id") or "").strip(),
+                    str(payload.get("funding_put_open_event_id") or "").strip(),
+                    _json_text(payload.get("funding_put_contract_key")),
+                    str(payload.get("participation_call_record_id") or "").strip(),
+                    str(payload.get("participation_call_open_event_id") or "").strip(),
+                    _json_text(payload.get("participation_call_contract_key")),
+                    int(payload.get("original_contracts") or 0),
+                    int(payload.get("created_at_ms") or now_ms()),
+                    identity_hash,
+                    raw_json,
+                ),
+            )
+        return True
+
+    def get_strategy_group_identity(
+        self,
+        group_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM strategy_group_identities WHERE group_id = ?",
+                (str(group_id or "").strip(),),
+            ).fetchone()
+        return _json_object(row["raw_json"]) if row is not None else None
+
+    def list_strategy_group_identities(
+        self,
+        *,
+        account: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE account = ?" if account else ""
+        params = (str(account).strip().lower(),) if account else ()
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json FROM strategy_group_identities
+                {where}
+                ORDER BY account ASC, symbol ASC, group_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
+    def assert_foreign_keys_clean(self, *, conn: sqlite3.Connection | None = None) -> None:
+        with self._optional_conn(conn) as active_conn:
+            violations = active_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"SQLite foreign key check failed: {len(violations)} violation(s)")
+
+    def read_decision_state_rows(self, *, account: str) -> dict[str, Any]:
+        account_value = str(account or "").strip().lower()
+        if not account_value:
+            raise ValueError("decision state snapshot requires account")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            events = self.list_trade_events(conn=conn)
+            lots = self.list_position_lots(conn=conn)
+            cases = self.list_trade_lifecycle_cases(conn=conn)
+            evidence = self.list_trade_lifecycle_evidence(account=account_value, conn=conn)
+            allocations = [
+                _json_object(row["raw_json"])
+                for row in conn.execute(
+                    """
+                    SELECT allocation.raw_json
+                    FROM trade_lifecycle_allocations AS allocation
+                    JOIN trade_lifecycle_cases AS lifecycle_case
+                      ON lifecycle_case.case_id = allocation.case_id
+                    WHERE lifecycle_case.account = ?
+                    ORDER BY allocation.created_at_ms ASC, allocation.allocation_id ASC
+                    """,
+                    (account_value,),
+                ).fetchall()
+            ]
+            assigned_stock_events = [
+                _json_object(row["event_json"])
+                for row in conn.execute(
+                    """
+                    SELECT event_json
+                    FROM assigned_stock_events
+                    ORDER BY trade_time_ms ASC, stock_event_id ASC
+                    """
+                ).fetchall()
+            ]
+            identities = self.list_strategy_group_identities(account=account_value, conn=conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return {
+            "trade_events": events,
+            "stored_position_lots": lots,
+            "account_position_lots": [
+                row
+                for row in lots
+                if str((row.get("fields") or {}).get("account") or "").strip().lower() == account_value
+            ],
+            "account_lifecycle_cases": [
+                row for row in cases if str(row.get("account") or "").strip().lower() == account_value
+            ],
+            "account_lifecycle_evidence": evidence,
+            "account_lifecycle_allocations": allocations,
+            "account_assigned_stock_events": [
+                row
+                for row in assigned_stock_events
+                if str(row.get("account") or (row.get("raw_payload") or {}).get("account") or "").strip().lower()
+                == account_value
+            ],
+            "account_combo_identities": identities,
+        }
+
+
+def _json_text(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    payload = json.loads(str(value) or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("stored ledger JSON value must be an object")
+    return dict(payload)
+
+
+def _lifecycle_case_immutable_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": payload.get("schema_version"),
+        "case_id": str(payload.get("case_id") or "").strip(),
+        "case_key": str(payload.get("case_key") or "").strip(),
+        "account": str(payload.get("account") or "").strip().lower(),
+        "broker": str(payload.get("broker") or "").strip().lower(),
+        "contract_key": payload.get("contract_key"),
+        "position_side": str(payload.get("position_side") or "").strip().lower(),
+        "expiration_ymd": str(payload.get("expiration_ymd") or "").strip(),
+        "target_contracts_by_lot": dict(payload.get("target_contracts_by_lot") or {}),
+        "observation_start_ms": payload.get("observation_start_ms"),
+        "pending_until_ms": payload.get("pending_until_ms"),
+    }
 
 
 def with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:
