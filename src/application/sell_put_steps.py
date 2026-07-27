@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pandas as pd
 
@@ -26,7 +26,10 @@ from src.application.render_sell_put_alerts import render_sell_put_alerts
 from src.application.report_labels import add_sell_put_labels
 from src.application.report_summaries import summarize_sell_put
 from src.application.scan_sell_put import run_sell_put_scan
-from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+from src.application.sell_put_cash import (
+    enrich_sell_put_candidates_with_cash,
+    sell_put_opening_capacity_inputs,
+)
 from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.candidate_filter_trace import (
@@ -241,6 +244,9 @@ def run_sell_put_scan_and_summarize(
     global_sell_put_event_risk: dict[str, Any] | None = None,
     run_sell_put: bool = True,
     yield_enhancement_sell_put_cfg: dict[str, Any] | None = None,
+    risk_policy_version: str | None = None,
+    quote_snapshot_id: str | None = None,
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
@@ -295,6 +301,17 @@ def run_sell_put_scan_and_summarize(
             strategy_family=sell_put_semantics.strategy_family,
             strategy_profile=sell_put_semantics.scan_strategy_profile,
             quiet=bool(is_scheduled),
+            risk_policy_version=risk_policy_version,
+            quote_snapshot_id=quote_snapshot_id,
+            all_decisions_sink_fn=all_decisions_sink_fn,
+            put_cash_capacity_fn=lambda contract: sell_put_opening_capacity_inputs(
+                symbol=symbol,
+                strike=contract.strike,
+                multiplier=contract.multiplier,
+                currency=contract.currency,
+                portfolio_ctx=portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+            ),
         )
         add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
         df_sp_lab = safe_read_csv(symbol_sp_labeled)

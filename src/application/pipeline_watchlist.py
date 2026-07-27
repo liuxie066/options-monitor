@@ -12,9 +12,12 @@ Design:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from threading import Lock
+from typing import Any, Callable, Iterable
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.config_profiles import deep_merge
 from src.application.config_sections import (
     resolve_templates_config,
@@ -31,6 +34,7 @@ from src.application.yield_enhancement_config import (
 )
 from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
+from src.infrastructure.io_utils import atomic_write_json
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_net_income',
@@ -39,6 +43,10 @@ LIQUIDITY_COMMON_FIELDS = (
     'max_spread_ratio',
 )
 DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS = 4
+POSITION_ADVICE_CANDIDATE_CAPTURE_SCHEMA = (
+    "position_advice_candidate_all_decisions_capture.v1"
+)
+POSITION_ADVICE_CANDIDATE_RISK_POLICY_VERSION = "candidate_pipeline_policy.v2"
 
 
 def _to_positive_int(value, default: int) -> int:
@@ -188,6 +196,15 @@ def run_watchlist_pipeline(
     build_pipeline_context_fn: Callable[..., tuple[dict | None, dict | None, float | None, float | None]],
     build_symbols_summary_fn: Callable[[list[dict]], object],
     build_symbols_digest_fn: Callable[[list[dict], int], object],
+    position_advice_quote_snapshot_ids: dict[str, str] | None = None,
+    position_advice_all_decisions_sink_fn: (
+        Callable[[list[dict[str, Any]]], None] | None
+    ) = None,
+    position_advice_risk_policy_version: str | None = None,
+    position_advice_producer_run_id: str | None = None,
+    position_advice_candidate_capture_status_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
+    ) = None,
 ) -> list[dict]:
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
@@ -263,6 +280,29 @@ def run_watchlist_pipeline(
             )
             item = _apply_event_snapshot_path(item, event_snapshot_path)
             item_portfolio_ctx = dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
+            symbol_key = normalize_symbol_read(item.get("symbol"))
+            quote_snapshot_id = (
+                (position_advice_quote_snapshot_ids or {}).get(symbol_key)
+                if symbol_key
+                else None
+            )
+            advice_scan_kwargs: dict[str, Any] = {}
+            if (
+                position_advice_all_decisions_sink_fn is not None
+                and position_advice_risk_policy_version
+            ):
+                advice_scan_kwargs = {
+                    "risk_policy_version": position_advice_risk_policy_version,
+                    "all_decisions_sink_fn": position_advice_all_decisions_sink_fn,
+                    "position_advice_producer_run_id": (
+                        position_advice_producer_run_id
+                    ),
+                    "candidate_capture_status_sink_fn": (
+                        position_advice_candidate_capture_status_sink_fn
+                    ),
+                }
+                if quote_snapshot_id:
+                    advice_scan_kwargs["quote_snapshot_id"] = quote_snapshot_id
 
             if not want_scan:
                 process_symbol_fn(
@@ -291,6 +331,7 @@ def run_watchlist_pipeline(
                 timeout_sec=symbol_timeout_sec,
                 is_scheduled=is_scheduled,
                 runtime_config=cfg,
+                **advice_scan_kwargs,
             )
             validated_rows = normalize_processor_rows(processor_rows)
             return list(validated_rows)
@@ -339,13 +380,30 @@ def run_watchlist_pipeline_default(
     symbols_arg: str | None,
     log: Callable[[str], None],
     want_fn: Callable[[str], bool],
+    position_advice_account_run_id: str | None = None,
 ) -> list[dict]:
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
     from src.application.pipeline_symbol import process_symbol
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
-    return run_watchlist_pipeline(
+    whitelist = _parse_symbols_whitelist(symbols_arg)
+    account_run_id = str(position_advice_account_run_id or "").strip()
+    capture_started_at = datetime.now(timezone.utc)
+    captured_decisions: list[dict[str, Any]] = []
+    capture_statuses: list[dict[str, Any]] = []
+    capture_lock = Lock()
+
+    def _capture_all_decisions(rows: list[dict[str, Any]]) -> None:
+        with capture_lock:
+            captured_decisions.extend(dict(item) for item in rows)
+
+    def _capture_status(status: dict[str, Any]) -> None:
+        with capture_lock:
+            capture_statuses.append(dict(status))
+
+    candidate_capture_enabled = bool(account_run_id and want_scan)
+    result = run_watchlist_pipeline(
         py=py,
         base=base,
         cfg=cfg,
@@ -383,4 +441,193 @@ def run_watchlist_pipeline_default(
             if is_scheduled
             else build_symbols_digest([r.get("symbol") for r in rows if r.get("symbol")], report_dir)
         ),
+        position_advice_all_decisions_sink_fn=(
+            _capture_all_decisions if candidate_capture_enabled else None
+        ),
+        position_advice_risk_policy_version=(
+            POSITION_ADVICE_CANDIDATE_RISK_POLICY_VERSION
+            if candidate_capture_enabled
+            else None
+        ),
+        position_advice_producer_run_id=(
+            account_run_id if candidate_capture_enabled else None
+        ),
+        position_advice_candidate_capture_status_sink_fn=(
+            _capture_status if candidate_capture_enabled else None
+        ),
     )
+    if not candidate_capture_enabled:
+        return result
+
+    captured_at = datetime.now(timezone.utc)
+    profiles = resolve_templates_config(cfg)
+    expected_scopes: set[tuple[str, str]] = set()
+    configuration_errors: list[str] = []
+    for raw_item in _iter_watchlist(cfg):
+        symbol = normalize_symbol_read(raw_item.get("symbol"))
+        if not symbol or (whitelist is not None and symbol not in whitelist):
+            continue
+        try:
+            resolved_item = resolve_watchlist_item_runtime_config(
+                item=raw_item,
+                profiles=profiles,
+                apply_profiles_fn=apply_profiles,
+            )
+        except Exception:
+            configuration_errors.append(symbol)
+            continue
+        if bool((resolved_item.get("sell_put") or {}).get("enabled", False)):
+            expected_scopes.add((symbol, "put"))
+        if bool((resolved_item.get("sell_call") or {}).get("enabled", False)):
+            expected_scopes.add((symbol, "call"))
+
+    normalized_statuses = sorted(
+        (
+            {
+                "symbol": normalize_symbol_read(item.get("symbol")),
+                "strategy_mode": str(item.get("strategy_mode") or "").strip(),
+                "status": str(item.get("status") or "").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+                "quote_snapshot_id": (
+                    str(item.get("quote_snapshot_id") or "").strip() or None
+                ),
+                "quote_receipt_relpath": (
+                    str(item.get("quote_receipt_relpath") or "").strip() or None
+                ),
+            }
+            for item in capture_statuses
+        ),
+        key=lambda item: (item["symbol"], item["strategy_mode"]),
+    )
+    statuses_by_scope: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in normalized_statuses:
+        key = (str(item["symbol"]), str(item["strategy_mode"]))
+        statuses_by_scope.setdefault(key, []).append(item)
+    missing_scan_scopes = sorted(
+        f"{symbol}:{mode}"
+        for symbol, mode in expected_scopes
+        if (symbol, mode) not in statuses_by_scope
+    )
+    duplicate_scan_scopes = sorted(
+        f"{symbol}:{mode}"
+        for (symbol, mode), items in statuses_by_scope.items()
+        if len(items) != 1
+    )
+    unexpected_scan_scopes = sorted(
+        f"{symbol}:{mode}"
+        for symbol, mode in statuses_by_scope
+        if (symbol, mode) not in expected_scopes
+    )
+    incomplete_scan_scopes = sorted(
+        f"{symbol}:{mode}"
+        for (symbol, mode), items in statuses_by_scope.items()
+        if (
+            len(items) != 1
+            or items[0]["status"] not in {"completed", "not_applicable"}
+            or (
+                items[0]["status"] == "completed"
+                and (
+                    not items[0]["quote_snapshot_id"]
+                    or not items[0]["quote_receipt_relpath"]
+                )
+            )
+        )
+    )
+    quote_bindings_by_symbol: dict[str, set[tuple[str, str]]] = {}
+    for item in normalized_statuses:
+        if item["quote_snapshot_id"] and item["quote_receipt_relpath"]:
+            quote_bindings_by_symbol.setdefault(
+                str(item["symbol"]),
+                set(),
+            ).add(
+                (
+                    str(item["quote_snapshot_id"]),
+                    str(item["quote_receipt_relpath"]),
+                )
+            )
+    quote_binding_conflict_symbols = sorted(
+        symbol
+        for symbol, bindings in quote_bindings_by_symbol.items()
+        if len(bindings) != 1
+    )
+    quote_receipt_relpaths = {
+        str(item["symbol"]): str(item["quote_receipt_relpath"])
+        for item in normalized_statuses
+        if item["quote_receipt_relpath"]
+    }
+    quote_snapshot_ids = {
+        str(item["symbol"]): str(item["quote_snapshot_id"])
+        for item in normalized_statuses
+        if item["quote_snapshot_id"]
+    }
+    candidate_symbols = sorted({symbol for symbol, _mode in expected_scopes})
+    decisions = sorted(
+        captured_decisions,
+        key=lambda item: (
+            str(item.get("strategy_mode") or ""),
+            str(item.get("candidate_id") or ""),
+        ),
+    )
+    required_quote_symbols = {
+        symbol
+        for (symbol, mode), items in statuses_by_scope.items()
+        if (
+            (symbol, mode) in expected_scopes
+            and len(items) == 1
+            and items[0]["status"] != "not_applicable"
+        )
+    }
+    missing_quote_symbols = sorted(
+        required_quote_symbols - set(quote_snapshot_ids)
+    )
+    account = str(
+        ((cfg.get("portfolio") or {}).get("account"))
+        if isinstance(cfg.get("portfolio"), dict)
+        else ""
+    ).strip().lower()
+    capture_payload = {
+        "schema_version": POSITION_ADVICE_CANDIDATE_CAPTURE_SCHEMA,
+        "account_run_id": account_run_id,
+        "account": account or None,
+        "risk_policy_version": POSITION_ADVICE_CANDIDATE_RISK_POLICY_VERSION,
+        "capture_started_at": capture_started_at.isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+        "complete": bool(
+            account
+            and not configuration_errors
+            and not missing_quote_symbols
+            and not missing_scan_scopes
+            and not duplicate_scan_scopes
+            and not unexpected_scan_scopes
+            and not incomplete_scan_scopes
+            and not quote_binding_conflict_symbols
+        ),
+        "candidate_symbols": candidate_symbols,
+        "expected_scan_scopes": sorted(
+            f"{symbol}:{mode}" for symbol, mode in expected_scopes
+        ),
+        "configuration_error_symbols": sorted(set(configuration_errors)),
+        "missing_quote_symbols": missing_quote_symbols,
+        "missing_scan_scopes": missing_scan_scopes,
+        "duplicate_scan_scopes": duplicate_scan_scopes,
+        "unexpected_scan_scopes": unexpected_scan_scopes,
+        "incomplete_scan_scopes": incomplete_scan_scopes,
+        "quote_binding_conflict_symbols": (
+            quote_binding_conflict_symbols
+        ),
+        "scan_statuses": normalized_statuses,
+        "quote_receipt_relpaths": dict(sorted(quote_receipt_relpaths.items())),
+        "quote_snapshot_ids": dict(sorted(quote_snapshot_ids.items())),
+        "candidate_decisions": decisions,
+        "candidate_count": len(decisions),
+    }
+    capture_payload["capture_hash"] = canonical_sha256(capture_payload)
+    atomic_write_json(
+        state_dir / "position_advice_candidate_all_decisions.raw.json",
+        capture_payload,
+        sort_keys=True,
+    )
+    return result

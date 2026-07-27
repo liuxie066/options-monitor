@@ -43,6 +43,13 @@ class SymbolMonitoringInputs:
     is_scheduled: bool
     runtime_config: dict[str, Any] | None = None
     fetch_only: bool = False
+    risk_policy_version: str | None = None
+    quote_snapshot_id: str | None = None
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None
+    position_advice_producer_run_id: str | None = None
+    candidate_capture_status_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -87,8 +94,10 @@ def run_symbol_monitoring(
     sp: dict[str, Any] = dict(symbol_cfg.get("sell_put", {}) or {})
     cc: dict[str, Any] = dict(symbol_cfg.get("sell_call", {}) or {})
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    want_put = bool(sp.get("enabled", False))
-    want_call = bool(cc.get("enabled", False))
+    configured_put = bool(sp.get("enabled", False))
+    configured_call = bool(cc.get("enabled", False))
+    want_put = configured_put
+    want_call = configured_call
     market_sp = dict(sp)
 
     exchange_rate_converter = deps.build_converter_fn(
@@ -174,7 +183,7 @@ def run_symbol_monitoring(
         else None
     )
 
-    deps.ensure_required_data_fn(
+    quote_evidence = deps.ensure_required_data_fn(
         py=inputs.py,
         base=inputs.base,
         symbol=symbol,
@@ -194,10 +203,70 @@ def run_symbol_monitoring(
         fetch_plan=fetch_plan,
         report_dir=inputs.report_dir,
         opend_fetch_config=fetch_request_kwargs,
+        position_advice_producer_run_id=(
+            inputs.position_advice_producer_run_id
+        ),
     )
 
     if bool(inputs.fetch_only):
         return []
+
+    resolved_quote_snapshot_id = str(
+        (
+            quote_evidence.get("snapshot_id")
+            if isinstance(quote_evidence, dict)
+            else inputs.quote_snapshot_id
+        )
+        or ""
+    ).strip()
+    quote_receipt_relpath = str(
+        (
+            quote_evidence.get("receipt_relpath")
+            if isinstance(quote_evidence, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    capture_enabled = bool(
+        inputs.all_decisions_sink_fn is not None
+        and str(inputs.risk_policy_version or "").strip()
+        and resolved_quote_snapshot_id
+    )
+
+    def _capture_sink_for(
+    ) -> tuple[Callable[[list[dict[str, Any]]], None] | None, dict[str, bool]]:
+        state = {"called": False}
+        if not capture_enabled:
+            return None, state
+
+        def _sink(rows: list[dict[str, Any]]) -> None:
+            state["called"] = True
+            if inputs.all_decisions_sink_fn is not None:
+                inputs.all_decisions_sink_fn(rows)
+
+        return _sink, state
+
+    put_capture_sink, put_capture_state = _capture_sink_for()
+    call_capture_sink, call_capture_state = _capture_sink_for()
+
+    def _report_capture(
+        *,
+        strategy_mode: str,
+        status: str,
+        reason: str,
+    ) -> None:
+        if inputs.candidate_capture_status_sink_fn is None:
+            return
+        inputs.candidate_capture_status_sink_fn(
+            {
+                "symbol": symbol.upper(),
+                "strategy_mode": strategy_mode,
+                "status": status,
+                "reason": reason,
+                "quote_snapshot_id": resolved_quote_snapshot_id or None,
+                "quote_receipt_relpath": quote_receipt_relpath or None,
+            }
+        )
 
     summary_rows: list[dict[str, Any]] = []
 
@@ -223,8 +292,25 @@ def run_symbol_monitoring(
                     global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                     global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
                     run_sell_put=True,
+                    risk_policy_version=inputs.risk_policy_version,
+                    quote_snapshot_id=resolved_quote_snapshot_id or None,
+                    all_decisions_sink_fn=put_capture_sink,
                 )
             )
+            if configured_put:
+                _report_capture(
+                    strategy_mode="put",
+                    status=(
+                        "completed"
+                        if put_capture_state["called"]
+                        else "incomplete"
+                    ),
+                    reason=(
+                        "all_decisions_captured"
+                        if put_capture_state["called"]
+                        else "all_decisions_not_captured"
+                    ),
+                )
         except Exception as exc:
             log.exception("symbol_monitoring: sell_put step failed for %s", symbol)
             append_strategy_scan_failure(
@@ -239,11 +325,23 @@ def run_symbol_monitoring(
             _append_summary_result(
                 summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
+            if configured_put:
+                _report_capture(
+                    strategy_mode="put",
+                    status="failed",
+                    reason="sell_put_scan_failed",
+                )
     else:
         deps.materialize_empty_sell_put_artifacts_fn(
             report_dir=inputs.report_dir, symbol_lower=symbol_lower
         )
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
+        if configured_put:
+            _report_capture(
+                strategy_mode="put",
+                status="not_applicable",
+                reason="sell_put_prefilter_not_applicable",
+            )
 
     if want_yield_enhancement:
         try:
@@ -310,8 +408,25 @@ def run_symbol_monitoring(
                     locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
                     global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
                     global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
+                    risk_policy_version=inputs.risk_policy_version,
+                    quote_snapshot_id=resolved_quote_snapshot_id or None,
+                    all_decisions_sink_fn=call_capture_sink,
                 )
             )
+            if configured_call:
+                _report_capture(
+                    strategy_mode="call",
+                    status=(
+                        "completed"
+                        if call_capture_state["called"]
+                        else "incomplete"
+                    ),
+                    reason=(
+                        "all_decisions_captured"
+                        if call_capture_state["called"]
+                        else "all_decisions_not_captured"
+                    ),
+                )
         except Exception as exc:
             log.exception("symbol_monitoring: sell_call step failed for %s", symbol)
             append_strategy_scan_failure(
@@ -328,7 +443,19 @@ def run_symbol_monitoring(
                 summary_rows,
                 deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
             )
+            if configured_call:
+                _report_capture(
+                    strategy_mode="call",
+                    status="failed",
+                    reason="covered_call_scan_failed",
+                )
     else:
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
+        if configured_call:
+            _report_capture(
+                strategy_mode="call",
+                status="not_applicable",
+                reason="covered_call_prefilter_not_applicable",
+            )
 
     return summary_rows

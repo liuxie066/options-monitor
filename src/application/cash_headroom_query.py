@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 
 from domain.domain.cash_secured_utils import (
     cash_secured_symbol_cny,
@@ -105,6 +106,92 @@ def _cash_secured_unavailable_reason(option_ctx: dict | None) -> tuple[dict[str,
     if not normalized:
         return {}, None
     return normalized, ";".join(f"{sym}:{reason}" for sym, reason in sorted(normalized.items()))
+
+
+def build_position_advice_cash_capacity(
+    *,
+    portfolio_context: Mapping[str, Any],
+    option_positions_context: Mapping[str, Any],
+    fx_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the shared uncommitted-cash pool from one exact FX snapshot."""
+
+    portfolio = dict(portfolio_context or {})
+    option_ctx = dict(option_positions_context or {})
+    fx = dict(fx_payload or {})
+    rates = fx.get("rates")
+    if not isinstance(rates, Mapping):
+        rates = {}
+    usdcny = _positive_float(rates.get("USDCNY"))
+    hkdcny = _positive_float(rates.get("HKDCNY"))
+    cash_by_currency = portfolio.get("cash_by_currency")
+    unavailable, unavailable_reason = _cash_secured_unavailable_reason(
+        option_ctx
+    )
+    secured_by_currency = normalize_cash_secured_total_by_ccy(
+        option_ctx,
+        by_symbol_by_ccy=normalize_cash_secured_by_symbol_by_ccy(option_ctx),
+    )
+    available_total = (
+        _sum_by_currency_to_cny(
+            dict(cash_by_currency),
+            usdcny_exchange_rate=usdcny,
+            cny_per_hkd_exchange_rate=hkdcny,
+        )
+        if isinstance(cash_by_currency, Mapping)
+        else None
+    )
+    secured_total = (
+        _sum_by_currency_to_cny(
+            secured_by_currency,
+            usdcny_exchange_rate=usdcny,
+            cny_per_hkd_exchange_rate=hkdcny,
+        )
+        if not unavailable
+        else None
+    )
+    reason_codes: list[str] = []
+    if available_total is None:
+        reason_codes.append("cash_available_conversion_unavailable")
+    if unavailable:
+        reason_codes.append("cash_secured_basis_unavailable")
+    elif secured_total is None:
+        reason_codes.append("cash_secured_conversion_unavailable")
+    headroom = (
+        float(available_total) - float(secured_total)
+        if available_total is not None and secured_total is not None
+        else None
+    )
+    return {
+        "schema_version": "position_advice_cash_capacity_values.v1",
+        "cash_capacity_semantics": (
+            "uncommitted_cash_headroom_base_cny.v1"
+        ),
+        "currency": "CNY",
+        "status": "available" if headroom is not None else "unavailable",
+        "reason_codes": reason_codes,
+        "cash_available_by_currency": (
+            dict(cash_by_currency)
+            if isinstance(cash_by_currency, Mapping)
+            else {}
+        ),
+        "cash_secured_by_currency": dict(secured_by_currency),
+        "cash_secured_unavailable_by_symbol": unavailable,
+        "cash_secured_unavailable_reason": unavailable_reason,
+        "cash_available_total_base_cny": available_total,
+        "cash_secured_open_short_puts_base_cny": secured_total,
+        "uncommitted_cash_headroom_base_cny": headroom,
+        "fx_snapshot_timestamp": str(fx.get("timestamp") or "") or None,
+        "fx_source": str(fx.get("source") or "") or None,
+    }
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def query_sell_put_cash(

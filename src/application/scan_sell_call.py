@@ -336,6 +336,9 @@ def run_sell_call_scan(
     strategy_family: str | None = None,
     strategy_profile: str | None = None,
     quiet: bool = False,
+    risk_policy_version: str | None = None,
+    quote_snapshot_id: str | None = None,
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
     threshold = validate_min_annualized_net_premium_return(
@@ -372,6 +375,8 @@ def run_sell_call_scan(
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
             quiet=bool(quiet),
+            risk_policy_version=risk_policy_version,
+            quote_snapshot_id=quote_snapshot_id,
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=_make_compute_metrics(avg_cost),
@@ -397,6 +402,7 @@ def run_sell_call_scan(
             ),
             print_summary_fn=_print_summary,
             metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost),
+            all_decisions_sink_fn=all_decisions_sink_fn,
         ),
         event_risk_cfg=event_risk_cfg,
         base_dir=Path(__file__).resolve().parents[2],

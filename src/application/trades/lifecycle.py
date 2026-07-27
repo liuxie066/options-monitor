@@ -26,6 +26,9 @@ from src.application.ledger.api import (
     record_lifecycle_expire_close,
 )
 from src.application.trades.deal_identity import active_ledger_events
+from src.application.trades.lifecycle_reconciliation import (
+    reconcile_lifecycle_evidence,
+)
 from src.application.trades.normalizer import NormalizedTradeDeal
 
 
@@ -280,6 +283,16 @@ def _write_lifecycle_close_from_case(
         int(case.get("event_time_ms") or 0),
         int(stock.get("trade_time_ms") or 0),
     ) or None
+    v2_result = _write_v2_lifecycle_close_from_case(
+        repo,
+        case=case,
+        decision_type=normalized_decision,
+        option_evidence=option_evidence,
+        stock_evidence=stock,
+        event_time_ms=event_time_ms,
+    )
+    if v2_result is not None:
+        return v2_result
     try:
         record_fn = record_lifecycle_assignment if normalized_decision == "assignment" else record_lifecycle_exercise
         ledger_result = record_fn(
@@ -360,6 +373,147 @@ def _write_lifecycle_close_from_case(
         reason=f"{normalized_decision}_recorded",
         operations=operations,
         diagnostics=diagnostics,
+    )
+
+
+def _write_v2_lifecycle_close_from_case(
+    repo: Any,
+    *,
+    case: dict[str, Any],
+    decision_type: str,
+    option_evidence: dict[str, Any] | None,
+    stock_evidence: dict[str, Any],
+    event_time_ms: int | None,
+) -> LifecycleTradeResolution | None:
+    option_source_id = str(
+        (option_evidence or {}).get("source_event_id") or ""
+    ).strip()
+    stock_source_id = str(stock_evidence.get("source_event_id") or "").strip()
+    evidence_seed = "|".join(
+        (
+            str(decision_type),
+            option_source_id,
+            stock_source_id,
+            str(case.get("account") or ""),
+            str(case.get("symbol") or ""),
+            str(case.get("expiration_ymd") or ""),
+        )
+    )
+    evidence_id = _stable_id("ev2", evidence_seed)
+    raw_option = (
+        dict((option_evidence or {}).get("raw") or {})
+        if isinstance((option_evidence or {}).get("raw"), dict)
+        else {}
+    )
+    evidence = {
+        "evidence_id": evidence_id,
+        "case_id": None,
+        "source_type": "broker_settlement_pair",
+        "source_event_id": "|".join(
+            item for item in (option_source_id, stock_source_id) if item
+        ),
+        "evidence_type": decision_type,
+        "terminal_type": decision_type,
+        "account": case.get("account"),
+        "symbol": case.get("symbol"),
+        "option_type": case.get("option_type"),
+        "position_side": case.get("position_side"),
+        "strike": case.get("strike"),
+        "expiration_ymd": case.get("expiration_ymd"),
+        "contracts": int(case.get("contracts") or 0),
+        "event_time_ms": int(event_time_ms or 0),
+        "currency": raw_option.get("currency"),
+        "stock_settlement": {
+            "source_event_id": stock_source_id,
+            "symbol": stock_evidence.get("symbol"),
+            "side": stock_evidence.get("side"),
+            "shares": abs(int(stock_evidence.get("stock_qty") or 0)),
+            "price": stock_evidence.get("stock_price"),
+            "event_time_ms": int(stock_evidence.get("trade_time_ms") or 0),
+        },
+        "source_evidence_ids": sorted(
+            str(item.get("evidence_id") or "").strip()
+            for item in (option_evidence, stock_evidence)
+            if isinstance(item, dict) and str(item.get("evidence_id") or "").strip()
+        ),
+    }
+    result = reconcile_lifecycle_evidence(
+        repo,
+        evidence=evidence,
+        apply_changes=True,
+        now_ms=int(event_time_ms or 0) or None,
+    )
+    if (
+        result.status == "needs_review"
+        and result.reason_codes == ("lifecycle_case_not_found",)
+    ):
+        return None
+    diagnostics = {
+        "lifecycle_v2": result.to_dict(),
+        "option_evidence": option_evidence,
+        "stock_evidence": stock_evidence,
+    }
+    if result.status in {"applied", "idempotent"}:
+        legacy_mirror = _case_with_decision(
+            case,
+            status="ledger_written",
+            decision_type=decision_type,
+            target_lot_ids=[
+                str(item.get("target_lot_id") or "").strip()
+                for item in result.allocation_plan
+                if str(item.get("target_lot_id") or "").strip()
+            ],
+        )
+        legacy_mirror["linked_v2_case_id"] = result.case_id
+        _upsert_case(repo, legacy_mirror)
+        operations = [
+            BrokerTradeOperation(
+                action=f"record_{decision_type}",
+                record_id=str(item.get("target_lot_id") or "").strip() or None,
+                contracts_to_close=int(item.get("contracts_allocated") or 0),
+                event_id=str(
+                    item.get("canonical_terminal_event_id") or ""
+                ).strip()
+                or None,
+                details={
+                    "lifecycle_case_id": result.case_id,
+                    "lifecycle_evidence_id": result.evidence_id,
+                    "lifecycle_allocation_id": item.get("allocation_id"),
+                    "lifecycle_schema_version": "lifecycle_case.v2",
+                },
+            )
+            for item in result.allocation_plan
+        ]
+        return LifecycleTradeResolution(
+            handled=True,
+            status="applied" if result.status == "applied" else "skipped",
+            action=decision_type,
+            reason=(
+                f"{decision_type}_recorded_v2"
+                if result.status == "applied"
+                else "lifecycle_already_written_v2"
+            ),
+            operations=operations,
+            diagnostics=diagnostics,
+        )
+    legacy_mirror = _case_with_decision(
+        case,
+        status="conflict" if result.status == "conflict" else "needs_review",
+        decision_type=decision_type,
+    )
+    legacy_mirror["linked_v2_case_id"] = result.case_id
+    _upsert_case(repo, legacy_mirror)
+    return LifecycleTradeResolution(
+        handled=True,
+        status="unresolved",
+        action=decision_type,
+        reason=(
+            result.reason_codes[0]
+            if result.reason_codes
+            else "lifecycle_v2_requires_review"
+        ),
+        operations=[_lifecycle_operation("lifecycle_v2_requires_review", diagnostics)],
+        diagnostics={**diagnostics, "retryable": result.status == "needs_review"},
     )
 
 

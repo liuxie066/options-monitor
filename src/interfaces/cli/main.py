@@ -212,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.trade_events import main as run_trade_events_cli
 
         return int(run_trade_events_cli(actual_argv[1:]))
+    if actual_argv and actual_argv[0] == "position-advice":
+        from src.interfaces.cli.position_advice_ops import (
+            main as run_position_advice_cli,
+        )
+
+        return int(run_position_advice_cli(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "symbols":
         from src.interfaces.cli.symbols import main as run_symbols_cli
 

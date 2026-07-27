@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from src.application.trades.deal_identity import completed_ledger_deal_ids
 from src.application.trades.history_backfill import fetch_opend_history_deals
+from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.inbox import (
     enqueue_trade_payload,
     mark_trade_payload_handled,
@@ -135,6 +136,14 @@ def run_history_backfill(
     unresolved_count = 0
     last_result: dict[str, Any] | None = None
     durable_queue_complete = True
+    lifecycle_discovery_before = _lifecycle_discovery_after_backfill_phase(
+        repo=repo,
+        account=None,
+        observed_at_ms=int(now.astimezone(timezone.utc).timestamp() * 1000),
+        apply_changes=apply_changes,
+        audit_path=audit_path,
+        phase="backfill_lifecycle_discovery_before",
+    )
     lock_context = process_lock if process_lock is not None else contextlib.nullcontext()
     for payload in payloads:
         if not isinstance(payload, dict):
@@ -316,6 +325,18 @@ def run_history_backfill(
     diagnostics["history_query_complete"] = history_query_complete
     diagnostics["durable_queue_complete"] = durable_queue_complete
     diagnostics["checkpoint_advanced"] = checkpoint_advanced
+    lifecycle_discovery_after = _lifecycle_discovery_after_backfill_phase(
+        repo=repo,
+        account=None,
+        observed_at_ms=int(now.astimezone(timezone.utc).timestamp() * 1000),
+        apply_changes=apply_changes,
+        audit_path=audit_path,
+        phase="backfill_lifecycle_reconciliation_after",
+    )
+    diagnostics["lifecycle_reconciliation"] = {
+        "before": lifecycle_discovery_before,
+        "after": lifecycle_discovery_after,
+    }
 
     finished_at = utc_now()
     out = {
@@ -343,6 +364,50 @@ def run_history_backfill(
         },
     )
     return out
+
+
+def _lifecycle_discovery_after_backfill_phase(
+    *,
+    repo: Any,
+    account: str | None,
+    observed_at_ms: int,
+    apply_changes: bool,
+    audit_path: Path,
+    phase: str,
+) -> dict[str, Any]:
+    try:
+        result = discover_lifecycle_cases(
+            repo,
+            account=account,
+            observed_at_ms=observed_at_ms,
+            apply_changes=apply_changes,
+        )
+        append_trade_intake_audit(
+            audit_path,
+            {
+                "phase": phase,
+                "source": "backfill",
+                "ok": True,
+                "result": result,
+            },
+        )
+        return {"ok": True, **result}
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        append_trade_intake_audit(
+            audit_path,
+            {
+                "phase": phase,
+                "source": "backfill",
+                "ok": False,
+                "error": error,
+            },
+        )
+        return {
+            "ok": False,
+            "apply_changes": bool(apply_changes),
+            "error": error,
+        }
 
 
 def _effective_lookback_hours(

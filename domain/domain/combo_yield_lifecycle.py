@@ -106,6 +106,20 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
             opened_count = max(opened, open_count + closed)
             closed_count = max(closed, opened_count - open_count)
             expiration = _text(row.get("expiration_ymd"))
+            lifecycle_state = _text(row.get("lifecycle_state")).lower()
+            resolved_by_lot = row.get("resolved_contracts_by_lot")
+            resolved_contracts = 0
+            if isinstance(resolved_by_lot, dict):
+                for raw_quantity in resolved_by_lot.values():
+                    quantity = _quantity(raw_quantity)
+                    if quantity is None:
+                        issues.append("invalid_lifecycle_resolved_quantity")
+                    else:
+                        resolved_contracts += quantity
+            if resolved_contracts > 0:
+                issues.append("lifecycle_terminal_allocation")
+            if lifecycle_state and lifecycle_state != "open":
+                issues.append(f"lifecycle_not_open:{lifecycle_state}")
 
             if option_type == "put" and side == "short":
                 put_opened += opened_count

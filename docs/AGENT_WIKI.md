@@ -339,6 +339,9 @@ mapping only, not a callable rollback path.
 - Domain policy: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
 - Recommended agent entry: `get_close_advice`
+- Portfolio-level v2 read: `position_advice_read`
+- v2 contract: `docs/POSITION_ADVICE_V2_CONTRACT.md`
+- v1/v2 matrix: `docs/POSITION_ADVICE_COMPATIBILITY.md`
 
 Core domain functions:
 
@@ -351,6 +354,12 @@ def evaluate_long_call_convexity_advice(inp: CloseAdviceInput, ...) -> dict[str,
 Keep scoring, thesis checks, and exit-state policy in the domain layer. The
 runner stays focused on loading local artifacts, pairing yield-enhancement legs,
 preserving `not_evaluable` rows, and formatting CSV/text output.
+
+Position Advice v2 remains an independent immutable portfolio plan. Its Agent
+surface is pure-read; shared authority changes and unknown-delivery resolution
+are human CLI operations only. `v2_shadow` must not enter scheduled
+notifications, and v2 reader failures always zero actionable rows rather than
+falling back to v1.
 
 ### Notifications
 

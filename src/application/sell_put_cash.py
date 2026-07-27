@@ -25,6 +25,95 @@ from src.infrastructure.exchange_rates import CurrencyConverter
 log = logging.getLogger(__name__)
 
 
+def sell_put_opening_capacity_inputs(
+    *,
+    symbol: str,
+    strike: Any,
+    multiplier: Any,
+    currency: Any,
+    portfolio_ctx: dict[str, Any] | None,
+    exchange_rate_converter: CurrencyConverter,
+) -> dict[str, Any]:
+    """Return the legacy cash gate as Candidate Engine resource inputs."""
+
+    try:
+        strike_value = float(strike)
+        multiplier_value = float(multiplier)
+    except (TypeError, ValueError):
+        return {"put_cash_capacity_available": False}
+    if strike_value <= 0 or multiplier_value <= 0 or not isinstance(portfolio_ctx, dict):
+        return {"put_cash_capacity_available": False}
+
+    option_ctx = portfolio_ctx.get("option_ctx")
+    if not isinstance(option_ctx, dict):
+        return {"put_cash_capacity_available": False}
+    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
+    if isinstance(unavailable, dict) and unavailable:
+        return {
+            "put_cash_required": strike_value * multiplier_value,
+            "put_cash_free": None,
+            "put_cash_capacity_available": False,
+        }
+
+    try:
+        normalized_by_ccy = normalize_cash_secured_by_symbol_by_ccy(option_ctx)
+        total_by_ccy = normalize_cash_secured_total_by_ccy(
+            option_ctx,
+            by_symbol_by_ccy=normalized_by_ccy,
+        )
+        used_total_cny = read_cash_secured_total_cny(option_ctx)
+        used_total_usd = float(total_by_ccy.get("USD") or 0.0)
+        cash_by_ccy = portfolio_ctx.get("cash_by_currency")
+        if not isinstance(cash_by_ccy, dict):
+            return {"put_cash_capacity_available": False}
+        cash_cny_raw = cash_by_ccy.get("CNY")
+        cash_cny = float(cash_cny_raw) if cash_cny_raw is not None else None
+        cash_total_cny = _sum_cash_total_cny(
+            cash_by_ccy,
+            exchange_rate_converter=exchange_rate_converter,
+        )
+        cash_usd_raw = cash_by_ccy.get("USD")
+        cash_usd = float(cash_usd_raw) if cash_usd_raw is not None else None
+    except (TypeError, ValueError):
+        return {"put_cash_capacity_available": False}
+
+    native_currency = normalize_currency(currency)
+    native_required = strike_value * multiplier_value
+    required_cny = exchange_rate_converter.native_to_cny(
+        native_required,
+        native_ccy=native_currency,
+    )
+    if required_cny is not None and cash_cny is not None and used_total_cny is not None:
+        return {
+            "put_cash_required": float(required_cny),
+            "put_cash_free": float(cash_cny) - float(used_total_cny),
+            "put_cash_capacity_available": True,
+        }
+    if (
+        required_cny is not None
+        and cash_total_cny is not None
+        and used_total_cny is not None
+    ):
+        return {
+            "put_cash_required": float(required_cny),
+            "put_cash_free": float(cash_total_cny) - float(used_total_cny),
+            "put_cash_capacity_available": True,
+        }
+    if native_currency == "USD" and cash_usd is not None:
+        return {
+            "put_cash_required": native_required,
+            "put_cash_free": cash_usd - used_total_usd,
+            "put_cash_capacity_available": True,
+        }
+    return {
+        "put_cash_required": (
+            float(required_cny) if required_cny is not None else native_required
+        ),
+        "put_cash_free": None,
+        "put_cash_capacity_available": False,
+    }
+
+
 def _sum_cash_total_cny(
     cash_by_ccy: dict[str, Any] | None,
     *,

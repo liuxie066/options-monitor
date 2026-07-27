@@ -306,6 +306,80 @@ def list_trade_lifecycle_evidence(
     return [dict(row) for row in list(rows or []) if isinstance(row, dict)]
 
 
+def lifecycle_reconciliation_facts(
+    repo: Any,
+    *,
+    case_id: str | None = None,
+    evidence_id: str | None = None,
+) -> dict[str, Any]:
+    """Return the semantic ledger facts needed for lifecycle reconciliation."""
+
+    candidate = getattr(repo, "primary_repo", repo)
+    requested_case_id = str(case_id or "").strip()
+    cases = list_trade_lifecycle_cases(repo)
+    if requested_case_id:
+        cases = [
+            item
+            for item in cases
+            if str(item.get("case_id") or "").strip() == requested_case_id
+        ]
+    list_allocations = getattr(
+        candidate,
+        "list_trade_lifecycle_allocations",
+        None,
+    )
+    allocations = (
+        list(list_allocations(case_id=requested_case_id or None) or [])
+        if callable(list_allocations)
+        else []
+    )
+    evidence = list_trade_lifecycle_evidence(
+        repo,
+        case_id=requested_case_id or None,
+    )
+    requested_evidence = None
+    requested_evidence_id = str(evidence_id or "").strip()
+    if requested_evidence_id:
+        get_evidence = getattr(
+            candidate,
+            "get_trade_lifecycle_evidence",
+            None,
+        )
+        if callable(get_evidence):
+            raw_evidence = get_evidence(requested_evidence_id)
+            if isinstance(raw_evidence, dict):
+                requested_evidence = dict(raw_evidence)
+    lot_ids = sorted(
+        {
+            str(lot_id or "").strip()
+            for lifecycle_case in cases
+            for lot_id in dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            )
+            if str(lot_id or "").strip()
+        }
+    )
+    get_lot_fields = getattr(candidate, "get_position_lot_fields", None)
+    lot_fields_by_id: dict[str, dict[str, Any]] = {}
+    if callable(get_lot_fields):
+        for lot_id in lot_ids:
+            fields = get_lot_fields(lot_id)
+            if isinstance(fields, dict):
+                lot_fields_by_id[lot_id] = dict(fields)
+    return {
+        "schema_version": "lifecycle_reconciliation_facts.v2",
+        "cases": [dict(item) for item in cases if isinstance(item, dict)],
+        "evidence": [
+            dict(item) for item in evidence if isinstance(item, dict)
+        ],
+        "allocations": [
+            dict(item) for item in allocations if isinstance(item, dict)
+        ],
+        "requested_evidence": requested_evidence,
+        "position_lot_fields_by_id": lot_fields_by_id,
+    }
+
+
 def project_trade_event_log(events: list[dict[str, Any]]) -> Any:
     return project_stored_trade_events_to_position_lots(events)
 
@@ -343,6 +417,7 @@ __all__ = [
     "list_position_rows",
     "list_trade_lifecycle_cases",
     "list_trade_lifecycle_evidence",
+    "lifecycle_reconciliation_facts",
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",
     "open_position_ledger",

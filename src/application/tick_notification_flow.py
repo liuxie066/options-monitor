@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import decide_daily_brief_notification, diff_daily_decision_briefs
@@ -43,6 +43,9 @@ from src.application.notification_delivery_route import resolve_notification_del
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     select_notification_delivery_adapter,
+)
+from src.application.position_advice_notification_authority import (
+    execute_notification_with_authority,
 )
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
@@ -370,6 +373,47 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 notifications=notify_route.get("notifications") or {},
             )
 
+        def _execute_with_notification_authority(
+            account: str,
+            send: Callable[[], dict[str, object]],
+        ) -> dict[str, object]:
+            lifecycle = daily_brief_prep.lifecycles_by_account.get(
+                str(account).strip().lower()
+            )
+            envelope = (
+                lifecycle.get("envelope")
+                if isinstance(lifecycle, Mapping)
+                else None
+            )
+            render_context = (
+                envelope.get("render_context")
+                if isinstance(envelope, Mapping)
+                else None
+            )
+            token = (
+                render_context.get("notification_authority_token")
+                if isinstance(render_context, Mapping)
+                else None
+            )
+            if not isinstance(token, Mapping):
+                return {
+                    "ok": False,
+                    "account": str(account),
+                    "command_ok": False,
+                    "delivery_confirmed": False,
+                    "error_code": "AUTHORITY_NOTIFICATION_TOKEN_MISSING",
+                    "attempts": 0,
+                    "retry_attempt_count": 0,
+                    "ambiguous_send": False,
+                    "duplicate_risk": False,
+                }
+            return execute_notification_with_authority(
+                base=request.base,
+                token=token,
+                channel=str(channel or provider or "unknown"),
+                send=send,
+            )
+
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
             run_id=request.run_id,
@@ -387,6 +431,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             failure_stage=delivery_adapter.failure_stage,
             idempotency_keys_by_account=daily_brief_prep.delivery_keys_by_account,
             transport_envelopes_by_account=daily_brief_prep.transport_envelopes_by_account,
+            authority_executor=_execute_with_notification_authority,
         )
         sent_accounts = list(execution.sent_accounts)
         notify_failures = list(execution.notify_failures)
@@ -698,6 +743,19 @@ def _prepare_daily_brief_notification(
                     and brief.get("status") in {"ready", "degraded"}
                     and brief.get("actionability") != "blocked"
                 )
+                notification_authority = (
+                    dict(brief.get("notification_authority") or {})
+                    if isinstance(
+                        brief.get("notification_authority"), Mapping
+                    )
+                    else {}
+                )
+                authority_allows_notification = (
+                    notification_authority.get("notification_allowed")
+                    is not False
+                )
+                if not authority_allows_notification:
+                    reliable = False
                 pending: list[str] = []
                 persisted: dict[str, Any] | None = None
                 diff: dict[str, Any] = {}
@@ -737,6 +795,14 @@ def _prepare_daily_brief_notification(
                     if scheduled_trigger
                     else {"action": "none", "reason": "non_scheduled_snapshot_only"}
                 )
+                if not authority_allows_notification:
+                    decision = {
+                        "action": "none",
+                        "reason": str(
+                            notification_authority.get("blocker")
+                            or "position_advice_notification_authority_unavailable"
+                        ),
+                    }
                 action = str(decision["action"])
                 existing_retry = None
                 if scheduled_trigger and not multi_market:
@@ -753,6 +819,11 @@ def _prepare_daily_brief_notification(
                 )
                 if not multi_market and not request.no_send and should_prepare and action in {"fixed_report", "candidate_alert", "fixed_failure"}:
                     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+                    authority_token = notification_authority.get("token")
+                    if isinstance(authority_token, Mapping):
+                        render_context["notification_authority_token"] = dict(
+                            authority_token
+                        )
                     if action == "fixed_failure":
                         message = render_fixed_failure(
                             brief,

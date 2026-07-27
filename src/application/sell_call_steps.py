@@ -8,7 +8,7 @@ Goal: minimal/no behavior change.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -107,6 +107,9 @@ def run_sell_call_scan_and_summarize(
     locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict[str, Any] | None = None,
     global_sell_call_event_risk: dict[str, Any] | None = None,
+    risk_policy_version: str | None = None,
+    quote_snapshot_id: str | None = None,
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     """Run sell_call scan + (optional) render + summarize.
 
@@ -245,6 +248,9 @@ def run_sell_call_scan_and_summarize(
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
         quiet=bool(is_scheduled),
+        risk_policy_version=risk_policy_version,
+        quote_snapshot_id=quote_snapshot_id,
+        all_decisions_sink_fn=all_decisions_sink_fn,
     )
 
     df_cc = safe_read_csv(symbol_cc)

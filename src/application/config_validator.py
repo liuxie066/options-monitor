@@ -700,6 +700,16 @@ def validate_config(cfg: dict):
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
 
+    raw_accounts = cfg.get('accounts')
+    if isinstance(raw_accounts, (list, tuple)):
+        normalized_accounts = [
+            str(item or '').strip().lower()
+            for item in raw_accounts
+            if str(item or '').strip()
+        ]
+        if len(normalized_accounts) != len(set(normalized_accounts)):
+            die('accounts contains duplicate labels after trim + lowercase normalization')
+
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
@@ -839,6 +849,11 @@ def validate_config(cfg: dict):
     if close_advice and not isinstance(close_advice, dict):
         die('close_advice must be an object')
     if isinstance(close_advice, dict):
+        if 'position_advice_authority' in close_advice:
+            die(
+                'close_advice.position_advice_authority is not supported; '
+                'Position Advice authority is portfolio-scoped shared control-plane state'
+            )
         if 'strategy' in close_advice or 'strategy_profile' in close_advice:
             die('close_advice.strategy is not supported; close_advice uses sell_put/sell_call strategy')
         if 'optimizer' in close_advice:
@@ -899,6 +914,18 @@ def validate_config(cfg: dict):
     if account_settings and not isinstance(account_settings, dict):
         die('account_settings must be an object')
     if isinstance(account_settings, dict):
+        normalized_setting_labels = [
+            str(item or '').strip().lower()
+            for item in account_settings
+            if str(item or '').strip()
+        ]
+        if len(normalized_setting_labels) != len(
+            set(normalized_setting_labels)
+        ):
+            die(
+                'account_settings contains duplicate labels after '
+                'trim + lowercase normalization'
+            )
         known_accounts = set(accounts_from_config(cfg))
         futu_account_settings = []
         for raw_key, raw_value in account_settings.items():

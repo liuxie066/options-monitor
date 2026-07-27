@@ -7,6 +7,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.position_advice_authority_service import (
+    apply_authority_change,
+    build_identity_binding_evidence,
+    read_authority_resolution,
+)
+from src.application.position_advice_notification_authority import (
+    build_notification_authority_token,
+)
+
 
 MARKET_DATE = "2026-07-21"
 FIXED_TARGET = "2026-07-21T10:00:00-04:00"
@@ -38,7 +48,66 @@ class _Audit:
         self.successes += 1
 
 
-def _brief(*, run_id: str, account: str = "lx", market: str = "US", blocked: bool = False, candidate: bool = True) -> dict:
+def _portfolio_identity_hash(account: str) -> str:
+    return canonical_sha256(
+        {
+            "normalized_portfolio_source": "futu",
+            "normalized_account": account,
+            "broker_account_id": f"test-{account}",
+        }
+    )
+
+
+def _ensure_v1_authority(base: Path, account: str) -> None:
+    identity_hash = _portfolio_identity_hash(account)
+    resolution = read_authority_resolution(
+        base=base,
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=identity_hash,
+    )
+    if resolution.resolution_status == "resolved":
+        return
+    binding = build_identity_binding_evidence(
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=identity_hash,
+        authoring_config_hash="b" * 64,
+        market_bindings=[
+            {
+                "market": "US",
+                "generated_config_hash": "c" * 64,
+                "source_receipt_hash": "d" * 64,
+                "normalized_account": account,
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": identity_hash,
+                "source_receipt_fresh": True,
+            }
+        ],
+    )
+    apply_authority_change(
+        base=base,
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=identity_hash,
+        target_mode="v1",
+        expected_policy_hash="absent",
+        actor="test",
+        requested_at="2026-07-21T13:00:00+00:00",
+        confirm=True,
+        identity_binding_evidence=binding,
+    )
+
+
+def _brief(
+    *,
+    base: Path,
+    run_id: str,
+    account: str = "lx",
+    market: str = "US",
+    blocked: bool = False,
+    candidate: bool = True,
+) -> dict:
     actions = []
     candidates = {"sell_put": [], "covered_call": [], "combo_yield": []}
     if candidate:
@@ -80,6 +149,23 @@ def _brief(*, run_id: str, account: str = "lx", market: str = "US", blocked: boo
             "reason": "pipeline_failed",
             "metrics": {},
         })
+    resolution = read_authority_resolution(
+        base=base,
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=_portfolio_identity_hash(account),
+    )
+    assert resolution.resolution_status == "resolved"
+    notification_token = build_notification_authority_token(
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=_portfolio_identity_hash(account),
+        selected_advice_contract="v1",
+        resolved_mode="v1",
+        authority_generation=resolution.generation,
+        authority_policy_hash=resolution.policy_hash,
+        account_run_id=run_id,
+    )
     return {
         "market": market,
         "market_trading_date": MARKET_DATE,
@@ -106,6 +192,15 @@ def _brief(*, run_id: str, account: str = "lx", market: str = "US", blocked: boo
         "events": [],
         "data_gaps": ([{"scope": "pipeline", "reason": "pipeline_failed"}] if blocked else []),
         "source_artifacts": [],
+        "notification_authority": {
+            "selected_advice_contract": "v1",
+            "resolved_mode": "v1",
+            "authority_generation": resolution.generation,
+            "authority_policy_hash": resolution.policy_hash,
+            "notification_allowed": True,
+            "blocker": None,
+            "token": notification_token,
+        },
     }
 
 
@@ -148,6 +243,8 @@ def _request(
     import src.application.tick_notification_flow as mod
     from src.application.multi_tick.misc import AccountResult
 
+    for account in accounts:
+        _ensure_v1_authority(tmp_path, account)
     target = FIXED_TARGET if fixed else HALF_TARGET
     results = [] if delivery_only else [AccountResult(account, pipeline_ok, fixed, "ok" if pipeline_ok else "pipeline failed", "") for account in accounts]
     completions: list[dict] = []
@@ -196,8 +293,8 @@ def _patch_assembler(monkeypatch, *, blocked: bool = False, candidate: bool = Tr
     monkeypatch.setattr(
         mod,
         "assemble_daily_decision_briefs",
-        lambda *, run_id, account, markets_to_run, **_kwargs: {
-            market: _brief(run_id=run_id, account=account, market=market, blocked=blocked, candidate=candidate)
+        lambda *, base, run_id, account, markets_to_run, **_kwargs: {
+            market: _brief(base=base, run_id=run_id, account=account, market=market, blocked=blocked, candidate=candidate)
             for market in markets_to_run
         },
     )
@@ -627,8 +724,8 @@ def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
     import src.application.tick_notification_flow as mod
     from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
 
-    def assemble(*, run_id, account, markets_to_run, **_kwargs):
-        brief = _brief(run_id=run_id, account=account)
+    def assemble(*, base, run_id, account, markets_to_run, **_kwargs):
+        brief = _brief(base=base, run_id=run_id, account=account)
         if run_id == "candidate-2":
             action = copy.deepcopy(brief["actions"][-1])
             action.update(

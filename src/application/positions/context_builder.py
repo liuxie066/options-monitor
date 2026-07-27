@@ -11,11 +11,15 @@ from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
 from domain.domain.combo_yield_lifecycle import build_option_group_inventory
+from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
 )
+from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import canonical_symbol
 from domain.domain.risk_capacity import (
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
@@ -56,6 +60,11 @@ def _empty_context(
         "raw_selected_count": raw_selected_count,
         "open_positions_min": [],
         "combo_yield_groups": [],
+        "position_lifecycle_by_lot": {},
+        "assigned_stock_events": [],
+        "strategy_group_identities": [],
+        "decision_state_fingerprint": None,
+        "decision_snapshot_status": "snapshot_unavailable",
     }
     if ledger_status is not None:
         out["ledger"] = ledger_status
@@ -84,6 +93,8 @@ def build_context(
     broker: str,
     account: str | None = None,
     rates: JsonDict | None = None,
+    decision_snapshot: JsonDict | None = None,
+    lifecycle_now_ms: int | None = None,
 ) -> JsonDict:
     """Build risk context from projected position-lot records.
 
@@ -141,6 +152,10 @@ def build_context(
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[JsonDict] = []
     as_of_date = datetime.now(EXPIRATION_DATE_TZ).date()
+    lifecycle_by_lot = build_lifecycle_read_models_from_decision_snapshot(
+        decision_snapshot,
+        now_ms=lifecycle_now_ms,
+    )
 
     for it in selected_items:
         if not it.is_open:
@@ -152,7 +167,11 @@ def build_context(
 
         symbol = it.canonical_underlying_symbol
 
-        open_positions_min.append(it.as_open_position_min(as_of_date=as_of_date))
+        position_row = it.as_open_position_min(as_of_date=as_of_date)
+        lifecycle = lifecycle_by_lot.get(it.record_id)
+        if lifecycle is not None:
+            position_row.update(lifecycle)
+        open_positions_min.append(position_row)
         if not symbol:
             continue
 
@@ -246,16 +265,47 @@ def build_context(
                     "strategy_group_id": item.fields.get("strategy_group_id"),
                     "yield_enhancement_mode": item.fields.get("yield_enhancement_mode"),
                     "strategy_snapshot": item.fields.get("strategy_snapshot"),
+                    **dict(lifecycle_by_lot.get(item.record_id) or {}),
                 }
                 for item in selected_items
             ]
+        ),
+        "position_lifecycle_by_lot": lifecycle_by_lot,
+        "assigned_stock_events": [
+            dict(item)
+            for item in list(
+                (decision_snapshot or {}).get("account_assigned_stock_events")
+                or []
+            )
+            if isinstance(item, dict)
+        ],
+        "strategy_group_identities": [
+            dict(item)
+            for item in list(
+                (decision_snapshot or {}).get("account_combo_identities") or []
+            )
+            if isinstance(item, dict)
+        ],
+        "decision_state_fingerprint": (
+            (decision_snapshot or {}).get("decision_state_fingerprint")
+        ),
+        "decision_snapshot_status": str(
+            (decision_snapshot or {}).get("snapshot_status")
+            or "snapshot_unavailable"
         ),
     }
     out["ledger"] = ledger_status
     return out
 
 
-def build_shared_context(records: list[JsonDict], broker: str, rates: JsonDict | None = None) -> JsonDict:
+def build_shared_context(
+    records: list[JsonDict],
+    broker: str,
+    rates: JsonDict | None = None,
+    *,
+    decision_snapshots_by_account: dict[str, JsonDict] | None = None,
+    lifecycle_now_ms: int | None = None,
+) -> JsonDict:
     broker_norm = normalize_broker(broker)
     accounts: set[str] = set()
     for rec in records:
@@ -267,13 +317,281 @@ def build_shared_context(records: list[JsonDict], broker: str, rates: JsonDict |
         acct = fields.get("account")
         if acct:
             accounts.add(acct)
-    by_account = {acct: build_context(records, broker=broker_norm, account=acct, rates=rates) for acct in sorted(accounts)}
+    snapshots = decision_snapshots_by_account or {}
+    by_account = {
+        acct: build_context(
+            records,
+            broker=broker_norm,
+            account=acct,
+            rates=rates,
+            decision_snapshot=snapshots.get(acct),
+            lifecycle_now_ms=lifecycle_now_ms,
+        )
+        for acct in sorted(accounts)
+    }
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm},
         "all_accounts": build_context(records, broker=broker_norm, account=None, rates=rates),
         "by_account": by_account,
     }
+
+
+def build_lifecycle_read_models_from_decision_snapshot(
+    decision_snapshot: JsonDict | None,
+    *,
+    now_ms: int | None = None,
+) -> dict[str, JsonDict]:
+    snapshot = dict(decision_snapshot or {})
+    if str(snapshot.get("snapshot_status") or "") != "trusted":
+        return {}
+    cases = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_cases") or [])
+        if isinstance(item, dict)
+        and str(item.get("schema_version") or "").strip() == "lifecycle_case.v2"
+    ]
+    evidence = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_evidence") or [])
+        if isinstance(item, dict)
+    ]
+    allocations = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_allocations") or [])
+        if isinstance(item, dict)
+    ]
+    lots_by_id = {
+        str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
+        for item in list(snapshot.get("account_position_lots") or [])
+        if isinstance(item, dict) and str(item.get("record_id") or "").strip()
+    }
+    evidence_by_case: dict[str, list[JsonDict]] = {}
+    for item in evidence:
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            evidence_by_case.setdefault(case_id, []).append(item)
+    allocations_by_case: dict[str, list[JsonDict]] = {}
+    for item in allocations:
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            allocations_by_case.setdefault(case_id, []).append(item)
+
+    output: dict[str, JsonDict] = {}
+    for lifecycle_case in sorted(cases, key=lambda item: str(item.get("case_id") or "")):
+        case_id = str(lifecycle_case.get("case_id") or "").strip()
+        case_allocations = allocations_by_case.get(case_id, [])
+        case_evidence = evidence_by_case.get(case_id, [])
+        resolution = resolve_allocations(
+            dict(lifecycle_case.get("target_contracts_by_lot") or {}),
+            case_allocations,
+        )
+        allocated_evidence_ids = {
+            str(item.get("evidence_id") or "").strip()
+            for item in case_allocations
+            if str(item.get("evidence_id") or "").strip()
+        }
+        orphan_evidence_ids = sorted(
+            {
+                str(item.get("evidence_id") or "").strip()
+                for item in case_evidence
+                if str(item.get("evidence_id") or "").strip()
+            }
+            - allocated_evidence_ids
+        )
+        quantity_drift = any(
+            lot_id not in lots_by_id
+            or int(lots_by_id[lot_id].get("contracts_open") or 0)
+            != expected_remaining
+            for lot_id, expected_remaining in resolution.remaining_contracts_by_lot.items()
+        )
+        persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
+        summary = dict(lifecycle_case.get("derived_summary") or {})
+        conflict_reasons = (
+            tuple(
+                str(item)
+                for item in summary.get("lifecycle_reason_codes") or []
+                if str(item)
+            )
+            if persisted_status == "conflict"
+            else ()
+        )
+        read_model = derive_lifecycle_read_model(
+            expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
+            market=str(
+                lifecycle_case.get("market")
+                or symbol_market(lifecycle_case.get("symbol"))
+                or ""
+            ),
+            target_contracts_by_lot=dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            ),
+            allocations=case_allocations,
+            now_ms=now_ms,
+            conflict_reason_codes=conflict_reasons,
+            orphan_evidence=bool(orphan_evidence_ids),
+            quantity_drift=quantity_drift,
+        )
+        model = {
+            "lifecycle_state": read_model.lifecycle_state,
+            "lifecycle_case_id": case_id,
+            "lifecycle_evidence_status": (
+                "conflict"
+                if read_model.lifecycle_state == "conflict"
+                else "evidence_without_allocation"
+                if orphan_evidence_ids
+                else "missing"
+                if not case_evidence
+                else "partial"
+                if any(read_model.remaining_contracts_by_lot.values())
+                else "complete"
+            ),
+            "lifecycle_reason_codes": list(read_model.lifecycle_reason_codes),
+            "pending_until_ms": read_model.pending_until_ms,
+            "terminal_event_ids": sorted(
+                str(item.get("canonical_terminal_event_id") or "").strip()
+                for item in case_allocations
+                if str(item.get("canonical_terminal_event_id") or "").strip()
+            ),
+            "target_contracts_by_lot": dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            ),
+            "resolved_contracts_by_lot": read_model.resolved_contracts_by_lot,
+            "remaining_contracts_by_lot": read_model.remaining_contracts_by_lot,
+            "resolved_contracts_by_terminal_type": (
+                read_model.resolved_contracts_by_terminal_type
+            ),
+            "allocation_ids": sorted(
+                str(item.get("allocation_id") or "").strip()
+                for item in case_allocations
+                if str(item.get("allocation_id") or "").strip()
+            ),
+            "actionable": False,
+        }
+        for lot_id in sorted(
+            dict(lifecycle_case.get("target_contracts_by_lot") or {})
+        ):
+            if lot_id in output:
+                output[lot_id] = {
+                    **model,
+                    "lifecycle_state": "conflict",
+                    "lifecycle_reason_codes": ["lifecycle_case_target_overlap"],
+                    "actionable": False,
+                }
+            else:
+                output[lot_id] = dict(model)
+    return output
+
+
+def build_position_advice_share_coverage(
+    *,
+    portfolio_context: JsonDict,
+    option_positions_context: JsonDict,
+) -> JsonDict:
+    """Build per-symbol uncommitted covered-share pools."""
+
+    portfolio = dict(portfolio_context or {})
+    option_ctx = dict(option_positions_context or {})
+    stocks = portfolio.get("stocks_by_symbol")
+    locked = option_ctx.get("locked_shares_by_symbol")
+    unavailable = option_ctx.get("locked_shares_unavailable_by_symbol")
+    stocks = dict(stocks) if isinstance(stocks, dict) else {}
+    locked = dict(locked) if isinstance(locked, dict) else {}
+    unavailable = (
+        dict(unavailable) if isinstance(unavailable, dict) else {}
+    )
+    symbols = {
+        canonical_symbol(item) or str(item or "").strip().upper()
+        for item in (*stocks.keys(), *locked.keys(), *unavailable.keys())
+        if str(item or "").strip()
+    }
+    by_symbol: dict[str, JsonDict] = {}
+    for symbol in sorted(symbols):
+        stock = stocks.get(symbol)
+        if not isinstance(stock, dict):
+            stock = next(
+                (
+                    value
+                    for key, value in stocks.items()
+                    if (canonical_symbol(key) or str(key).strip().upper())
+                    == symbol
+                    and isinstance(value, dict)
+                ),
+                None,
+            )
+        locked_value = next(
+            (
+                value
+                for key, value in locked.items()
+                if (canonical_symbol(key) or str(key).strip().upper())
+                == symbol
+            ),
+            0,
+        )
+        unavailable_reason = next(
+            (
+                str(value or "").strip()
+                for key, value in unavailable.items()
+                if (canonical_symbol(key) or str(key).strip().upper())
+                == symbol
+            ),
+            "",
+        )
+        reasons: list[str] = []
+        eligible_shares = _nonnegative_int(
+            stock.get("shares") if isinstance(stock, dict) else None
+        )
+        locked_shares = _nonnegative_int(locked_value)
+        if not isinstance(stock, dict):
+            reasons.append("underlying_holding_missing")
+        elif eligible_shares is None:
+            reasons.append("underlying_shares_invalid")
+        if locked_shares is None:
+            reasons.append("locked_shares_invalid")
+        if unavailable_reason:
+            reasons.append("locked_shares_unavailable")
+        uncommitted = (
+            eligible_shares - locked_shares
+            if eligible_shares is not None
+            and locked_shares is not None
+            and not unavailable_reason
+            else None
+        )
+        if uncommitted is not None and uncommitted < 0:
+            reasons.append("locked_shares_exceed_holdings")
+            uncommitted = None
+        by_symbol[symbol] = {
+            "symbol": symbol,
+            "status": "available" if uncommitted is not None else "unavailable",
+            "reason_codes": reasons,
+            "unavailable_reason": unavailable_reason or None,
+            "eligible_shares": eligible_shares,
+            "locked_open_short_call_shares": locked_shares,
+            "uncommitted_covered_shares": uncommitted,
+            "avg_cost": (
+                stock.get("avg_cost") if isinstance(stock, dict) else None
+            ),
+            "currency": (
+                stock.get("currency") if isinstance(stock, dict) else None
+            ),
+        }
+    return {
+        "schema_version": "position_advice_share_coverage_values.v1",
+        "share_coverage_semantics": "uncommitted_covered_shares.v1",
+        "by_symbol": by_symbol,
+    }
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 0:
+        return None
+    return parsed
 
 
 def slice_shared_context_for_account(shared_ctx: JsonDict, account: str | None) -> JsonDict | None:

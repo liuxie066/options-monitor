@@ -91,7 +91,14 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
         }
     ]
     phases = [event["phase"] for event in _audit_events(tmp_path / "audit.jsonl")]
-    assert phases == ["backfill_check_started", "backfill_received", "backfill_applied", "backfill_check_finished"]
+    assert phases == [
+        "backfill_check_started",
+        "backfill_lifecycle_discovery_before",
+        "backfill_received",
+        "backfill_applied",
+        "backfill_lifecycle_reconciliation_after",
+        "backfill_check_finished",
+    ]
 
 
 def test_run_history_backfill_skips_state_duplicate_before_pipeline(tmp_path: Path) -> None:

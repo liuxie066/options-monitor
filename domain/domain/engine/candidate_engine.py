@@ -4,9 +4,15 @@ import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+
 
 CANDIDATE_ENGINE_SCHEMA_VERSION = "1.0"
 SCHEMA_KIND_CANDIDATE_DECISION = "candidate_decision"
+REPLACEMENT_CANDIDATE_SCHEMA_VERSION = "replacement_candidate_decision.v1"
+REPLACEMENT_ACCEPTED_OPENING = "accepted_opening"
+REPLACEMENT_CAPACITY_DEFERRED = "capacity_deferred_to_allocator"
+REPLACEMENT_REJECTED_INVARIANT = "rejected_invariant"
 
 StrategyMode = Literal["put", "call"]
 
@@ -716,6 +722,7 @@ def evaluate_candidate_hard_constraints(
     max_strike: int | float | None = None,
     put_cash_required: int | float | None = None,
     put_cash_free: int | float | None = None,
+    put_cash_capacity_available: bool | None = None,
     call_covered_contracts_available: int | float | None = None,
     extra_required_fields: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -816,7 +823,16 @@ def evaluate_candidate_hard_constraints(
 
     put_required_v = _coerce_float(put_cash_required)
     put_free_v = _coerce_float(put_cash_free)
-    if mode_norm == "put" and put_required_v is not None and put_free_v is not None and put_required_v > put_free_v:
+    if mode_norm == "put" and put_cash_capacity_available is False:
+        _reject(
+            rejects,
+            stage=STAGE_HARD_CONSTRAINTS,
+            reason=REJECT_HARD_CAPACITY_PUT,
+            message="put cash capacity evidence is unavailable",
+            metric_value=put_required_v,
+            threshold=put_free_v,
+        )
+    elif mode_norm == "put" and put_required_v is not None and put_free_v is not None and put_required_v > put_free_v:
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
@@ -844,6 +860,33 @@ def evaluate_candidate_hard_constraints(
         accepted=(len(rejects) == 0),
         rejects=rejects,
         normalized_input=normalized,
+    )
+
+
+def evaluate_candidate_non_resource_hard_constraints(
+    raw: dict[str, Any] | Any,
+    *,
+    mode: StrategyMode | str,
+    min_dte: int | float | None = None,
+    max_dte: int | float | None = None,
+    min_strike: int | float | None = None,
+    max_strike: int | float | None = None,
+    extra_required_fields: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    """Run the exact Stage 0/1 opening gates without cash/share availability."""
+
+    return evaluate_candidate_hard_constraints(
+        raw,
+        mode=mode,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_strike=min_strike,
+        max_strike=max_strike,
+        put_cash_required=None,
+        put_cash_free=None,
+        put_cash_capacity_available=None,
+        call_covered_contracts_available=None,
+        extra_required_fields=extra_required_fields,
     )
 
 
@@ -1010,6 +1053,221 @@ def evaluate_candidate_risk_filter(
         rejects=rejects,
         normalized_input=normalized,
     )
+
+
+def evaluate_candidate_invariants(
+    raw: dict[str, Any] | Any,
+    *,
+    mode: StrategyMode | str,
+    risk_policy_version: str,
+    quote_snapshot_id: str,
+    min_dte: int | float | None = None,
+    max_dte: int | float | None = None,
+    min_strike: int | float | None = None,
+    max_strike: int | float | None = None,
+    min_annualized_return: int | float | None = None,
+    min_net_income: int | float | None = None,
+    annualized_return: int | float | None = None,
+    net_income: int | float | None = None,
+    min_open_interest: int | float | None = None,
+    min_volume: int | float | None = None,
+    max_spread_ratio: int | float | None = None,
+    event_flag: bool = False,
+    event_mode: str = "warn",
+    open_interest: int | float | None = None,
+    volume: int | float | None = None,
+    spread_ratio: int | float | None = None,
+    extra_required_fields: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    """Replay all Candidate Engine gates that do not consume portfolio resources."""
+
+    policy_version = str(risk_policy_version or "").strip()
+    snapshot_id = str(quote_snapshot_id or "").strip()
+    if not policy_version or not snapshot_id:
+        raise ValueError("risk policy version and quote snapshot id are required")
+    mode_norm = normalize_strategy_mode(mode)
+    stage1 = evaluate_candidate_non_resource_hard_constraints(
+        raw,
+        mode=mode_norm,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_strike=min_strike,
+        max_strike=max_strike,
+        extra_required_fields=extra_required_fields,
+    )
+    stage2 = evaluate_candidate_return_floor(
+        stage1,
+        min_annualized_return=min_annualized_return,
+        min_net_income=min_net_income,
+        annualized_return=annualized_return,
+        net_income=net_income,
+    )
+    stage3 = evaluate_candidate_risk_filter(
+        stage2,
+        min_open_interest=min_open_interest,
+        min_volume=min_volume,
+        max_spread_ratio=max_spread_ratio,
+        event_flag=event_flag,
+        event_mode=event_mode,
+        open_interest=open_interest,
+        volume=volume,
+        spread_ratio=spread_ratio,
+    )
+    normalized_input = dict(stage3.get("normalized_input") or {})
+    policy = {
+        "mode": mode_norm,
+        "min_dte": _coerce_float(min_dte),
+        "max_dte": _coerce_float(max_dte),
+        "min_strike": _coerce_float(min_strike),
+        "max_strike": _coerce_float(max_strike),
+        "min_annualized_return": _coerce_float(min_annualized_return),
+        "min_net_income": _coerce_float(min_net_income),
+        "min_open_interest": _coerce_float(min_open_interest),
+        "min_volume": _coerce_float(min_volume),
+        "max_spread_ratio": _coerce_float(max_spread_ratio),
+        "event_mode": str(event_mode or "warn").strip().lower(),
+        "extra_required_fields": sorted(
+            {
+                str(item or "").strip()
+                for item in (extra_required_fields or [])
+                if str(item or "").strip()
+            }
+        ),
+    }
+    out = dict(stage3)
+    out.update(
+        {
+            "risk_policy_version": policy_version,
+            "risk_policy": policy,
+            "risk_policy_hash": canonical_sha256(policy),
+            "quote_snapshot_id": snapshot_id,
+            "normalized_input_hash": canonical_sha256(normalized_input),
+            "stage_decision_hashes": {
+                "stage1_non_resource": canonical_sha256(stage1),
+                "stage2_return_floor": canonical_sha256(stage2),
+                "stage3_risk_filter": canonical_sha256(stage3),
+            },
+        }
+    )
+    out["decision_hash"] = canonical_sha256(out)
+    return out
+
+
+def attach_opening_decision_provenance(
+    opening_decision: dict[str, Any],
+    *,
+    risk_policy_version: str,
+    risk_policy_hash: str,
+    quote_snapshot_id: str,
+    normalized_input: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind an actual opening decision to the input/policy used to produce it."""
+
+    decision = validate_candidate_decision_payload(dict(opening_decision or {}))
+    policy_version = str(risk_policy_version or "").strip()
+    policy_hash = str(risk_policy_hash or "").strip()
+    snapshot_id = str(quote_snapshot_id or "").strip()
+    if not policy_version or not policy_hash or not snapshot_id:
+        raise ValueError("opening decision provenance is incomplete")
+    out = dict(decision)
+    out.update(
+        {
+            "risk_policy_version": policy_version,
+            "risk_policy_hash": policy_hash,
+            "quote_snapshot_id": snapshot_id,
+            "normalized_input": dict(normalized_input or {}),
+            "normalized_input_hash": canonical_sha256(dict(normalized_input or {})),
+        }
+    )
+    out["decision_hash"] = canonical_sha256(out)
+    return out
+
+
+def candidate_blocking_reject_reasons(decision: dict[str, Any]) -> tuple[str, ...]:
+    payload = validate_candidate_decision_payload(dict(decision or {}))
+    return tuple(
+        sorted(
+            {
+                str(item.get("reason") or "")
+                for item in payload.get("rejects", [])
+                if str(item.get("reason") or "") != REJECT_RISK_EVENT_WARN
+            }
+        )
+    )
+
+
+def build_replacement_candidate_decision(
+    *,
+    candidate_id: str,
+    opening_decision: dict[str, Any],
+    invariant_decision: dict[str, Any],
+) -> dict[str, Any]:
+    opening = validate_candidate_decision_payload(dict(opening_decision or {}))
+    invariant = validate_candidate_decision_payload(dict(invariant_decision or {}))
+    mode = normalize_strategy_mode(opening.get("mode"))
+    candidate = str(candidate_id or "").strip()
+    if not candidate:
+        raise ValueError("candidate_id is required")
+    opening_hash = str(opening.get("decision_hash") or "")
+    invariant_hash = str(invariant.get("decision_hash") or "")
+    opening_without_hash = {
+        key: value for key, value in opening.items() if key != "decision_hash"
+    }
+    invariant_without_hash = {
+        key: value for key, value in invariant.items() if key != "decision_hash"
+    }
+    decision_hashes_valid = (
+        opening_hash == canonical_sha256(opening_without_hash)
+        and invariant_hash == canonical_sha256(invariant_without_hash)
+    )
+    opening_blocking = candidate_blocking_reject_reasons(opening)
+    invariant_blocking = candidate_blocking_reject_reasons(invariant)
+    expected_resource_reject = (
+        REJECT_HARD_CAPACITY_PUT if mode == "put" else REJECT_HARD_CAPACITY_CALL
+    )
+    parity = decision_hashes_valid and all(
+        (
+            opening.get("normalized_input_hash"),
+            invariant.get("normalized_input_hash"),
+            opening.get("risk_policy_version"),
+            invariant.get("risk_policy_version"),
+            opening.get("risk_policy_hash"),
+            invariant.get("risk_policy_hash"),
+            opening.get("quote_snapshot_id"),
+            invariant.get("quote_snapshot_id"),
+        )
+    ) and (
+        opening.get("normalized_input_hash") == invariant.get("normalized_input_hash")
+        and opening.get("risk_policy_version") == invariant.get("risk_policy_version")
+        and opening.get("risk_policy_hash") == invariant.get("risk_policy_hash")
+        and opening.get("quote_snapshot_id") == invariant.get("quote_snapshot_id")
+    )
+    eligibility = REPLACEMENT_REJECTED_INVARIANT
+    resource_reject: str | None = None
+    if parity and bool(invariant.get("accepted")) and not invariant_blocking:
+        if bool(opening.get("accepted")) and not opening_blocking:
+            eligibility = REPLACEMENT_ACCEPTED_OPENING
+        elif opening_blocking == (expected_resource_reject,):
+            eligibility = REPLACEMENT_CAPACITY_DEFERRED
+            resource_reject = expected_resource_reject
+    payload = {
+        "schema_version": REPLACEMENT_CANDIDATE_SCHEMA_VERSION,
+        "candidate_id": candidate,
+        "strategy_mode": mode,
+        "opening_decision_hash": opening_hash,
+        "opening_accepted": bool(opening.get("accepted")),
+        "opening_rejects": list(opening.get("rejects") or []),
+        "blocking_reject_reasons": list(opening_blocking),
+        "invariant_decision_hash": invariant_hash,
+        "invariant_rejects": list(invariant.get("rejects") or []),
+        "invariant_policy_parity": parity,
+        "resource_relative_reject": resource_reject,
+        "replacement_eligibility": eligibility,
+        "risk_policy_version": str(invariant.get("risk_policy_version") or ""),
+        "quote_snapshot_id": str(invariant.get("quote_snapshot_id") or ""),
+    }
+    payload["replacement_decision_hash"] = canonical_sha256(payload)
+    return payload
 
 
 def build_candidate_rank_key(

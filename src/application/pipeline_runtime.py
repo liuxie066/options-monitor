@@ -57,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-dir", default=None, help="Directory to write reports (symbols_summary/alerts/notification). Default: output_shared/reports")
     parser.add_argument("--state-dir", default=None, help="Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output_shared/state")
     parser.add_argument("--shared-context-dir", default=None, help="Optional shared context cache directory for cross-account reuse within one tick")
+    parser.add_argument(
+        "--position-advice-account-run-id",
+        default=None,
+        help=(
+            "Explicit account run id for immutable Position Advice v2 "
+            "candidate capture"
+        ),
+    )
     return parser
 
 
@@ -196,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
             symbols_arg=getattr(args, "symbols", None),
             log=log,
             want_fn=_want,
+            position_advice_account_run_id=getattr(
+                args,
+                "position_advice_account_run_id",
+                None,
+            ),
         )
 
         symbols = [str(r.get("symbol")) for r in summary_rows if r.get("symbol")]

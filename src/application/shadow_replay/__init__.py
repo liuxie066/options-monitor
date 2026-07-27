@@ -14,13 +14,19 @@ from src.application.shadow_replay.evidence import (
     shadow_replay_dataset_status,
     summarize_shadow_replay_readiness,
 )
+from src.application.position_advice_promotion import (
+    build_position_advice_promotion_evidence,
+    publish_position_advice_promotion_evidence,
+)
 
 __all__ = [
     "analyze_shadow_replay_dataset",
     "build_shadow_replay_dataset",
+    "build_position_advice_promotion_evidence",
     "collect_shadow_replay_marks",
     "load_shadow_replay_observed_evidence",
     "mark_shadow_replay_dataset",
+    "publish_position_advice_promotion_evidence",
     "run_shadow_replay_candidate_impact",
     "run_shadow_replay_data_plan",
     "settle_shadow_replay_dataset",

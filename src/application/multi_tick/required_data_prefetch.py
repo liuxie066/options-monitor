@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import time
@@ -28,7 +29,11 @@ from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol
-from src.application.opend_symbol_outputs import save_outputs
+from src.application.opend_symbol_outputs import (
+    find_fresh_required_data_quote_receipts,
+    publish_required_data_quote_snapshot,
+    save_outputs,
+)
 from src.application.required_data_coverage import required_data_frame_covers_fetch_plan
 from src.application.required_data_observability import (
     summarize_prefetch_fetch_metrics,
@@ -251,6 +256,7 @@ def _fetch_one_inprocess(
     opend_fetch_cfg: dict[str, Any],
     batch_cfg: Any,
     fetch_plan: RequiredDataFetchPlanBundle | None = None,
+    producer_run_id: str | None = None,
 ) -> dict[str, Any]:
     symbol = str(symbol_cfg.get('symbol')).strip()
     if not symbol:
@@ -310,12 +316,65 @@ def _fetch_one_inprocess(
             expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
             include_realized_volatility=bool(fetch_kwargs.get("include_realized_volatility")),
         )
+        source_observed_at = datetime.now(timezone.utc)
         _gateway_pool.mark_success()
-        save_outputs(base, symbol, payload0, output_root=shared_required)
+        saved_paths = save_outputs(base, symbol, payload0, output_root=shared_required)
         raw_meta = payload0.get('meta')
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         ok = str(meta.get('status') or '').strip().lower() not in {'error', 'fail', 'failed'}
         message = str(meta.get('error') or meta.get('status') or 'fetched')
+        quote_receipt_relpath: str | None = None
+        if ok and str(producer_run_id or "").strip():
+            if (
+                not isinstance(saved_paths, tuple)
+                or len(saved_paths) != 2
+            ):
+                raise RuntimeError("save_outputs did not return quote artifact paths")
+            quote_receipt_path, _quote_receipt = publish_required_data_quote_snapshot(
+                producer_root=shared_required,
+                producer_run_id=str(producer_run_id),
+                symbol=symbol,
+                raw_path=Path(saved_paths[0]),
+                csv_path=Path(saved_paths[1]),
+                fetch_plan=(
+                    fetch_plan.to_debug_dict()
+                    if fetch_plan is not None
+                    else {}
+                ),
+                fetch_policy={
+                    "source": src,
+                    "host": host,
+                    "port": port,
+                    "limit_expirations": limit_exp,
+                    "fetch_kwargs": fetch_kwargs,
+                    "opend_fetch": opend_fetch_cfg,
+                    "snapshot_batch_size": int(
+                        getattr(batch_cfg, 'market_snapshot', 0) or 0
+                    ),
+                    "snapshot_fallback_max_codes": int(
+                        getattr(
+                            batch_cfg,
+                            'market_snapshot_fallback_max_codes',
+                            100,
+                        )
+                        or 0
+                    ),
+                    "snapshot_fallback_batch_size": int(
+                        getattr(
+                            batch_cfg,
+                            'market_snapshot_fallback_batch_size',
+                            20,
+                        )
+                        or 20
+                    ),
+                },
+                source_observed_at=source_observed_at,
+            )
+            quote_receipt_relpath = (
+                quote_receipt_path.resolve()
+                .relative_to(shared_required.resolve())
+                .as_posix()
+            )
         payload = normalize_tool_execution_payload(
             tool_name='required_data_prefetch',
             symbol=symbol,
@@ -328,6 +387,8 @@ def _fetch_one_inprocess(
         )
         if isinstance(payload0, dict):
             payload['payload'] = payload0
+        if quote_receipt_relpath is not None:
+            payload["quote_source_receipt"] = quote_receipt_relpath
     except Exception as exc:
         _gateway_pool.mark_failure(exc)
         message = str(exc or '')
@@ -426,6 +487,7 @@ def prefetch_required_data(
     cfg: dict[str, Any],
     shared_required: Path,
     force_refresh: bool = False,
+    producer_run_id: str | None = None,
 ) -> dict[str, Any]:
     with _required_data_prefetch_file_lock(base):
         return _prefetch_required_data_unlocked(
@@ -435,6 +497,7 @@ def prefetch_required_data(
             cfg=cfg,
             shared_required=shared_required,
             force_refresh=force_refresh,
+            producer_run_id=producer_run_id,
         )
 
 
@@ -446,6 +509,7 @@ def _prefetch_required_data_unlocked(
     cfg: dict[str, Any],
     shared_required: Path,
     force_refresh: bool = False,
+    producer_run_id: str | None = None,
 ) -> dict[str, Any]:
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
@@ -582,6 +646,33 @@ def _prefetch_required_data_unlocked(
                 force_refresh=bool(force_refresh),
             )
         )
+        if bool(payload.get("ok")) and str(producer_run_id or "").strip():
+            source_observed_at = datetime.now(timezone.utc)
+            raw_path = shared_required / "raw" / f"{symbol}_required_data.json"
+            csv_path = shared_required / "parsed" / f"{symbol}_required_data.csv"
+            quote_receipt_path, _quote_receipt = publish_required_data_quote_snapshot(
+                producer_root=shared_required,
+                producer_run_id=str(producer_run_id),
+                symbol=symbol,
+                raw_path=raw_path,
+                csv_path=csv_path,
+                fetch_plan=fetch_plan.to_debug_dict(),
+                fetch_policy={
+                    "source": src,
+                    "host": str(fetch_cfg.get('host') or '127.0.0.1'),
+                    "port": int(fetch_cfg.get('port') or 11111),
+                    "limit_expirations": limit_exp,
+                    "fetch_kwargs": fetch_kwargs,
+                    "opend_fetch": opend_fetch_cfg,
+                    "execution_mode": "subprocess",
+                },
+                source_observed_at=source_observed_at,
+            )
+            payload["quote_source_receipt"] = (
+                quote_receipt_path.resolve()
+                .relative_to(shared_required.resolve())
+                .as_posix()
+            )
         # Canonical adapter validation before entering next layer.
         source_snapshot = adapt_opend_tool_payload(payload)
         payload["source_snapshot"] = source_snapshot
@@ -642,6 +733,10 @@ def _prefetch_required_data_unlocked(
             'rate_limit_cooldowns': [],
             'symbols': [],
             'audit': [],
+            'quote_receipts': find_fresh_required_data_quote_receipts(
+                producer_root=shared_required,
+                symbols=symbols,
+            ),
         }
 
     configured_max_workers = _resolve_prefetch_max_workers(cfg)
@@ -657,6 +752,7 @@ def _prefetch_required_data_unlocked(
             opend_fetch_cfg=opend_fetch_cfg,
             batch_cfg=batch_cfg,
             fetch_plan=_get_fetch_plan(symbol_cfg),
+            producer_run_id=producer_run_id,
         )
 
     wave_results: list[PrefetchCoordinatorResult] = []
@@ -743,4 +839,8 @@ def _prefetch_required_data_unlocked(
         'results': coordinator_result.results,
         'symbols': coordinator_result.symbol_items,
         'audit': coordinator_result.audit_items,
+        'quote_receipts': find_fresh_required_data_quote_receipts(
+            producer_root=shared_required,
+            symbols=symbols,
+        ),
     }
