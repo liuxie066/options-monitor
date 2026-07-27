@@ -22,6 +22,7 @@ _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "As
 _MARKET_TIME_LABELS = {"US": "美东", "HK": "香港", "CN": "北京时间"}
 _STRATEGY_LABELS = {
     "sell_put": "Sell Put",
+    "short_put": "Sell Put",
     "covered_call": "Covered Call",
     "combo_yield": "组合增强",
 }
@@ -45,6 +46,15 @@ _CLOSE_ACTION_LABELS = {
     "hold_call_as_convexity": "继续持有 Call",
     "hold_call": "继续持有 Call",
     "hold": "继续观察",
+}
+_POSITION_ADVICE_LABELS = {
+    "roll": "建议滚仓",
+    "replace": "建议替换当前期权腿",
+    "reallocate": "建议重新分配资金",
+    "review": "建议人工核查",
+    "hold": "继续观察",
+    "not_evaluable": "暂无法评估（证据不足）",
+    "none": "继续观察",
 }
 _STANDARD_CLOSE_TIER_LABELS = {
     "strong": "强烈建议平仓",
@@ -937,6 +947,9 @@ def _position_contract_label(row: Mapping[str, Any], *, market: str) -> str:
 
 
 def _position_status_label(row: Mapping[str, Any]) -> str:
+    recommendation = _lower(row.get("recommendation"))
+    if recommendation in _POSITION_ADVICE_LABELS:
+        return _POSITION_ADVICE_LABELS[recommendation]
     evaluation = _lower(row.get("evaluation_status"))
     quote = _lower(row.get("quote_status"))
     statuses = {evaluation, quote}
@@ -973,6 +986,10 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
 _POSITION_ACTIONABLE_LABELS = frozenset(
     [
         *(_CLOSE_ACTION_LABELS[action] for action in _CLOSE_DETAIL_ACTIONS),
+        *(
+            _POSITION_ADVICE_LABELS[action]
+            for action in ("roll", "replace", "reallocate", "review")
+        ),
         *_STANDARD_CLOSE_TIER_LABELS.values(),
         "建议复核持仓",
     ]
@@ -986,6 +1003,33 @@ def _position_has_advice(row: Mapping[str, Any]) -> bool:
 
 
 def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:
+    recommendation = _lower(row.get("recommendation"))
+    if recommendation in {"roll", "replace", "reallocate"}:
+        metrics = (
+            row.get("metrics")
+            if isinstance(row.get("metrics"), Mapping)
+            else {}
+        )
+        parts: list[str] = []
+        improvement = _number(
+            metrics.get("net_carry_improvement_H_base_cny")
+        )
+        if improvement is not None:
+            parts.append(f"比较期净 carry 提升 {_money(improvement, market='CN')}")
+        payback = _number(metrics.get("payback_days"))
+        if payback is not None:
+            parts.append(f"摩擦回收期 {payback:g} 天")
+        horizon = _number(metrics.get("comparison_horizon_days"))
+        if horizon is not None:
+            parts.append(f"比较期限 {horizon:g} 天")
+        return [" · ".join(parts)] if parts else []
+    if recommendation == "review":
+        reasons = [
+            str(item)
+            for item in row.get("reason_codes") or []
+            if str(item)
+        ]
+        return ["；".join(reasons)] if reasons else []
     if status.startswith("暂无法评估") or _lower(row.get("close_action")) not in _CLOSE_DETAIL_ACTIONS:
         return []
     metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}

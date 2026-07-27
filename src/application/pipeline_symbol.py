@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from functools import partial
+from typing import Any, Callable
 
 from src.application.exchange_rate_loader import build_converter
 from src.application.prefilters import apply_prefilters
@@ -54,6 +55,13 @@ def process_symbol(
     is_scheduled: bool = False,
     runtime_config: dict | None = None,
     fetch_only: bool = False,
+    risk_policy_version: str | None = None,
+    quote_snapshot_id: str | None = None,
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    position_advice_producer_run_id: str | None = None,
+    candidate_capture_status_sink_fn: (
+        Callable[[dict[str, Any]], None] | None
+    ) = None,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
     if report_dir is None:
@@ -76,6 +84,13 @@ def process_symbol(
             is_scheduled=bool(is_scheduled),
             runtime_config=runtime_config,
             fetch_only=bool(fetch_only),
+            risk_policy_version=risk_policy_version,
+            quote_snapshot_id=quote_snapshot_id,
+            all_decisions_sink_fn=all_decisions_sink_fn,
+            position_advice_producer_run_id=position_advice_producer_run_id,
+            candidate_capture_status_sink_fn=(
+                candidate_capture_status_sink_fn
+            ),
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,

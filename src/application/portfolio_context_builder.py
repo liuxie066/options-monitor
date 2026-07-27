@@ -87,6 +87,10 @@ def build_context(
     records: list[dict],
     broker: str | None = None,
     account: str | None = None,
+    *,
+    source_observed_at: str | None = None,
+    portfolio_source_name: str = "holdings",
+    source_account_identifiers: list[str] | tuple[str, ...] | set[str] = (),
 ) -> dict:
     # holding schema fields we saw:
     # asset_id, asset_type, broker/market, account, quantity, avg_cost, currency
@@ -182,17 +186,37 @@ def build_context(
         if not existing.get("currency") and currency:
             existing["currency"] = currency
 
+    observed_at = str(source_observed_at or datetime.now(timezone.utc).isoformat())
+    identifiers = sorted(
+        {
+            str(item or "").strip().lower()
+            for item in source_account_identifiers
+            if str(item or "").strip()
+        }
+    )
+    if not identifiers and account_norm:
+        identifiers = [account_norm]
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "source_observed_at": observed_at,
+        "source_account_identifiers": identifiers,
         "filters": {"broker": broker_norm, "account": account_norm},
         "cash_by_currency": cash_by_currency,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(selected),
+        "portfolio_source_name": str(portfolio_source_name or "holdings"),
     }
 
 
-def build_shared_context(records: list[dict], broker: str | None = None) -> dict:
+def build_shared_context(
+    records: list[dict],
+    broker: str | None = None,
+    *,
+    source_observed_at: str | None = None,
+    portfolio_source_name: str = "holdings",
+) -> dict:
     broker_norm = str(broker).strip() if broker else None
+    observed_at = str(source_observed_at or datetime.now(timezone.utc).isoformat())
     accounts: set[str] = set()
     for rec in records:
         fields0 = rec.get("fields") or {}
@@ -205,11 +229,31 @@ def build_shared_context(records: list[dict], broker: str | None = None) -> dict
         if a:
             accounts.add(a)
 
-    by_account = {acct: build_context(records, broker=broker_norm, account=acct) for acct in sorted(accounts)}
+    by_account = {
+        acct: build_context(
+            records,
+            broker=broker_norm,
+            account=acct,
+            source_observed_at=observed_at,
+            portfolio_source_name=portfolio_source_name,
+            source_account_identifiers=[acct],
+        )
+        for acct in sorted(accounts)
+    }
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "source_observed_at": observed_at,
+        "source_account_identifiers": sorted(accounts),
+        "portfolio_source_name": str(portfolio_source_name or "holdings"),
         "filters": {"broker": broker_norm, "account": None},
-        "all_accounts": build_context(records, broker=broker_norm, account=None),
+        "all_accounts": build_context(
+            records,
+            broker=broker_norm,
+            account=None,
+            source_observed_at=observed_at,
+            portfolio_source_name=portfolio_source_name,
+            source_account_identifiers=sorted(accounts),
+        ),
         "by_account": by_account,
     }
 
@@ -256,7 +300,16 @@ def load_holdings_portfolio_context(
     broker: str | None = None,
     account: str | None = None,
 ) -> dict:
-    return build_context(load_holdings_records(data_config_path), broker=broker, account=account)
+    records = load_holdings_records(data_config_path)
+    observed_at = datetime.now(timezone.utc).isoformat()
+    return build_context(
+        records,
+        broker=broker,
+        account=account,
+        source_observed_at=observed_at,
+        portfolio_source_name="external_holdings",
+        source_account_identifiers=([account] if account else []),
+    )
 
 
 def load_holdings_portfolio_shared_context(
@@ -264,7 +317,13 @@ def load_holdings_portfolio_shared_context(
     data_config_path: Path,
     broker: str | None = None,
 ) -> dict:
-    return build_shared_context(load_holdings_records(data_config_path), broker=broker)
+    records = load_holdings_records(data_config_path)
+    return build_shared_context(
+        records,
+        broker=broker,
+        source_observed_at=datetime.now(timezone.utc).isoformat(),
+        portfolio_source_name="external_holdings",
+    )
 
 
 def main():

@@ -87,8 +87,12 @@ from src.application.ledger.results import (
     TradeEventInterventionLedgerResult,
 )
 from src.application.ledger.writer import (
+    apply_lifecycle_allocation_atomically,
+    discover_expired_lifecycle_cases_atomically,
     persist_normalized_trade_events_atomically,
     persist_trade_event,
+    persist_trade_event_with_combo_identity,
+    record_lifecycle_evidence_issue_atomically,
     rebuild_position_lots_from_trade_events,
 )
 from src.application.ledger.lifecycle import persist_assignment_events, persist_exercise_events, persist_expire_close_events
@@ -1750,6 +1754,72 @@ def refresh_position_lot_projection(repo: Any) -> ProjectionRefreshResult:
     return rebuild_position_lots_from_trade_events(getattr(repo, "primary_repo", repo))
 
 
+def record_combo_trade_open(
+    repo: Any,
+    *,
+    event: Any,
+    combo_identity_intent: dict[str, Any],
+) -> dict[str, Any]:
+    return persist_trade_event_with_combo_identity(
+        repo,
+        event,
+        combo_identity_intent=combo_identity_intent,
+    )
+
+
+def record_lifecycle_allocation(
+    repo: Any,
+    *,
+    case_id: str,
+    evidence: dict[str, Any],
+    terminal_events: list[Any],
+    allocations: list[dict[str, Any]],
+    derived_status: str,
+    derived_summary: dict[str, Any],
+) -> dict[str, Any]:
+    return apply_lifecycle_allocation_atomically(
+        repo,
+        case_id=case_id,
+        evidence=evidence,
+        terminal_events=terminal_events,
+        allocations=allocations,
+        derived_status=derived_status,
+        derived_summary=derived_summary,
+    )
+
+
+def discover_expired_lifecycle_cases(
+    repo: Any,
+    *,
+    account: str | None = None,
+    observed_at_ms: int | None = None,
+    apply_changes: bool = True,
+) -> dict[str, Any]:
+    return discover_expired_lifecycle_cases_atomically(
+        repo,
+        account=account,
+        observed_at_ms=observed_at_ms,
+        apply_changes=apply_changes,
+    )
+
+
+def record_lifecycle_evidence_issue(
+    repo: Any,
+    *,
+    case_id: str,
+    evidence: dict[str, Any],
+    status: str,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return record_lifecycle_evidence_issue_atomically(
+        repo,
+        case_id=case_id,
+        evidence=evidence,
+        status=status,
+        reason_codes=reason_codes,
+    )
+
+
 def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
@@ -1856,10 +1926,14 @@ __all__ = [
     "preview_trade_event_void",
     "record_broker_trade_close",
     "record_broker_trade_open",
+    "record_combo_trade_open",
     "record_expired_position_closes",
     "record_lifecycle_assignment",
     "record_lifecycle_exercise",
     "record_lifecycle_expire_close",
+    "record_lifecycle_allocation",
+    "discover_expired_lifecycle_cases",
+    "record_lifecycle_evidence_issue",
     "record_manual_exercise",
     "record_manual_assignment",
     "record_manual_position_adjust",

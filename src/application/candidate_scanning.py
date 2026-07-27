@@ -9,12 +9,17 @@ import pandas as pd
 from domain.domain.engine import (
     CANDIDATE_REJECT_REASON_RULE_MAP,
     CandidateScoreWeights,
+    attach_opening_decision_provenance,
     build_candidate_decision,
+    build_replacement_candidate_decision,
     evaluate_candidate_hard_constraints,
+    evaluate_candidate_invariants,
+    evaluate_candidate_non_resource_hard_constraints,
     evaluate_candidate_return_floor,
     evaluate_candidate_risk_filter,
     rank_candidate_rows,
 )
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     empty_reject_log_dataframe,
 )
@@ -53,6 +58,8 @@ class CandidateScanConfig:
     strategy_family: str | None = None
     strategy_profile: str | None = None
     quiet: bool = False
+    risk_policy_version: str | None = None
+    quote_snapshot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,10 @@ class CandidateScanDependencies:
     annotate_event_risk_fn: Callable[[pd.DataFrame, Path, dict[str, Any] | None], pd.DataFrame]
     print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
     metric_reject_reason_fn: Callable[[CandidateContractInput], dict[str, Any] | None] | None = None
+    all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None
+
+
+CANDIDATE_ALL_DECISIONS_SCHEMA = "candidate_all_decisions.v1"
 
 
 def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] | None) -> CandidateScoreWeights | None:
@@ -190,6 +201,220 @@ def _build_base_values(
     )
 
 
+def _build_non_resource_base_values(
+    contract: CandidateContractInput,
+    *,
+    min_dte: int,
+    max_dte: int,
+    min_strike: float | None,
+    max_strike: float | None,
+) -> tuple[dict[str, Any], CandidateBaseValues | None]:
+    gate = evaluate_candidate_non_resource_hard_constraints(
+        contract.to_gate_payload(),
+        mode=contract.mode,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_strike=min_strike,
+        max_strike=max_strike,
+        extra_required_fields=(),
+    )
+    if not bool(gate.get("accepted")):
+        return gate, None
+    spread, spread_ratio = _spread_values(contract)
+    return gate, CandidateBaseValues(
+        dte=int(contract.dte or 0),
+        strike=float(contract.strike or 0.0),
+        open_interest=float(contract.open_interest or 0.0),
+        volume=float(contract.volume or 0.0),
+        spread=spread,
+        spread_ratio=spread_ratio,
+    )
+
+
+def _candidate_id(
+    *,
+    mode: str,
+    normalized_input: dict[str, Any],
+) -> str:
+    return canonical_sha256(
+        {
+            "schema": "options-monitor.candidate-id.v1",
+            "mode": str(mode),
+            "symbol": normalized_input.get("symbol"),
+            "contract_symbol": normalized_input.get("contract_symbol"),
+            "expiration": normalized_input.get("expiration"),
+            "strike": normalized_input.get("strike"),
+        }
+    )
+
+
+def _build_all_decision_context(
+    *,
+    contract: CandidateContractInput,
+    base_values: CandidateBaseValues,
+    metrics: dict[str, Any],
+    opening_stage1: dict[str, Any],
+    config: CandidateScanConfig,
+    deps: CandidateScanDependencies,
+    context_index: int,
+) -> dict[str, Any]:
+    """Build one sidecar context from the opening path's exact computed facts."""
+
+    annualized_return = deps.annualized_return_value_fn(metrics)
+    normalized_input = {
+        **contract.to_gate_payload(),
+        "dte": base_values.dte,
+        "strike": base_values.strike,
+        "open_interest": base_values.open_interest,
+        "volume": base_values.volume,
+        "spread": base_values.spread,
+        "spread_ratio": base_values.spread_ratio,
+        **metrics,
+    }
+    opening_stage2 = evaluate_candidate_return_floor(
+        opening_stage1,
+        min_annualized_return=config.min_annualized_net_return,
+        min_net_income=config.min_net_income,
+        annualized_return=annualized_return,
+        net_income=metrics.get("net_income"),
+    )
+    opening_stage3 = evaluate_candidate_risk_filter(
+        opening_stage2,
+        min_open_interest=config.min_open_interest,
+        min_volume=config.min_volume,
+        max_spread_ratio=config.max_spread_ratio,
+        open_interest=base_values.open_interest,
+        volume=base_values.volume,
+        spread_ratio=base_values.spread_ratio,
+    )
+    return {
+        "candidate_id": _candidate_id(
+            mode=config.mode,
+            normalized_input=normalized_input,
+        ),
+        "normalized_input": normalized_input,
+        "annualized_return": annualized_return,
+        "opening_pre_event": opening_stage3,
+        "event_row": {
+            **normalized_input,
+            "__all_decisions_index": context_index,
+        },
+    }
+
+
+def _finalize_all_decisions(
+    *,
+    contexts: list[dict[str, Any]],
+    config: CandidateScanConfig,
+    deps: CandidateScanDependencies,
+    event_risk_cfg: dict[str, Any] | None,
+    base_dir: Path,
+) -> list[dict[str, Any]]:
+    if not contexts:
+        return []
+    policy_version = str(config.risk_policy_version or "").strip()
+    quote_snapshot_id = str(config.quote_snapshot_id or "").strip()
+    if not policy_version or not quote_snapshot_id:
+        raise ValueError(
+            "risk_policy_version and quote_snapshot_id are required for all-decisions"
+        )
+    event_rows = pd.DataFrame([dict(item["event_row"]) for item in contexts])
+    annotated = deps.annotate_event_risk_fn(event_rows, base_dir, event_risk_cfg)
+    if "__all_decisions_index" not in annotated.columns:
+        raise ValueError("event annotator did not preserve all-decisions identity")
+    if len(annotated) != len(contexts):
+        raise ValueError("event annotator changed all-decisions cardinality")
+    annotated_by_index = {
+        int(row["__all_decisions_index"]): row
+        for row in annotated.to_dict("records")
+    }
+    if set(annotated_by_index) != set(range(len(contexts))):
+        raise ValueError("event annotator changed all-decisions cardinality")
+
+    event_mode = normalize_event_risk_mode((event_risk_cfg or {}).get("mode"))
+    decisions: list[dict[str, Any]] = []
+    for index, context in enumerate(contexts):
+        annotated_row = dict(annotated_by_index[index])
+        annotated_row.pop("__all_decisions_index", None)
+        event_flag = bool(annotated_row.get("event_flag"))
+        normalized_input = dict(context["normalized_input"])
+        normalized_input.update(
+            {
+                key: annotated_row.get(key)
+                for key in (
+                    "event_flag",
+                    "event_types",
+                    "event_dates",
+                    "event_source_status",
+                    "event_source_error",
+                )
+                if key in annotated_row
+            }
+        )
+        opening = evaluate_candidate_risk_filter(
+            context["opening_pre_event"],
+            event_flag=event_flag,
+            event_mode=event_mode,
+        )
+        invariant = evaluate_candidate_invariants(
+            normalized_input,
+            mode=config.mode,
+            risk_policy_version=policy_version,
+            quote_snapshot_id=quote_snapshot_id,
+            min_dte=config.min_dte,
+            max_dte=config.max_dte,
+            min_strike=config.min_strike,
+            max_strike=config.max_strike,
+            min_annualized_return=config.min_annualized_net_return,
+            min_net_income=config.min_net_income,
+            annualized_return=context["annualized_return"],
+            net_income=normalized_input.get("net_income"),
+            min_open_interest=config.min_open_interest,
+            min_volume=config.min_volume,
+            max_spread_ratio=config.max_spread_ratio,
+            event_flag=event_flag,
+            event_mode=event_mode,
+            open_interest=normalized_input.get("open_interest"),
+            volume=normalized_input.get("volume"),
+            spread_ratio=normalized_input.get("spread_ratio"),
+            extra_required_fields=(),
+        )
+        opening = attach_opening_decision_provenance(
+            opening,
+            risk_policy_version=policy_version,
+            risk_policy_hash=str(invariant["risk_policy_hash"]),
+            quote_snapshot_id=quote_snapshot_id,
+            normalized_input=dict(invariant["normalized_input"]),
+        )
+        replacement = build_replacement_candidate_decision(
+            candidate_id=str(context["candidate_id"]),
+            opening_decision=opening,
+            invariant_decision=invariant,
+        )
+        decisions.append(
+            {
+                "schema_version": CANDIDATE_ALL_DECISIONS_SCHEMA,
+                "candidate_id": context["candidate_id"],
+                "strategy_mode": config.mode,
+                "normalized_input": invariant["normalized_input"],
+                "normalized_input_hash": invariant["normalized_input_hash"],
+                "risk_policy_version": policy_version,
+                "risk_policy_hash": invariant["risk_policy_hash"],
+                "quote_snapshot_id": quote_snapshot_id,
+                "opening_decision": opening,
+                "invariant_decision": invariant,
+                "replacement_candidate_decision": replacement,
+            }
+        )
+    return sorted(
+        decisions,
+        key=lambda item: (
+            str(item["strategy_mode"]),
+            str(item["candidate_id"]),
+        ),
+    )
+
+
 def run_candidate_scan(
     *,
     config: CandidateScanConfig,
@@ -214,6 +439,7 @@ def run_candidate_scan(
 
     rows: list[dict[str, Any]] = []
     reject_rows: list[dict[str, Any]] = []
+    all_decision_contexts: list[dict[str, Any]] = []
     for symbol in config.symbols:
         df = _load_required_data_rows(input_root=config.input_root, symbol=symbol, mode=config.mode)
         if df.empty:
@@ -246,6 +472,35 @@ def run_candidate_scan(
                 max_strike=config.max_strike,
                 extra_hard_kwargs=hard_kwargs,
             )
+            metrics: dict[str, Any] | None = None
+            metrics_computed = False
+            if deps.all_decisions_sink_fn is not None:
+                _non_resource_stage1, non_resource_base_values = (
+                    _build_non_resource_base_values(
+                        contract,
+                        min_dte=config.min_dte,
+                        max_dte=config.max_dte,
+                        min_strike=config.min_strike,
+                        max_strike=config.max_strike,
+                    )
+                )
+                # The all-decisions universe begins only after basic
+                # normalization and DTE/strike constraints, before capacity.
+                if non_resource_base_values is not None:
+                    metrics = deps.compute_metrics_fn(contract)
+                    metrics_computed = True
+                    if metrics:
+                        all_decision_contexts.append(
+                            _build_all_decision_context(
+                                contract=contract,
+                                base_values=non_resource_base_values,
+                                metrics=metrics,
+                                opening_stage1=stage1,
+                                config=config,
+                                deps=deps,
+                                context_index=len(all_decision_contexts),
+                            )
+                        )
             if base_values is None:
                 replay_fields = _contract_replay_fields(contract)
                 reject_rows.extend(
@@ -268,7 +523,8 @@ def run_candidate_scan(
                     )
                 )
                 continue
-            metrics = deps.compute_metrics_fn(contract)
+            if not metrics_computed:
+                metrics = deps.compute_metrics_fn(contract)
             if not metrics:
                 reason: dict[str, Any] = {}
                 if deps.metric_reject_reason_fn is not None:
@@ -347,6 +603,17 @@ def run_candidate_scan(
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate:
                 rows.append(candidate)
+
+    if deps.all_decisions_sink_fn is not None:
+        deps.all_decisions_sink_fn(
+            _finalize_all_decisions(
+                contexts=all_decision_contexts,
+                config=config,
+                deps=deps,
+                event_risk_cfg=event_risk_cfg,
+                base_dir=base_dir,
+            )
+        )
 
     out = pd.DataFrame(rows)
     if not out.empty:

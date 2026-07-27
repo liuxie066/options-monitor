@@ -46,6 +46,11 @@ from src.application.positions.workflows import (
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.trade_time_format import add_trade_time_beijing
 from src.application.trades.lifecycle import resolve_lifecycle_expired_unassigned
+from src.application.trades.lifecycle_reconciliation import (
+    discover_lifecycle_cases,
+    lifecycle_case_read_model,
+    reconcile_lifecycle_evidence,
+)
 from src.application.trades.review import replay_trade_events
 from src.application.write_contract import attach_write_contract
 from src.interfaces.cli.ledger_write_safety import add_write_flags as _add_local_write_flags
@@ -309,6 +314,22 @@ def main(argv: list[str] | None = None) -> int:
     _add_runtime_root_arg(p_lifecycle_inspect)
     p_lifecycle_inspect.add_argument('--case-id', required=True)
     p_lifecycle_inspect.add_argument('--format', default='json', choices=['json', 'text'])
+    p_lifecycle_reconcile = lifecycle_sub.add_parser(
+        'reconcile',
+        help='discover expired-open cases and optionally reconcile one canonical evidence payload',
+    )
+    _add_runtime_root_arg(p_lifecycle_reconcile)
+    p_lifecycle_reconcile.add_argument('--account', default=None)
+    p_lifecycle_reconcile.add_argument('--case-id', default=None)
+    p_lifecycle_reconcile.add_argument('--target-lot-id', default=None)
+    p_lifecycle_reconcile.add_argument(
+        '--evidence-json',
+        default=None,
+        help='path to one canonical lifecycle evidence JSON object',
+    )
+    p_lifecycle_reconcile.add_argument('--observed-at-ms', type=int, default=None)
+    p_lifecycle_reconcile.add_argument('--format', default='json', choices=['json', 'text'])
+    _add_local_write_flags(p_lifecycle_reconcile, high_risk=True)
     p_lifecycle_confirm_expired = lifecycle_sub.add_parser(
         'confirm-expired',
         help='confirm a pending zero-price option lifecycle case expired without assignment/exercise',
@@ -437,11 +458,15 @@ def main(argv: list[str] | None = None) -> int:
 
     write_controls: dict[str, dict[str, bool]] = {}
     write_control_key = str(args.cmd)
-    if args.cmd == "lifecycle" and getattr(args, "lifecycle_cmd", None) == "confirm-expired":
-        write_control_key = "lifecycle:confirm-expired"
+    if args.cmd == "lifecycle" and getattr(args, "lifecycle_cmd", None) in {
+        "confirm-expired",
+        "reconcile",
+    }:
+        lifecycle_command = str(args.lifecycle_cmd)
+        write_control_key = f"lifecycle:{lifecycle_command}"
         write_controls[write_control_key] = _resolve_write_control(
             args,
-            command_name="option-positions lifecycle confirm-expired",
+            command_name=f"option-positions lifecycle {lifecycle_command}",
             high_risk=True,
         )
     elif args.cmd in {
@@ -921,6 +946,99 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"- {evidence.get('evidence_id')} | {evidence.get('evidence_type')} | "
                         f"source={evidence.get('source_event_id') or '-'}"
+                    )
+            return 0
+        if args.lifecycle_cmd == 'reconcile':
+            control = write_controls["lifecycle:reconcile"]
+            dry_run = not bool(control["write_requested"])
+            discovery = discover_lifecycle_cases(
+                repo,
+                account=args.account,
+                observed_at_ms=args.observed_at_ms,
+                apply_changes=not dry_run,
+            )
+            reconciliation = None
+            evidence_path = str(args.evidence_json or "").strip()
+            if evidence_path:
+                evidence = _load_json_object(
+                    _resolve_path_under(evidence_path, base=base)
+                )
+                reconciliation = reconcile_lifecycle_evidence(
+                    repo,
+                    evidence=evidence,
+                    case_id=args.case_id,
+                    target_lot_id=args.target_lot_id,
+                    apply_changes=not dry_run,
+                    now_ms=args.observed_at_ms,
+                ).to_dict()
+            cases = list_trade_lifecycle_cases(
+                repo,
+                account=args.account,
+            )
+            read_models = []
+            for row in cases:
+                case_id = str(row.get("case_id") or "").strip()
+                if not case_id or str(row.get("schema_version") or "").strip() != "lifecycle_case.v2":
+                    continue
+                read_models.append(
+                    lifecycle_case_read_model(
+                        repo,
+                        case_id=case_id,
+                        now_ms=args.observed_at_ms,
+                    )
+                )
+            write_applied = bool(
+                not dry_run
+                and (
+                    discovery.get("created_case_ids")
+                    or discovery.get("refreshed_case_ids")
+                    or (
+                        isinstance(reconciliation, dict)
+                        and isinstance(reconciliation.get("ledger_result"), dict)
+                        and any(
+                            reconciliation["ledger_result"].get(field)
+                            for field in (
+                                "evidence_created",
+                                "evidence_bound",
+                                "terminal_events_created",
+                                "allocations_created",
+                                "status_changed",
+                            )
+                        )
+                    )
+                )
+            )
+            payload = attach_write_contract(
+                {
+                    "operation": "lifecycle_reconcile",
+                    "mode": "dry_run" if dry_run else "apply",
+                    "discovery": discovery,
+                    "reconciliation": reconciliation,
+                    "read_models": read_models,
+                    "ledger_store": ledger_store,
+                },
+                dry_run=dry_run,
+                write_applied=write_applied,
+                rollback_hint=(
+                    "lifecycle facts are append-only; repair mistakes with controlled "
+                    "void/repair commands, never delete allocations"
+                ),
+            )
+            if args.format == 'json':
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            else:
+                prefix = "[DRY_RUN]" if dry_run else "[DONE]"
+                print(
+                    f"{prefix} lifecycle reconcile "
+                    f"created={len(discovery.get('created_case_ids') or [])} "
+                    f"would_create={len(discovery.get('would_create_case_ids') or [])} "
+                    f"refreshed={len(discovery.get('refreshed_case_ids') or [])} "
+                    f"cases={len(read_models)}"
+                )
+                if reconciliation is not None:
+                    print(
+                        f"reconciliation={reconciliation.get('status')} "
+                        f"reasons={','.join(reconciliation.get('reason_codes') or []) or '-'}"
                     )
             return 0
         if args.lifecycle_cmd == 'confirm-expired':

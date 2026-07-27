@@ -8,7 +8,15 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.position_advice_current_repository import (
+    PositionAdviceCurrentError,
+    collect_protected_current_runs_under_global_lock,
+)
 from src.application.version_check import compare_versions
+from src.infrastructure.position_advice_manifest_lock import (
+    PositionAdviceLockError,
+    position_advice_manifest_locks,
+)
 
 
 def _default_releases_root(repo_root: Path) -> Path:
@@ -140,6 +148,7 @@ def _output_run_cleanup_plan(
     keep_days: int,
     keep_count: int,
     now: datetime,
+    position_advice_protected_runs: set[Path] | None = None,
 ) -> dict[str, Any]:
     runs_root = runtime_root / "output_runs"
     keep_days_int = max(0, int(keep_days))
@@ -170,6 +179,8 @@ def _output_run_cleanup_plan(
     pointer = _latest_run_pointer(runtime_root, runs_root)
     if pointer is not None:
         protected[pointer.resolve()] = "last_run_dir_pointer"
+    for current_run in position_advice_protected_runs or set():
+        protected[current_run.resolve()] = "position_advice_current_manifest"
 
     delete_runs: list[dict[str, Any]] = []
     protected_runs: list[dict[str, Any]] = []
@@ -392,13 +403,35 @@ def service_cleanup(
     ]
     runtime_now = now or datetime.now(timezone.utc)
     output_runs_cleanup = {"enabled": False}
+    output_runs_cleanup_error: str | None = None
+    runtime_cleanup_root = runtime or repo_link.parent.resolve()
     if cleanup_output_runs:
-        output_runs_cleanup = _output_run_cleanup_plan(
-            runtime_root=runtime or repo_link.parent.resolve(),
-            keep_days=output_runs_keep_days,
-            keep_count=output_runs_keep_count,
-            now=runtime_now,
-        )
+        try:
+            with position_advice_manifest_locks(
+                base=runtime_cleanup_root,
+                global_mode="exclusive",
+            ):
+                current_runs = collect_protected_current_runs_under_global_lock(
+                    base=runtime_cleanup_root,
+                )
+                output_runs_cleanup = _output_run_cleanup_plan(
+                    runtime_root=runtime_cleanup_root,
+                    keep_days=output_runs_keep_days,
+                    keep_count=output_runs_keep_count,
+                    now=runtime_now,
+                    position_advice_protected_runs=current_runs,
+                )
+        except (PositionAdviceCurrentError, PositionAdviceLockError, OSError) as exc:
+            output_runs_cleanup_error = f"{type(exc).__name__}: {exc}"
+            output_runs_cleanup = {
+                "enabled": True,
+                "status": "position_advice_manifest_invalid",
+                "root": str(runtime_cleanup_root / "output_runs"),
+                "protected_runs": [],
+                "delete_runs": [],
+                "estimated_bytes": 0,
+                "error": output_runs_cleanup_error,
+            }
     runtime_logs_cleanup = {"enabled": False}
     if cleanup_runtime_logs:
         runtime_logs_cleanup = _runtime_log_cleanup_plan(
@@ -415,6 +448,38 @@ def service_cleanup(
     )
     deleted_paths: list[str] = []
     operations: list[dict[str, Any]] = []
+
+    if output_runs_cleanup_error is not None:
+        return {
+            **base,
+            "ok": False,
+            "status": "position_advice_manifest_invalid",
+            "reason": output_runs_cleanup_error,
+            "changed": False,
+            "active_release": str(active_release),
+            "kept_releases": [{"path": str(path), "version": path.name} for path in kept],
+            "delete_releases": release_items,
+            "cache_dirs": cache_items,
+            "output_runs_cleanup": output_runs_cleanup,
+            "runtime_logs_cleanup": runtime_logs_cleanup,
+            "journal_vacuum_size": journal_vacuum_size,
+            "estimated_freed_bytes": estimated,
+            "freed_bytes": 0,
+            "deleted_paths": [],
+            "operations": [],
+            "protected": [
+                "output_shared",
+                "output_accounts",
+                "option_positions.sqlite3",
+                "trade_events",
+                "audit",
+                "locks",
+                "runtime config",
+                "user overlay config",
+                "active release",
+                "rollback release",
+            ],
+        }
 
     if confirm:
         for path in delete_releases:
@@ -449,20 +514,65 @@ def service_cleanup(
             _delete_path(path)
             deleted_paths.append(str(path))
             operations.append({"path": str(path), "ok": True, "kind": item.get("kind")})
-        for item in output_runs_cleanup.get("delete_runs") or []:
-            path = Path(str(item.get("path") or ""))
-            runs_root = Path(str(output_runs_cleanup.get("root") or ""))
-            if not path.exists():
-                operations.append({"path": str(path), "ok": False, "skipped": True, "reason": "missing", "kind": "output_run"})
-                continue
-            if path.parent != runs_root.resolve() or not _safe_child(path, parent=runs_root):
+        if cleanup_output_runs:
+            try:
+                with position_advice_manifest_locks(
+                    base=runtime_cleanup_root,
+                    global_mode="exclusive",
+                ):
+                    current_runs = collect_protected_current_runs_under_global_lock(
+                        base=runtime_cleanup_root,
+                    )
+                    output_runs_cleanup = _output_run_cleanup_plan(
+                        runtime_root=runtime_cleanup_root,
+                        keep_days=output_runs_keep_days,
+                        keep_count=output_runs_keep_count,
+                        now=runtime_now,
+                        position_advice_protected_runs=current_runs,
+                    )
+                    for item in output_runs_cleanup.get("delete_runs") or []:
+                        path = Path(str(item.get("path") or ""))
+                        runs_root = Path(str(output_runs_cleanup.get("root") or ""))
+                        if not path.exists():
+                            operations.append(
+                                {
+                                    "path": str(path),
+                                    "ok": False,
+                                    "skipped": True,
+                                    "reason": "missing",
+                                    "kind": "output_run",
+                                }
+                            )
+                            continue
+                        if (
+                            path.parent != runs_root.resolve()
+                            or not _safe_child(path, parent=runs_root)
+                        ):
+                            operations.append(
+                                {
+                                    "path": str(path),
+                                    "ok": False,
+                                    "skipped": True,
+                                    "reason": "unsafe_output_run_path",
+                                    "kind": "output_run",
+                                }
+                            )
+                            continue
+                        _delete_path(path)
+                        deleted_paths.append(str(path))
+                        operations.append(
+                            {"path": str(path), "ok": True, "kind": "output_run"}
+                        )
+            except (PositionAdviceCurrentError, PositionAdviceLockError, OSError) as exc:
                 operations.append(
-                    {"path": str(path), "ok": False, "skipped": True, "reason": "unsafe_output_run_path", "kind": "output_run"}
+                    {
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "position_advice_manifest_invalid",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "kind": "output_run_cleanup",
+                    }
                 )
-                continue
-            _delete_path(path)
-            deleted_paths.append(str(path))
-            operations.append({"path": str(path), "ok": True, "kind": "output_run"})
         for item in runtime_logs_cleanup.get("delete_logs") or []:
             path = Path(str(item.get("path") or ""))
             logs_root = Path(str(runtime_logs_cleanup.get("root") or ""))

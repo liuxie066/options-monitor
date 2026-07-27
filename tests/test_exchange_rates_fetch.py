@@ -32,6 +32,8 @@ def test_get_rates_or_fetch_latest_fetches_sina_when_cache_missing(tmp_path: Pat
     assert out["rates"] == {"USDCNY": 7.3, "HKDCNY": 0.93}
     saved = json.loads(cache_path.read_text(encoding="utf-8"))
     assert saved["rates"] == {"USDCNY": 7.3, "HKDCNY": 0.93}
+    assert saved["timestamp"] == "2026-04-24T00:00:00+00:00"
+    assert saved["source"] == "sina_fx"
 
 
 def test_get_rates_or_fetch_latest_falls_back_to_stale_cache_when_live_fetch_fails(tmp_path: Path, monkeypatch) -> None:
@@ -50,6 +52,8 @@ def test_get_rates_or_fetch_latest_falls_back_to_stale_cache_when_live_fetch_fai
 
     assert out is not None
     assert out["rates"] == {"USDCNY": 7.28, "HKDCNY": 0.94}
+    assert out["timestamp"] == "2026-04-20T00:00:00+00:00"
+    assert out["freshness_status"] == "stale_fallback"
     assert any("fallback to stale cache" in msg for msg in messages)
 
 

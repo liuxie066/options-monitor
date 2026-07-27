@@ -576,3 +576,151 @@ def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:
         raise AssertionError("expected unsupported legacy reject rule")
     except ValueError as e:
         assert "unsupported legacy reject rule" in str(e)
+
+
+def _replacement_base_row() -> dict[str, object]:
+    return {
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-09-18",
+        "dte": 45,
+        "spot": 120,
+        "strike": 100,
+        "bid": 1.9,
+        "ask": 2.1,
+        "mid": 2,
+        "multiplier": 100,
+        "open_interest": 500,
+        "volume": 50,
+        "spread_ratio": 0.1,
+        "currency": "USD",
+        "contract_symbol": "NVDA260918P00100000",
+    }
+
+
+def _replacement_invariant(
+    *,
+    annualized_return: float = 0.12,
+    event_flag: bool = False,
+) -> dict[str, object]:
+    from domain.domain.engine import evaluate_candidate_invariants
+
+    return evaluate_candidate_invariants(
+        _replacement_base_row(),
+        mode="put",
+        risk_policy_version="candidate_policy.v2",
+        quote_snapshot_id="quote-snapshot-1",
+        min_dte=14,
+        max_dte=60,
+        min_annualized_return=0.08,
+        min_net_income=50,
+        annualized_return=annualized_return,
+        net_income=100,
+        min_open_interest=100,
+        min_volume=10,
+        max_spread_ratio=0.3,
+        event_flag=event_flag,
+        event_mode="reject",
+        open_interest=500,
+        volume=50,
+        spread_ratio=0.1,
+    )
+
+
+def _opening_with_invariant_provenance(
+    opening: dict[str, object],
+    invariant: dict[str, object],
+) -> dict[str, object]:
+    from domain.domain.engine import attach_opening_decision_provenance
+
+    return attach_opening_decision_provenance(
+        opening,
+        risk_policy_version=str(invariant["risk_policy_version"]),
+        risk_policy_hash=str(invariant["risk_policy_hash"]),
+        quote_snapshot_id=str(invariant["quote_snapshot_id"]),
+        normalized_input=dict(invariant["normalized_input"]),
+    )
+
+
+def test_replacement_candidate_defers_only_the_exact_put_capacity_reject() -> None:
+    from domain.domain.engine import (
+        REPLACEMENT_CAPACITY_DEFERRED,
+        build_replacement_candidate_decision,
+        evaluate_candidate_hard_constraints,
+    )
+
+    invariant = _replacement_invariant()
+    opening = evaluate_candidate_hard_constraints(
+        _replacement_base_row(),
+        mode="put",
+        min_dte=14,
+        max_dte=60,
+        put_cash_required=10_000,
+        put_cash_free=5_000,
+    )
+    bound_opening = _opening_with_invariant_provenance(opening, invariant)
+    replacement = build_replacement_candidate_decision(
+        candidate_id="NVDA260918P00100000",
+        opening_decision=bound_opening,
+        invariant_decision=invariant,
+    )
+
+    assert replacement["replacement_eligibility"] == REPLACEMENT_CAPACITY_DEFERRED
+    assert replacement["blocking_reject_reasons"] == ["hard_capacity_put"]
+    assert replacement["resource_relative_reject"] == "hard_capacity_put"
+    assert replacement["invariant_policy_parity"] is True
+    assert len(replacement["replacement_decision_hash"]) == 64
+
+
+def test_replacement_candidate_does_not_hide_later_return_or_event_rejects() -> None:
+    from domain.domain.engine import (
+        REPLACEMENT_REJECTED_INVARIANT,
+        build_replacement_candidate_decision,
+        evaluate_candidate_hard_constraints,
+    )
+
+    opening = evaluate_candidate_hard_constraints(
+        _replacement_base_row(),
+        mode="put",
+        put_cash_required=10_000,
+        put_cash_free=5_000,
+    )
+    for invariant in (
+        _replacement_invariant(annualized_return=0.01),
+        _replacement_invariant(event_flag=True),
+    ):
+        replacement = build_replacement_candidate_decision(
+            candidate_id="NVDA260918P00100000",
+            opening_decision=_opening_with_invariant_provenance(
+                opening,
+                invariant,
+            ),
+            invariant_decision=invariant,
+        )
+        assert replacement["replacement_eligibility"] == REPLACEMENT_REJECTED_INVARIANT
+        assert replacement["resource_relative_reject"] is None
+
+
+def test_replacement_candidate_requires_policy_and_normalized_input_parity() -> None:
+    from domain.domain.engine import (
+        REPLACEMENT_REJECTED_INVARIANT,
+        build_replacement_candidate_decision,
+        evaluate_candidate_hard_constraints,
+    )
+
+    invariant = _replacement_invariant()
+    opening = evaluate_candidate_hard_constraints(
+        _replacement_base_row(),
+        mode="put",
+    )
+    bound_opening = _opening_with_invariant_provenance(opening, invariant)
+    drifted = dict(bound_opening)
+    drifted["risk_policy_hash"] = "different"
+    drifted["decision_hash"] = "f" * 64
+    replacement = build_replacement_candidate_decision(
+        candidate_id="NVDA260918P00100000",
+        opening_decision=drifted,
+        invariant_decision=invariant,
+    )
+    assert replacement["replacement_eligibility"] == REPLACEMENT_REJECTED_INVARIANT
+    assert replacement["invariant_policy_parity"] is False

@@ -361,6 +361,8 @@ def build_futu_portfolio_context(
     account: str | None,
     market: str = "富途",
     base_currency: str = "CNY",
+    source_observed_at: str | None = None,
+    broker_account_identifiers: set[str] | list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     cash_by_currency: dict[str, float] = {}
     cash_components_by_currency: dict[str, dict[str, float]] = {}
@@ -430,8 +432,14 @@ def build_futu_portfolio_context(
         if not existing.get("name") and name:
             existing["name"] = name
 
+    observed_at = str(source_observed_at or datetime.now(timezone.utc).isoformat())
+    identifiers = sorted(
+        {str(item or "").strip() for item in broker_account_identifiers if str(item or "").strip()}
+    )
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "source_observed_at": observed_at,
+        "source_account_identifiers": identifiers,
         "filters": {"broker": str(market), "account": account},
         "cash_by_currency": cash_by_currency,
         "cash_components_by_currency": cash_components_by_currency,
@@ -484,6 +492,7 @@ def fetch_futu_portfolio_context(
 
     balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
     position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
+    source_observed_at = datetime.now(timezone.utc).isoformat()
 
     return build_futu_portfolio_context(
         balance_rows=balance_rows,
@@ -491,4 +500,6 @@ def fetch_futu_portfolio_context(
         account=account,
         market=market,
         base_currency=base_currency,
+        source_observed_at=source_observed_at,
+        broker_account_identifiers=account_ids,
     )
