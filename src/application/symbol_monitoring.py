@@ -123,7 +123,7 @@ def run_symbol_monitoring(
     if yield_enhancement_cfg:
         symbol_cfg.pop("yield_enhancement", None)
         symbol_cfg[COMBO_YIELD_CONFIG_KEY] = yield_enhancement_cfg
-    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, market_sp)
+    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
     stock = prefilters.stock
     if want_call and isinstance(stock, dict):
         effective_min_strike = resolve_effective_sell_call_min_strike(

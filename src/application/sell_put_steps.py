@@ -20,7 +20,6 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from domain.domain.symbol_identity import symbol_currency, symbol_market
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.render_sell_put_alerts import render_sell_put_alerts
 from src.application.report_labels import add_sell_put_labels
@@ -38,7 +37,6 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
-from domain.domain.sell_put_config import validate_min_annualized_net_return
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 
 log = logging.getLogger(__name__)
@@ -251,53 +249,28 @@ def run_sell_put_scan_and_summarize(
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
-    resolved_min_annualized_net_return = 0.0 if sell_put_semantics.scan_uses_underwriting_gate else validate_min_annualized_net_return(
-        sp.get('min_annualized_net_return'),
-        source=f'{symbol}.sell_put.min_annualized_net_return',
-    )
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     event_risk = resolve_event_risk_config(global_sell_put_event_risk)
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
-    global_min_net_income = float((global_sell_put_liquidity or {}).get('min_net_income', 0.0) or 0.0)
-    min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
-    min_net_income_native = 0.0
-    sell_put_scan_allowed = True
-    if sell_put_semantics.scan_uses_underwriting_gate:
-        min_net_income_native = 0.0
-    elif min_net_income_cny > 0:
-        native_ccy = symbol_currency(symbol)
-        if not native_ccy:
-            log.warning("sell_put_steps: currency unresolved for %s; fail closed", symbol)
-            sell_put_scan_allowed = False
-        else:
-            converted_min_income = exchange_rate_converter.cny_to_native(
-                min_net_income_cny,
-                native_ccy=native_ccy,
-            )
-            if converted_min_income is None:
-                log.warning("sell_put_steps: min_net_income conversion unavailable for %s/%s; fail closed", symbol, native_ccy)
-                sell_put_scan_allowed = False
-            else:
-                min_net_income_native = float(converted_min_income)
-
-    if run_sell_put and sell_put_scan_allowed:
+    if run_sell_put:
         run_sell_put_scan(
             symbols=[sym],
             input_root=required_data_dir,
             output=symbol_sp,
             min_dte=window.min_dte,
             max_dte=window.max_dte,
-            min_annualized_net_return=resolved_min_annualized_net_return,
-            min_net_income=float(min_net_income_native),
+            # Underwriting applies return/income thresholds once, after CNY enrichment.
+            min_annualized_net_return=0.0,
+            min_net_income=0.0,
             min_strike=_optional_float(sp, 'min_strike'),
             max_strike=_optional_float(sp, 'max_strike'),
             min_open_interest=liquidity.min_open_interest,
             min_volume=liquidity.min_volume,
             max_spread_ratio=liquidity.max_spread_ratio,
             event_risk_cfg=event_risk,
-            score_weights=sp.get('score_weights'),
+            score_weights=None,
             strategy_family=sell_put_semantics.strategy_family,
             strategy_profile=sell_put_semantics.scan_strategy_profile,
             quiet=bool(is_scheduled),

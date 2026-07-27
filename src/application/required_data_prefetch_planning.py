@@ -17,7 +17,11 @@ from src.application.strategy_policy import (
     assert_strategy_config_resolved,
     strategy_semantics_for_side_config,
 )
-from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
+from src.application.yield_enhancement_config import (
+    derive_yield_enhancement_policy,
+    resolve_staggered_expiry_gap_days,
+    resolve_yield_enhancement_cfg,
+)
 
 
 DEFAULT_STRIKE_EXPAND_PCT = 0.20
@@ -139,6 +143,7 @@ def build_prefetch_budget_plan(
     symbol_cfgs: list[dict[str, Any]],
     *,
     option_chain_cfg: dict[str, Any],
+    fetch_plans_by_config_id: dict[int, Any] | None = None,
 ) -> PrefetchBudgetPlan:
     configured_max_calls = max(1, _to_int(option_chain_cfg.get("max_calls") or 10, 10))
     window_sec = max(0.001, _to_float(option_chain_cfg.get("window_sec")) or 30.0)
@@ -164,7 +169,10 @@ def build_prefetch_budget_plan(
         current_calls = 0
 
     for cfg in symbol_cfgs:
-        est = estimate_prefetch_option_chain_calls(cfg)
+        est = estimate_prefetch_option_chain_calls(
+            cfg,
+            fetch_plan=(fetch_plans_by_config_id or {}).get(id(cfg)),
+        )
         estimated_total += est
         symbol = str((cfg or {}).get("symbol") or "").strip()
         if est > safe_calls:
@@ -200,11 +208,26 @@ def build_prefetch_budget_plan(
     )
 
 
-def estimate_prefetch_option_chain_calls(symbol_cfg: dict[str, Any]) -> int:
+def estimate_prefetch_option_chain_calls(
+    symbol_cfg: dict[str, Any],
+    *,
+    fetch_plan: Any | None = None,
+) -> int:
     fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
     if not is_futu_fetch_source(source):
         return 0
+    if fetch_plan is not None:
+        side_plans = list(getattr(fetch_plan, "side_plans", []) or [])
+        if not side_plans:
+            return _limit_expirations(symbol_cfg)
+        expirations = {
+            str(expiration)
+            for side_plan in side_plans
+            for expiration in getattr(side_plan, "explicit_expirations", []) or []
+            if str(expiration).strip()
+        }
+        return max(1, len(expirations))
     return _limit_expirations(symbol_cfg)
 
 
@@ -214,7 +237,7 @@ def merge_prefetch_symbol_configs(symbol_cfgs: list[dict[str, Any]]) -> dict[str
         return {}
     merged = deepcopy(items[0])
     fetch_cfg = dict(_as_dict(merged.get("fetch")))
-    fetch_cfg["limit_expirations"] = max((_limit_expirations(item) for item in items), default=8)
+    fetch_cfg.pop("limit_expirations", None)
     merged["fetch"] = fetch_cfg
     merged["_prefetch_strategy_kwargs"] = _merge_strategy_prefetch_kwargs(
         [strategy_prefetch_kwargs(item, enabled=True) for item in items]
@@ -237,7 +260,7 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
     ye = resolve_yield_enhancement_cfg(symbol_cfg)
     want_put = bool(sp.get("enabled", False))
     want_direct_call = bool(cc.get("enabled", False))
-    yield_policy = derive_yield_enhancement_policy(ye, sp)
+    yield_policy = derive_yield_enhancement_policy(ye)
     want_yield_call = bool(yield_policy.enabled)
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
@@ -270,6 +293,12 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
         call_cfg = dict(_as_dict(ye.get("call")))
         structure_mode = str(ye.get("structure_mode") or "same_expiry_pair").strip().lower()
         if structure_mode == "staggered_expiry_pair":
+            put_min_dte, put_max_dte = _window_values(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
+            min_gap_days, max_gap_days = resolve_staggered_expiry_gap_days(ye)
+            call_cfg.pop("min_dte", None)
+            call_cfg.pop("max_dte", None)
+            call_cfg["min_dte"] = put_min_dte + min_gap_days
+            call_cfg["max_dte"] = put_max_dte + max_gap_days
             window_defaults = DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW
         else:
             call_cfg.pop("min_dte", None)
@@ -392,6 +421,16 @@ def _symbol_key(symbol: str) -> str:
 
 
 def _limit_expirations(symbol_cfg: dict[str, Any]) -> int:
+    source_cfgs = (symbol_cfg or {}).get("_prefetch_source_symbol_cfgs")
+    if isinstance(source_cfgs, list):
+        configured = [
+            _to_int(_as_dict(item.get("fetch")).get("limit_expirations"), 0)
+            for item in source_cfgs
+            if isinstance(item, dict)
+        ]
+        positive = [value for value in configured if value > 0]
+        if positive:
+            return max(positive)
     fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
     return max(1, _to_int(fetch_cfg.get("limit_expirations") or 8, 8))
 

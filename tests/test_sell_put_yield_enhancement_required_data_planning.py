@@ -24,7 +24,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
         limit_expirations=2,
         want_put=True,
         want_call=False,
-        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
         yield_enhancement_cfg={
             "enabled": True,
@@ -40,7 +40,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
     assert len(plan.merged_specs) == 1
     merged_spec = plan.merged_specs[0]
     assert tuple(merged_spec.option_types) == ("put", "call")
-    assert merged_spec.include_realized_volatility is False
+    assert merged_spec.include_realized_volatility is True
     put_spec = merged_spec
     call_spec = merged_spec
     assert put_spec.explicit_expirations == ["2026-06-19"]
@@ -71,7 +71,7 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
         yield_enhancement_cfg={"enabled": True},
         fetch_host="127.0.0.1",
@@ -108,7 +108,7 @@ def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(mon
         want_call=False,
         sell_put_cfg={
             "enabled": False,
-            "strategy": "return_first",
+            "strategy": "insurance_underwriting",
             "min_dte": 20,
             "max_dte": 60,
             "min_strike": 90,
@@ -169,6 +169,7 @@ def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkey
 
 def test_staggered_combo_yield_fetches_call_on_independent_later_dte_window(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
 
     monkeypatch.setattr(
         mod,
@@ -176,6 +177,7 @@ def test_staggered_combo_yield_fetches_call_on_independent_later_dte_window(monk
         lambda *args, **kwargs: ["2026-08-21", "2026-10-16", "2026-11-20"],
     )
     monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 110.0)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
 
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,
@@ -196,7 +198,8 @@ def test_staggered_combo_yield_fetches_call_on_independent_later_dte_window(monk
         yield_enhancement_cfg={
             "enabled": True,
             "structure_mode": "staggered_expiry_pair",
-            "call": {"min_dte": 60, "max_dte": 150},
+            "min_expiry_gap_days": 30,
+            "max_expiry_gap_days": 100,
         },
         fetch_host="127.0.0.1",
         fetch_port=11111,
@@ -206,6 +209,40 @@ def test_staggered_combo_yield_fetches_call_on_independent_later_dte_window(monk
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
     assert put_plan.explicit_expirations == ["2026-08-21"]
     assert call_plan.explicit_expirations == ["2026-10-16", "2026-11-20"]
-    assert (call_plan.min_dte, call_plan.max_dte) == (60, 150)
-    assert "combo_yield.call.min_dte" in call_plan.source_fields
-    assert "combo_yield.call.max_dte" in call_plan.source_fields
+    assert (call_plan.min_dte, call_plan.max_dte) == (50, 160)
+    assert "combo_yield.min_expiry_gap_days" in call_plan.source_fields
+    assert "combo_yield.max_expiry_gap_days" in call_plan.source_fields
+
+
+def test_strategy_expiration_plan_is_not_truncated_by_legacy_limit(monkeypatch, tmp_path: Path) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2026-06-19", "2026-07-17", "2026-08-21"],
+    )
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 6, 1))
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=1,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={
+            "enabled": True,
+            "min_dte": 1,
+            "max_dte": 90,
+            "max_strike": 100,
+        },
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    put_plan = next(side for side in plan.side_plans if side.option_type == "put")
+    assert put_plan.explicit_expirations == ["2026-06-19", "2026-07-17", "2026-08-21"]
+    assert plan.merged_specs[0].limit_expirations == 0

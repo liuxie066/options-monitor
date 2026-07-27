@@ -14,14 +14,14 @@
 
 ## 命名与兼容
 
-`insurance_underwriting` 是 Sell Put / Covered Call 的开仓策略语义，不是整个开仓域的统一策略。Sell Put / Covered Call 开仓配置必须显式写 `insurance_underwriting` 或 `return_first`，不再接受 `short_vol` 作为开仓配置值。
+`insurance_underwriting` 是 Sell Put / Covered Call 唯一的新开仓策略语义，不是整个开仓域的统一策略。新开仓配置不再接受 `return_first` 或 `short_vol`，也不再接受会改变正式排序的 `score_weights`。
 
-这次重构只改变开仓机会推荐。Combo Yield 开仓策略已独立成型；Close Advice、历史持仓里的 short-vol thesis、以及 Combo Yield 持仓侧退出语义后续单独处理。
+这次收敛只改变新开仓机会推荐。历史持仓、历史 artifact、Shadow Replay 和 Close Advice 仍可解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Combo Yield 开仓策略独立成型；Combo Yield 持仓侧退出语义后续单独处理。
 
 | Strategy Family | Opening Profile | Close Profile | Status |
 |---|---|---|---|
-| Sell Put | `insurance_underwriting` / `return_first` | `sell_put_short_vol` / `sell_put_return_first` | active |
-| Covered Call | `insurance_underwriting` / `return_first` | `covered_call_short_vol` / `covered_call_return_first` | active |
+| Sell Put | `insurance_underwriting` | `sell_put_short_vol`；历史 `sell_put_return_first` 兼容 | active |
+| Covered Call | `insurance_underwriting` | `covered_call_short_vol`；历史 `covered_call_return_first` 兼容 | active |
 | Combo Yield | Combo Yield funding / participation | pending combo close design | opening strategy refactored |
 
 ## 通用流水线
@@ -47,12 +47,12 @@ Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选�
 
 - option type: put
 - DTE 在配置窗口内
-- `strike <= max_strike`
+- `strike <= min(max_strike, spot)`；`max_strike` 为空时只受现价上限约束
 - `strike >= min_strike`，其中 `min_strike` 可为空
 - 基础流动性满足配置
 - 现金覆盖仍由现有 cash-secured 逻辑负责
 
-`max_strike` 是愿意接货的最高价。通过这个边界后，`strike` 离 `max_strike` 越远越好。
+`max_strike` 是愿意接货的最高价，现价是自然上限。二者组成同一个硬门槛，不再在门槛通过后重复增加一层“价格安全边际”筛选。
 
 ### 硬筛
 
@@ -77,27 +77,16 @@ Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选�
 
 ### 排序
 
-排序目标是推荐最优候选项，不是展示所有可能解释。
+排序目标是推荐最优候选项，不是继续叠加一套软评分。
 
 排序顺序：
 
-1. `strike_safety_margin_pct` 降序
-2. `premium_edge_score` 降序
-3. `spread_ratio` 升序
-4. `open_interest` 降序
-5. `net_income_cny` / `net_income` 降序，仅作最终同分项
+1. 所有硬门槛通过。
+2. 每个标的只保留 `annualized_net_return_on_cash_basis` 最高的合约。
+3. 不同标的继续按 `annualized_net_return_on_cash_basis` 降序。
+4. 年化净收益相同时，依次用净接货折价、`concentration_score`、spread、OI 和净收益额稳定破同分。
 
-Sell Put 的 `premium_edge_score` 保留现有字段名以兼容已有 artifact，但改为去重后的承保补偿分：
-
-- `return_edge = 年化收益率 / 最低年化收益率`
-- `iv_rv_edge = IV/RV / 最低 IV/RV`
-- `iv_minus_rv_edge = (IV-RV) / 最低 IV-RV`
-- `vol_edge = min(iv_rv_edge, iv_minus_rv_edge)`
-- `premium_edge_score = mean(return_edge, vol_edge)`
-
-每项仍以 `premium_score_cap` 封顶。净权利金保留为硬门槛和最终同分项，不再与已包含它的年化收益重复进入主评分。IV/RV 与 IV-RV 取较弱证据，避免对同一波动率优势重复加权。
-
-`strike_safety_margin_pct = (max_strike - strike) / max_strike`
+`net_assignment_discount_pct = (spot - breakeven) / spot`。它和集中度只负责破同分，不覆盖年化净收益主排序。`strategy_score`、`premium_edge_score` 等字段继续用于解释和研究，但不再改变正式推荐顺序。
 
 ## Covered Call
 
@@ -112,7 +101,7 @@ Covered Call 的核心目标是：在愿意以某个价格卖出正股的前提�
 - 基础流动性满足配置
 - 持股覆盖仍由现有 share coverage 逻辑负责
 
-`min_strike` 是愿意卖出正股的最低价。通过这个边界后，`strike` 离 `min_strike` 越远越好。
+`min_strike` 是愿意卖出正股的最低价。通过这个边界后，`strike` 离 `min_strike` 的距离只在年化净权利金收益相同时用于破同分。
 
 ### 硬筛
 
@@ -136,13 +125,10 @@ Covered Call 的上行放弃是这个策略的自然代价，应通过 `min_stri
 
 排序顺序：
 
-1. `strike_upside_margin_pct` 降序
-2. `premium_edge_score` 降序
-3. `spread_ratio` 升序
-4. `open_interest` 降序
-5. `net_income_cny` / `net_income` 降序，仅作最终同分项
-
-Covered Call 的 `premium_edge_score` 使用与 Sell Put 相同的去重补偿分：年化收益与 `min(IV/RV 优势, IV-RV 优势)` 取平均，每项仍以 `premium_score_cap` 封顶。净权利金保留为硬门槛和最终同分项，不再重复进入主评分。
+1. 所有硬门槛通过。
+2. 每个标的只保留 `annualized_net_premium_return` 最高的合约。
+3. 不同标的继续按 `annualized_net_premium_return` 降序。
+4. 年化净权利金收益相同时，依次用 `strike_upside_margin_pct`、`concentration_score`、spread、OI 和净收益额稳定破同分。
 
 `strike_upside_margin_pct = (strike - min_strike) / min_strike`
 
@@ -181,14 +167,15 @@ Funding Put 是资金腿，Long Call 是参与腿。不是“多张 Put 共同�
 
 Funding Put：
 
-- 依赖 `sell_put.enabled=true`。
 - 使用 Sell Put 自己的 DTE 窗口和接货 strike 边界。
 - 在组合构造前先复用完整 Sell Put underwriting 候选；现金、事件、收益、IV/RV、流动性及愿意接货边界均不得因 Long Call 而放宽。
+- Combo Yield 自己启用时即可独立构造 Funding Put，不依赖 Sell Put step 是否启用或成功。
 
 Participation Call：
 
 - 从 required-data Call universe 独立召回，不要求启用 Covered Call 扫描。
-- 使用 `combo_yield.call.min_dte/max_dte`；Call 到期日必须晚于 Put。
+- 同到期结构直接复用 Funding Put 到期日。
+- 错期结构使用 `combo_yield.min_expiry_gap_days/max_expiry_gap_days`；对每个 Put 精确校验 `Call DTE - Put DTE`，不再配置一套绝对 Call DTE。
 - 可配置 `call.min_strike/max_strike` 与 `call.min_delta/max_delta`。
 - 错期模式不强制 `call strike >= spot`，但最终结构仍必须满足 `put strike < call strike`。
 - Call bid/ask、delta、OI、volume、spread 和 multiplier 缺失或不合格时 fail closed。
@@ -199,7 +186,7 @@ Participation Call：
 - Put 到期早于 Call；Put strike 低于 Call strike。
 - `put_net_credit > 0`，`call_total_cost > 0`。
 - 默认 `funding_mode=credit_or_even`：`combo_net_credit >= 0`。
-- 默认 `max_call_cost_to_put_credit=1`：Call 总成本不超过 Put 净收入；对应 `funding_ratio >= 1`。
+- 默认 `min_net_credit_retention=0.60`：至少保留 Funding Put 60% 的净权利金，即 Participation Call 最多使用 40%。
 - 两腿基础流动性通过，费用按当前费用模型估算。
 
 费用与资金定义：
@@ -208,6 +195,7 @@ Participation Call：
 put_net_credit = Put bid * multiplier - estimated_sell_fees
 call_total_cost = Call ask * multiplier + estimated_buy_fees
 combo_net_credit = put_net_credit - call_total_cost
+net_credit_retention = combo_net_credit / put_net_credit
 call_cost_to_put_credit = call_total_cost / put_net_credit
 funding_ratio = put_net_credit / call_total_cost
 ```
@@ -219,26 +207,25 @@ funding_ratio = put_net_credit / call_total_cost
 同一 Funding Put 下先选一个 Participation Call：
 
 1. `funding_accepted` 优先
-2. `call_delta` 降序
-3. `call_cost_to_put_credit` 降序，即在仍满足全额覆盖前提下优先使用更多可用 Put 权利金
-4. `call_dte` 降序
-5. max(`put_spread_ratio`, `call_spread_ratio`) 升序
-6. `call_open_interest` 降序
+2. `abs(call_delta)` 降序，直接最大化上行参与度
+3. `net_credit_retention` 降序
+4. max(`put_spread_ratio`, `call_spread_ratio`) 升序
+5. `call_open_interest` 降序
+6. 较短 Call DTE 优先
 7. Call 合约标识稳定排序
 
-不同组合进入通知前按以下顺序排列：
+每个标的先按 Sell Put 规则选择一张 Funding Put，再为它选择 Participation Call。不同标的进入通知前按以下顺序排列：
 
 1. `funding_accepted` 优先
-2. Put `strike_safety_margin_pct` 降序
-3. Funding Put `premium_edge_score` 降序
+2. Funding Put `put_only_annualized_net_return` 降序
+3. Put 净接货折价降序
 4. `call_delta` 降序
-5. `call_cost_to_put_credit` 降序
-6. `call_dte` 降序
-7. 两腿最大 spread 升序
-8. min(`put_open_interest`, `call_open_interest`) 降序
-9. symbol、Put 合约、Call 合约稳定排序
+5. `net_credit_retention` 降序
+6. 两腿最大 spread 升序
+7. min(`put_open_interest`, `call_open_interest`) 降序
+8. symbol、Put 合约、Call 合约稳定排序
 
-因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足资金覆盖硬门槛的组合。每个 Funding Put 只保留排序最优的一张 Call；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
+因此，通知里只出现：Funding Put 已通过 Sell Put underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试只进入 `<symbol>_combo_yield_pair_diagnostics.csv`，不会进入通知。
 
 ### 候选身份、成交意图与回执
 
@@ -262,7 +249,19 @@ funding_ratio = put_net_credit / call_total_cost
 
 ### 配置示例边界
 
-`combo_yield.call.min_dte=60`、`max_dte=120` 仅是展示独立 Call horizon 的示例，不是生产推荐值。生产参数必须通过 Shadow Replay、pair diagnostics 和 outcome 证据校准。默认仍是 `same_expiry_pair`，本轮没有自动修改生产配置。
+错期配置只接受相对间隔，例如 `min_expiry_gap_days=30`、`max_expiry_gap_days=90`；该数值是示例，不是通用最优值。`combo_yield.call.min_dte/max_dte` 已拒绝，避免 Put 窗口变化后出现两套期限配置漂移。默认仍是 `same_expiry_pair`。
+
+### required-data 全局计划
+
+每次 run 在抓取期权链前先完成一次全局决策：
+
+1. 解析所有模板、标的覆盖项和三类策略要求。
+2. 每个唯一标的只发现一次 spot 与到期日目录。
+3. 按策略 DTE、错期间隔、strike 和 option side 生成精确到期日并集。
+4. 用真实到期日数量估算 API 调用预算并拆 wave。
+5. 所有标的计划完成后才检查缓存和执行抓取。
+
+`fetch.limit_expirations` 不再裁剪正式策略 universe；底层抓取仍可保留该参数供非策略 CLI 使用。到期日发现失败时，全局计划 fail closed，不能用部分数据声称得到了“全局最优”。DTE 窗口仍有业务意义，窗口数量上限没有。
 
 ## 当前实现边界
 

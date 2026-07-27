@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -42,6 +43,7 @@ from src.application.required_data_observability import (
 from src.application.required_data_planning import (
     RequiredDataFetchPlanBundle,
     _merge_same_side_plans as _merge_required_data_side_plans,
+    _merge_side_plans as _merge_required_data_fetch_specs,
     build_required_data_fetch_plan,
 )
 from src.application.required_data_prefetch_planning import (
@@ -140,19 +142,37 @@ def _build_prefetch_fetch_plan(
                 (bundle.spot_reference for bundle in bundles if bundle.spot_reference is not None),
                 None,
             )
+            merged_side_plans = _merge_required_data_side_plans([
+                side_plan
+                for bundle in bundles
+                for side_plan in bundle.side_plans
+            ])
+            fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
             return RequiredDataFetchPlanBundle(
                 symbol=str(symbol_cfg.get("symbol") or bundles[0].symbol),
                 spot_reference=spot_reference,
-                side_plans=_merge_required_data_side_plans([
-                    side_plan
+                side_plans=merged_side_plans,
+                merged_specs=_merge_required_data_fetch_specs(
+                    symbol=str(symbol_cfg.get("symbol") or bundles[0].symbol),
+                    limit_expirations=0,
+                    host=str(fetch_cfg.get("host") or "127.0.0.1"),
+                    port=_to_int(fetch_cfg.get("port") or 11111, 11111),
+                    side_plans=merged_side_plans,
+                    include_realized_volatility=any(
+                        bool(spec.include_realized_volatility)
+                        for bundle in bundles
+                        for spec in bundle.merged_specs
+                    ),
+                ),
+                expiration_discovery_complete=all(
+                    bundle.expiration_discovery_complete for bundle in bundles
+                ),
+                expiration_discovery_error="; ".join(
+                    str(bundle.expiration_discovery_error)
                     for bundle in bundles
-                    for side_plan in bundle.side_plans
-                ]),
-                merged_specs=[
-                    spec
-                    for bundle in bundles
-                    for spec in bundle.merged_specs
-                ],
+                    if bundle.expiration_discovery_error
+                )
+                or None,
             )
     return _build_single_prefetch_fetch_plan(
         symbol_cfg,
@@ -171,11 +191,13 @@ def _build_single_prefetch_fetch_plan(
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
-    limit_exp = int(fetch_cfg.get("limit_expirations") or 8)
+    # Strategy required-data planning is bounded by resolved DTE/expiry
+    # requirements, not by a per-symbol "first N expirations" cap.
+    limit_exp = 0
     sell_put_cfg = _as_dict(symbol_cfg.get("sell_put"))
     sell_call_cfg = _as_dict(symbol_cfg.get("sell_call"))
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
-    yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, sell_put_cfg)
+    yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg)
     want_put = bool(sell_put_cfg.get("enabled", False))
     want_call = bool(sell_call_cfg.get("enabled", False))
     want_yield_enhancement = bool(yield_policy.enabled)
@@ -248,6 +270,84 @@ def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | N
     }
 
 
+def _prefetch_limit_expirations(
+    symbol_cfg: dict[str, Any],
+    fetch_plan: RequiredDataFetchPlanBundle | None,
+) -> int:
+    if fetch_plan is not None and fetch_plan.side_plans:
+        return 0
+    source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
+    if isinstance(source_cfgs, list):
+        configured = [
+            _to_int(_as_dict(item.get("fetch")).get("limit_expirations"), 0)
+            for item in source_cfgs
+            if isinstance(item, dict)
+        ]
+        positive = [value for value in configured if value > 0]
+        if positive:
+            return max(positive)
+    fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+    return max(1, _to_int(fetch_cfg.get("limit_expirations") or 8, 8))
+
+
+def _global_required_data_plan_summary(
+    *,
+    symbol_cfgs: list[dict[str, Any]],
+    fetch_plans_by_config_id: dict[int, RequiredDataFetchPlanBundle],
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for symbol_cfg in symbol_cfgs:
+        fetch_plan = fetch_plans_by_config_id[id(symbol_cfg)]
+        expirations = sorted({
+            str(expiration)
+            for side_plan in fetch_plan.side_plans
+            for expiration in side_plan.explicit_expirations
+            if str(expiration).strip()
+        })
+        has_strategy_requirements = bool(fetch_plan.side_plans)
+        option_chain_calls = (
+            max(1, len(expirations))
+            if has_strategy_requirements
+            else _prefetch_limit_expirations(symbol_cfg, fetch_plan)
+        )
+        items.append(
+            {
+                "symbol": str(symbol_cfg.get("symbol") or "").strip(),
+                "source": str(_as_dict(symbol_cfg.get("fetch")).get("source") or "futu"),
+                "planning_mode": (
+                    "strategy_exact_expirations"
+                    if has_strategy_requirements
+                    else "generic_compatibility_window"
+                ),
+                "option_chain_calls": option_chain_calls,
+                "expiration_count": len(expirations),
+                "discovery_status": (
+                    "complete"
+                    if fetch_plan.expiration_discovery_complete
+                    else "incomplete"
+                ),
+                "discovery_error": fetch_plan.expiration_discovery_error,
+                "fetch_plan": fetch_plan.to_debug_dict(),
+            }
+        )
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "plan_id": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "planning_scope": "run",
+        "strategy_expiration_limit": None,
+        "symbols": items,
+        "symbols_count": len(items),
+        "estimated_option_chain_calls": sum(
+            int(item["option_chain_calls"])
+            for item in items
+        ),
+        "discovery_complete": all(
+            item["discovery_status"] == "complete"
+            for item in items
+        ),
+    }
+
+
 def _fetch_one_inprocess(
     symbol_cfg: dict[str, Any],
     *,
@@ -264,7 +364,7 @@ def _fetch_one_inprocess(
             tool_name='required_data_prefetch',
             symbol='',
             source='unknown',
-            limit_exp=8,
+            limit_exp=0,
             status='error',
             ok=False,
             message='empty_symbol',
@@ -280,7 +380,7 @@ def _fetch_one_inprocess(
 
     fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
     src, _decision = resolve_symbol_fetch_source(fetch_cfg)
-    limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
+    limit_exp = _prefetch_limit_expirations(symbol_cfg, fetch_plan)
     host = str(fetch_cfg.get('host') or '127.0.0.1')
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
     fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
@@ -530,21 +630,36 @@ def _prefetch_required_data_unlocked(
     option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
-    fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {}
+    fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
+        id(symbol_cfg): _build_prefetch_fetch_plan(
+            symbol_cfg,
+            base=base,
+            shared_required=shared_required,
+            opend_fetch_cfg=opend_fetch_cfg,
+        )
+        for symbol_cfg in fetch_syms
+    }
+    global_required_data_plan = _global_required_data_plan_summary(
+        symbol_cfgs=fetch_syms,
+        fetch_plans_by_config_id=fetch_plan_cache,
+    )
+    if not bool(global_required_data_plan["discovery_complete"]):
+        failed_symbols = [
+            str(item.get("symbol") or "")
+            for item in global_required_data_plan["symbols"]
+            if item.get("discovery_status") != "complete"
+        ]
+        raise RuntimeError(
+            "global required-data plan incomplete; expiration discovery failed for: "
+            + ", ".join(failed_symbols)
+        )
 
     def _get_fetch_plan(symbol_cfg: dict[str, Any]) -> RequiredDataFetchPlanBundle:
         cache_key = id(symbol_cfg)
         cached = fetch_plan_cache.get(cache_key)
         if cached is not None:
             return cached
-        fetch_plan = _build_prefetch_fetch_plan(
-            symbol_cfg,
-            base=base,
-            shared_required=shared_required,
-            opend_fetch_cfg=opend_fetch_cfg,
-        )
-        fetch_plan_cache[cache_key] = fetch_plan
-        return fetch_plan
+        raise RuntimeError("symbol is missing from the global required-data plan")
 
     def _need_fetch(symbol_cfg: dict[str, Any]) -> bool:
         symbol = str(symbol_cfg.get('symbol')).strip()
@@ -571,7 +686,7 @@ def _prefetch_required_data_unlocked(
                 tool_name='required_data_prefetch',
                 symbol='',
                 source='unknown',
-                limit_exp=8,
+                limit_exp=0,
                 status='error',
                 ok=False,
                 message='empty_symbol',
@@ -582,7 +697,7 @@ def _prefetch_required_data_unlocked(
                 tool_name='required_data_prefetch',
                 symbol=symbol,
                 source='cache',
-                limit_exp=8,
+                limit_exp=0,
                 status='cached',
                 ok=True,
                 message='cached_strategy_covered',
@@ -591,9 +706,9 @@ def _prefetch_required_data_unlocked(
 
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
-        limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
         fetch_plan = _get_fetch_plan(symbol_cfg)
         fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
+        limit_exp = _prefetch_limit_expirations(symbol_cfg, fetch_plan)
         opt_types = str(fetch_kwargs["option_types"])
 
         cmd = [
@@ -684,7 +799,11 @@ def _prefetch_required_data_unlocked(
 
     todo_cfgs = [it for it in fetch_syms if _need_fetch(it)]
     unique_cached_count = max(0, len(fetch_syms) - len(todo_cfgs))
-    budget_plan = build_prefetch_budget_plan(todo_cfgs, option_chain_cfg=option_chain_fetch_cfg)
+    budget_plan = build_prefetch_budget_plan(
+        todo_cfgs,
+        option_chain_cfg=option_chain_fetch_cfg,
+        fetch_plans_by_config_id=fetch_plan_cache,
+    )
     option_chain_fetch_cfg = dict(option_chain_fetch_cfg)
     option_chain_fetch_cfg["max_calls"] = int(budget_plan.safe_option_chain_calls_per_window)
     opend_fetch_cfg = dict(opend_fetch_cfg)
@@ -728,6 +847,7 @@ def _prefetch_required_data_unlocked(
             'fetch_metrics': fetch_metrics,
             'run_fetch_summary': run_fetch_summary,
             'prefetch_budget_plan': budget_plan.summary(),
+            'global_required_data_plan': global_required_data_plan,
             'opend_rate_limit_classes': [],
             'opend_rate_limit_items': [],
             'rate_limit_cooldowns': [],
@@ -832,6 +952,7 @@ def _prefetch_required_data_unlocked(
         'opend_rate_limit_classes': sorted(coordinator_result.opend_rate_limit_classes),
         'opend_rate_limit_items': list(coordinator_result.opend_rate_limit_items),
         'prefetch_budget_plan': budget_plan.summary(),
+        'global_required_data_plan': global_required_data_plan,
         'rate_limit_cooldowns': rate_limit_cooldowns,
         'fetch_metrics': fetch_metrics,
         'run_fetch_summary': run_fetch_summary,

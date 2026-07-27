@@ -120,7 +120,7 @@ def test_sell_put_strategy_semantics_matrix() -> None:
     assert underwriting.scan_uses_event_risk is True
     assert underwriting.scan_uses_path_risk is False
     assert underwriting.yield_enhancement_mode == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
-    assert underwriting.yield_enhancement_requires_rv is False
+    assert underwriting.yield_enhancement_requires_rv is True
     assert underwriting.yield_enhancement_uses_short_vol_gate is False
     assert underwriting.close_advice_profile == "sell_put_short_vol"
     assert underwriting.close_requires_rv is True
@@ -158,15 +158,26 @@ def test_sell_call_strategy_semantics_matrix() -> None:
     assert short_vol.close_requires_rv is True
 
 
-def test_strategy_semantics_for_side_config_normalizes_legacy_profile() -> None:
+def test_strategy_semantics_for_side_config_rejects_legacy_opening_profile() -> None:
+    try:
+        strategy_semantics_for_side_config(
+            family=SELL_PUT_FAMILY,
+            side_cfg={"strategy": "yield_first"},
+        )
+        raise AssertionError("expected legacy opening profile rejection")
+    except ValueError as exc:
+        assert "only supports insurance_underwriting" in str(exc)
+
+
+def test_strategy_semantics_for_side_config_defaults_to_underwriting() -> None:
     semantics = strategy_semantics_for_side_config(
         family=SELL_PUT_FAMILY,
-        side_cfg={"strategy": "yield_first"},
+        side_cfg={},
     )
 
-    assert semantics.strategy_profile == RETURN_FIRST_PROFILE
-    assert semantics.yield_enhancement_mode == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
-    assert semantics.close_requires_rv is False
+    assert semantics.strategy_profile == INSURANCE_UNDERWRITING_PROFILE
+    assert semantics.scan_uses_underwriting_gate is True
+    assert semantics.close_requires_rv is True
 
 
 def test_position_strategy_semantics_preserves_yield_enhancement_mode() -> None:

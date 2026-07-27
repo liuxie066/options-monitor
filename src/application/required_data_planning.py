@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ from src.application.opend_market_snapshot_fetching import get_underlier_spot
 from src.application.opend_symbol_chain_fetching import list_option_expirations
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
+    resolve_staggered_expiry_gap_days,
 )
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
@@ -108,6 +110,8 @@ class RequiredDataFetchPlanBundle:
     spot_reference: float | None
     side_plans: list[OptionSideFetchPlan]
     merged_specs: list[RequiredDataFetchSpec]
+    expiration_discovery_complete: bool = True
+    expiration_discovery_error: str | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +119,8 @@ class RequiredDataFetchPlanBundle:
             "spot_reference": self.spot_reference,
             "side_plans": [plan.to_debug_dict() for plan in self.side_plans],
             "merged_requests": [spec.to_debug_dict() for spec in self.merged_specs],
+            "expiration_discovery_complete": bool(self.expiration_discovery_complete),
+            "expiration_discovery_error": self.expiration_discovery_error,
         }
 
 
@@ -187,25 +193,59 @@ def _filter_expirations_by_dte(*, symbol: str, available_expirations: list[str],
     if not available_expirations:
         return []
     try:
-        from datetime import datetime
         from src.application.opend_utils import get_trading_date, normalize_underlier
 
         today = get_trading_date(normalize_underlier(symbol).market)
-        out: list[str] = []
-        for exp in available_expirations:
-            try:
-                d0 = datetime.fromisoformat(str(exp)[:10]).date()
-                dte0 = int((d0 - today).days)
-            except Exception:
-                continue
-            if min_dte is not None and dte0 < int(min_dte):
-                continue
-            if max_dte is not None and dte0 > int(max_dte):
-                continue
-            out.append(str(exp)[:10])
-        return out
+    except Exception as exc:
+        raise RuntimeError(f"failed to resolve trading date for {symbol}") from exc
+
+    out: list[str] = []
+    for exp in available_expirations:
+        try:
+            d0 = datetime.fromisoformat(str(exp)[:10]).date()
+            dte0 = int((d0 - today).days)
+        except Exception:
+            continue
+        if min_dte is not None and dte0 < int(min_dte):
+            continue
+        if max_dte is not None and dte0 > int(max_dte):
+            continue
+        out.append(str(exp)[:10])
+    return out
+
+
+def _expiration_date(value: Any) -> date | None:
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
     except Exception:
-        return list(available_expirations)
+        return None
+
+
+def _filter_staggered_call_expirations(
+    *,
+    put_expirations: list[str],
+    call_expirations: list[str],
+    min_gap_days: int,
+    max_gap_days: int,
+) -> list[str]:
+    put_dates = [
+        parsed
+        for value in put_expirations
+        if (parsed := _expiration_date(value)) is not None
+    ]
+    if not put_dates:
+        return []
+    out: list[str] = []
+    for value in call_expirations:
+        call_date = _expiration_date(value)
+        if call_date is None:
+            continue
+        if any(
+            int(min_gap_days) <= (call_date - put_date).days <= int(max_gap_days)
+            for put_date in put_dates
+        ):
+            out.append(str(value)[:10])
+    return out
 
 
 def _resolve_put_side_plan(
@@ -225,7 +265,7 @@ def _resolve_put_side_plan(
         min_dte=window.min_dte,
         max_dte=window.max_dte,
     )
-    expirations = filtered[: int(limit_expirations)] if limit_expirations and filtered else filtered
+    expirations = filtered
     configured_min_strike = _safe_float(sell_put_cfg.get("min_strike"))
     configured_max_strike = _safe_float(sell_put_cfg.get("max_strike"))
     min_strike = configured_min_strike
@@ -338,7 +378,7 @@ def _resolve_call_side_plan(
         min_dte=window.min_dte,
         max_dte=window.max_dte,
     )
-    expirations = filtered[: int(limit_expirations)] if limit_expirations and filtered else filtered
+    expirations = filtered
     strike_window, reason, source_fields = _resolve_sell_call_strike_window(
         sell_call_cfg=sell_call_cfg,
         spot_reference=spot_reference,
@@ -374,11 +414,17 @@ def _resolve_combo_yield_call_plan(
     call_cfg = dict(cfg.get("call") or {})
     structure_mode = str(cfg.get("structure_mode") or "same_expiry_pair").strip().lower()
     if structure_mode == "staggered_expiry_pair":
-        call_window = resolve_candidate_window(
-            call_cfg,
-            defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+        min_gap_days, max_gap_days = resolve_staggered_expiry_gap_days(cfg)
+        put_window = resolve_candidate_window(
+            sell_put_cfg,
+            defaults=DEFAULT_SELL_PUT_WINDOW,
         )
-        dte_source_prefix = "combo_yield.call"
+        call_cfg.pop("min_dte", None)
+        call_cfg.pop("max_dte", None)
+        call_cfg["min_dte"] = int(put_window.min_dte) + int(min_gap_days)
+        call_cfg["max_dte"] = int(put_window.max_dte) + int(max_gap_days)
+        call_window = resolve_candidate_window(call_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
+        dte_source_prefix = "combo_yield"
     else:
         call_cfg.pop("min_dte", None)
         call_cfg.pop("max_dte", None)
@@ -390,7 +436,7 @@ def _resolve_combo_yield_call_plan(
             defaults=DEFAULT_SELL_PUT_WINDOW,
         )
         dte_source_prefix = "sell_put"
-    return _resolve_call_side_plan(
+    plan = _resolve_call_side_plan(
         symbol=symbol,
         sell_call_cfg=call_cfg,
         limit_expirations=limit_expirations,
@@ -401,6 +447,40 @@ def _resolve_combo_yield_call_plan(
         dte_source_prefix=dte_source_prefix,
         fallback_min_pct=0.0,
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
+    )
+    if structure_mode != "staggered_expiry_pair":
+        return plan
+
+    put_expirations = _filter_expirations_by_dte(
+        symbol=symbol,
+        available_expirations=available_expirations,
+        min_dte=put_window.min_dte,
+        max_dte=put_window.max_dte,
+    )
+    feasible_call_expirations = _filter_staggered_call_expirations(
+        put_expirations=put_expirations,
+        call_expirations=plan.explicit_expirations,
+        min_gap_days=min_gap_days,
+        max_gap_days=max_gap_days,
+    )
+    return replace(
+        plan,
+        explicit_expirations=feasible_call_expirations,
+        planning_reason=(
+            "derive combo_yield Call expirations from Funding Put expirations "
+            "and configured expiry-gap bounds"
+        ),
+        source_fields=[
+            field
+            for field in plan.source_fields
+            if field not in {"combo_yield.min_dte", "combo_yield.max_dte"}
+        ]
+        + [
+            "sell_put.min_dte",
+            "sell_put.max_dte",
+            "combo_yield.min_expiry_gap_days",
+            "combo_yield.max_expiry_gap_days",
+        ],
     )
 
 
@@ -484,7 +564,7 @@ def _merge_side_plans(
         merged.append(
             RequiredDataFetchSpec(
                 symbol=symbol,
-                limit_expirations=limit_expirations,
+                limit_expirations=0,
                 host=host,
                 port=port,
                 option_types=option_types,
@@ -537,6 +617,8 @@ def build_required_data_fetch_plan(
         snapshot_window_sec=snapshot_window_sec,
         snapshot_max_calls=snapshot_max_calls,
     )
+    expiration_discovery_complete = True
+    expiration_discovery_error: str | None = None
     try:
         available_expirations = list_option_expirations(
             symbol,
@@ -547,11 +629,13 @@ def build_required_data_fetch_plan(
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
         )
-    except Exception:
+    except Exception as exc:
         available_expirations = []
+        expiration_discovery_complete = False
+        expiration_discovery_error = str(exc or "option expiration discovery failed")
 
     side_plans: list[OptionSideFetchPlan] = []
-    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg, sell_put_cfg)
+    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg)
     combo_yield_enabled = bool(yield_enhancement_policy.enabled)
     if want_put or combo_yield_enabled:
         side_plans.append(
@@ -601,4 +685,6 @@ def build_required_data_fetch_plan(
                 or (combo_yield_enabled and yield_enhancement_policy.requires_realized_volatility)
             ),
         ),
+        expiration_discovery_complete=expiration_discovery_complete,
+        expiration_discovery_error=expiration_discovery_error,
     )

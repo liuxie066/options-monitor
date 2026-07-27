@@ -122,6 +122,8 @@ def validate_yield_enhancement_pair(
     call_leg: YieldEnhancementLeg,
     *,
     structure_mode: str = "same_expiry_pair",
+    min_expiry_gap_days: int | None = None,
+    max_expiry_gap_days: int | None = None,
 ) -> list[str]:
     rejects: list[str] = []
     if str(put_leg.option_type).lower() != "put":
@@ -134,6 +136,11 @@ def validate_yield_enhancement_pair(
     if normalized_structure_mode == "staggered_expiry_pair":
         if call_leg.expiration <= put_leg.expiration or call_leg.dte <= put_leg.dte:
             rejects.append("expiration_order")
+        gap_days = int(call_leg.dte) - int(put_leg.dte)
+        if min_expiry_gap_days is not None and gap_days < int(min_expiry_gap_days):
+            rejects.append("expiry_gap_below_min")
+        if max_expiry_gap_days is not None and gap_days > int(max_expiry_gap_days):
+            rejects.append("expiry_gap_above_max")
     elif put_leg.expiration != call_leg.expiration:
         rejects.append("expiration_mismatch")
     if put_leg.currency.upper() != call_leg.currency.upper():
@@ -393,10 +400,10 @@ def yield_enhancement_staggered_call_rank_key(row: dict[str, Any]) -> tuple[Any,
     return (
         -1.0 if _funding_accepted(row) else 0.0,
         -call_delta,
-        -f("call_cost_to_put_credit", default=-1.0),
-        -f("call_dte", default=-1.0),
+        -f("net_credit_retention", default=-1.0),
         max_leg_spread_ratio,
         -f("call_open_interest"),
+        f("call_dte", default=999999.0),
         str(row.get("call_contract_symbol") or ""),
     )
 
@@ -406,16 +413,16 @@ def yield_enhancement_staggered_rank_key(row: dict[str, Any]) -> tuple[Any, ...]
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
 
-    assignment_margin = _safe_float(row.get("strike_safety_margin_pct"))
+    assignment_margin = _safe_float(row.get("net_assignment_discount_pct"))
+    if assignment_margin is None:
+        assignment_margin = _safe_float(row.get("strike_safety_margin_pct"))
     if assignment_margin is None:
         assignment_margin = _safe_float(row.get("put_assignment_margin_pct"))
     if assignment_margin is None:
         assignment_margin = f("put_otm_pct")
-    premium_edge = _safe_float(row.get("premium_edge_score"))
-    if premium_edge is None:
-        premium_edge = _safe_float(row.get("put_only_annualized_net_return"))
-    if premium_edge is None:
-        premium_edge = f("annualized_net_return_on_cash_basis", default=-1.0)
+    put_annualized_return = _safe_float(row.get("put_only_annualized_net_return"))
+    if put_annualized_return is None:
+        put_annualized_return = f("annualized_net_return_on_cash_basis", default=-1.0)
     raw_call_delta = _safe_float(row.get("call_delta"))
     call_delta = abs(raw_call_delta) if raw_call_delta is not None else -1.0
     max_leg_spread_ratio = max(
@@ -424,11 +431,10 @@ def yield_enhancement_staggered_rank_key(row: dict[str, Any]) -> tuple[Any, ...]
     )
     return (
         -1.0 if _funding_accepted(row) else 0.0,
+        -float(put_annualized_return),
         -float(assignment_margin),
-        -float(premium_edge),
         -call_delta,
-        -f("call_cost_to_put_credit", default=-1.0),
-        -f("call_dte", default=-1.0),
+        -f("net_credit_retention", default=-1.0),
         max_leg_spread_ratio,
         -min(f("put_open_interest"), f("call_open_interest")),
         str(row.get("symbol") or ""),
@@ -470,6 +476,27 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
 
 def rank_yield_enhancement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted([dict(row) for row in rows], key=yield_enhancement_rank_key)
+
+
+def select_best_yield_enhancement_per_symbol(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return one canonical highest-ranked Combo Yield pair per underlying."""
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rank_yield_enhancement_rows(rows):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        key = symbol or str(
+            row.get("candidate_pair_id")
+            or row.get("strategy_group_id")
+            or row.get("put_contract_symbol")
+            or ""
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(row)
+    return selected
 
 
 def rank_yield_enhancement_calls_for_put(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

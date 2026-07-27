@@ -165,9 +165,9 @@ def select_symbol_expirations(
                     filtered.append(str(exp)[:10])
                 except Exception:
                     continue
-            expirations_pick0 = filtered if filtered else list(expirations_all)
-        except Exception:
-            expirations_pick0 = list(expirations_all)
+            expirations_pick0 = filtered
+        except Exception as exc:
+            raise RuntimeError("failed to filter option expirations by DTE") from exc
 
     if explicit_expirations_norm:
         return expirations_pick0

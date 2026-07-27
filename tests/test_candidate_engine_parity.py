@@ -36,7 +36,7 @@ def test_candidate_engine_call_rank_matches_option_candidate_strategy() -> None:
     assert [r["contract_symbol"] for r in engine] == ["C1", "C2", "C3"]
 
 
-def test_candidate_engine_put_summary_preserves_upstream_candidate_order() -> None:
+def test_candidate_engine_put_summary_uses_canonical_recommendation_order() -> None:
     from domain.domain.engine import rank_candidate_rows
     from src.application.report_summaries import summarize_sell_put
 
@@ -68,7 +68,7 @@ def test_candidate_engine_put_summary_preserves_upstream_candidate_order() -> No
     engine_top = rank_candidate_rows(rows, mode="put")[0]
 
     assert engine_top["contract_symbol"] == "P_FAR_DELTA"
-    assert summary["top_contract"] == "2026-06-18 130P"
+    assert summary["top_contract"] == "2026-06-18 140P"
     assert summary["cash_required_usd"] is None
 
 
@@ -129,7 +129,7 @@ def test_candidate_engine_put_summary_keeps_event_risk_fields() -> None:
     assert summary["reject_stage_candidate"] == "EVENT_WARN"
 
 
-def test_candidate_engine_call_summary_preserves_upstream_candidate_order() -> None:
+def test_candidate_engine_call_summary_uses_canonical_recommendation_order() -> None:
     from domain.domain.engine import rank_candidate_rows
     from src.application.report_summaries import summarize_sell_call
 
@@ -164,7 +164,7 @@ def test_candidate_engine_call_summary_preserves_upstream_candidate_order() -> N
     engine_top = rank_candidate_rows(rows, mode="call")[0]
 
     assert engine_top["contract_symbol"] == "C_FAR_DELTA"
-    assert summary["top_contract"] == "2026-06-18 230C"
+    assert summary["top_contract"] == "2026-06-18 220C"
 
 
 def test_candidate_engine_legacy_put_reject_rule_mapping_matches_filter_reject_log() -> None:

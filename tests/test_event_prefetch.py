@@ -121,11 +121,11 @@ def test_event_prefetch_rejects_malformed_structured_events_as_source_error(tmp_
     assert "coverage" not in cached
 
 
-def test_event_prefetch_includes_yield_enhancement_for_return_first() -> None:
+def test_event_prefetch_includes_combo_yield_for_underwriting() -> None:
     from src.application.events.prefetch import build_event_prefetch_plan
 
     cfg = _cfg()
-    cfg["symbols"][0]["sell_put"]["strategy"] = "return_first"
+    cfg["symbols"][0]["sell_put"]["strategy"] = "insurance_underwriting"
 
     plan = build_event_prefetch_plan(cfg)
 

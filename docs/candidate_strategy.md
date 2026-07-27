@@ -128,9 +128,9 @@
 
 ## 3.3 收益门槛
 
-收益门槛对 `return_first` 和 `insurance_underwriting` 都是开仓过滤条件，但语义不同：`return_first` 用它确认收益条件合格；`insurance_underwriting` 用它确认这张保险的最低保费足够，再继续评估 IV/RV、事件风险、流动性和 strike 安全距离。
+Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。收益门槛用于确认最低保费足够，再继续评估 IV/RV、事件风险、流动性和价格边界。
 
-`return_first` 可使用的收益门槛包括：
+收益门槛包括：
 
 - `min_annualized_net_return`（Put）
 - `min_annualized_net_premium_return`（Covered Call）
@@ -144,7 +144,7 @@
 3. 代码默认值
 
 ### 当前默认值注意
-默认 Sell Put / Covered Call 开仓 profile 是 `insurance_underwriting`。开仓配置不再接受 `strategy=short_vol`。
+默认且唯一的 Sell Put / Covered Call 开仓 profile 是 `insurance_underwriting`。开仓配置不再接受 `strategy=return_first`、`strategy=short_vol` 或 `score_weights`。
 如果你要看当前默认值，请直接看：
 
 - `domain/domain/sell_put_config.py`
@@ -223,12 +223,13 @@
 
 默认 Sell Put 与 Covered Call 开仓 profile 都是 `insurance_underwriting`。这意味着系统把二者视为承保候选：先确认这张保险的收益、波动率边际、事件风险、流动性和覆盖能力是否合格，再做推荐排序。
 
-当前共享评估由 `domain/domain/insurance_underwriting.py` 负责，规则分四组：
+当前共享评估由 `domain/domain/insurance_underwriting.py` 负责，规则分三组：
 
 - 波动率边际：`IV/RV >= min_iv_rv_ratio` 且 `IV - RV >= min_iv_minus_rv`
 - 事件风险：默认拒绝 expiry 前有财报等事件的候选；事件源不可用时 fail closed
 - 收益底线：年化收益率和单笔净收入必须达到最低承保价格
-- 边界距离：Sell Put 越低于 `max_strike` 越好；Covered Call 越高于有效 `min_strike` 越好
+
+价格边界在基础扫描阶段作为硬门槛执行：Sell Put 的 `strike <= min(max_strike, spot)`，Covered Call 的 `strike >= effective_min_strike`。门槛通过后，价格距离不再形成第二套软门禁。
 
 Sell Put 和 Covered Call 都会对 IV/RV、事件源和必要价格输入 fail closed。开仓侧不再把 stress、gap-down、path pressure 或单标的集中度作为硬风险阈值；旧开仓配置字段不再兼容读取，新默认模板也不再输出它们。
 
@@ -251,27 +252,25 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 排序与过滤分离。
 
 ### Sell Put
-`return_first` profile 仍可用于收益优先排序。默认 `insurance_underwriting` profile 会综合：
 
-1. 保费边际：收益率、单笔净收入、IV/RV、IV-RV 相对阈值的综合得分
-2. strike 安全距离：离 `max_strike` 越远越好
-3. 单笔净收入
-4. 价差
+1. 硬门槛全部通过。
+2. 每个标的选择年化净收益率最高的合约。
+3. 不同标的继续按年化净收益率降序。
+4. 年化净收益率相同时，净接货折价和集中度只作 tie-break；再用流动性、净收益额和合约标识稳定排序。
 
 ### Covered Call
-默认 `insurance_underwriting` profile 会综合：
 
-1. 保费边际：收益率、单笔净收入、IV/RV、IV-RV 相对阈值的综合得分
-2. strike 上行距离：高于有效 `min_strike` 越多越好
-3. 单笔净收入
-4. 价差
+1. 硬门槛全部通过。
+2. 每个标的选择年化净权利金收益率最高的合约。
+3. 不同标的继续按年化净权利金收益率降序。
+4. 年化净权利金收益率相同时，strike 上行距离和集中度只作 tie-break；再用流动性、净收益额和合约标识稳定排序。
 
 最终 CSV、summary 和 alerts 使用与当前 opening profile 对应的排序核心。
 
 需要解释“为什么这个候选排在前面”时，用同一套排序核心：
 
-- `return_first` 使用 `build_candidate_rank_key(...)` / `explain_candidate_rank(...)` 解释收益优先排序
-- `insurance_underwriting` 使用 `domain/domain/insurance_underwriting.py::rank_underwriting_candidates(...)` 对齐承保排序
+- 当前 `insurance_underwriting` 使用正式固定排序，不读取开仓 `score_weights`
+- 历史 `return_first` artifact 仍可由兼容解析和研究工具解释，但不能作为新开仓 profile
 - Tool Gateway 调用方可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
 
 `candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选。

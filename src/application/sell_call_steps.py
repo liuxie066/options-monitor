@@ -19,7 +19,7 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from domain.domain.symbol_identity import canonical_symbol
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
@@ -34,7 +34,6 @@ from src.application.candidate_filter_trace import (
 )
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
-    resolve_min_annualized_net_premium_return_from_sell_call_cfg,
 )
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
 
@@ -194,32 +193,9 @@ def run_sell_call_scan_and_summarize(
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
-    min_annualized = 0.0 if sell_call_semantics.scan_uses_underwriting_gate else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
-        sell_call_cfg=cc,
-        source_prefix=f'{symbol}.sell_call',
-    )
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
     event_risk = resolve_event_risk_config(global_sell_call_event_risk)
     window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
-
-    # Config min_net_income is always CNY. The scanners expect option-native
-    # currency thresholds (USD for US symbols, HKD for HK symbols).
-    global_min_net_income = float((global_sell_call_liquidity or {}).get('min_net_income', 0.0) or 0.0)
-    min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
-    min_net_income_native = 0.0
-    if sell_call_semantics.scan_uses_underwriting_gate:
-        min_net_income_native = 0.0
-    elif min_net_income_cny > 0:
-        native_ccy = symbol_currency(symbol)
-        if not native_ccy:
-            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
-        converted_min_income = exchange_rate_converter.cny_to_native(
-            min_net_income_cny,
-            native_ccy=native_ccy,
-        )
-        if converted_min_income is None:
-            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
-        min_net_income_native = float(converted_min_income)
 
     run_sell_call_scan(
         symbols=[symbol],
@@ -237,14 +213,15 @@ def run_sell_call_scan_and_summarize(
             cost_multiplier=cc.get('min_strike_cost_multiplier', 1.0),
         ),
         max_strike=_optional_float(cc, 'max_strike'),
-        min_annualized_net_return=min_annualized,
+        # Underwriting applies return/income thresholds once, after CNY enrichment.
+        min_annualized_net_return=0.0,
         min_strike_cost_multiplier=float(cc.get('min_strike_cost_multiplier', 1.0) or 1.0),
-        min_net_income=float(min_net_income_native),
+        min_net_income=0.0,
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
         event_risk_cfg=event_risk,
-        score_weights=cc.get('score_weights'),
+        score_weights=None,
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
         quiet=bool(is_scheduled),

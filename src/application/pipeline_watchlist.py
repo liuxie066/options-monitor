@@ -37,7 +37,6 @@ from src.application.config_validator import validate_resolved_watchlist_item_ru
 from src.infrastructure.io_utils import atomic_write_json
 
 LIQUIDITY_COMMON_FIELDS = (
-    'min_net_income',
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',

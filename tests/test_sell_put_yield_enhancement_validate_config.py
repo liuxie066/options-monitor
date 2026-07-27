@@ -230,6 +230,82 @@ def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> N
         assert "templates.put_base.combo_yield.call.min_strike" in str(exc)
 
 
+def test_validate_config_accepts_staggered_expiry_gap_bounds() -> None:
+    from src.application.config_validator import validate_config
+
+    validate_config(
+        {
+            "templates": {},
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                    "combo_yield": {
+                        "enabled": True,
+                        "structure_mode": "staggered_expiry_pair",
+                        "min_expiry_gap_days": 30,
+                        "max_expiry_gap_days": 90,
+                    },
+                    "sell_call": {"enabled": False},
+                }
+            ],
+        }
+    )
+
+
+def test_validate_config_rejects_absolute_call_dte_for_combo_yield() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {
+                    "enabled": True,
+                    "structure_mode": "staggered_expiry_pair",
+                    "call": {"min_dte": 60, "max_dte": 120},
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "unsupported absolute DTE fields" in str(exc)
+
+
+def test_validate_config_rejects_invalid_staggered_expiry_gap_bounds() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "combo_yield": {
+                    "enabled": True,
+                    "structure_mode": "staggered_expiry_pair",
+                    "min_expiry_gap_days": 91,
+                    "max_expiry_gap_days": 90,
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "min_expiry_gap_days >" in str(exc)
+
+
 def test_validate_config_rejects_removed_template_combo_yield_call_otm_bounds() -> None:
     from src.application.config_validator import validate_config
 

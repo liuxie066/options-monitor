@@ -23,11 +23,10 @@ from src.application.short_vol_risk_context import (
     PortfolioRiskContext,
     enrich_short_vol_contract_cny_fields,
 )
-from src.application.strategy_policy import RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE, normalize_strategy_profile
+from src.application.strategy_policy import SHORT_VOL_PROFILE, normalize_strategy_profile
 from src.infrastructure.exchange_rates import CurrencyConverter
 
 
-RETURN_FIRST_STRATEGY = RETURN_FIRST_PROFILE
 SHORT_VOL_STRATEGY = SHORT_VOL_PROFILE
 
 

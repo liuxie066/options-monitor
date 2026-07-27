@@ -6,7 +6,10 @@ from pathlib import Path
 import pandas as pd
 
 from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
-from src.application.combo_yield_steps import run_combo_yield_scan_and_summarize
+from src.application.combo_yield_steps import (
+    run_combo_yield_for_symbol_and_summarize,
+    run_combo_yield_scan_and_summarize,
+)
 from src.application.yield_enhancement_config import derive_yield_enhancement_policy
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -57,7 +60,7 @@ def _run(
         captured["df"] = kwargs["df_candidates"].copy()
         return find_pairs_fn(**kwargs)
 
-    policy = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "return_first"})
+    policy = derive_yield_enhancement_policy({"enabled": True})
     run_combo_yield_scan_and_summarize(
         base=tmp_path,
         sym="NVDA",
@@ -66,7 +69,7 @@ def _run(
         symbol_cfg={"symbol": "NVDA", "combo_yield": {"enabled": True}},
         yield_enhancement_cfg={"enabled": True},
         yield_sp={
-            "strategy": "return_first",
+            "strategy": "insurance_underwriting",
             "min_annualized_net_return": 0.10,
             "reject_event_risk": True,
             "event_source_fail_closed": True,
@@ -125,6 +128,49 @@ def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path)
     assert len(captured) == 1
     assert float(captured.iloc[0]["premium_edge_score"]) == 0.25
     assert float(captured.iloc[0]["strike_safety_margin_pct"]) == 0.12
+
+
+def test_combo_yield_facade_forces_funding_put_underwriting_when_sell_put_is_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.combo_yield_steps as steps
+
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return steps._empty_result(report_dir=kwargs["report_dir"], symbol_lower=kwargs["symbol_lower"]), {
+            "strategy": "combo_yield",
+        }
+
+    monkeypatch.setattr(steps, "run_combo_yield_scan_and_summarize", fake_run)
+
+    summary = run_combo_yield_for_symbol_and_summarize(
+        base=tmp_path,
+        sym="NVDA",
+        symbol="NVDA",
+        symbol_lower="nvda",
+        symbol_cfg={
+            "symbol": "NVDA",
+            "combo_yield": {"enabled": True},
+            "sell_put": {"enabled": False},
+        },
+        sell_put_cfg={"enabled": False},
+        top_n=3,
+        required_data_dir=tmp_path / "required_data",
+        report_dir=tmp_path / "reports",
+        is_scheduled=True,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        portfolio_ctx=None,
+    )
+
+    assert summary == {"strategy": "combo_yield"}
+    assert captured["yield_sp"] == {
+        "enabled": False,
+        "strategy": "insurance_underwriting",
+    }
+    assert captured["yield_enhancement_policy"].requires_realized_volatility is True
 
 
 def test_combo_yield_event_gate_fails_closed_without_iv_rv_underwriting(tmp_path: Path) -> None:

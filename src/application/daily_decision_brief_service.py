@@ -16,7 +16,10 @@ from domain.domain.daily_decision_brief import (
     normalize_daily_decision_brief,
 )
 from domain.domain.daily_decision_event_risk import build_candidate_event_risk
-from domain.domain.engine import rank_candidate_rows
+from domain.domain.engine import (
+    select_best_candidate_per_symbol,
+    select_best_yield_enhancement_per_symbol,
+)
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
 from domain.domain.position_advice_authority import scope_for
@@ -187,11 +190,24 @@ def assemble_daily_decision_brief(
     if "combo_yield" in failed_families:
         combo_rows, combo_available = [], False
 
-    ranked_puts = rank_candidate_rows(put_rows, mode="put") if put_rows else []
-    ranked_calls = rank_candidate_rows(call_rows, mode="call") if call_rows else []
+    ranked_puts = (
+        select_best_candidate_per_symbol(put_rows, mode="put")
+        if put_rows
+        else []
+    )
+    ranked_calls = (
+        select_best_candidate_per_symbol(call_rows, mode="call")
+        if call_rows
+        else []
+    )
     selected_puts = ranked_puts[:max_candidates]
     selected_calls = ranked_calls[:max_candidates]
-    selected_combos = combo_rows[:max_candidates]
+    ranked_combos = (
+        select_best_yield_enhancement_per_symbol(combo_rows)
+        if combo_rows
+        else []
+    )
+    selected_combos = ranked_combos[:max_candidates]
     if selected_puts or selected_calls or selected_combos:
         event_snapshot, event_snapshot_reason = _load_event_snapshot(
             base=base_path,

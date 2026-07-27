@@ -211,7 +211,9 @@ def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySema
         scan_uses_event_risk=uses_underwriting,
         scan_uses_path_risk=False,
         yield_enhancement_mode=yield_mode,
-        yield_enhancement_requires_rv=False,
+        yield_enhancement_requires_rv=(
+            normalized_family == SELL_PUT_FAMILY and uses_underwriting
+        ),
         yield_enhancement_uses_short_vol_gate=False,
         close_advice_profile=close_profile,
         close_requires_rv=uses_short_vol_thesis,
@@ -225,9 +227,16 @@ def strategy_semantics_for_side_config(
     side_cfg: dict[str, Any] | None,
 ) -> StrategySemantics:
     cfg = side_cfg if isinstance(side_cfg, dict) else {}
+    raw_profile = cfg.get("strategy") or cfg.get("strategy_profile")
+    profile = str(raw_profile or INSURANCE_UNDERWRITING_PROFILE).strip().lower()
+    if profile != INSURANCE_UNDERWRITING_PROFILE:
+        raise ValueError(
+            f"{family} opening strategy only supports {INSURANCE_UNDERWRITING_PROFILE}; "
+            f"got {profile or '<empty>'}"
+        )
     return strategy_semantics_for_profile(
         family=family,
-        profile=cfg.get("strategy") or cfg.get("strategy_profile"),
+        profile=INSURANCE_UNDERWRITING_PROFILE,
     )
 
 
