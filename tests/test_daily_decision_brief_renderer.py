@@ -1167,6 +1167,7 @@ def test_fixed_report_card_groups_regular_combo_and_actionable_position_tables()
     assert "卖 08-21 $300 Put @ $3.45" in message
     assert "买 09-18 $400 Call @ $1.05" in message
     assert "年化 15.4% · 净收入 $620.00" in message
+    assert "\n\n事件｜" in message
     assert "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |" in message
     assert "NVDA · 组合增强（Put 侧） · 08-21 $100 Put" in message
     assert "建议平掉 Put，保留 Call | $0.35 | +$285.00 | 4.1%" in message
@@ -1210,7 +1211,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "### Sell Put" in message
     assert "**MSFT｜Sell Put｜08-21 $400 Put（首选）**" in message
     assert "| 优先 | 合约 |" not in message
-    assert "事件｜Sell Put #1：" in message
+    assert "\n\n事件｜Sell Put #1：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额｜暂不可用" in message

@@ -474,7 +474,9 @@ def _render_user_view_card(
                     use_table=not (projection == "candidate_alert" and len(family_rows) == 1),
                 )
             )
-        lines.extend(_render_candidate_event_card(candidates))
+        event_lines = _render_candidate_event_card(candidates)
+        if event_lines:
+            lines.extend(["", *event_lines])
         for note in view.get("candidate_omissions") or []:
             lines.append(f"补充｜{note}")
 
