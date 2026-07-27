@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Kept Daily Brief event summaries outside Feishu candidate tables by explicitly ending the table block before rendering event prose.
+
 ## 1.5.3 - 2026-07-27
 
 ### Bug Fixes
