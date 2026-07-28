@@ -1465,34 +1465,56 @@ def _notification_diagnosis(
     shared_notify_summary: dict[str, Any] = shared_notify_summary_raw if isinstance(shared_notify_summary_raw, dict) else {}
     route_summary = _resolve_notification_route_summary(cfg)
 
-    no_send = bool(tick_metrics.get("no_send") or shared_payload.get("no_send"))
+    local_sources = (notify_summary, tick_metrics)
+    shared_sources = (shared_notify_summary, shared_payload)
+    selected_run_path = str(
+        (latest_run_payload or {}).get("path") or ""
+    ).strip()
+    selected_run_id = Path(selected_run_path).name if selected_run_path else ""
+    shared_matches_selected_run = bool(
+        selected_run_id
+        and str(shared_payload.get("run_id") or "").strip()
+        == selected_run_id
+    )
+    selected_run_is_authoritative = latest_run_payload is not None
+    count_sources = (
+        local_sources
+        if tick_metrics
+        or (
+            selected_run_is_authoritative
+            and not shared_matches_selected_run
+        )
+        else shared_sources
+    )
+
+    def _present_value(
+        key: str,
+        *,
+        default: Any,
+    ) -> Any:
+        for source in count_sources:
+            if key in source:
+                return source[key]
+        return default
+
+    no_send = bool(_present_value("no_send", default=False))
     account_messages_count = int(
-        notify_summary.get("account_messages_count")
-        or tick_metrics.get("account_messages_count")
-        or shared_notify_summary.get("account_messages_count")
-        or shared_payload.get("account_messages_count")
-        or 0
+        _present_value("account_messages_count", default=0) or 0
     )
     send_attempted_count = int(
-        notify_summary.get("send_attempted_count")
-        or tick_metrics.get("send_attempted_count")
-        or shared_notify_summary.get("send_attempted_count")
-        or shared_payload.get("send_attempted_count")
-        or 0
+        _present_value("send_attempted_count", default=0) or 0
     )
     send_confirmed_count = int(
-        notify_summary.get("send_confirmed_count")
-        or tick_metrics.get("send_confirmed_count")
-        or shared_notify_summary.get("send_confirmed_count")
-        or shared_payload.get("send_confirmed_count")
-        or 0
+        _present_value("send_confirmed_count", default=0) or 0
     )
     send_failed_count = int(
-        notify_summary.get("send_failed_count")
-        or tick_metrics.get("send_failed_count")
-        or shared_notify_summary.get("send_failed_count")
-        or shared_payload.get("send_failed_count")
-        or 0
+        _present_value("send_failed_count", default=0) or 0
+    )
+    ambiguous_send_count = int(
+        _present_value("ambiguous_send_count", default=0) or 0
+    )
+    duplicate_risk_count = int(
+        _present_value("duplicate_risk_count", default=0) or 0
     )
     scheduler_should_run = scheduler.get("should_run_scan")
     scheduler_should_notify = scheduler.get("is_notify_window_open")
@@ -1522,7 +1544,13 @@ def _notification_diagnosis(
     elif send_attempted_count > 0:
         status = "send_failed_or_unconfirmed"
         reason = "repository attempted notification delivery but no account send was confirmed"
-    elif not bool(route_summary.get("configured")):
+    elif (
+        not bool(route_summary.get("configured"))
+        and (
+            account_messages_count > 0
+            or scheduler_should_notify is True
+        )
+    ):
         status = "notification_route_missing"
         reason = "notifications route is missing or incomplete"
     elif tick_metrics:
@@ -1547,8 +1575,21 @@ def _notification_diagnosis(
         "send_attempted_count": send_attempted_count,
         "send_confirmed_count": send_confirmed_count,
         "send_failed_count": send_failed_count,
-        "sent_accounts": tick_metrics.get("sent_accounts") or shared_payload.get("sent_accounts") or [],
-        "final_reason": tick_metrics.get("reason") or shared_payload.get("reason") or shared_payload.get("status"),
+        "ambiguous_send_count": ambiguous_send_count,
+        "duplicate_risk_count": duplicate_risk_count,
+        "sent_accounts": _present_value(
+            "sent_accounts",
+            default=[],
+        )
+        or [],
+        "final_reason": _present_value(
+            "reason",
+            default=(
+                _present_value("status", default=None)
+                if not selected_run_is_authoritative
+                else None
+            ),
+        ),
     }
 
 
@@ -2313,6 +2354,29 @@ def runtime_status_tool(
         latest_run_payload=latest_run_payload,
         trigger_context=trigger_context,
     )
+    notification_status = str(
+        notification_diagnosis.get("status") or ""
+    )
+    notification_warning_codes = {
+        "sent_partial": "NOTIFICATION_PARTIAL_FAILURE",
+        "send_failed_or_unconfirmed": "NOTIFICATION_DELIVERY_FAILED",
+        "notification_route_missing": "NOTIFICATION_ROUTE_MISSING",
+    }
+    notification_warning_code = notification_warning_codes.get(
+        notification_status
+    )
+    if notification_warning_code is not None:
+        warnings.append(
+            "Notification delivery is unhealthy: "
+            f"{notification_status}: "
+            f"{notification_diagnosis.get('reason')}"
+        )
+        warning_codes.append(notification_warning_code)
+    if int(notification_diagnosis.get("duplicate_risk_count") or 0) > 0:
+        warnings.append(
+            "Notification delivery has unresolved duplicate risk."
+        )
+        warning_codes.append("NOTIFICATION_DUPLICATE_RISK")
     upgrade_evaluation = _upgrade_status_evaluation(
         upgrade_status,
         base=base,
@@ -2458,6 +2522,21 @@ def runtime_status_tool(
     data["summary"]["config_authority_ok"] = bool(config_authority.get("ok"))
     data["summary"]["config_authority_reason"] = config_authority.get("stale_or_invalid_reason")
     data["summary"]["freshness_status"] = data["freshness"].get("status")
+    data["summary"]["notification_status"] = notification_diagnosis.get(
+        "status"
+    )
+    data["summary"]["notification_reason"] = notification_diagnosis.get(
+        "reason"
+    )
+    data["summary"]["notification_send_attempted_count"] = (
+        notification_diagnosis.get("send_attempted_count")
+    )
+    data["summary"]["notification_send_confirmed_count"] = (
+        notification_diagnosis.get("send_confirmed_count")
+    )
+    data["summary"]["notification_send_failed_count"] = (
+        notification_diagnosis.get("send_failed_count")
+    )
     data["summary"]["account_count"] = data["account_summary"].get("account_count")
     data["summary"]["latest_run_path"] = latest_run_payload.get("path") if latest_run_payload else None
     data["summary"]["latest_scanned_run_path"] = latest_scanned_run_payload.get("path") if latest_scanned_run_payload else None

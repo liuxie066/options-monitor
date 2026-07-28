@@ -339,6 +339,62 @@ def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> N
     assert audit_events[-1]["extra"]["ambiguous_send"] is True
 
 
+def test_multi_tick_notify_aggregates_provider_and_outer_retries() -> None:
+    helper = importlib.import_module(
+        "src.application.scheduled_notification"
+    )
+    send_calls: list[dict] = []
+    normalize_calls = 0
+
+    def _send(**kwargs):
+        send_calls.append(dict(kwargs))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    def _normalize(**_kwargs):
+        nonlocal normalize_calls
+        normalize_calls += 1
+        if normalize_calls == 1:
+            return {
+                "ok": False,
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "error_code": "SEND_FAILED",
+                "retry_attempt_count": 2,
+                "fallback_used": False,
+            }
+        return {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": "lx-confirmed",
+            "retry_attempt_count": 0,
+            "fallback_used": False,
+        }
+
+    result = helper.send_account_message_with_retry(
+        base=Path("/tmp/options-monitor-test"),
+        channel="feishu_app",
+        target="ou_1",
+        account="lx",
+        message="hello",
+        run_id="run-retry-aggregate",
+        runlog=_FakeRunLogger(),
+        audit_fn=lambda *_args, **_kwargs: None,
+        send_fn=_send,
+        normalize_fn=_normalize,
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    assert result["provider_retry_attempt_count"] == 2
+    assert result["outer_retry_attempt_count"] == 1
+    assert result["fallback_attempt_count"] == 0
+    assert result["retry_attempt_count"] == 3
+
+
 def test_multi_tick_notify_without_override_preserves_legacy_transport_key() -> None:
     helper = importlib.import_module("src.application.scheduled_notification")
     adapter = importlib.import_module("src.application.notification_delivery_adapter")

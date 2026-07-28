@@ -104,10 +104,13 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     )
 
     assert out["ok"] is False
-    assert out["command_ok"] is True
+    assert out["transport_ok"] is True
+    assert out["command_ok"] is False
     assert out["delivery_confirmed"] is False
-    assert out["returncode"] == 0
+    assert out["returncode"] == 1
     assert out["feishu_code"] == 230001
+    assert out["provider_response_code"] == 230001
+    assert out["error_code"] == "FEISHU_PROVIDER_REJECTED"
     assert out["feishu_msg"] == "denied"
 
 
@@ -782,10 +785,73 @@ def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
     )
 
     assert normalized["delivery_confirmed"] is False
-    assert normalized["command_ok"] is True
+    assert normalized["transport_ok"] is True
+    assert normalized["command_ok"] is False
     assert normalized["ambiguous_send"] is True
     assert normalized["fallback_used"] is False
     assert normalized["effective_idempotency_key"] == "idem-card-3"
+
+
+def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.feishu_notification_renderer import (
+        render_feishu_notification_card,
+    )
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    fallback_text = "# 决策简报\n\n候选｜NVDA"
+    envelope = render_feishu_notification_card(
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        fallback_text=fallback_text,
+    )
+
+    def _transient_then_reject(**kwargs):  # type: ignore[no-untyped-def]
+        kwargs["log_fn"](
+            {
+                "category": "transient",
+                "attempt": 1,
+                "http_status": 500,
+            }
+        )
+        raise FeishuPermanentError(
+            "card rejected after retry",
+            code=230001,
+            response={"http_status": 400, "feishu_code": 230001},
+        )
+
+    monkeypatch.setattr(service, "send_message", _transient_then_reject)
+    monkeypatch.setattr(
+        service,
+        "send_post_message",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ambiguous history must not use fallback UUID")
+        ),
+    )
+
+    normalized = service.normalize_feishu_app_send_output(
+        send_result=service.send_feishu_app_message(
+            base=tmp_path,
+            channel="feishu_app",
+            target="",
+            message=fallback_text,
+            notifications={},
+            idempotency_key="idem-card-transient",
+            transport_envelope=envelope,
+        )
+    )
+
+    assert normalized["delivery_confirmed"] is False
+    assert normalized["ambiguous_send"] is True
+    assert normalized["fallback_used"] is False
+    assert normalized["effective_idempotency_key"] == (
+        "idem-card-transient"
+    )
 
 
 def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp_path: Path) -> None:

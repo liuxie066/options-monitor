@@ -112,3 +112,48 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     assert scheduler_called["value"] == 0
     assert any(e.get("step") == "watchdog" and e.get("status") == "error" for e in events)
     assert any(e.get("step") == "run_end" and e.get("status") == "error" for e in events)
+
+
+def test_watchdog_outer_exception_fails_closed_without_ok_event(
+    fake_runlog_factory,
+    tmp_path,
+) -> None:
+    from src.application.multi_tick_watchdog import run_multi_tick_watchdog
+
+    events: list[dict] = []
+    outcome = run_multi_tick_watchdog(
+        base=tmp_path,
+        base_cfg={},
+        accounts=[],
+        no_send=True,
+        vpy=tmp_path / ".venv" / "bin" / "python",
+        runlog=fake_runlog_factory(events),
+        safe_data_fn=lambda data: data,
+        utc_now_fn=lambda: "2026-07-29T00:00:00Z",
+        audit_fn=lambda *_args, **_kwargs: None,
+        on_guard_failure=lambda *_args, **_kwargs: None,
+        run_opend_watchdog=lambda **_kwargs: {"ok": True},
+        parse_last_json_obj=lambda _text: {"ok": True},
+        classify_failure=lambda **_kwargs: {},
+        resolve_watchlist_config=lambda _cfg: (_ for _ in ()).throw(
+            ValueError("invalid watchlist")
+        ),
+        is_futu_fetch_source=lambda _source: True,
+        resolve_multi_tick_engine_entrypoint=lambda **_kwargs: {},
+        build_opend_unhealthy_execution_plan=lambda **_kwargs: {},
+        mark_opend_phone_verify_pending=lambda *_args, **_kwargs: None,
+        send_opend_alert=lambda *_args, **_kwargs: None,
+        send_opend_recovery_notice=lambda *_args, **_kwargs: None,
+        state_repo=object(),
+    )
+
+    assert outcome.should_continue is False
+    assert outcome.return_code == 2
+    assert any(
+        event.get("step") == "watchdog" and event.get("status") == "error"
+        for event in events
+    )
+    assert not any(
+        event.get("step") == "watchdog" and event.get("status") == "ok"
+        for event in events
+    )

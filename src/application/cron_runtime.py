@@ -37,6 +37,9 @@ def build_notify_summary(
     send_attempted_count: int | None = None,
     send_confirmed_count: int | None = None,
     retry_attempt_count: int | None = None,
+    provider_retry_attempt_count: int | None = None,
+    outer_retry_attempt_count: int | None = None,
+    fallback_attempt_count: int | None = None,
     ambiguous_send_count: int | None = None,
     duplicate_risk_count: int | None = None,
 ) -> dict[str, int]:
@@ -55,6 +58,13 @@ def build_notify_summary(
         "send_confirmed_count": confirmed_count,
         "send_failed_count": len(notify_failures),
         "retry_attempt_count": int(retry_attempt_count or 0),
+        "provider_retry_attempt_count": int(
+            provider_retry_attempt_count or 0
+        ),
+        "outer_retry_attempt_count": int(
+            outer_retry_attempt_count or 0
+        ),
+        "fallback_attempt_count": int(fallback_attempt_count or 0),
         "ambiguous_send_count": int(ambiguous_send_count or 0),
         "duplicate_risk_count": int(duplicate_risk_count or 0),
     }
@@ -77,6 +87,9 @@ def apply_notify_results_to_tick_metrics(
         "send_confirmed_count",
         "send_failed_count",
         "retry_attempt_count",
+        "provider_retry_attempt_count",
+        "outer_retry_attempt_count",
+        "fallback_attempt_count",
         "ambiguous_send_count",
         "duplicate_risk_count",
     ):
@@ -91,6 +104,7 @@ def apply_notify_results_to_tick_metrics(
 
 def build_shared_last_run_meta(
     *,
+    run_id: str | None = None,
     now_utc: str,
     channel: str | None,
     target: str | None,
@@ -102,6 +116,7 @@ def build_shared_last_run_meta(
 ) -> dict[str, Any]:
     actual_sent_accounts = [] if no_send else list(sent_accounts)
     return {
+        "run_id": str(run_id or "").strip() or None,
         "last_run_utc": str(now_utc),
         "sent": (not no_send) and bool(sent_accounts),
         "no_send": bool(no_send),

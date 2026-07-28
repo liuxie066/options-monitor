@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -30,6 +30,7 @@ NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA = (
 NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA = (
     "position_advice_notification_authority_resolution.v1"
 )
+NOTIFICATION_INFLIGHT_LEASE_SECONDS = 300
 
 
 class PositionAdviceNotificationAuthorityError(RuntimeError):
@@ -95,6 +96,7 @@ def execute_notification_with_authority(
     token: Mapping[str, Any],
     channel: str,
     send: Callable[[], Mapping[str, Any]],
+    delivery_identity: Mapping[str, Any] | None = None,
     now: datetime | str | None = None,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
@@ -106,8 +108,12 @@ def execute_notification_with_authority(
     channel_value = str(channel or "").strip().lower()
     if not channel_value:
         raise ValueError("notification channel is required")
+    delivery_identity_value = _validate_delivery_identity(
+        delivery_identity,
+        expected_account=str(item["normalized_account"]),
+    )
     generation = int(item["authority_generation"])
-    dedupe_key = canonical_sha256(
+    notification_key = canonical_sha256(
         {
             "portfolio_scope_id": scope_id,
             "authority_generation": generation,
@@ -142,49 +148,50 @@ def execute_notification_with_authority(
             mode="exclusive",
             timeout_seconds=timeout_seconds,
         ):
-            existing = _existing_terminal(state_dir, dedupe_key)
+            existing = _existing_terminal(state_dir, notification_key)
             if existing is not None:
                 status, receipt = existing
                 if status == "accepted":
-                    return {
-                        "ok": True,
-                        "account": item["normalized_account"],
-                        "delivery_confirmed": True,
-                        "command_ok": True,
-                        "authority_duplicate_suppressed": True,
-                        "authority_receipt_id": dedupe_key,
-                        "authority_receipt_status": status,
-                        "message_id": receipt.get("message_id"),
-                        "idempotency_key": receipt.get(
-                            "provider_idempotency_key"
-                        ),
-                        "attempts": 0,
-                        "retry_attempt_count": 0,
-                    }
-                if status == "unknown" and not _notification_is_resolved(
-                    state_dir, dedupe_key
-                ):
-                    return _blocked_result(
+                    return _duplicate_suppressed_result(
                         account=str(item["normalized_account"]),
-                        dedupe_key=dedupe_key,
-                        error_code="AUTHORITY_NOTIFICATION_UNKNOWN",
+                        receipt=receipt,
                     )
                 return _blocked_result(
                     account=str(item["normalized_account"]),
-                    dedupe_key=dedupe_key,
-                    error_code="AUTHORITY_NOTIFICATION_RESOLVED",
+                    receipt_id=str(receipt["receipt_id"]),
+                    error_code="AUTHORITY_NOTIFICATION_UNKNOWN",
                 )
-            if _unresolved_inflight_for_dedupe(state_dir, dedupe_key):
+            inflight_state = _inflight_state_for_dedupe(
+                state_dir,
+                notification_key,
+            )
+            if inflight_state is not None:
+                inflight_status, unresolved_intent = inflight_state
+                if inflight_status == "delivered":
+                    return _duplicate_suppressed_result(
+                        account=str(item["normalized_account"]),
+                        receipt=unresolved_intent,
+                    )
                 return _blocked_result(
                     account=str(item["normalized_account"]),
-                    dedupe_key=dedupe_key,
+                    receipt_id=str(unresolved_intent["receipt_id"]),
                     error_code="AUTHORITY_NOTIFICATION_INFLIGHT",
                 )
 
-            attempt_number = _next_attempt_number(state_dir, dedupe_key)
+            attempt_number = _next_attempt_number(
+                state_dir,
+                notification_key,
+            )
+            receipt_id = canonical_sha256(
+                {
+                    "notification_key": notification_key,
+                    "attempt_number": attempt_number,
+                }
+            )
             intent = {
                 "schema_version": NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA,
-                "receipt_id": dedupe_key,
+                "receipt_id": receipt_id,
+                "notification_key": notification_key,
                 "attempt_number": attempt_number,
                 "status": "inflight",
                 "portfolio_scope_id": scope_id,
@@ -198,13 +205,20 @@ def execute_notification_with_authority(
                 "account_run_id": item["account_run_id"],
                 "channel": channel_value,
                 "token_hash": item["token_hash"],
+                "delivery_identity": delivery_identity_value,
                 "recorded_at": checked_at,
+                "lease_expires_at": _timestamp(
+                    _parse_timestamp(checked_at)
+                    + timedelta(
+                        seconds=NOTIFICATION_INFLIGHT_LEASE_SECONDS
+                    )
+                ),
             }
             _write_once_or_verify(
                 _attempt_receipt_path(
                     state_dir,
                     "inflight",
-                    dedupe_key,
+                    notification_key,
                     attempt_number,
                 ),
                 intent,
@@ -240,23 +254,14 @@ def execute_notification_with_authority(
             }
             terminal["receipt_hash"] = canonical_sha256(terminal)
             _write_once_or_verify(
-                (
-                    _attempt_receipt_path(
-                        state_dir,
-                        terminal_status,
-                        dedupe_key,
-                        attempt_number,
-                    )
-                    if terminal_status == "failed"
-                    else state_dir
-                    / terminal_status
-                    / f"{dedupe_key}.json"
-                ),
+                state_dir
+                / terminal_status
+                / f"{receipt_id}.json",
                 terminal,
             )
             return {
                 **result,
-                "authority_receipt_id": dedupe_key,
+                "authority_receipt_id": receipt_id,
                 "authority_receipt_status": terminal_status,
             }
 
@@ -297,25 +302,66 @@ def resolve_notification_unknown(
         scope_mode="exclusive",
         timeout_seconds=timeout_seconds,
     ):
-        unknown_path = state_dir / "unknown" / f"{receipt}.json"
-        unknown = _read_json_object(unknown_path)
+        receipt_kind, source_receipt = _resolution_source_receipt(
+            state_dir,
+            receipt,
+        )
+        source_receipt_hash = str(
+            source_receipt.get("receipt_hash") or ""
+        ).strip() or canonical_sha256(source_receipt)
+        delivery_identity = source_receipt.get("delivery_identity")
+        if delivery_identity is not None and not isinstance(
+            delivery_identity,
+            Mapping,
+        ):
+            raise PositionAdviceNotificationAuthorityError(
+                "notification delivery identity is invalid"
+            )
+        resolved_at_value = _timestamp(resolved_at)
+        if receipt_kind == "inflight":
+            lease_expires_at = _inflight_lease_expires_at(source_receipt)
+            if _parse_timestamp(resolved_at_value) < _parse_timestamp(
+                lease_expires_at
+            ):
+                raise PositionAdviceNotificationAuthorityError(
+                    "notification inflight lease has not expired"
+                )
         payload = {
             "schema_version": NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA,
             "receipt_id": receipt,
-            "unknown_receipt_hash": unknown.get("receipt_hash"),
+            "source_receipt_kind": receipt_kind,
+            "source_receipt_hash": source_receipt_hash,
             "resolution": outcome,
             "evidence": evidence_payload,
             "evidence_hash": canonical_sha256(evidence_payload),
             "actor": actor_value,
-            "resolved_at": _timestamp(resolved_at),
+            "resolved_at": resolved_at_value,
+            "delivery_identity": (
+                dict(delivery_identity)
+                if isinstance(delivery_identity, Mapping)
+                else None
+            ),
         }
         payload["resolution_hash"] = canonical_sha256(payload)
         path = state_dir / "resolutions" / f"{receipt}.json"
         existing = _read_json_object(path) if path.exists() else None
-        if existing is not None and existing != payload:
+        if existing is not None and not _same_resolution_request(
+            existing=existing,
+            outcome=outcome,
+            evidence=evidence_payload,
+            actor=actor_value,
+        ):
             raise PositionAdviceNotificationAuthorityError(
                 "notification resolution conflicts with existing receipt"
             )
+        delivery_reconciliation = _reconcile_delivery_identity(
+            base=base,
+            account=account,
+            delivery_identity=delivery_identity,
+            outcome=outcome,
+            resolved_at=resolved_at_value,
+            dry_run=True,
+        )
         plan = {
             "schema_version": (
                 "position_advice_notification_resolution_plan.v1"
@@ -323,8 +369,9 @@ def resolve_notification_unknown(
             "status": "ready",
             "dry_run": bool(dry_run),
             "would_change": existing is None,
-            "resolution_receipt": payload,
+            "resolution_receipt": existing or payload,
             "resolution_path": str(path),
+            "delivery_reconciliation": delivery_reconciliation,
         }
         if dry_run:
             return plan
@@ -332,8 +379,28 @@ def resolve_notification_unknown(
             raise PositionAdviceNotificationAuthorityError(
                 "notification resolution apply requires explicit confirm"
             )
+        if existing is not None:
+            return {
+                **plan,
+                "status": "already_applied",
+                "dry_run": False,
+                "would_change": False,
+            }
+        delivery_reconciliation = _reconcile_delivery_identity(
+            base=base,
+            account=account,
+            delivery_identity=delivery_identity,
+            outcome=outcome,
+            resolved_at=resolved_at_value,
+            dry_run=False,
+        )
         _write_once_or_verify(path, payload)
-        return {**plan, "status": "applied", "dry_run": False}
+        return {
+            **plan,
+            "status": "applied",
+            "dry_run": False,
+            "delivery_reconciliation": delivery_reconciliation,
+        }
 
 
 def unresolved_notification_authority_exists(
@@ -346,10 +413,20 @@ def unresolved_notification_authority_exists(
         / "notification_authority"
     )
     for path in (state_dir / "inflight").glob("*.json"):
-        if not _inflight_has_terminal(state_dir, path):
+        if (
+            not _inflight_has_terminal(state_dir, path)
+            and _notification_resolution_outcome(
+                state_dir,
+                _receipt_id_from_path_payload(path),
+            )
+            not in {"delivered", "failed"}
+        ):
             return True
     for path in (state_dir / "unknown").glob("*.json"):
-        if not _notification_is_resolved(state_dir, path.stem):
+        if _notification_resolution_outcome(
+            state_dir,
+            path.stem,
+        ) not in {"delivered", "failed"}:
             return True
     return False
 
@@ -410,7 +487,6 @@ def _terminal_status(result: Mapping[str, Any]) -> str:
     if (
         result.get("ambiguous_send") is True
         or result.get("duplicate_risk") is True
-        or result.get("command_ok") is True
         or str(result.get("error_code") or "")
         in {"SEND_TIMEOUT", "SEND_UNCONFIRMED"}
     ):
@@ -420,18 +496,45 @@ def _terminal_status(result: Mapping[str, Any]) -> str:
 
 def _existing_terminal(
     state_dir: Path,
-    receipt_id: str,
+    notification_key: str,
 ) -> tuple[str, dict[str, Any]] | None:
-    matches: list[tuple[str, dict[str, Any]]] = []
+    accepted: list[dict[str, Any]] = []
+    unresolved_unknown: list[dict[str, Any]] = []
     for status in ("accepted", "unknown"):
-        path = state_dir / status / f"{receipt_id}.json"
-        if path.exists():
-            matches.append((status, _read_json_object(path)))
-    if len(matches) > 1:
-        raise PositionAdviceNotificationAuthorityError(
-            "notification authority terminal receipts conflict"
+        for path in (state_dir / status).glob("*.json"):
+            receipt = _read_json_object(path)
+            key = str(
+                receipt.get("notification_key")
+                or receipt.get("receipt_id")
+                or ""
+            ).strip()
+            if key != notification_key:
+                continue
+            if status == "accepted":
+                accepted.append(receipt)
+                continue
+            resolution = _read_notification_resolution(
+                state_dir,
+                str(receipt.get("receipt_id") or ""),
+            )
+            if (
+                resolution is not None
+                and resolution.get("resolution") == "delivered"
+            ):
+                accepted.append(receipt)
+            elif (
+                resolution is None
+                or resolution.get("resolution") != "failed"
+            ):
+                unresolved_unknown.append(receipt)
+    if accepted:
+        return "accepted", max(accepted, key=_receipt_attempt_number)
+    if unresolved_unknown:
+        return (
+            "unknown",
+            max(unresolved_unknown, key=_receipt_attempt_number),
         )
-    return matches[0] if matches else None
+    return None
 
 
 def _attempt_receipt_path(
@@ -449,22 +552,40 @@ def _attempt_receipt_path(
 
 def _next_attempt_number(state_dir: Path, receipt_id: str) -> int:
     attempts: set[int] = set()
-    for status in ("inflight", "failed"):
-        for path in (state_dir / status).glob(f"{receipt_id}.*.json"):
-            try:
-                attempts.add(int(path.stem.rsplit(".", 1)[1]))
-            except (IndexError, ValueError):
-                continue
+    for path in (state_dir / "inflight").glob(f"{receipt_id}.*.json"):
+        try:
+            attempts.add(int(path.stem.rsplit(".", 1)[1]))
+        except (IndexError, ValueError):
+            continue
     return max(attempts, default=0) + 1
 
 
-def _unresolved_inflight_for_dedupe(
+def _inflight_state_for_dedupe(
     state_dir: Path,
-    receipt_id: str,
-) -> bool:
-    return any(
-        not _inflight_has_terminal(state_dir, path)
-        for path in (state_dir / "inflight").glob(f"{receipt_id}*.json")
+    notification_key: str,
+) -> tuple[str, dict[str, Any]] | None:
+    delivered: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for path in (state_dir / "inflight").glob(
+        f"{notification_key}*.json"
+    ):
+        if _inflight_has_terminal(state_dir, path):
+            continue
+        intent = _read_json_object(path)
+        outcome = _notification_resolution_outcome(
+            state_dir,
+            str(intent.get("receipt_id") or ""),
+        )
+        if outcome == "delivered":
+            delivered.append(intent)
+        elif outcome != "failed":
+            unresolved.append(intent)
+    if delivered:
+        return "delivered", max(delivered, key=_receipt_attempt_number)
+    return (
+        ("unresolved", max(unresolved, key=_receipt_attempt_number))
+        if unresolved
+        else None
     )
 
 
@@ -478,32 +599,48 @@ def _inflight_has_terminal(state_dir: Path, path: Path) -> bool:
         return False
     if any(
         (state_dir / status / f"{receipt_id}.json").is_file()
-        for status in ("accepted", "unknown")
+        for status in ("accepted", "unknown", "failed")
     ):
         return True
-    attempt_number = intent.get("attempt_number")
-    if isinstance(attempt_number, bool):
-        return False
-    try:
-        attempt = int(attempt_number)
-    except (TypeError, ValueError, OverflowError):
-        return False
+    notification_key = str(
+        intent.get("notification_key") or receipt_id
+    ).strip()
+    attempt_number = _receipt_attempt_number(intent)
     return _attempt_receipt_path(
         state_dir,
         "failed",
-        receipt_id,
-        attempt,
+        notification_key,
+        attempt_number,
     ).is_file()
 
 
-def _notification_is_resolved(state_dir: Path, receipt_id: str) -> bool:
-    return (state_dir / "resolutions" / f"{receipt_id}.json").is_file()
+def _duplicate_suppressed_result(
+    *,
+    account: str,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "account": account,
+        "delivery_confirmed": True,
+        "command_ok": True,
+        "authority_duplicate_suppressed": True,
+        "authority_receipt_id": receipt.get("receipt_id"),
+        "authority_receipt_status": "accepted",
+        "message_id": receipt.get("message_id"),
+        "idempotency_key": receipt.get("provider_idempotency_key")
+        or (receipt.get("delivery_identity") or {}).get(
+            "transport_idempotency_key"
+        ),
+        "attempts": 0,
+        "retry_attempt_count": 0,
+    }
 
 
 def _blocked_result(
     *,
     account: str,
-    dedupe_key: str,
+    receipt_id: str,
     error_code: str,
 ) -> dict[str, Any]:
     return {
@@ -516,9 +653,197 @@ def _blocked_result(
         "retry_attempt_count": 0,
         "ambiguous_send": True,
         "duplicate_risk": True,
-        "authority_receipt_id": dedupe_key,
+        "authority_receipt_id": receipt_id,
         "authority_receipt_status": "unknown",
     }
+
+
+def _validate_delivery_identity(
+    raw: Mapping[str, Any] | None,
+    *,
+    expected_account: str,
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    item = dict(raw)
+    required = {
+        "account",
+        "market",
+        "market_trading_date",
+        "delivery_key",
+        "source_digest",
+        "message_sha256",
+        "transport_idempotency_key",
+    }
+    if any(not str(item.get(field) or "").strip() for field in required):
+        raise ValueError("daily brief delivery identity is incomplete")
+    account = normalize_account_label(str(item["account"]))
+    if account != normalize_account_label(expected_account):
+        raise ValueError("daily brief delivery identity account mismatch")
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    delivery_key = str(item["delivery_key"]).strip()
+    transport_key = str(item["transport_idempotency_key"]).strip()
+    if transport_key != build_notification_transport_key(delivery_key):
+        raise ValueError("daily brief delivery identity transport key mismatch")
+    for field in ("source_digest", "message_sha256"):
+        value = str(item[field]).strip()
+        if len(value) != 64:
+            raise ValueError(f"daily brief delivery identity {field} is invalid")
+    return {
+        "account": account,
+        "market": str(item["market"]).strip().upper(),
+        "market_trading_date": str(
+            item["market_trading_date"]
+        ).strip(),
+        "delivery_key": delivery_key,
+        "source_digest": str(item["source_digest"]).strip(),
+        "message_sha256": str(item["message_sha256"]).strip(),
+        "transport_idempotency_key": transport_key,
+    }
+
+
+def _resolution_source_receipt(
+    state_dir: Path,
+    receipt_id: str,
+) -> tuple[str, dict[str, Any]]:
+    unknown_path = state_dir / "unknown" / f"{receipt_id}.json"
+    if unknown_path.is_file():
+        return "unknown", _read_json_object(unknown_path)
+    for path in (state_dir / "inflight").glob("*.json"):
+        intent = _read_json_object(path)
+        if str(intent.get("receipt_id") or "").strip() != receipt_id:
+            continue
+        if _inflight_has_terminal(state_dir, path):
+            raise PositionAdviceNotificationAuthorityError(
+                "notification inflight receipt already has a terminal result"
+            )
+        return "inflight", intent
+    raise PositionAdviceNotificationAuthorityError(
+        "notification authority receipt is unavailable"
+    )
+
+
+def _inflight_lease_expires_at(receipt: Mapping[str, Any]) -> str:
+    explicit = str(receipt.get("lease_expires_at") or "").strip()
+    if explicit:
+        return _timestamp(explicit)
+    recorded_at = _parse_timestamp(
+        str(receipt.get("recorded_at") or "")
+    )
+    return _timestamp(
+        recorded_at
+        + timedelta(seconds=NOTIFICATION_INFLIGHT_LEASE_SECONDS)
+    )
+
+
+def _notification_resolution_outcome(
+    state_dir: Path,
+    receipt_id: str,
+) -> str | None:
+    try:
+        payload = _read_notification_resolution(state_dir, receipt_id)
+    except (
+        OSError,
+        ValueError,
+        PositionAdviceNotificationAuthorityError,
+    ):
+        return None
+    if payload is None:
+        return None
+    outcome = str(payload.get("resolution") or "").strip().lower()
+    return outcome if outcome in {"delivered", "failed"} else None
+
+
+def _receipt_id_from_path_payload(path: Path) -> str:
+    try:
+        return str(
+            _read_json_object(path).get("receipt_id") or ""
+        ).strip()
+    except (
+        OSError,
+        ValueError,
+        PositionAdviceNotificationAuthorityError,
+    ):
+        return ""
+
+
+def _same_resolution_request(
+    *,
+    existing: Mapping[str, Any],
+    outcome: str,
+    evidence: Mapping[str, Any],
+    actor: str,
+) -> bool:
+    return (
+        str(existing.get("resolution") or "") == outcome
+        and existing.get("evidence_hash") == canonical_sha256(evidence)
+        and str(existing.get("actor") or "") == actor
+    )
+
+
+def _reconcile_delivery_identity(
+    *,
+    base: Path,
+    account: str,
+    delivery_identity: Any,
+    outcome: str,
+    resolved_at: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if delivery_identity is None:
+        return {
+            "available": False,
+            "reason": "legacy_receipt_without_delivery_identity",
+            "dry_run": bool(dry_run),
+        }
+    identity = _validate_delivery_identity(
+        delivery_identity,
+        expected_account=account,
+    )
+    assert identity is not None
+    from src.application.daily_decision_brief_repository import (
+        reconcile_daily_decision_brief_delivery_resolution,
+    )
+
+    result = reconcile_daily_decision_brief_delivery_resolution(
+        base=base,
+        account=identity["account"],
+        market=identity["market"],
+        market_trading_date=identity["market_trading_date"],
+        delivery_key=identity["delivery_key"],
+        source_digest=identity["source_digest"],
+        message_sha256=identity["message_sha256"],
+        transport_idempotency_key=identity[
+            "transport_idempotency_key"
+        ],
+        resolution=outcome,
+        resolved_at_utc=resolved_at,
+        dry_run=dry_run,
+    )
+    return {"available": True, **result}
+
+
+def _read_notification_resolution(
+    state_dir: Path,
+    receipt_id: str,
+) -> dict[str, Any] | None:
+    if len(receipt_id) != 64:
+        return None
+    path = state_dir / "resolutions" / f"{receipt_id}.json"
+    return _read_json_object(path) if path.is_file() else None
+
+
+def _receipt_attempt_number(receipt: Mapping[str, Any]) -> int:
+    value = receipt.get("attempt_number")
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _write_once_or_verify(path: Path, payload: Mapping[str, Any]) -> None:
@@ -552,6 +877,11 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _timestamp(value: datetime | str) -> str:
+    parsed = _parse_timestamp(value)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: datetime | str) -> datetime:
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -561,7 +891,7 @@ def _timestamp(value: datetime | str) -> str:
         parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must be timezone aware")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc)
 
 
 __all__ = [

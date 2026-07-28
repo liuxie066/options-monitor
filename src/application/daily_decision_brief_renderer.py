@@ -540,6 +540,11 @@ def _render_user_view_card(
                     ],
                 ]
             )
+            decision_details = _render_position_decision_details_card(
+                positions
+            )
+            if decision_details:
+                lines.extend(["", *decision_details])
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     lines.extend(["", "## 资金"])
@@ -908,6 +913,7 @@ def _position_views(
                 "title": " · ".join(title_parts),
                 "holding": " · ".join(title_parts),
                 "status": status,
+                "recommendation": _lower(row.get("recommendation")),
                 "details": _position_close_details(row, market=market, status=status),
                 **_position_card_fields(row, market=market, status=status),
             }
@@ -1003,7 +1009,7 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
             metrics.get("net_carry_improvement_H_base_cny")
         )
         if improvement is not None:
-            parts.append(f"比较期净 carry 提升 {_money(improvement, market='CN')}")
+            parts.append(f"比较期净 carry 提升 {_currency_money('CNY', improvement)}")
         payback = _number(metrics.get("payback_days"))
         if payback is not None:
             parts.append(f"摩擦回收期 {payback:g} 天")
@@ -1056,6 +1062,32 @@ def _position_card_fields(row: Mapping[str, Any], *, market: str, status: str) -
         "realized_if_close": realized_text,
         "remaining_annualized": _percent(remaining) if remaining is not None else "—",
     }
+
+
+def _render_position_decision_details_card(
+    positions: list[Mapping[str, Any]],
+) -> list[str]:
+    rows: list[str] = []
+    for item in positions:
+        if _lower(item.get("recommendation")) not in {
+            "roll",
+            "replace",
+            "reallocate",
+        }:
+            continue
+        details = [
+            str(detail).strip()
+            for detail in item.get("details") or []
+            if str(detail).strip()
+        ]
+        if not details:
+            continue
+        holding = _flat_title(item.get("holding") or item.get("title"))
+        status = str(item.get("status") or "").strip()
+        rows.append(
+            f"- **{holding}｜{status}**：{'；'.join(details)}"
+        )
+    return ["### 持仓决策依据", *rows] if rows else []
 
 
 def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:

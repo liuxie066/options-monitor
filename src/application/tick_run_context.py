@@ -31,6 +31,9 @@ def build_tick_idempotency_context(
     market_config: str,
     accounts: list[str],
     trigger_kind: str = "manual",
+    symbols: str | None = None,
+    no_send: bool = False,
+    trigger_job_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> TickIdempotencyContext:
     market_cfg = str(market_config or "auto").strip().lower()
@@ -42,11 +45,19 @@ def build_tick_idempotency_context(
         account_id = str(account).strip().lower()
         if account_id:
             idempotency_accounts.append(account_id)
+    work_scope = "|".join(
+        (
+            str(symbols or "").strip().upper(),
+            "no_send" if no_send else "send",
+            str(trigger_job_id or "").strip(),
+        )
+    )
 
     key = sha256(
         (
             f"{Path(cfg_path).resolve()}|{market_cfg}|{normalized_trigger_kind}|"
             f"{','.join(sorted(idempotency_accounts))}|"
+            f"{work_scope}|"
             f"{bucket}"
         ).encode("utf-8")
     ).hexdigest()

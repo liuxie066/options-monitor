@@ -236,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
         accounts=args.accounts or [],
         trigger_kind=trigger_kind,
+        symbols=symbols_arg,
+        no_send=no_send,
+        trigger_job_id=str(trigger_context.get("job_id") or ""),
     )
     market_cfg = idempotency.market_config
     execution_bucket = idempotency.bucket
@@ -400,6 +403,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not scheduler_outcome.should_continue:
         results.extend(scheduler_outcome.results)
+        complete_tick_idempotency(
+            status="failed",
+            message=scheduler_outcome.message or "scheduler_failed",
+            ok=False,
+            error_code=scheduler_outcome.error_code or "SCHEDULER_FAILED",
+        )
         return scheduler_outcome.return_code
     assert scheduler_outcome.context is not None
     scheduler_context = scheduler_outcome.context
@@ -421,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     def commit_scan_targets(targets: dict[str, str | None]) -> None:
+        if trigger_kind != "scheduled":
+            return
         mark_scheduler_accounts(
             config=cfg_path,
             state=state_path,

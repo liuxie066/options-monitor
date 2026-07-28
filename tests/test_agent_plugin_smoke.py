@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -525,7 +526,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
 
 
-def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_missing_ledger_is_read_only_and_never_bootstraps(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -540,22 +541,24 @@ def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tm
         encoding="utf-8",
     )
 
-    class _Repo:
-        bootstrap_status = "degraded_option_positions_repo_load_failed"
-        bootstrap_message = "option positions repo load failed: sqlite unavailable"
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
 
-    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
+    def unexpected_bootstrap(_path):
+        raise AssertionError("healthcheck must not load or bootstrap the positions repository")
+
+    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=unexpected_bootstrap)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
     bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
     assert bootstrap["status"] == "warn"
-    assert bootstrap["value"]["status"] == "degraded_option_positions_repo_load_failed"
-    assert "sqlite unavailable" in bootstrap["message"]
+    assert bootstrap["value"]["status"] == "read_only_inspection"
+    assert "did not create it" in bootstrap["message"]
+    assert sqlite_path.exists() is False
     assert out["data"]["summary"]["warning_count"] >= 1
 
 
-def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_inspects_existing_ledger_sqlite_read_only(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -570,17 +573,27 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
         encoding="utf-8",
     )
 
-    class _Repo:
-        bootstrap_status = "sqlite_only_no_feishu_bootstrap"
-        bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    sqlite_path.parent.mkdir(parents=True)
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute("CREATE TABLE trade_events (event_id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE position_lots (position_id TEXT PRIMARY KEY)")
 
-    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
+    def unexpected_bootstrap(_path):
+        raise AssertionError("healthcheck must not load or bootstrap the positions repository")
+
+    _patch_healthcheck_dependencies(monkeypatch, load_option_positions_repo=unexpected_bootstrap)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
     bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
     assert bootstrap["status"] == "ok"
-    assert bootstrap["value"]["status"] == "sqlite_only_no_feishu_bootstrap"
+    assert bootstrap["value"]["status"] == "read_only_inspection"
+    assert "inspected read-only" in bootstrap["message"]
+    ledger_store = next(item for item in out["data"]["checks"] if item["name"] == "ledger_store")
+    assert ledger_store["status"] == "ok"
+    assert ledger_store["value"]["trade_event_count"] == 0
+    assert ledger_store["value"]["position_lot_count"] == 0
 
 
 def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_path: Path) -> None:
@@ -2721,6 +2734,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     write_json(
         shared_state_dir / "last_run.json",
         {
+            "run_id": "run-audit-only",
             "sent": True,
             "sent_accounts": ["user1", "user2"],
             "notify_summary": {
@@ -2751,6 +2765,70 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     assert diagnosis["account_messages_count"] == 2
     assert diagnosis["send_attempted_count"] == 2
     assert diagnosis["send_confirmed_count"] == 2
+
+
+def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_counts(
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    def write_json(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    runs_root = tmp_path / "output_runs"
+    historical_run = runs_root / "run-historical"
+    write_json(
+        shared_state_dir / "last_run.json",
+        {
+            "run_id": "run-current",
+            "sent": True,
+            "sent_accounts": ["user1"],
+            "notify_summary": {
+                "account_messages_count": 1,
+                "send_attempted_count": 1,
+                "send_confirmed_count": 1,
+                "send_failed_count": 0,
+            },
+        },
+    )
+    write_json(
+        historical_run / "state" / "tick_metrics.json",
+        {
+            "sent": False,
+            "sent_accounts": [],
+            "notify_summary": {
+                "account_messages_count": 1,
+                "send_attempted_count": 1,
+                "send_confirmed_count": 0,
+                "send_failed_count": 1,
+            },
+        },
+    )
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_key": "us",
+            "config_path": str(cfg_path),
+            "run_id": "run-historical",
+            "shared_state_dir": str(shared_state_dir),
+            "runs_root": str(runs_root),
+            "report_dir": str(tmp_path / "output_shared" / "reports"),
+            "accounts_root": str(tmp_path / "output_accounts"),
+        },
+    )
+
+    diagnosis = out["data"]["notification_diagnosis"]
+    assert diagnosis["status"] == "send_failed_or_unconfirmed"
+    assert diagnosis["send_confirmed_count"] == 0
+    assert diagnosis["send_failed_count"] == 1
+    assert diagnosis["sent_accounts"] == []
+    assert out["data"]["summary"]["ok"] is False
+    assert "NOTIFICATION_DELIVERY_FAILED" in out["data"]["summary"]["warning_codes"]
 
 
 def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:

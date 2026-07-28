@@ -117,6 +117,114 @@ def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> Non
     assert sorted(started) == ["lx", "sy"]
 
 
+def test_tick_idempotency_separates_symbol_diagnostic_from_full_schedule(
+    tmp_path,
+) -> None:
+    from datetime import datetime, timezone
+    from src.application.tick_run_context import build_tick_idempotency_context
+
+    now = datetime(2026, 7, 29, 1, 23, tzinfo=timezone.utc)
+    common = {
+        "cfg_path": tmp_path / "config.us.json",
+        "market_config": "us",
+        "accounts": ["lx"],
+        "now_utc": now,
+    }
+    scheduled = build_tick_idempotency_context(
+        **common,
+        trigger_kind="scheduled",
+        no_send=False,
+        trigger_job_id="om-tick-us",
+    )
+    diagnostic = build_tick_idempotency_context(
+        **common,
+        trigger_kind="manual",
+        symbols="NVDA",
+        no_send=True,
+        trigger_job_id="om-tick-us",
+    )
+    other_symbol = build_tick_idempotency_context(
+        **common,
+        trigger_kind="manual",
+        symbols="AAPL",
+        no_send=True,
+        trigger_job_id="om-tick-us",
+    )
+
+    assert scheduled.key != diagnostic.key
+    assert diagnostic.key != other_symbol.key
+
+
+def test_tick_account_execution_isolates_one_account_exception(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.account_run import AccountRunOutcome
+    from src.application.multi_tick.misc import AccountResult
+
+    events: list[dict[str, Any]] = []
+    audits: list[dict[str, Any]] = []
+
+    def fake_run_one_account(*, request, **_kwargs):
+        if request.acct == "lx":
+            raise OSError("lx output unavailable")
+        return AccountRunOutcome(
+            result=AccountResult("sy", False, False, "not_due", ""),
+            acct_metrics={"account": "sy", "ran_pipeline": False},
+            prefetch_done=False,
+            ran_pipeline=False,
+        )
+
+    monkeypatch.setattr(mod, "run_one_account", fake_run_one_account)
+    outcome = mod.run_tick_account_execution(
+        mod.TickAccountExecutionRequest(
+            account_ids=["lx", "sy"],
+            account_workers=2,
+            base=tmp_path,
+            base_cfg={},
+            cfg_path=tmp_path / "config.us.json",
+            vpy=tmp_path / ".venv" / "bin" / "python",
+            markets_to_run=["US"],
+            scheduler_ms=1,
+            scheduler_view={},
+            notify_decision_by_account={},
+            should_run_global=False,
+            reason_global="not_due",
+            run_id="isolated-run",
+            run_dir=tmp_path / "output_runs" / "isolated-run",
+            shared_required=tmp_path / "required",
+            accounts_root=tmp_path / "accounts",
+            prefetch_done=False,
+            force_mode=False,
+            smoke=False,
+            no_send=True,
+            scan_decision_by_account={
+                "lx": {"should_run": False, "reason": "not_due"},
+                "sy": {"should_run": False, "reason": "not_due"},
+            },
+            state_path=tmp_path / "scheduler.json",
+            scheduler_schedule_key="schedule",
+            runlog=SimpleNamespace(
+                safe_event=lambda step, status, **kwargs: events.append(
+                    {"step": step, "status": status, **kwargs}
+                )
+            ),
+            audit_helper=SimpleNamespace(
+                audit=lambda event_type, action, **kwargs: audits.append(
+                    {"event_type": event_type, "action": action, **kwargs}
+                ),
+                fail_schema_validation=lambda **_kwargs: None,
+            ),
+        )
+    )
+
+    assert [item.account for item in outcome.results] == ["lx", "sy"]
+    assert outcome.results[0].decision_reason == "account_execution_exception:OSError"
+    assert outcome.results[1].decision_reason == "not_due"
+    assert any(item["action"] == "account_execution_exception" for item in audits)
+
+
 def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     from src.application import multi_account_tick as mod
 

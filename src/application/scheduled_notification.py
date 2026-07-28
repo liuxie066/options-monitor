@@ -104,6 +104,27 @@ class PerAccountSendExecution:
         return sum(int(item.get("retry_attempt_count") or 0) for item in self.send_results)
 
     @property
+    def provider_retry_attempt_count(self) -> int:
+        return sum(
+            int(item.get("provider_retry_attempt_count") or 0)
+            for item in self.send_results
+        )
+
+    @property
+    def outer_retry_attempt_count(self) -> int:
+        return sum(
+            int(item.get("outer_retry_attempt_count") or 0)
+            for item in self.send_results
+        )
+
+    @property
+    def fallback_attempt_count(self) -> int:
+        return sum(
+            int(item.get("fallback_attempt_count") or 0)
+            for item in self.send_results
+        )
+
+    @property
     def ambiguous_send_count(self) -> int:
         return sum(1 for item in self.send_results if bool(item.get("ambiguous_send")))
 
@@ -242,6 +263,25 @@ def _should_retry_send(
 def _confirmed_from_send_tool(send_tool_dto: dict[str, Any], message_id: Any) -> bool:
     del message_id
     return bool(send_tool_dto.get("delivery_confirmed"))
+
+
+def _aggregate_retry_metrics(
+    attempt_records: list[dict[str, object]],
+) -> dict[str, int]:
+    provider_retries = sum(
+        int(item.get("retry_attempt_count") or 0)
+        for item in attempt_records
+    )
+    outer_retries = max(0, len(attempt_records) - 1)
+    fallback_attempts = sum(
+        1 for item in attempt_records if bool(item.get("fallback_used"))
+    )
+    return {
+        "retry_attempt_count": provider_retries + outer_retries,
+        "provider_retry_attempt_count": provider_retries,
+        "outer_retry_attempt_count": outer_retries,
+        "fallback_attempt_count": fallback_attempts,
+    }
 
 
 def build_notify_failure_summary_message(
@@ -471,6 +511,7 @@ def send_account_message_with_retry(
         )
 
         if ok:
+            retry_metrics = _aggregate_retry_metrics(attempt_records)
             runlog.safe_event(
                 "notify",
                 "ok",
@@ -493,7 +534,7 @@ def send_account_message_with_retry(
                 "idempotency_key": record.get("idempotency_key") or idempotency_key,
                 "effective_idempotency_key": record.get("effective_idempotency_key"),
                 "local_receipt_id": record.get("local_receipt_id"),
-                "retry_attempt_count": int(record.get("retry_attempt_count") or 0),
+                **retry_metrics,
                 "ambiguous_send": bool(record.get("ambiguous_send")),
                 "duplicate_risk": bool(record.get("duplicate_risk")),
                 "render_mode": record.get("render_mode"),
@@ -533,6 +574,7 @@ def send_account_message_with_retry(
         "local_receipt_id": None,
     }
     command_ok = bool(final.get("command_ok"))
+    retry_metrics = _aggregate_retry_metrics(attempt_records)
     return {
         "ok": False,
         "account": account,
@@ -550,7 +592,7 @@ def send_account_message_with_retry(
         "idempotency_key": final.get("idempotency_key") or idempotency_key,
         "effective_idempotency_key": final.get("effective_idempotency_key"),
         "local_receipt_id": final.get("local_receipt_id"),
-        "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
+        **retry_metrics,
         "ambiguous_send": bool(final.get("ambiguous_send")),
         "duplicate_risk": bool(final.get("duplicate_risk")),
         "local_error_code": final.get("local_error_code"),
@@ -679,6 +721,15 @@ def execute_per_account_delivery(
                     "effective_idempotency_key": send_result.get("effective_idempotency_key"),
                     "local_receipt_id": send_result.get("local_receipt_id"),
                     "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
+                    "provider_retry_attempt_count": int(
+                        send_result.get("provider_retry_attempt_count") or 0
+                    ),
+                    "outer_retry_attempt_count": int(
+                        send_result.get("outer_retry_attempt_count") or 0
+                    ),
+                    "fallback_attempt_count": int(
+                        send_result.get("fallback_attempt_count") or 0
+                    ),
                     "ambiguous_send": bool(send_result.get("ambiguous_send")),
                     "duplicate_risk": bool(send_result.get("duplicate_risk")),
                     "local_error_code": send_result.get("local_error_code"),

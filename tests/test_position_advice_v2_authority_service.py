@@ -26,6 +26,7 @@ from src.application.position_advice_authority_service import (
 from src.application.position_advice_notification_authority import (
     build_notification_authority_token,
     execute_notification_with_authority,
+    resolve_notification_unknown,
 )
 from src.infrastructure.position_advice_manifest_lock import (
     portfolio_scope_state_dir,
@@ -507,13 +508,30 @@ def test_v2_requires_passing_promotion_and_unknown_delivery_blocks_promotion(
         )
     _publish_promotion_artifacts(tmp_path, promotion)
 
-    unknown_dir = (
-        portfolio_scope_state_dir(tmp_path, scope_for("lx"))
-        / "notification_authority"
-        / "unknown"
+    token = build_notification_authority_token(
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        selected_advice_contract="v1",
+        resolved_mode="v2_shadow",
+        authority_generation=int(shadow["policy"]["generation"]),
+        authority_policy_hash=policy_hash,
+        account_run_id="promotion-unknown",
     )
-    unknown_dir.mkdir(parents=True)
-    (unknown_dir / "delivery-1.json").write_text("{}")
+    unknown_result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu_app",
+        send=lambda: {
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "error_code": "SEND_UNCONFIRMED",
+            "ambiguous_send": True,
+        },
+        now=NOW,
+    )
+    receipt_id = str(unknown_result["authority_receipt_id"])
     blocked = plan_authority_change(
         base=tmp_path,
         normalized_account="lx",
@@ -527,9 +545,17 @@ def test_v2_requires_passing_promotion_and_unknown_delivery_blocks_promotion(
     )
     assert "notification_authority_unknown_unresolved" in blocked["reason_codes"]
 
-    resolution_dir = unknown_dir.parent / "resolutions"
-    resolution_dir.mkdir()
-    (resolution_dir / "delivery-1.json").write_text("{}")
+    resolve_notification_unknown(
+        base=tmp_path,
+        normalized_account="lx",
+        receipt_id=receipt_id,
+        resolution="delivered",
+        evidence={"provider_audit_id": "audit-promotion"},
+        actor="operator@example",
+        resolved_at=NOW,
+        confirm=True,
+        dry_run=False,
+    )
     promoted = apply_authority_change(
         base=tmp_path,
         normalized_account="lx",
@@ -547,7 +573,7 @@ def test_v2_requires_passing_promotion_and_unknown_delivery_blocks_promotion(
     assert promoted["policy"]["covered_strategy_families"] == ["short_put"]
 
 
-def test_rollback_v1_records_outstanding_unknown_without_blocking(
+def test_rollback_v1_blocks_while_notification_result_is_unknown(
     tmp_path: Path,
 ) -> None:
     first = _apply_first_use(tmp_path)
@@ -571,7 +597,7 @@ def test_rollback_v1_records_outstanding_unknown_without_blocking(
     unknown_dir.mkdir(parents=True)
     (unknown_dir / f"{receipt_id}.json").write_text("{}", encoding="utf-8")
 
-    rollback = apply_authority_change(
+    plan = plan_authority_change(
         base=tmp_path,
         normalized_account="lx",
         normalized_portfolio_source="futu",
@@ -580,15 +606,110 @@ def test_rollback_v1_records_outstanding_unknown_without_blocking(
         expected_policy_hash=str(shadow["policy"]["policy_hash"]),
         actor="operator@example",
         requested_at=NOW,
-        confirm=True,
+    )
+    assert plan["status"] == "blocked"
+    assert plan["outstanding_notification_receipt_ids"] == [receipt_id]
+    assert "notification_authority_unknown_unresolved" in plan["reason_codes"]
+    with pytest.raises(
+        PositionAdviceAuthorityError,
+        match="notification_authority_unknown_unresolved",
+    ):
+        apply_authority_change(
+            base=tmp_path,
+            normalized_account="lx",
+            normalized_portfolio_source="futu",
+            portfolio_account_identity_hash=IDENTITY,
+            target_mode="v1",
+            expected_policy_hash=str(shadow["policy"]["policy_hash"]),
+            actor="operator@example",
+            requested_at=NOW,
+            confirm=True,
+        )
+
+
+def test_authority_change_blocks_while_daily_brief_delivery_is_pending(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+        prepare_daily_decision_brief_delivery,
     )
 
-    assert rollback["policy"]["mode"] == "v1"
-    assert rollback["outstanding_notification_receipt_ids"] == [receipt_id]
-    receipt = json.loads(
-        Path(str(rollback["change_receipt_path"])).read_text(encoding="utf-8")
+    first = _apply_first_use(tmp_path)
+    shadow = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash=str(first["policy"]["policy_hash"]),
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
     )
-    assert receipt["outstanding_notification_receipt_ids"] == [receipt_id]
+    brief = {
+        "market": "US",
+        "market_trading_date": "2026-07-27",
+        "account": "lx",
+        "revision": 1,
+        "run_id": "pending-brief-run",
+        "generated_at_utc": NOW.isoformat(),
+        "data_as_of_utc": NOW.isoformat(),
+        "valid_until_utc": (NOW + timedelta(hours=6)).isoformat(),
+        "status": "ready",
+        "actionability": "live_actionable",
+        "strategy_summary": "test",
+        "actions": [],
+        "positions": [],
+        "capacity": {},
+        "candidates": {
+            "sell_put": [],
+            "covered_call": [],
+            "combo_yield": [],
+        },
+        "rejections": {},
+        "events": [],
+        "data_gaps": [],
+        "source_artifacts": [],
+    }
+    persisted = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=brief,
+    )
+    envelope = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date="2026-07-27",
+        run_id="pending-brief-run",
+        delivery_kind="fixed_report",
+        source_kind="successful_brief",
+        revision=persisted["current_revision"],
+        source_digest=persisted["current_brief_digest"],
+        scheduled_target_market="2026-07-27T10:00:00-04:00",
+        candidate_identities=persisted["current_candidate_identities"],
+        rendered_message="# pending delivery",
+        render_context={"projection": "fixed_report"},
+        prepared_at_utc=NOW.isoformat(),
+    )["envelope"]
+
+    plan = plan_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v1",
+        expected_policy_hash=str(shadow["policy"]["policy_hash"]),
+        actor="operator@example",
+        requested_at=NOW,
+    )
+
+    assert plan["status"] == "blocked"
+    assert "notification_authority_unknown_unresolved" in plan["reason_codes"]
+    assert any(
+        item.endswith(str(envelope["delivery_key"]))
+        for item in plan["outstanding_notification_receipt_ids"]
+    )
 
 
 def test_malformed_existing_policy_blocks_other_scope_first_use(tmp_path: Path) -> None:

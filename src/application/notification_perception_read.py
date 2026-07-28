@@ -24,9 +24,12 @@ def read_notification_perception_events(
 ) -> dict[str, Any]:
     base = repo_root.resolve()
     paths = _audit_paths(base=base, run_id=run_id, audit_path=audit_path)
-    rows = []
+    rows: list[dict[str, Any]] = []
+    read_statuses: list[dict[str, Any]] = []
     for path in paths:
-        rows.extend(_read_jsonl(path, base=base))
+        file_rows, read_status = _read_jsonl(path, base=base)
+        rows.extend(file_rows)
+        read_statuses.append(read_status)
     filtered = [
         row
         for row in rows
@@ -36,18 +39,43 @@ def read_notification_perception_events(
     filtered.sort(key=lambda row: str(row.get("event_at_utc") or row.get("created_at_utc") or ""), reverse=True)
     max_rows = max(0, min(int(limit or 10), 50))
     events = [_public_event(row) for row in filtered[:max_rows]]
+    malformed_count = sum(
+        int(item.get("malformed_count") or 0)
+        for item in read_statuses
+    )
+    unreadable_count = sum(
+        1 for item in read_statuses if item.get("status") == "unreadable"
+    )
+    missing_count = sum(
+        1 for item in read_statuses if item.get("status") == "missing"
+    )
+    if unreadable_count:
+        read_status = "failed"
+    elif malformed_count:
+        read_status = "partial"
+    elif missing_count == len(read_statuses):
+        read_status = "missing"
+    elif not rows:
+        read_status = "valid_empty"
+    else:
+        read_status = "ok"
     return {
         "schema_version": NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION,
         "summary": {
-            "ok": True,
+            "ok": read_status not in {"failed", "partial"},
+            "status": read_status,
             "total_count": len(filtered),
             "returned_count": len(events),
             "limit": max_rows,
             "run_id": str(run_id or "").strip() or None,
             "conversation_id": str(conversation_id or "").strip() or None,
             "event_kind": str(event_kind or "").strip() or None,
+            "malformed_count": malformed_count,
+            "unreadable_count": unreadable_count,
+            "missing_count": missing_count,
         },
         "audit_paths": [str(path) for path in paths],
+        "read_statuses": read_statuses,
         "events": events,
     }
 
@@ -57,30 +85,73 @@ def _audit_paths(*, base: Path, run_id: str | None, audit_path: str | Path | Non
         return [_resolve_path(audit_path, base=base)]
     text_run_id = str(run_id or "").strip()
     if text_run_id:
-        return [(base / "output_runs" / text_run_id / "state" / "audit_events.jsonl").resolve()]
+        return [
+            _resolve_path(
+                Path("output_runs")
+                / text_run_id
+                / "state"
+                / "audit_events.jsonl",
+                base=base,
+            )
+        ]
     return [(base / "output_shared" / "state" / "audit_events.jsonl").resolve()]
 
 
-def _read_jsonl(path: Path, *, base: Path) -> list[dict[str, Any]]:
+def _read_jsonl(
+    path: Path,
+    *,
+    base: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    display_path = str(_display_path(path, base=base))
     if not path.exists() or not path.is_file():
-        return []
+        return [], {
+            "path": display_path,
+            "status": "missing",
+            "line_count": 0,
+            "parsed_count": 0,
+            "malformed_count": 0,
+        }
     out: list[dict[str, Any]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+    except OSError as exc:
+        return [], {
+            "path": display_path,
+            "status": "unreadable",
+            "line_count": None,
+            "parsed_count": 0,
+            "malformed_count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    malformed_count = 0
+    nonempty_count = 0
     for line in lines:
         if not line.strip():
             continue
+        nonempty_count += 1
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
+            malformed_count += 1
             continue
         if not isinstance(payload, dict):
+            malformed_count += 1
             continue
-        payload["_source_path"] = str(_display_path(path, base=base))
+        payload["_source_path"] = display_path
         out.append(payload)
-    return out
+    return out, {
+        "path": display_path,
+        "status": (
+            "partially_corrupt"
+            if malformed_count
+            else "valid_empty"
+            if not out
+            else "ok"
+        ),
+        "line_count": nonempty_count,
+        "parsed_count": len(out),
+        "malformed_count": malformed_count,
+    }
 
 
 def _matches_event(row: dict[str, Any], *, conversation_id: str | None, event_kind: str | None) -> bool:

@@ -36,6 +36,7 @@ from src.application.daily_decision_brief_service import assemble_daily_decision
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
 from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
 from src.application.multi_tick_finalization import (
+    _record_finalize_degraded,
     finalize_multi_tick_run,
     finalize_no_account_notification,
 )
@@ -357,6 +358,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     send_attempted_count = 0
     send_confirmed_count = 0
     retry_attempt_count = 0
+    provider_retry_attempt_count = 0
+    outer_retry_attempt_count = 0
+    fallback_attempt_count = 0
     ambiguous_send_count = 0
     duplicate_risk_count = 0
     if bool(notify_delivery.get("should_send")):
@@ -407,11 +411,27 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                     "ambiguous_send": False,
                     "duplicate_risk": False,
                 }
+            delivery_key = str(envelope.get("delivery_key") or "")
             return execute_notification_with_authority(
                 base=request.base,
                 token=token,
                 channel=str(channel or provider or "unknown"),
                 send=send,
+                delivery_identity={
+                    "account": str(account),
+                    "market": envelope.get("market")
+                    or lifecycle.get("market"),
+                    "market_trading_date": envelope.get(
+                        "market_trading_date"
+                    )
+                    or lifecycle.get("market_trading_date"),
+                    "delivery_key": delivery_key,
+                    "source_digest": envelope.get("source_digest"),
+                    "message_sha256": envelope.get("message_sha256"),
+                    "transport_idempotency_key": (
+                        build_notification_transport_key(delivery_key)
+                    ),
+                },
             )
 
         execution = execute_per_account_delivery(
@@ -444,6 +464,11 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         send_attempted_count = execution.send_attempted_count
         send_confirmed_count = len(sent_accounts)
         retry_attempt_count = execution.retry_attempt_count
+        provider_retry_attempt_count = (
+            execution.provider_retry_attempt_count
+        )
+        outer_retry_attempt_count = execution.outer_retry_attempt_count
+        fallback_attempt_count = execution.fallback_attempt_count
         ambiguous_send_count = execution.ambiguous_send_count + sum(
             1 for item in confirmation_failures if bool(item.get("ambiguous_send"))
         )
@@ -517,6 +542,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         send_attempted_count=send_attempted_count,
         send_confirmed_count=send_confirmed_count,
         retry_attempt_count=retry_attempt_count,
+        provider_retry_attempt_count=provider_retry_attempt_count,
+        outer_retry_attempt_count=outer_retry_attempt_count,
+        fallback_attempt_count=fallback_attempt_count,
         ambiguous_send_count=ambiguous_send_count,
         duplicate_risk_count=duplicate_risk_count,
     )
@@ -536,8 +564,16 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             run_id=request.run_id,
             extra={"sent": bool(request.tick_metrics.get("sent"))},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_finalize_degraded(
+            runlog=request.runlog,
+            run_id=request.run_id,
+            safe_data_fn=_safe_runlog_data,
+            audit_fn=request.audit_helper.audit,
+            action="write_tick_metrics",
+            exc=exc,
+            extra={"notification_delivery_confirmed": bool(sent_accounts)},
+        )
 
     return finish_success(
         lambda: finalize_multi_tick_run(
@@ -593,9 +629,9 @@ def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
 def _commit_scan_targets_before_delivery(request: TickNotificationRequest) -> None:
     if request.delivery_only or not request.scheduled_scan_targets_by_account:
         return
-    targets = dict(request.scheduled_scan_targets_by_account)
     if str(request.trigger_kind or "scheduled").strip().lower() != "scheduled":
-        targets = {str(account): None for account in targets}
+        return
+    targets = dict(request.scheduled_scan_targets_by_account)
     if request.commit_scan_targets_fn is None:
         raise RuntimeError("scheduled scan target commit callback is required")
     try:
@@ -813,8 +849,7 @@ def _prepare_daily_brief_notification(
                         market_trading_date=str(brief["market_trading_date"]),
                     )
                 should_prepare = not (
-                    action == "candidate_alert"
-                    and isinstance(existing_retry, dict)
+                    isinstance(existing_retry, dict)
                     and isinstance(existing_retry.get("envelope"), dict)
                 )
                 if not multi_market and not request.no_send and should_prepare and action in {"fixed_report", "candidate_alert", "fixed_failure"}:

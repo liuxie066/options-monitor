@@ -1187,6 +1187,43 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     _assert_no_internal_leak(message)
 
 
+def test_fixed_report_card_renders_v2_roll_economics_outside_table() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-21",
+            "strike": 100,
+            "option_type": "put",
+            "recommendation": "roll",
+            "metrics": {
+                "net_carry_improvement_H_base_cny": 120,
+                "payback_days": 2,
+                "comparison_horizon_days": 30,
+            },
+        }
+    ]
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert "### 持仓决策依据" in message
+    assert (
+        "- **NVDA｜Sell Put｜08-21 $100 Put｜建议滚仓**："
+        "比较期净 carry 提升 ¥120.00 · 摩擦回收期 2 天 · "
+        "比较期限 30 天"
+    ) in message
+    details_block = message.split("### 持仓决策依据", 1)[1]
+    assert "| 比较期净 carry" not in details_block
+
+
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
 

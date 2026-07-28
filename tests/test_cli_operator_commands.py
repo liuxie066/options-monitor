@@ -47,6 +47,45 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
     }]
 
 
+@pytest.mark.parametrize("command", ("healthcheck", "doctor"))
+def test_healthcheck_commands_exit_nonzero_when_readiness_is_false(
+    monkeypatch,
+    capsys,
+    command: str,
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setattr(
+        cli,
+        "run_healthcheck",
+        lambda **_kwargs: {
+            "tool_name": "healthcheck",
+            "ok": True,
+            "data": {
+                "summary": {"ok": False, "critical_count": 1},
+                "checks": [
+                    {
+                        "name": "notification_credentials",
+                        "status": "error",
+                    }
+                ],
+            },
+        },
+    )
+
+    rc = cli.main([command, "--config-key", "us"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    if command == "healthcheck":
+        assert payload["ok"] is True
+        assert payload["data"]["summary"]["ok"] is False
+    else:
+        assert payload["ok"] is False
+        assert payload["data"]["execution_ok"] is True
+        assert payload["data"]["readiness_ok"] is False
+
+
 def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

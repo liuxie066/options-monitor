@@ -226,6 +226,7 @@ def run_healthcheck_tool(
     healthcheck_symbols_for_futu: Callable[[dict[str, Any]], list[str]],
     write_tools_enabled: Callable[[], bool],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    del load_option_positions_repo
     config_path, cfg = load_runtime_config(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
@@ -390,12 +391,20 @@ def run_healthcheck_tool(
     option_positions_bootstrap_message = None
     if data_config_path.exists() or not data_config_ref:
         try:
-            option_repo = load_option_positions_repo(data_config_path)
-            ledger_store = _dict(ledger_store_payload(data_config_path, option_repo))
+            ledger_store = _dict(ledger_store_payload(data_config_path))
+            db_exists = bool(ledger_store.get("db_exists"))
+            counts_readable = (
+                ledger_store.get("trade_event_count") is not None
+                and ledger_store.get("position_lot_count") is not None
+            )
             checks.append(
                 {
                     "name": "ledger_store",
-                    "status": "ok",
+                    "status": (
+                        "ok"
+                        if db_exists and counts_readable
+                        else "warn"
+                    ),
                     "message": (
                         f"sqlite={ledger_store.get('sqlite_path')} "
                         f"trade_events={ledger_store.get('trade_event_count')} "
@@ -406,15 +415,34 @@ def run_healthcheck_tool(
             )
             for warning in ledger_store.get("warnings") or []:
                 warnings.append(str(warning))
-            option_positions_bootstrap_status = str(getattr(option_repo, "bootstrap_status", "") or "").strip() or None
-            option_positions_bootstrap_message = str(getattr(option_repo, "bootstrap_message", "") or "").strip() or None
+            option_positions_bootstrap_status = "read_only_inspection"
+            if not db_exists:
+                option_positions_bootstrap_message = (
+                    "ledger SQLite is missing; healthcheck did not create it"
+                )
+                warnings.append(option_positions_bootstrap_message)
+            elif not counts_readable:
+                option_positions_bootstrap_message = (
+                    "ledger SQLite could not be inspected read-only"
+                )
+                warnings.append(option_positions_bootstrap_message)
+            else:
+                option_positions_bootstrap_message = (
+                    "ledger SQLite inspected read-only; bootstrap was not run"
+                )
         except Exception as exc:
-            option_positions_bootstrap_status = "degraded_option_positions_repo_load_failed"
+            option_positions_bootstrap_status = (
+                "degraded_option_positions_read_only_inspection_failed"
+            )
             option_positions_bootstrap_message = str(exc)
 
     if option_positions_bootstrap_status:
         bootstrap_check_status = "ok"
-        if option_positions_bootstrap_status.startswith("degraded_"):
+        if (
+            option_positions_bootstrap_status.startswith("degraded_")
+            or "missing" in str(option_positions_bootstrap_message or "")
+            or "could not" in str(option_positions_bootstrap_message or "")
+        ):
             bootstrap_check_status = "warn"
             warnings.append(f"option_positions bootstrap degraded: {option_positions_bootstrap_message or option_positions_bootstrap_status}")
         checks.append(

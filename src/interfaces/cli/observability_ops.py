@@ -29,6 +29,19 @@ def _print(payload: dict[str, Any]) -> int:
     return 0 if payload.get("ok", True) else 2
 
 
+def _healthcheck_readiness_ok(payload: dict[str, Any]) -> bool:
+    if payload.get("ok") is not True:
+        return False
+    data = payload.get("data")
+    summary = data.get("summary") if isinstance(data, dict) else None
+    return not isinstance(summary, dict) or summary.get("ok") is not False
+
+
+def _print_healthcheck(payload: dict[str, Any]) -> int:
+    sys.stdout.write(_dumps(payload))
+    return 0 if _healthcheck_readiness_ok(payload) else 2
+
+
 def _add_candidate_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate-report-dir", default=None, help="directory containing candidate diagnostic evidence files")
     parser.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
@@ -159,14 +172,22 @@ def handle_observability_command(
     format_runtime_logs_fn: Callable[[dict[str, Any]], str] = format_runtime_logs,
 ) -> int:
     if args.command == "healthcheck":
-        return _print(run_healthcheck_fn(**_healthcheck_kwargs(args)))
+        return _print_healthcheck(
+            run_healthcheck_fn(**_healthcheck_kwargs(args))
+        )
 
     if args.command == "doctor":
         healthcheck = run_healthcheck_fn(**_healthcheck_kwargs(args))
+        execution_ok = healthcheck.get("ok") is True
+        readiness_ok = _healthcheck_readiness_ok(healthcheck)
         return _print(build_response(
             tool_name="doctor",
-            ok=bool(healthcheck.get("ok", True)),
-            data={"healthcheck": healthcheck},
+            ok=bool(execution_ok and readiness_ok),
+            data={
+                "execution_ok": execution_ok,
+                "readiness_ok": readiness_ok,
+                "healthcheck": healthcheck,
+            },
         ))
 
     if args.command == "support" and args.support_command == "bundle":

@@ -41,6 +41,7 @@ def test_build_tick_cron_plan_symbol_scope_forces_no_send() -> None:
     plan = build_tick_cron_plan(market="us", accounts=["sy"], symbols=["PDD"], no_send=False)
 
     assert plan.symbols == ["PDD"]
+    assert plan.trigger_env["OM_TRIGGER_SOURCE"] == "diagnostic"
     assert plan.tick_argv == [
         "./om",
         "run",
@@ -131,6 +132,55 @@ def test_run_tick_cron_reports_timeout(tmp_path, capsys) -> None:
 
     assert rc == 124
     assert capsys.readouterr().err.strip() == "EXEC_TIMEOUT_RC_124"
+
+
+def test_default_tick_process_uses_session_and_terminates_process_group(
+    monkeypatch,
+) -> None:
+    import src.application.tick_cron as mod
+
+    calls: list[tuple] = []
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.wait_count = 0
+
+        def wait(self, timeout=None):
+            self.wait_count += 1
+            if self.wait_count <= 2:
+                raise subprocess.TimeoutExpired("tick", timeout)
+            return -9
+
+    fake = FakeProcess()
+    monkeypatch.setattr(
+        mod.subprocess,
+        "Popen",
+        lambda *args, **kwargs: calls.append(("popen", args, kwargs)) or fake,
+    )
+    monkeypatch.setattr(
+        mod.os,
+        "killpg",
+        lambda pid, sig: calls.append(("killpg", pid, sig)),
+    )
+
+    try:
+        mod._run_tick_process_group(
+            command=["./om", "run", "tick"],
+            cwd=None,
+            env={},
+            timeout_seconds=1,
+            terminate_grace_seconds=0.1,
+        )
+        raise AssertionError("expected timeout")
+    except subprocess.TimeoutExpired:
+        pass
+
+    assert calls[0][0] == "popen"
+    assert calls[0][2]["start_new_session"] is True
+    assert ("killpg", 4321, mod.signal.SIGTERM) in calls
+    assert ("killpg", 4321, mod.signal.SIGKILL) in calls
 
 
 def test_run_tick_cron_reports_process_failure_distinct_from_lock(tmp_path, capsys) -> None:

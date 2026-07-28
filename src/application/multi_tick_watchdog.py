@@ -250,5 +250,12 @@ def run_multi_tick_watchdog(
             error_code="WATCHDOG_EXCEPTION",
             message=str(exc),
         )
+        runlog.safe_event(
+            "run_end",
+            "error",
+            error_code="WATCHDOG_EXCEPTION",
+            message="opend watchdog execution failed",
+        )
+        return MultiTickWatchdogOutcome(should_continue=False, return_code=2)
     runlog.safe_event("watchdog", "ok", duration_ms=int((monotonic() - t_watchdog0) * 1000))
     return MultiTickWatchdogOutcome(should_continue=True, return_code=0)

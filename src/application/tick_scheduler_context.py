@@ -67,6 +67,8 @@ class TickSchedulerOutcome:
     return_code: int
     context: TickSchedulerContext | None
     results: list[AccountResult]
+    error_code: str | None = None
+    message: str | None = None
 
 
 def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickSchedulerOutcome:
@@ -156,7 +158,14 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
                     results.append(AccountResult(acct0, False, False, err, ""))
             request.runlog.safe_event("run_end", "error", error_code="SCHEDULER_FAILED", message=err)
             request.audit_helper.guard_mark_failure("SCHEDULER_FAILED", "scan_scheduler")
-            return TickSchedulerOutcome(False, 0, None, results)
+            return TickSchedulerOutcome(
+                False,
+                2,
+                None,
+                results,
+                error_code="SCHEDULER_FAILED",
+                message=err,
+            )
 
     context = TickSchedulerContext(
         markets_to_run=markets_to_run,

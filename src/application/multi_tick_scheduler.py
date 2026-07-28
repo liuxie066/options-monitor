@@ -236,6 +236,50 @@ def run_scheduler_flow(
         smoke=smoke,
     )
 
+    def _account_scheduler_unavailable(
+        *,
+        account: str,
+        source: str,
+        message: str,
+    ) -> None:
+        notify_decision_by_account[account] = account_view_cls(
+            is_notify_window_open=False,
+        )
+        scan_decision_by_account[account] = {
+            "should_run": False,
+            "reason": "scheduler_unavailable",
+            "source": source,
+            "error": message,
+        }
+
+    def _audit_account_scheduler_failure(
+        *,
+        account: str,
+        exc: Exception,
+        source: str,
+        stage: str,
+    ) -> None:
+        audit_fn(
+            "tool_call",
+            "scan_scheduler_account",
+            status="error",
+            tool_name="scan_scheduler_inprocess",
+            account=account,
+            message=str(exc),
+            extra={
+                "account": account,
+                "exception_type": type(exc).__name__,
+                "source": source,
+                "stage": stage,
+                "fail_closed": True,
+            },
+        )
+        _account_scheduler_unavailable(
+            account=account,
+            source=source,
+            message=str(exc),
+        )
+
     def _global_scan_fallback(source: str) -> dict[str, Any]:
         return {
             "should_run": bool(should_run_global),
@@ -297,24 +341,19 @@ def run_scheduler_flow(
                 account_view_cls=account_view_cls,
             )
         except SchemaValidationError as exc:
-            notify_decision_by_account[acct0] = None
-            scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_schema_error")
-            fail_schema_validation(stage="account_scheduler_decision", exc=exc)
-        except Exception as exc:
-            audit_fn(
-                "tool_call",
-                "scan_scheduler_account",
-                status="error",
-                tool_name="scan_scheduler_inprocess",
-                account=str(acct0),
-                message=str(exc),
-                extra={
-                    "account": str(acct0),
-                    "exception_type": type(exc).__name__,
-                },
+            _audit_account_scheduler_failure(
+                account=acct0,
+                exc=exc,
+                source="account_scheduler_schema_error",
+                stage="account_scheduler_decision",
             )
-            notify_decision_by_account[acct0] = None
-            scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_exception")
+        except Exception as exc:
+            _audit_account_scheduler_failure(
+                account=acct0,
+                exc=exc,
+                source="account_scheduler_exception",
+                stage="account_scheduler_execution",
+            )
 
     return MultiTickSchedulerResult(
         state_path=state_path,

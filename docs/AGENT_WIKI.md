@@ -377,13 +377,29 @@ that separate human operation.
   `src/application/tick_notification_flow.py`
 - Read tool: `notification_perception_read`
 
-Notification text should remain Markdown-friendly and operationally direct. The business renderer owns one canonical Markdown string: proactive Feishu App delivery projects it as `msg_type=post` with no duplicate `title`, splitting blank/spacer-only lines into native `zh_cn.content` paragraphs. Content paragraphs each contain one `md` node; separators become dedicated plain-text spacer paragraphs so the visual blank line remains without prefixing the following desktop Markdown with a zero-width character. WeChat ClawBot sends the same canonical string unchanged through `text_item.text`. Feishu inbound replies/outbox remain text. Do not create channel-specific business renderers or parse/rewrite the Markdown in an adapter beyond this paragraph projection.
+Notification text should remain Markdown-friendly and operationally direct. The
+business renderer owns one canonical flat Markdown string. Scheduled Feishu App
+Daily Brief delivery also persists a digest-verified Card JSON 2.0 transport
+projection of that same decision view; retries must reuse the frozen envelope
+and logical idempotency key. WeChat ClawBot sends the canonical flat string
+unchanged through `text_item.text`. Channel adapters may select the persisted
+transport projection but must not independently recalculate business content.
 
 Scheduled ordinary delivery has one renderer authority: Daily Decision Brief. `preview_notification` is read-only and defaults to the Compact compatibility renderer; its output always reports `authority=compatibility_only` and `delivery_evidence=false`. Explicit `render_style=legacy` remains temporarily available only for compatibility inspection and returns a deprecation warning. Neither preview renderer may be used as a scheduled fallback.
 
 System notices use `# OM · 系统通知 · <component>` and receipts use `# OM · 回执 · <account>` plus `类型｜成交` or `类型｜持仓维护`. `notification_shells.py` owns only the flat Markdown H1/field/section layout. OpenD rate limits and recovery, delivery-failure aggregation/retry, trade receipt warnings, and maintenance receipt status/dedupe/persistence remain with their existing callers; the shell must not send, retry, inspect provider byte limits, or classify business state.
 
-Feishu post delivery measures the exact final outer JSON request body as UTF-8 before token acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail closed as `FEISHU_POST_TOO_LARGE`, retaining only byte counts, normalized character count, and a SHA-256 content hash. Do not truncate, fragment, retry this deterministic local failure, or automatically fall back to text. Timeouts, transient failures, confirmed sends, and ambiguous sends must also never trigger text fallback for the same business event. Live desktop/mobile canaries and any rollback to the text sender require separate explicit operator approval; after rollback, only an HTTP-before-send size failure may be explicitly replayed with a new transport UUID and linked audit.
+Card delivery may fall back to the canonical Feishu `post` projection only
+after a definite permanent Card rejection and only when the complete Card
+attempt history proves that no transient or ambiguous send occurred. The
+fallback uses a distinct `<transport-key>:fallback` UUID and records both the
+logical and effective keys. Any timeout, transient response, unknown outcome,
+or duplicate risk freezes the original envelope and requires evidence-based
+resolution; it must never switch UUID or confirm the Daily Brief. Feishu post
+delivery measures the exact final outer JSON request body as UTF-8 before token
+acquisition or message HTTP. Requests over the fixed 28 KiB local budget fail
+closed as `FEISHU_POST_TOO_LARGE` and are not truncated, fragmented, retried, or
+automatically replayed.
 
 Notification perception events are compressed system evidence for Assistant
 follow-ups. They record delivery action/reason, accounts, symbol summaries,

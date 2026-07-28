@@ -408,3 +408,30 @@ def test_processed_target_watermark_is_account_isolated() -> None:
 
     state["last_run_utc_by_account"].pop("sy")
     assert decide(cfg, state, now, account="sy").should_run_scan is True
+
+
+def test_disabled_schedule_is_terminal_unless_force() -> None:
+    from src.application.scan_scheduler import decide
+
+    cfg = {
+        "enabled": False,
+        "timezone": "America/New_York",
+        "beijing_timezone": "Asia/Shanghai",
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {
+            "start_plus_min": 10,
+            "hourly_minute": 0,
+            "end_minus_min": 10,
+        },
+    }
+    now = datetime(2026, 7, 27, 13, 40, tzinfo=timezone.utc)
+
+    disabled = decide(cfg, {}, now, account="lx")
+    forced = decide(cfg, {}, now, account="lx", force=True)
+
+    assert disabled.in_run_window is False
+    assert disabled.should_run_scan is False
+    assert disabled.is_notify_window_open is False
+    assert "调度已禁用" in disabled.reason
+    assert forced.should_run_scan is True
+    assert forced.is_notify_window_open is True
