@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+### Improvements
+- Added a mandatory release-delta coverage manifest and publication gate that maps every commit since the previous stable tag to an exact release note or an explicit no-user-impact reason.
+
+### Bug Fixes
+- Captured Position Advice source completion only after reading the ledger decision snapshot, allowing Account Runs to publish valid source receipts for v2 authority bootstrap.
+
 ## 1.6.0 - 2026-07-28
 
 ### New Features
+- Added Position Advice v2 as an independent portfolio-level advisory contract for existing option positions, comparing hold, roll, replace, reallocate, and manual-review outcomes from one coherent account snapshot while retaining Close Advice v1.
+- Added per-account v1/v2 advice authority, non-actionable v2 shadow generation, evidence-gated promotion, fail-closed Position Advice reads and notification selection, and controlled rollback without granting trading authority.
 - Added a fully funded staggered-expiry Combo Yield structure that selects one underwritten Funding Put per symbol and then maximizes Participation Call upside within expiry-gap and retained-premium constraints.
 
 ### Improvements
