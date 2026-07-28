@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.6.3",
+  "base": {
+    "tag": "v1.6.2",
+    "commit": "8ce678c1e0c22ad76a23ef512eba5d7c12d49969"
+  },
+  "reviewed_head": "597d63c9b9d8ca2b0efd356df203c2f1bb7ef1d0",
+  "commits": [
+    {
+      "sha": "721a07db028b25db03ec75acdc73744d1cb61585",
+      "subject": "feat: render brief candidates as summaries"
+    },
+    {
+      "sha": "597d63c9b9d8ca2b0efd356df203c2f1bb7ef1d0",
+      "subject": "fix: formalize implicit v1 authority history"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Replaced compact recommendation comparison tables in Feishu Daily Brief cards with mobile-friendly per-candidate summaries that keep the contract and key metrics together.",
+      "commits": [
+        "721a07db028b25db03ec75acdc73744d1cb61585"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed a first-use Position Advice authority policy to formalize only verified implicit v1 notification history while preserving immutable delivery receipts and requiring an explicit v1 bootstrap before v2 shadow mode.",
+      "commits": [
+        "597d63c9b9d8ca2b0efd356df203c2f1bb7ef1d0"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
