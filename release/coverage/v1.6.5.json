@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.6.5",
+  "base": {
+    "tag": "v1.6.4",
+    "commit": "a3d22a225f67768ab234069e8c77ae8cf0f9246d"
+  },
+  "reviewed_head": "607b7c7c6d98b35c83a61cf4ffd1576e02bf0037",
+  "commits": [
+    {
+      "sha": "422c32f9316ef7068d28285c80148e245fd2fe2c",
+      "subject": "feat: show combo leg recommendation prices"
+    },
+    {
+      "sha": "607b7c7c6d98b35c83a61cf4ffd1576e02bf0037",
+      "subject": "fix: freeze required data across account scans"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added direction-aware recommended prices to both Combo Yield legs in Daily Brief cards, using pipe-separated mobile-friendly lines and explicit unavailable states when a leg quote is missing.",
+      "commits": [
+        "422c32f9316ef7068d28285c80148e245fd2fe2c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Froze one immutable required-data snapshot and prepared portfolio context across every account in a shared scan, preventing later accounts from observing newer broker data or rebuilding inconsistent strategy evidence.",
+      "commits": [
+        "607b7c7c6d98b35c83a61cf4ffd1576e02bf0037"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
