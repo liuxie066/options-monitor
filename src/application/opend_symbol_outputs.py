@@ -169,9 +169,9 @@ def publish_required_data_quote_snapshot(
         raise PositionAdviceSourceError("required-data JSON is unreadable") from exc
     meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
     status = str((meta or {}).get("status") or "").strip().lower()
-    if status in {"error", "fail", "failed"}:
+    if status != "ok":
         raise PositionAdviceSourceError(
-            "failed required-data payload cannot produce a quote receipt"
+            "incomplete required-data payload cannot produce a quote receipt"
         )
 
     symbol_norm = str(symbol or "").strip().upper()

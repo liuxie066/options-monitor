@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from domain.domain.candidate_defaults import CandidateLiquidityDefaults, CandidateWindowDefaults
 from src.application.combo_yield_steps import (
@@ -44,6 +45,10 @@ def _run(
     find_pairs_fn,
     yield_sp: dict | None = None,
     underwriting_filter_put_candidates_fn=None,
+    output_mode: str = "separate",
+    is_scheduled: bool = True,
+    attach_calls_fn=None,
+    render_alerts_fn=None,
 ):
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -60,14 +65,15 @@ def _run(
         captured["df"] = kwargs["df_candidates"].copy()
         return find_pairs_fn(**kwargs)
 
-    policy = derive_yield_enhancement_policy({"enabled": True})
+    yield_cfg = {"enabled": True, "output_mode": output_mode}
+    policy = derive_yield_enhancement_policy(yield_cfg)
     run_combo_yield_scan_and_summarize(
         base=tmp_path,
         sym="NVDA",
         symbol="NVDA",
         symbol_lower="nvda",
         symbol_cfg={"symbol": "NVDA", "combo_yield": {"enabled": True}},
-        yield_enhancement_cfg={"enabled": True},
+        yield_enhancement_cfg=yield_cfg,
         yield_sp={
             "strategy": "insurance_underwriting",
             "min_annualized_net_return": 0.10,
@@ -86,7 +92,7 @@ def _run(
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         portfolio_ctx=None,
         top_n=3,
-        is_scheduled=True,
+        is_scheduled=is_scheduled,
         run_put_scan_fn=run_put_scan_fn,
         label_put_candidates_fn=label_put_candidates_fn,
         find_pairs_fn=capture_pairs,
@@ -96,6 +102,8 @@ def _run(
             underwriting_filter_put_candidates_fn
             or (lambda **kwargs: kwargs["df_labeled"])
         ),
+        **({"attach_calls_fn": attach_calls_fn} if attach_calls_fn is not None else {}),
+        **({"render_alerts_fn": render_alerts_fn} if render_alerts_fn is not None else {}),
     )
     trace = [
         json.loads(line)
@@ -359,3 +367,69 @@ def test_combo_yield_writes_shadow_rank_artifact_without_changing_selection(tmp_
     assert artifact.loc[artifact["baseline_selected"], "call_contract_symbol"].tolist() == ["NVDA_C115"]
     assert artifact.loc[artifact["shadow_selected"], "call_contract_symbol"].tolist() == ["NVDA_C110"]
     assert artifact["rank_changed"].all()
+
+
+def test_combo_yield_candidate_write_error_is_not_swallowed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.combo_yield_steps as steps
+
+    original_write = steps._atomic_write_dataframe
+
+    def fail_candidate_write(path: Path, df: pd.DataFrame) -> None:
+        if path.name == "nvda_combo_yield_candidates.csv":
+            raise OSError("disk full")
+        original_write(path, df)
+
+    monkeypatch.setattr(steps, "_atomic_write_dataframe", fail_candidate_write)
+
+    with pytest.raises(RuntimeError, match="failed to persist Combo Yield candidates"):
+        _run(
+            tmp_path,
+            candidates=[_candidate()],
+            find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+        )
+
+
+def test_combo_yield_render_failure_happens_before_inline_commit(tmp_path: Path) -> None:
+    attached: list[bool] = []
+
+    def fail_render(**_kwargs) -> str:
+        raise RuntimeError("render failed")
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        _run(
+            tmp_path,
+            candidates=[_candidate()],
+            find_pairs_fn=lambda **_kwargs: pd.DataFrame(),
+            output_mode="both",
+            is_scheduled=False,
+            attach_calls_fn=lambda **_kwargs: attached.append(True),
+            render_alerts_fn=fail_render,
+        )
+
+    assert attached == []
+
+
+def test_empty_combo_yield_materialization_clears_stale_inline_columns(tmp_path: Path) -> None:
+    from src.application.combo_yield_steps import materialize_empty_combo_yield_artifacts
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    labeled_path = report_dir / "nvda_sell_put_candidates_labeled.csv"
+    pd.DataFrame(
+        [
+            {
+                "contract_symbol": "NVDA_P100",
+                "label": "候选",
+                "linked_call_contract": "2026-08-21 110C",
+                "linked_call_contract_symbol": "NVDA_C110",
+            }
+        ]
+    ).to_csv(labeled_path, index=False)
+
+    materialize_empty_combo_yield_artifacts(report_dir=report_dir, symbol_lower="nvda")
+
+    cleaned = pd.read_csv(labeled_path)
+    assert cleaned.to_dict("records") == [{"contract_symbol": "NVDA_P100", "label": "候选"}]

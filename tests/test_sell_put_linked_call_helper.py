@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 
 def test_yield_enhancement_defaults_match_system_template() -> None:
@@ -949,6 +950,7 @@ def test_staggered_expiry_policy_uses_full_put_premium_funding_defaults() -> Non
 
 def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import (
+        attach_best_linked_calls,
         find_sell_put_yield_enhancement_pairs,
         select_best_yield_enhancement_pairs,
     )
@@ -965,9 +967,9 @@ def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_pat
                 "contract_symbol": "NVDA261016C00110000",
                 "strike": 110.0,
                 "spot": 110.0,
-                "bid": 2.60,
+                "bid": 0.90,
                 "ask": 1.00,
-                "mid": 0.975,
+                "mid": 0.95,
                 "volume": 50,
                 "open_interest": 800,
                 "implied_volatility": 0.40,
@@ -983,9 +985,9 @@ def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_pat
                 "contract_symbol": "NVDA261120C00115000",
                 "strike": 115.0,
                 "spot": 110.0,
-                "bid": 2.35,
+                "bid": 0.80,
                 "ask": 0.90,
-                "mid": 0.875,
+                "mid": 0.85,
                 "volume": 45,
                 "open_interest": 700,
                 "implied_volatility": 0.39,
@@ -1073,3 +1075,72 @@ def test_staggered_expiry_pair_uses_later_call_and_explicit_leg_horizons(tmp_pat
     assert float(row["strike_safety_margin_pct"]) == 0.10
     assert float(row["premium_edge_score"]) == 0.18
     assert float(row["cash_required_usd"]) == 10000.0
+    inline = attach_best_linked_calls(df_candidates=puts, pairs_df=selected)
+    assert inline.iloc[0]["linked_call_contract"] == "2026-10-16 110C"
+    assert inline.iloc[0]["linked_call_contract_symbol"] == "NVDA261016C00110000"
+
+
+def test_yield_enhancement_rejects_crossed_call_quote(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(tmp_path, dte=44, bid=1.20, ask=1.00)
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(dte=44),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "call": {"min_delta": 0.10, "max_delta": 0.45},
+        },
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "insurance_underwriting",
+            "min_dte": 20,
+            "max_dte": 60,
+        },
+    )
+
+    assert pairs.empty
+    assert pairs.attrs["reject_counts"] == {
+        "call_expiration_unavailable": 1,
+        "call_leg_invalid": 1,
+    }
+
+
+def test_yield_enhancement_required_data_read_error_is_not_an_empty_universe(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    (parsed / "NVDA_required_data.csv").write_bytes(b"\xff")
+
+    with pytest.raises(RuntimeError, match="failed to read Combo Yield required-data calls"):
+        find_sell_put_yield_enhancement_pairs(
+            df_candidates=_single_put_df(dte=44),
+            symbol="NVDA",
+            input_root=tmp_path,
+            yield_enhancement_cfg={"enabled": True},
+            sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
+        )
+
+
+def test_yield_enhancement_pair_write_error_is_not_swallowed(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(tmp_path, dte=44)
+    blocked_parent = tmp_path / "blocked"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="failed to persist Combo Yield pairs"):
+        find_sell_put_yield_enhancement_pairs(
+            df_candidates=_single_put_df(dte=44),
+            symbol="NVDA",
+            input_root=tmp_path,
+            yield_enhancement_cfg={
+                "enabled": True,
+                "call": {"min_delta": 0.10, "max_delta": 0.45},
+            },
+            sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
+            output_path=blocked_parent / "pairs.csv",
+        )

@@ -423,7 +423,7 @@ def _fetch_one_inprocess(
         saved_paths = save_outputs(base, symbol, payload0, output_root=shared_required)
         raw_meta = payload0.get('meta')
         meta = raw_meta if isinstance(raw_meta, dict) else {}
-        ok = str(meta.get('status') or '').strip().lower() not in {'error', 'fail', 'failed'}
+        ok = str(meta.get('status') or '').strip().lower() == 'ok'
         message = str(meta.get('error') or meta.get('status') or 'fetched')
         quote_receipt_relpath: str | None = None
         if ok and str(producer_run_id or "").strip():

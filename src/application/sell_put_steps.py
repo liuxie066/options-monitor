@@ -29,7 +29,13 @@ from src.application.sell_put_cash import (
     enrich_sell_put_candidates_with_cash,
     sell_put_opening_capacity_inputs,
 )
-from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+from src.application.candidate_underwriting_decisions import (
+    apply_insurance_underwriting_to_all_decisions,
+)
+from src.application.sell_put_strategy_risk import (
+    enrich_and_filter_sell_put_underwriting,
+    resolve_sell_put_underwriting_config,
+)
 from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
@@ -255,6 +261,21 @@ def run_sell_put_scan_and_summarize(
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
 
     if run_sell_put:
+        underwriting_cfg = resolve_sell_put_underwriting_config(sp)
+        scan_decisions_sink = all_decisions_sink_fn
+        if all_decisions_sink_fn is not None and underwriting_cfg.enabled:
+
+            def _underwritten_sink(rows: list[dict[str, Any]]) -> None:
+                all_decisions_sink_fn(
+                    apply_insurance_underwriting_to_all_decisions(
+                        rows,
+                        mode="put",
+                        cfg=underwriting_cfg,
+                        exchange_rate_converter=exchange_rate_converter,
+                    )
+                )
+
+            scan_decisions_sink = _underwritten_sink
         run_sell_put_scan(
             symbols=[sym],
             input_root=required_data_dir,
@@ -276,7 +297,7 @@ def run_sell_put_scan_and_summarize(
             quiet=bool(is_scheduled),
             risk_policy_version=risk_policy_version,
             quote_snapshot_id=quote_snapshot_id,
-            all_decisions_sink_fn=all_decisions_sink_fn,
+            all_decisions_sink_fn=scan_decisions_sink,
             put_cash_capacity_fn=lambda contract: sell_put_opening_capacity_inputs(
                 symbol=symbol,
                 strike=contract.strike,
