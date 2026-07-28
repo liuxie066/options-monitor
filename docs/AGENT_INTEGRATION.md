@@ -228,7 +228,14 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. Successful Copilot replies and deterministic replies that contain rich Markdown are rendered as display-only Feishu Card JSON 2.0 Markdown so tables remain readable; short plain Control replies and errors stay as text. The reply outbox persists the final transport envelope before delivery, retries that exact envelope with a stable UUID, and remains compatible with legacy text rows. New envelopes also retain a top-level flattened `text` copy so a code rollback can drain pending rows through the legacy sender. A confirmed permanent card rejection may use the envelope's flattened text fallback; ambiguous or transient failures retry the original card. This adaptive rendering is limited to inbound Feishu conversations and does not change scheduled notifications or other channels.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. Successful Copilot replies and deterministic replies that contain rich Markdown are rendered as display-only Feishu Card JSON 2.0 Markdown so tables remain readable; short plain Control replies and errors stay as text. The reply outbox persists the final transport envelope before delivery, retries that exact envelope with a stable UUID, and remains compatible with legacy text rows. New envelopes also retain a top-level flattened `text` copy so a code rollback can drain pending rows through the legacy sender. A confirmed permanent card rejection may use the envelope's flattened text fallback; ambiguous or transient failures retry the original card.
+
+Scheduled Daily Brief delivery independently uses a frozen Card JSON 2.0
+envelope derived from its canonical decision view. A post fallback is allowed
+only for a definite permanent Card rejection with no earlier transient or
+ambiguous attempt; it uses a distinct fallback UUID. Provider business
+rejections are definite failures, while timeouts and other ambiguous outcomes
+remain unresolved and cannot advance the Daily Brief delivery pointer.
 
 When `inbound.feishu_ws.ack_reaction` is configured, an independent bounded ACK lane adds the Reaction after the allowlisted text event has entered the business queue; the Reaction is best-effort and does not mean that Control, Copilot, a tool, or the final reply has completed. Unauthorized senders remain silent, and ACK failures or drops do not block business processing. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 

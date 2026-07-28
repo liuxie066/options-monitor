@@ -171,6 +171,7 @@ def finalize_multi_tick_run(
         last_run_path = (shared_state_dir_getter(base) / "last_run.json").resolve()
         prev = read_json_fn(last_run_path, {})
         run_meta = build_shared_last_run_meta(
+            run_id=run_id,
             now_utc=utc_now_fn(),
             channel=channel,
             target=target,

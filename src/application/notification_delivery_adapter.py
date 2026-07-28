@@ -131,7 +131,10 @@ def send_feishu_app_message(
                     log_fn=http_attempts.append,
                 )
             except FeishuPermanentError as exc:
-                if not _card_permanent_failure_allows_fallback(exc):
+                if (
+                    not _card_permanent_failure_allows_fallback(exc)
+                    or _http_attempts_have_ambiguous_send(http_attempts)
+                ):
                     raise
                 fallback = dict(envelope["fallback"])
                 fallback_used = True
@@ -200,6 +203,16 @@ def _card_permanent_failure_allows_fallback(exc: FeishuPermanentError) -> bool:
     )
 
 
+def _http_attempts_have_ambiguous_send(
+    http_attempts: list[dict[str, Any]],
+) -> bool:
+    return any(
+        isinstance(item, dict)
+        and str(item.get("category") or "") == "transient"
+        for item in http_attempts
+    )
+
+
 def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str, Any]:
     result = send_result if isinstance(send_result, dict) else {}
     raw_response_json = result.get("response_json")
@@ -219,12 +232,30 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     effective_idempotency_key = str(result.get("effective_idempotency_key") or "").strip() or None
     http_attempts = result.get("http_attempts") if isinstance(result.get("http_attempts"), list) else []
     retry_attempt_count = max(0, len(http_attempts) - 1)
-    ambiguous_send = any(str(item.get("category") or "") == "transient" for item in http_attempts if isinstance(item, dict))
-    duplicate_risk = bool(ambiguous_send and not idempotency_key)
+    ambiguous_send = _http_attempts_have_ambiguous_send(http_attempts)
+    fallback_used = bool(result.get("fallback_used"))
+    duplicate_risk = bool(
+        ambiguous_send and (not idempotency_key or fallback_used)
+    )
 
-    command_ok = http_status == 200
-    delivery_confirmed = bool(command_ok and feishu_code == 0 and message_id)
+    transport_ok = http_status == 200
+    command_ok = bool(transport_ok and feishu_code == 0)
+    delivery_confirmed = bool(
+        command_ok
+        and message_id
+        and not (fallback_used and ambiguous_send)
+    )
     ok = delivery_confirmed
+    error_code = (
+        local_error_code
+        or (
+            "FEISHU_PROVIDER_REJECTED"
+            if transport_ok and feishu_code not in {None, 0}
+            else "SEND_UNCONFIRMED"
+            if command_ok and not delivery_confirmed
+            else "FEISHU_SEND_FAILED"
+        )
+    )
 
     if ok:
         message = f"message_id={message_id}"
@@ -263,10 +294,12 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
         message=message,
         extra={
             "command_ok": command_ok,
+            "transport_ok": transport_ok,
             "delivery_confirmed": delivery_confirmed,
             "message_id": (None if message_id is None else str(message_id)),
             "http_status": http_status,
             "feishu_code": feishu_code,
+            "provider_response_code": feishu_code,
             "feishu_msg": feishu_msg,
             "request_path": request_path,
             "response_tail": response_tail,
@@ -277,9 +310,9 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "ambiguous_send": ambiguous_send,
             "duplicate_risk": duplicate_risk,
             "local_error_code": local_error_code,
-            "error_code": local_error_code,
+            "error_code": (None if ok else error_code),
             "render_mode": str(result.get("render_mode") or ""),
-            "fallback_used": bool(result.get("fallback_used")),
+            "fallback_used": fallback_used,
             **local_diagnostics,
         },
     )

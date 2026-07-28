@@ -377,7 +377,7 @@ def test_non_scheduled_scan_updates_current_without_delivery_side_effects(
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is True
     assert read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["available"] is False
     assert calls == []
-    assert bundle.commits == [{"lx": None}]
+    assert bundle.commits == []
 
 
 def test_scheduled_scan_missing_exact_account_target_fails_before_prepare_or_send(monkeypatch, tmp_path: Path) -> None:
@@ -458,6 +458,40 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
     assert "现金总额｜$100,000.00" in card_markdown
     assert "可用于期权开仓｜$60,000.00" in card_markdown
     assert "| 项目 | 数值 |" not in card_markdown
+
+
+def test_confirmed_delivery_records_degraded_evidence_when_tick_metrics_write_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    _patch_sender(monkeypatch)
+    monkeypatch.setattr(
+        mod.state_repo,
+        "write_tick_metrics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("metrics unavailable")
+        ),
+    )
+    bundle = _request(tmp_path, run_id="metrics-degraded")
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    degraded = [
+        event
+        for event in bundle.request.runlog.events
+        if event.get("step") == "finalize"
+        and event.get("status") == "degraded"
+    ]
+    assert degraded
+    assert degraded[-1]["data"]["action"] == "write_tick_metrics"
+    assert degraded[-1]["data"]["notification_delivery_confirmed"] is True
+    assert any(
+        event.get("action") == "write_tick_metrics"
+        and event.get("status") == "error"
+        for event in bundle.request.audit_helper.events
+    )
 
 
 @pytest.mark.parametrize(
@@ -559,7 +593,10 @@ def test_pipeline_failure_nonfixed_is_quiet_but_commits_after_failure_artifact(m
 
 def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, tmp_path: Path) -> None:
     import src.application.tick_notification_flow as mod
-    from src.application.daily_decision_brief_repository import read_retryable_daily_decision_brief_delivery
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        read_retryable_daily_decision_brief_delivery,
+    )
 
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
@@ -569,7 +606,29 @@ def test_commit_failure_prevents_provider_call_and_keeps_envelope(monkeypatch, t
     with pytest.raises(OSError, match="state write failed"):
         mod.run_tick_notification_flow(bundle.request)
     assert calls == []
-    assert read_retryable_daily_decision_brief_delivery(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)["envelope"]
+    pending = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )["envelope"]
+    assert pending
+
+    retry_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=retry_calls)
+    retry = _request(tmp_path, run_id="commit-recovery")
+    assert mod.run_tick_notification_flow(retry.request) == 0
+    assert retry.commits == [{"lx": FIXED_TARGET}]
+    assert retry_calls[0]["message"] == pending["rendered_message"]
+    delivery = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    confirmed = delivery["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    assert confirmed["delivery_key"] == pending["delivery_key"]
+    assert confirmed["message_sha256"] == pending["message_sha256"]
+    assert confirmed["status"] == "confirmed"
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:

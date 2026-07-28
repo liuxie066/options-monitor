@@ -168,6 +168,16 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
         state_repo=state_repo,
     )
     if not watchdog_outcome.should_continue:
+        request.complete_tick_idempotency_fn(
+            status=("failed" if watchdog_outcome.return_code else "skipped"),
+            message="watchdog_blocked",
+            ok=(watchdog_outcome.return_code == 0),
+            error_code=(
+                "WATCHDOG_EXCEPTION"
+                if watchdog_outcome.return_code
+                else None
+            ),
+        )
         return outcome(False, watchdog_outcome.return_code)
 
     return outcome(True, 0)
