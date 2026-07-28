@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 1.6.5 - 2026-07-28
+
 ### Improvements
 - Added direction-aware recommended prices to both Combo Yield legs in Daily Brief cards, using pipe-separated mobile-friendly lines and explicit unavailable states when a leg quote is missing.
+
+### Bug Fixes
+- Froze one immutable required-data snapshot and prepared portfolio context across every account in a shared scan, preventing later accounts from observing newer broker data or rebuilding inconsistent strategy evidence.
 
 ## 1.6.4 - 2026-07-28
 
