@@ -62,6 +62,79 @@ def _decision_snapshot() -> dict:
     }
 
 
+def _account_run_inputs(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict, dict]:
+    state = tmp_path / "account" / "state"
+    quotes = tmp_path / "required"
+    state.mkdir(parents=True)
+    quotes.mkdir()
+    quote = _quote_receipt(quotes)
+    snapshot = _decision_snapshot()
+    _write_json(
+        state / "portfolio_context.json",
+        {
+            "source_observed_at": NOW.isoformat(),
+            "source_account_identifiers": ["12345"],
+            "portfolio_source_name": "futu",
+            "cash_by_currency": {"CNY": 1000, "USD": 100},
+            "stocks_by_symbol": {
+                "NVDA": {
+                    "shares": 200,
+                    "avg_cost": 100,
+                    "currency": "USD",
+                }
+            },
+        },
+    )
+    _write_json(
+        state / "option_positions_context.json",
+        {
+            "decision_snapshot_status": "trusted",
+            "decision_state_fingerprint": snapshot[
+                "decision_state_fingerprint"
+            ],
+            "cash_secured_unavailable_by_symbol": {},
+            "cash_secured_total_cny": 500,
+            "locked_shares_by_symbol": {"NVDA": 100},
+            "locked_shares_unavailable_by_symbol": {},
+        },
+    )
+    _write_json(
+        state / "rate_cache.json",
+        {
+            "source": "fixture",
+            "timestamp": NOW.isoformat(),
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+    )
+    decision = {
+        "schema_version": "candidate_all_decisions.v1",
+        "candidate_id": "candidate-1",
+        "strategy_mode": "put",
+        "quote_snapshot_id": quote["snapshot_id"],
+        "risk_policy_hash": "c" * 64,
+    }
+    capture = {
+        "schema_version": (
+            "position_advice_candidate_all_decisions_capture.v1"
+        ),
+        "account_run_id": "run-1",
+        "account": "lx",
+        "complete": True,
+        "quote_receipt_relpaths": {
+            "NVDA": "quotes/NVDA/receipt.json",
+        },
+        "candidate_decisions": [decision],
+    }
+    capture["capture_hash"] = canonical_sha256(capture)
+    _write_json(
+        state / "position_advice_candidate_all_decisions.raw.json",
+        capture,
+    )
+    return state, quotes, quote, snapshot
+
+
 def test_cash_capacity_uses_uncommitted_base_cny_not_gross_cash() -> None:
     capacity = build_cash_capacity(
         portfolio_context={
@@ -116,71 +189,7 @@ def test_cash_and_share_capacity_fail_closed_on_unknown_basis() -> None:
 def test_account_run_publishes_complete_receipt_dependency_graph(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / "account" / "state"
-    quotes = tmp_path / "required"
-    state.mkdir(parents=True)
-    quotes.mkdir()
-    quote = _quote_receipt(quotes)
-    identity_context = {
-        "source_observed_at": NOW.isoformat(),
-        "source_account_identifiers": ["12345"],
-        "portfolio_source_name": "futu",
-        "cash_by_currency": {"CNY": 1000, "USD": 100},
-        "stocks_by_symbol": {
-            "NVDA": {
-                "shares": 200,
-                "avg_cost": 100,
-                "currency": "USD",
-            }
-        },
-    }
-    snapshot = _decision_snapshot()
-    _write_json(state / "portfolio_context.json", identity_context)
-    _write_json(
-        state / "option_positions_context.json",
-        {
-            "decision_snapshot_status": "trusted",
-            "decision_state_fingerprint": snapshot[
-                "decision_state_fingerprint"
-            ],
-            "cash_secured_unavailable_by_symbol": {},
-            "cash_secured_total_cny": 500,
-            "locked_shares_by_symbol": {"NVDA": 100},
-            "locked_shares_unavailable_by_symbol": {},
-        },
-    )
-    _write_json(
-        state / "rate_cache.json",
-        {
-            "source": "fixture",
-            "timestamp": NOW.isoformat(),
-            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-        },
-    )
-    decision = {
-        "schema_version": "candidate_all_decisions.v1",
-        "candidate_id": "candidate-1",
-        "strategy_mode": "put",
-        "quote_snapshot_id": quote["snapshot_id"],
-        "risk_policy_hash": "c" * 64,
-    }
-    capture = {
-        "schema_version": (
-            "position_advice_candidate_all_decisions_capture.v1"
-        ),
-        "account_run_id": "run-1",
-        "account": "lx",
-        "complete": True,
-        "quote_receipt_relpaths": {
-            "NVDA": "quotes/NVDA/receipt.json",
-        },
-        "candidate_decisions": [decision],
-    }
-    capture["capture_hash"] = canonical_sha256(capture)
-    _write_json(
-        state / "position_advice_candidate_all_decisions.raw.json",
-        capture,
-    )
+    state, quotes, quote, snapshot = _account_run_inputs(tmp_path)
 
     result = publish_account_run_sources(
         account_run_id="run-1",
@@ -223,3 +232,52 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
         ]
         == quote["snapshot_id"]
     )
+
+
+def test_default_completion_timestamp_is_captured_after_ledger_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, quotes, _quote, snapshot = _account_run_inputs(tmp_path)
+    reader_called = False
+
+    class SequencedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            value = NOW + timedelta(
+                seconds=3 if reader_called else 1,
+            )
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    def read_snapshot() -> dict:
+        nonlocal reader_called
+        reader_called = True
+        return snapshot
+
+    monkeypatch.setattr(
+        "src.application.position_advice_account_sources.datetime",
+        SequencedDateTime,
+    )
+
+    result = publish_account_run_sources(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        required_data_root=quotes,
+        decision_snapshot_reader=read_snapshot,
+    )
+
+    ledger = next(
+        item["receipt"]
+        for item in result["receipts"]
+        if item["source_kind"] == "ledger_decision_state"
+    )
+    assert reader_called is True
+    assert ledger["source_observed_at"] == (
+        NOW + timedelta(seconds=2)
+    ).isoformat().replace("+00:00", "Z")
+    assert ledger["completed_at"] == (
+        NOW + timedelta(seconds=3)
+    ).isoformat().replace("+00:00", "Z")
