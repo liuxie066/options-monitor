@@ -29,6 +29,12 @@ from src.infrastructure.position_advice_manifest_lock import (
 AUTHORITY_CHANGE_RECEIPT_SCHEMA = "position_advice_authority_change_intent.v1"
 AUTHORITY_CHANGE_PLAN_SCHEMA = "position_advice_authority_change_plan.v1"
 IDENTITY_BINDING_SCHEMA = "position_advice_first_use_identity_binding.v1"
+NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA = (
+    "position_advice_notification_authority_receipt.v1"
+)
+NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA = (
+    "position_advice_notification_authority_resolution.v1"
+)
 
 
 class PositionAdviceAuthorityError(RuntimeError):
@@ -377,14 +383,18 @@ def _read_authority_resolution_locked(
     account = normalize_account_label(normalized_account)
     scope_id = scope_for(account)
     path = authority_policy_path(base, scope_id)
-    historical_state = _historical_authority_state_exists(base, scope_id)
     if not path.exists():
+        history_status = _classify_authority_history(
+            base=base,
+            portfolio_scope_id=scope_id,
+            normalized_account=account,
+        )
         return resolve_authority(
             normalized_account_label=account,
             normalized_portfolio_source=normalized_portfolio_source,
             portfolio_account_identity_hash_value=portfolio_account_identity_hash,
             policy=None,
-            historical_authority_state_exists=historical_state,
+            historical_authority_state_exists=history_status == "conflict",
         )
     if path.is_symlink():
         return resolve_authority(
@@ -473,8 +483,16 @@ def _plan_authority_change_locked(
                 reasons.extend(resolution.reason_codes)
         except (OSError, ValueError, PositionAdviceAuthorityError):
             reasons.append("authority_policy_unreadable")
-    elif _historical_authority_state_exists(base, scope_id):
-        reasons.append("authority_policy_missing_with_history")
+    else:
+        history_status = _classify_authority_history(
+            base=base,
+            portfolio_scope_id=scope_id,
+            normalized_account=account,
+        )
+        if history_status == "conflict":
+            reasons.append("authority_policy_missing_with_history")
+        elif history_status == "implicit_v1_notifications" and mode != "v1":
+            reasons.append("authority_implicit_v1_history_requires_v1_bootstrap")
 
     first_use = current_policy is None
     if first_use:
@@ -800,12 +818,246 @@ def _published_promotion_artifacts_match(
     )
 
 
-def _historical_authority_state_exists(base: Path, portfolio_scope_id: str) -> bool:
+def _classify_authority_history(
+    *,
+    base: Path,
+    portfolio_scope_id: str,
+    normalized_account: str,
+) -> str:
     scope_dir = portfolio_scope_state_dir(base, portfolio_scope_id)
     if not scope_dir.exists():
-        return False
+        return "empty"
+    if scope_dir.is_symlink() or not scope_dir.is_dir():
+        return "conflict"
     ignored = {".current.lock"}
-    return any(path.name not in ignored for path in scope_dir.iterdir())
+    try:
+        entries = [path for path in scope_dir.iterdir() if path.name not in ignored]
+    except OSError:
+        return "conflict"
+    if not entries:
+        return "empty"
+    if len(entries) != 1 or entries[0].name != "notification_authority":
+        return "conflict"
+    if _implicit_v1_notification_history_is_valid(
+        state_dir=entries[0],
+        portfolio_scope_id=portfolio_scope_id,
+        normalized_account=normalized_account,
+    ):
+        return "implicit_v1_notifications"
+    return "conflict"
+
+
+def _implicit_v1_notification_history_is_valid(
+    *,
+    state_dir: Path,
+    portfolio_scope_id: str,
+    normalized_account: str,
+) -> bool:
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        return False
+    allowed_statuses = {
+        "accepted",
+        "failed",
+        "inflight",
+        "resolutions",
+        "unknown",
+    }
+    receipts: dict[tuple[str, str, int], dict[str, Any]] = {}
+    resolutions: list[tuple[Path, dict[str, Any]]] = []
+    receipt_count = 0
+    try:
+        for entry in state_dir.iterdir():
+            if entry.name == ".send.lock":
+                if entry.is_symlink() or not entry.is_file():
+                    return False
+                continue
+            if (
+                entry.name not in allowed_statuses
+                or entry.is_symlink()
+                or not entry.is_dir()
+            ):
+                return False
+            for path in entry.iterdir():
+                if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                    return False
+                payload = _read_json_object(path)
+                if entry.name == "resolutions":
+                    resolutions.append((path, payload))
+                    continue
+                validated = _validate_implicit_v1_notification_receipt(
+                    path=path,
+                    status=entry.name,
+                    payload=payload,
+                    portfolio_scope_id=portfolio_scope_id,
+                    normalized_account=normalized_account,
+                )
+                if validated is None:
+                    return False
+                receipt_id, attempt = validated
+                key = (entry.name, receipt_id, attempt)
+                if key in receipts:
+                    return False
+                receipts[key] = payload
+                receipt_count += 1
+    except (OSError, ValueError, PositionAdviceAuthorityError):
+        return False
+
+    if receipt_count == 0:
+        return False
+    terminal_statuses = ("accepted", "failed", "unknown")
+    terminal_ids = {
+        status: {
+            receipt_id
+            for receipt_status, receipt_id, _attempt in receipts
+            if receipt_status == status
+        }
+        for status in terminal_statuses
+    }
+    if terminal_ids["accepted"] & terminal_ids["unknown"]:
+        return False
+    terminal_attempts: set[tuple[str, int]] = set()
+    for (status, receipt_id, attempt), terminal in receipts.items():
+        if status not in terminal_statuses:
+            continue
+        terminal_attempt = (receipt_id, attempt)
+        if terminal_attempt in terminal_attempts:
+            return False
+        terminal_attempts.add(terminal_attempt)
+        intent = receipts.get(("inflight", receipt_id, attempt))
+        if intent is None or not _notification_receipt_pair_matches(intent, terminal):
+            return False
+    unknown_receipts = {
+        receipt_id: payload
+        for (status, receipt_id, _attempt), payload in receipts.items()
+        if status == "unknown"
+    }
+    return all(
+        _implicit_v1_notification_resolution_is_valid(
+            path=path,
+            payload=payload,
+            unknown_receipts=unknown_receipts,
+        )
+        for path, payload in resolutions
+    )
+
+
+def _validate_implicit_v1_notification_receipt(
+    *,
+    path: Path,
+    status: str,
+    payload: Mapping[str, Any],
+    portfolio_scope_id: str,
+    normalized_account: str,
+) -> tuple[str, int] | None:
+    receipt_id = str(payload.get("receipt_id") or "").strip()
+    attempt_number = payload.get("attempt_number")
+    if not isinstance(attempt_number, int) or isinstance(attempt_number, bool):
+        return None
+    attempt = attempt_number
+    authority_generation = payload.get("authority_generation")
+    if (
+        not isinstance(authority_generation, int)
+        or isinstance(authority_generation, bool)
+        or authority_generation != 0
+    ):
+        return None
+    expected_name = (
+        f"{receipt_id}.{attempt}.json"
+        if status in {"failed", "inflight"}
+        else f"{receipt_id}.json"
+    )
+    required = {
+        "schema_version": NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA,
+        "status": status,
+        "portfolio_scope_id": portfolio_scope_id,
+        "normalized_account": normalized_account,
+        "selected_advice_contract": "v1",
+        "resolved_mode": "v1",
+        "authority_policy_hash": None,
+    }
+    if (
+        not _is_sha256(receipt_id)
+        or attempt < 1
+        or path.name != expected_name
+        or any(payload.get(field) != value for field, value in required.items())
+        or not _is_sha256(payload.get("token_hash"))
+        or not str(payload.get("account_run_id") or "").strip()
+        or not str(payload.get("channel") or "").strip()
+        or not _is_timestamp(payload.get("recorded_at"))
+    ):
+        return None
+    if status == "inflight":
+        if payload.get("receipt_hash") is not None:
+            return None
+    elif not _is_timestamp(payload.get("completed_at")) or payload.get(
+        "receipt_hash"
+    ) != canonical_sha256(
+        {key: value for key, value in payload.items() if key != "receipt_hash"}
+    ):
+        return None
+    return receipt_id, attempt
+
+
+def _notification_receipt_pair_matches(
+    intent: Mapping[str, Any],
+    terminal: Mapping[str, Any],
+) -> bool:
+    fields = (
+        "schema_version",
+        "receipt_id",
+        "attempt_number",
+        "portfolio_scope_id",
+        "normalized_account",
+        "selected_advice_contract",
+        "resolved_mode",
+        "authority_generation",
+        "authority_policy_hash",
+        "account_run_id",
+        "channel",
+        "token_hash",
+        "recorded_at",
+    )
+    return all(intent.get(field) == terminal.get(field) for field in fields)
+
+
+def _implicit_v1_notification_resolution_is_valid(
+    *,
+    path: Path,
+    payload: Mapping[str, Any],
+    unknown_receipts: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    receipt_id = str(payload.get("receipt_id") or "").strip()
+    unknown = unknown_receipts.get(receipt_id)
+    evidence = payload.get("evidence")
+    if (
+        unknown is None
+        or path.name != f"{receipt_id}.json"
+        or payload.get("schema_version") != NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA
+        or payload.get("unknown_receipt_hash") != unknown.get("receipt_hash")
+        or payload.get("resolution") not in {"delivered", "failed"}
+        or not isinstance(evidence, Mapping)
+        or not evidence
+        or payload.get("evidence_hash") != canonical_sha256(dict(evidence))
+        or not str(payload.get("actor") or "").strip()
+        or not _is_timestamp(payload.get("resolved_at"))
+    ):
+        return False
+    return payload.get("resolution_hash") == canonical_sha256(
+        {key: value for key, value in payload.items() if key != "resolution_hash"}
+    )
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
+
+
+def _is_timestamp(value: Any) -> bool:
+    try:
+        _timestamp(str(value or ""))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _unresolved_notification_receipt_ids(
