@@ -659,6 +659,8 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
                 "call_expiration": "2026-09-18",
                 "put_strike": 180,
                 "call_strike": 220,
+                "bid": 4.25,
+                "linked_call_ask": 0.55,
                 "structure_mode": "staggered_expiry_pair",
                 "funding_accepted": True,
                 "put_only_annualized_net_return": 0.30,
@@ -674,6 +676,8 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert [item["strategy_group_id"] for item in combos] == ["pair-c", "pair-a"]
     assert combos[0]["put_leg_role"] == "funding_put"
     assert combos[0]["call_leg_role"] == "participation_call"
+    assert combos[0]["put_sell_reference"] == 4.25
+    assert combos[0]["call_buy_reference"] == 0.55
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
     assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
 

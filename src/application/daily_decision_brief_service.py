@@ -1520,6 +1520,12 @@ def _candidate_view(
     event_risk: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if family == "combo_yield":
+        put_sell_reference = _number(row.get("put_bid"))
+        if put_sell_reference is None:
+            put_sell_reference = _number(row.get("bid"))
+        call_buy_reference = _number(row.get("call_ask"))
+        if call_buy_reference is None:
+            call_buy_reference = _number(row.get("linked_call_ask"))
         return {
             "rank": rank,
             "symbol": _text(row.get("symbol")).upper(),
@@ -1532,8 +1538,8 @@ def _candidate_view(
             "call_expiration": _text(row.get("call_expiration") or row.get("expiration")),
             "put_strike": _number(row.get("put_strike")),
             "call_strike": _number(row.get("call_strike")),
-            "put_sell_reference": _number(row.get("put_bid")),
-            "call_buy_reference": _number(row.get("call_ask")),
+            "put_sell_reference": put_sell_reference,
+            "call_buy_reference": call_buy_reference,
             "priority": _priority_from_row(row, default="P1"),
             "metrics": _candidate_metrics(row, rank=rank),
             "capacity": dict(capacity or {}),
