@@ -63,6 +63,86 @@ def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: 
     assert resolved["lx"]["explicit_expirations"] == ["2026-08-21", "2026-09-18"]
 
 
+def test_cross_account_prefetch_union_is_order_independent_and_covers_call_costs() -> None:
+    from src.application.required_data_prefetch_planning import (
+        build_cross_account_prefetch_config,
+        build_prefetch_symbol_plan,
+    )
+
+    config = {
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "broker": "US",
+                "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 45},
+                "sell_call": {
+                    "enabled": True,
+                    "min_dte": 7,
+                    "max_dte": 45,
+                    "min_strike_cost_multiplier": 1.1,
+                },
+            }
+        ]
+    }
+    contexts = {
+        "lx": {"stocks_by_symbol": {"NVDA": {"avg_cost": 100}}},
+        "sy": {"stocks_by_symbol": {"NVDA": {"avg_cost": 120}}},
+    }
+
+    forward = build_cross_account_prefetch_config(
+        base_config=config,
+        account_configs={"lx": config, "sy": config},
+        prepared_portfolio_contexts=contexts,
+    )
+    reverse = build_cross_account_prefetch_config(
+        base_config=config,
+        account_configs={"sy": config, "lx": config},
+        prepared_portfolio_contexts={"sy": contexts["sy"], "lx": contexts["lx"]},
+    )
+
+    assert forward == reverse
+    merged = build_prefetch_symbol_plan(forward["symbols"]).symbol_cfgs[0]
+    call_window = merged["_prefetch_strategy_kwargs"]["side_strike_windows"]["call"]
+    assert call_window["min_strike"] == pytest.approx(110.0)
+    assert call_window["max_strike"] == pytest.approx(161.568)
+    assert merged["_prefetch_strategy_kwargs"]["side_strike_windows"]["put"]
+
+
+def test_cross_account_prefetch_keeps_put_when_one_context_is_unavailable() -> None:
+    from src.application.required_data_prefetch_planning import (
+        build_cross_account_prefetch_config,
+        build_prefetch_symbol_plan,
+    )
+
+    config = {
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "broker": "US",
+                "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 45},
+                "sell_call": {
+                    "enabled": True,
+                    "min_dte": 7,
+                    "max_dte": 45,
+                },
+            }
+        ]
+    }
+    union = build_cross_account_prefetch_config(
+        base_config=config,
+        account_configs={"lx": config, "sy": config},
+        prepared_portfolio_contexts={
+            "lx": {"stocks_by_symbol": {"NVDA": {"avg_cost": 100}}},
+            "sy": None,
+        },
+    )
+    merged = build_prefetch_symbol_plan(union["symbols"]).symbol_cfgs[0]
+    kwargs = merged["_prefetch_strategy_kwargs"]
+
+    assert set(kwargs["option_types"].split(",")) == {"put", "call"}
+    assert kwargs["side_strike_windows"]["put"]
+
+
 def test_exact_dte_window_preserves_empty_expiration_set() -> None:
     from src.application.opend_symbol_chain_fetching import select_symbol_expirations
 

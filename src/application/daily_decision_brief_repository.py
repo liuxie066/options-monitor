@@ -15,6 +15,7 @@ from domain.domain.daily_decision_brief import (
     daily_brief_digest,
     diff_daily_decision_briefs,
     normalize_daily_decision_brief,
+    reconcile_daily_decision_brief_evidence,
 )
 from domain.storage import paths
 from domain.storage.json_io import atomic_write_json, atomic_write_text
@@ -95,6 +96,14 @@ def persist_daily_decision_brief_success(
                 "run_id": run_id,
             }
         )
+        if (
+            previous is not None
+            and previous.get("market_trading_date") == market_date
+        ):
+            candidate = reconcile_daily_decision_brief_evidence(
+                previous,
+                candidate,
+            )
         normalized = normalize_daily_decision_brief(candidate)
         if normalized.get("status") not in {"ready", "degraded"}:
             raise ValueError("only ready or degraded daily briefs may advance successful current")

@@ -311,6 +311,7 @@ def resolve_exact_fresh_required_data_quote_receipt(
     producer_root: Path,
     symbol: str,
     now: datetime | str | None = None,
+    expected_producer_run_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Return a fresh receipt only when it binds the exact current scan bytes."""
 
@@ -359,6 +360,12 @@ def resolve_exact_fresh_required_data_quote_receipt(
                 now=now_value,
                 expected_source_kind="quotes",
             )
+            if (
+                expected_producer_run_id is not None
+                and str(validated.get("producer_run_id") or "").strip()
+                != str(expected_producer_run_id).strip()
+            ):
+                continue
             payload = json.loads(
                 validated["payload_path"].read_text(encoding="utf-8")
             )

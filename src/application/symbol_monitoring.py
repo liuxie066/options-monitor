@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
+from domain.domain.symbol_identity import symbol_market
 from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
+from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
+from src.application.strategy_scan_status import publish_strategy_scan_status
 from src.application.yield_enhancement_config import (
     COMBO_YIELD_CONFIG_KEY,
     derive_yield_enhancement_policy,
@@ -47,6 +50,8 @@ class SymbolMonitoringInputs:
     quote_snapshot_id: str | None = None
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None
     position_advice_producer_run_id: str | None = None
+    required_data_snapshot_manifest: Path | None = None
+    required_data_snapshot_run_id: str | None = None
     candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None
@@ -79,6 +84,15 @@ def _append_summary_result(summary_rows: list[dict[str, Any]], result: object) -
         return
     if isinstance(result, dict):
         summary_rows.append(result)
+
+
+def _summary_candidate_count(result: object) -> int:
+    rows = result if isinstance(result, list) else [result]
+    return sum(
+        max(0, int(item.get("candidate_count") or 0))
+        for item in rows
+        if isinstance(item, dict)
+    )
 
 
 def run_symbol_monitoring(
@@ -138,44 +152,95 @@ def run_symbol_monitoring(
     fetch_want_put = bool(want_put or want_yield_enhancement)
     fetch_want_call = bool(want_call or want_yield_enhancement)
     fetch_sell_put_cfg = market_sp if want_yield_enhancement else sp
-
-    try:
-        deps.apply_multiplier_cache_fn(
-            base=inputs.base,
-            required_data_dir=inputs.required_data_dir,
-            symbol=symbol,
-        )
-    except Exception:
-        pass
-
-    fetch_cfg = dict(symbol_cfg.get("fetch", {}) or {})
     runtime_config: dict[str, Any] = (
         inputs.runtime_config
         if isinstance(inputs.runtime_config, dict)
         else symbol_cfg
     )
+    frozen_status_enabled = bool(
+        inputs.required_data_snapshot_manifest is not None
+        and str(inputs.position_advice_producer_run_id or "").strip()
+    )
+    portfolio_cfg = (
+        runtime_config.get("portfolio")
+        if isinstance(runtime_config.get("portfolio"), dict)
+        else {}
+    )
+    status_account = str(portfolio_cfg.get("account") or "").strip().lower()
+    status_market = str(
+        symbol_market(symbol)
+        or symbol_cfg.get("broker")
+        or ""
+    ).strip().upper()
+
+    def _publish_status(
+        *,
+        family: str,
+        status: str,
+        candidate_count: int | None = None,
+        reason: str | None = None,
+        snapshot_id: str | None = None,
+        receipt_relpath: str | None = None,
+    ) -> None:
+        if not frozen_status_enabled:
+            return
+        try:
+            publish_strategy_scan_status(
+                report_dir=inputs.report_dir,
+                run_id=str(inputs.position_advice_producer_run_id),
+                account=status_account,
+                market=status_market,
+                symbol=symbol,
+                strategy_family=family,
+                status=status,
+                candidate_count=candidate_count,
+                reason=reason,
+                snapshot_id=snapshot_id,
+                receipt_relpath=receipt_relpath,
+            )
+        except Exception:
+            log.exception(
+                "symbol_monitoring: strategy status publish failed for %s/%s",
+                symbol,
+                family,
+            )
+
+    frozen_required_data = inputs.required_data_snapshot_manifest is not None
+    if not frozen_required_data:
+        try:
+            deps.apply_multiplier_cache_fn(
+                base=inputs.base,
+                required_data_dir=inputs.required_data_dir,
+                symbol=symbol,
+            )
+        except Exception:
+            pass
+
+    fetch_cfg = dict(symbol_cfg.get("fetch", {}) or {})
     discovery_fetch_kwargs = opend_discovery_kwargs(runtime_config)
     fetch_request_kwargs = opend_fetch_kwargs(runtime_config)
-    fetch_plan = build_required_data_fetch_plan(
-        base=inputs.base,
-        required_data_dir=inputs.required_data_dir,
-        symbol=symbol,
-        limit_expirations=int(limit_expirations),
-        want_put=fetch_want_put,
-        want_call=want_call,
-        sell_put_cfg=fetch_sell_put_cfg,
-        sell_call_cfg=cc,
-        yield_enhancement_cfg=yield_enhancement_cfg,
-        symbol_cfg=symbol_cfg,
-        fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
-        fetch_port=int(fetch_cfg.get("port") or 11111),
-        snapshot_max_wait_sec=float(discovery_fetch_kwargs["snapshot_max_wait_sec"]),
-        snapshot_window_sec=float(discovery_fetch_kwargs["snapshot_window_sec"]),
-        snapshot_max_calls=int(discovery_fetch_kwargs["snapshot_max_calls"]),
-        expiration_max_wait_sec=float(discovery_fetch_kwargs["expiration_max_wait_sec"]),
-        expiration_window_sec=float(discovery_fetch_kwargs["expiration_window_sec"]),
-        expiration_max_calls=int(discovery_fetch_kwargs["expiration_max_calls"]),
-    )
+    fetch_plan = None
+    if not frozen_required_data:
+        fetch_plan = build_required_data_fetch_plan(
+            base=inputs.base,
+            required_data_dir=inputs.required_data_dir,
+            symbol=symbol,
+            limit_expirations=int(limit_expirations),
+            want_put=fetch_want_put,
+            want_call=want_call,
+            sell_put_cfg=fetch_sell_put_cfg,
+            sell_call_cfg=cc,
+            yield_enhancement_cfg=yield_enhancement_cfg,
+            symbol_cfg=symbol_cfg,
+            fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
+            fetch_port=int(fetch_cfg.get("port") or 11111),
+            snapshot_max_wait_sec=float(discovery_fetch_kwargs["snapshot_max_wait_sec"]),
+            snapshot_window_sec=float(discovery_fetch_kwargs["snapshot_window_sec"]),
+            snapshot_max_calls=int(discovery_fetch_kwargs["snapshot_max_calls"]),
+            expiration_max_wait_sec=float(discovery_fetch_kwargs["expiration_max_wait_sec"]),
+            expiration_window_sec=float(discovery_fetch_kwargs["expiration_window_sec"]),
+            expiration_max_calls=int(discovery_fetch_kwargs["expiration_max_calls"]),
+        )
     fetch_max_strike = fetch_sell_put_cfg.get("max_strike")
     fetch_max_strike_value = (
         float(fetch_max_strike)
@@ -183,30 +248,119 @@ def run_symbol_monitoring(
         else None
     )
 
-    quote_evidence = deps.ensure_required_data_fn(
-        py=inputs.py,
-        base=inputs.base,
-        symbol=symbol,
-        required_data_dir=inputs.required_data_dir,
-        limit_expirations=limit_expirations,
-        want_put=fetch_want_put,
-        want_call=fetch_want_call,
-        timeout_sec=inputs.timeout_sec,
-        is_scheduled=bool(inputs.is_scheduled),
-        state_dir=inputs.state_dir,
-        fetch_source=str(fetch_cfg.get("source") or "opend"),
-        fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
-        fetch_port=int(fetch_cfg.get("port") or 11111),
-        max_strike=fetch_max_strike_value,
-        min_dte=None,
-        max_dte=None,
-        fetch_plan=fetch_plan,
-        report_dir=inputs.report_dir,
-        opend_fetch_config=fetch_request_kwargs,
-        position_advice_producer_run_id=(
-            inputs.position_advice_producer_run_id
-        ),
-    )
+    try:
+        required_data_kwargs: dict[str, Any] = {
+            "py": inputs.py,
+            "base": inputs.base,
+            "symbol": symbol,
+            "required_data_dir": inputs.required_data_dir,
+            "limit_expirations": limit_expirations,
+            "want_put": fetch_want_put,
+            "want_call": fetch_want_call,
+            "timeout_sec": inputs.timeout_sec,
+            "is_scheduled": bool(inputs.is_scheduled),
+            "state_dir": inputs.state_dir,
+            "fetch_source": str(fetch_cfg.get("source") or "opend"),
+            "fetch_host": str(fetch_cfg.get("host") or "127.0.0.1"),
+            "fetch_port": int(fetch_cfg.get("port") or 11111),
+            "max_strike": fetch_max_strike_value,
+            "min_dte": None,
+            "max_dte": None,
+            "fetch_plan": fetch_plan,
+            "report_dir": inputs.report_dir,
+            "opend_fetch_config": fetch_request_kwargs,
+            "position_advice_producer_run_id": (
+                inputs.position_advice_producer_run_id
+            ),
+        }
+        if inputs.required_data_snapshot_manifest is not None:
+            required_data_kwargs.update(
+                {
+                    "required_data_snapshot_manifest": (
+                        inputs.required_data_snapshot_manifest
+                    ),
+                    "required_data_snapshot_run_id": (
+                        inputs.required_data_snapshot_run_id
+                    ),
+                }
+            )
+        quote_evidence = deps.ensure_required_data_fn(
+            **required_data_kwargs,
+        )
+    except FrozenRequiredDataUnavailable as exc:
+        summary_rows: list[dict[str, Any]] = []
+
+        def _unavailable_summary(result: object) -> None:
+            if not isinstance(result, dict):
+                return
+            row = dict(result)
+            row["candidate_count"] = 0
+            row["note"] = "行情快照不可用"
+            summary_rows.append(row)
+
+        for family, enabled in (
+            ("sell_put", want_put),
+            ("combo_yield", want_yield_enhancement),
+            ("covered_call", want_call),
+        ):
+            if enabled:
+                append_strategy_scan_failure(
+                    report_dir=inputs.report_dir,
+                    symbol=symbol,
+                    strategy_family=family,
+                    error=exc,
+                )
+        deps.materialize_empty_sell_put_artifacts_fn(
+            report_dir=inputs.report_dir,
+            symbol_lower=symbol_lower,
+        )
+        deps.materialize_empty_combo_yield_artifacts_fn(
+            report_dir=inputs.report_dir,
+            symbol_lower=symbol_lower,
+        )
+        deps.materialize_empty_sell_call_artifacts_fn(
+            report_dir=inputs.report_dir,
+            symbol_lower=symbol_lower,
+        )
+        if want_put:
+            _unavailable_summary(
+                deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
+            )
+        if want_yield_enhancement:
+            _unavailable_summary(
+                deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg)
+            )
+        if want_call:
+            _unavailable_summary(
+                deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg)
+            )
+        if inputs.candidate_capture_status_sink_fn is not None:
+            for strategy_mode, enabled in (("put", configured_put), ("call", configured_call)):
+                if enabled:
+                    inputs.candidate_capture_status_sink_fn(
+                        {
+                            "symbol": symbol.upper(),
+                            "strategy_mode": strategy_mode,
+                            "status": "failed",
+                            "reason": "required_data_snapshot_unavailable",
+                            "quote_snapshot_id": exc.snapshot_id,
+                            "quote_receipt_relpath": exc.receipt_relpath,
+                        }
+                    )
+        for family, enabled in (
+            ("sell_put", want_put),
+            ("combo_yield", want_yield_enhancement),
+            ("covered_call", want_call),
+        ):
+            if enabled:
+                _publish_status(
+                    family=family,
+                    status="unavailable",
+                    reason="required_data_snapshot_unavailable",
+                    snapshot_id=exc.snapshot_id,
+                    receipt_relpath=exc.receipt_relpath,
+                )
+        return summary_rows
 
     if bool(inputs.fetch_only):
         return []
@@ -272,30 +426,38 @@ def run_symbol_monitoring(
 
     if want_put:
         try:
+            put_result = deps.run_sell_put_scan_fn(
+                py=inputs.py,
+                base=inputs.base,
+                sym=symbol,
+                symbol=symbol,
+                symbol_lower=symbol_lower,
+                symbol_cfg=symbol_cfg,
+                sp=sp,
+                top_n=inputs.top_n,
+                required_data_dir=inputs.required_data_dir,
+                report_dir=inputs.report_dir,
+                timeout_sec=inputs.timeout_sec,
+                is_scheduled=bool(inputs.is_scheduled),
+                exchange_rate_converter=exchange_rate_converter,
+                portfolio_ctx=inputs.portfolio_ctx,
+                global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
+                run_sell_put=True,
+                risk_policy_version=inputs.risk_policy_version,
+                quote_snapshot_id=resolved_quote_snapshot_id or None,
+                all_decisions_sink_fn=put_capture_sink,
+            )
             _append_summary_result(
                 summary_rows,
-                deps.run_sell_put_scan_fn(
-                    py=inputs.py,
-                    base=inputs.base,
-                    sym=symbol,
-                    symbol=symbol,
-                    symbol_lower=symbol_lower,
-                    symbol_cfg=symbol_cfg,
-                    sp=sp,
-                    top_n=inputs.top_n,
-                    required_data_dir=inputs.required_data_dir,
-                    report_dir=inputs.report_dir,
-                    timeout_sec=inputs.timeout_sec,
-                    is_scheduled=bool(inputs.is_scheduled),
-                    exchange_rate_converter=exchange_rate_converter,
-                    portfolio_ctx=inputs.portfolio_ctx,
-                    global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
-                    global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
-                    run_sell_put=True,
-                    risk_policy_version=inputs.risk_policy_version,
-                    quote_snapshot_id=resolved_quote_snapshot_id or None,
-                    all_decisions_sink_fn=put_capture_sink,
-                )
+                put_result,
+            )
+            _publish_status(
+                family="sell_put",
+                status="completed",
+                candidate_count=_summary_candidate_count(put_result),
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
             )
             if configured_put:
                 _report_capture(
@@ -325,6 +487,13 @@ def run_symbol_monitoring(
             _append_summary_result(
                 summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg)
             )
+            _publish_status(
+                family="sell_put",
+                status="failed",
+                reason="sell_put_scan_failed",
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
+            )
             if configured_put:
                 _report_capture(
                     strategy_mode="put",
@@ -345,24 +514,32 @@ def run_symbol_monitoring(
 
     if want_yield_enhancement:
         try:
+            combo_result = deps.run_combo_yield_scan_fn(
+                base=inputs.base,
+                sym=symbol,
+                symbol=symbol,
+                symbol_lower=symbol_lower,
+                symbol_cfg=symbol_cfg,
+                sell_put_cfg=market_sp,
+                top_n=inputs.top_n,
+                required_data_dir=inputs.required_data_dir,
+                report_dir=inputs.report_dir,
+                is_scheduled=bool(inputs.is_scheduled),
+                exchange_rate_converter=exchange_rate_converter,
+                portfolio_ctx=inputs.portfolio_ctx,
+                global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
+                global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
+            )
             _append_summary_result(
                 summary_rows,
-                deps.run_combo_yield_scan_fn(
-                    base=inputs.base,
-                    sym=symbol,
-                    symbol=symbol,
-                    symbol_lower=symbol_lower,
-                    symbol_cfg=symbol_cfg,
-                    sell_put_cfg=market_sp,
-                    top_n=inputs.top_n,
-                    required_data_dir=inputs.required_data_dir,
-                    report_dir=inputs.report_dir,
-                    is_scheduled=bool(inputs.is_scheduled),
-                    exchange_rate_converter=exchange_rate_converter,
-                    portfolio_ctx=inputs.portfolio_ctx,
-                    global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
-                    global_sell_put_event_risk=(symbol_cfg.get("_global_sell_put_event_risk") or {}),
-                )
+                combo_result,
+            )
+            _publish_status(
+                family="combo_yield",
+                status="completed",
+                candidate_count=_summary_candidate_count(combo_result),
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
             )
         except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
@@ -379,6 +556,13 @@ def run_symbol_monitoring(
                 summary_rows,
                 deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg),
             )
+            _publish_status(
+                family="combo_yield",
+                status="failed",
+                reason="combo_yield_scan_failed",
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
+            )
     elif not want_yield_enhancement:
         deps.materialize_empty_combo_yield_artifacts_fn(
             report_dir=inputs.report_dir, symbol_lower=symbol_lower
@@ -387,31 +571,39 @@ def run_symbol_monitoring(
     if want_call:
         option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}
         try:
+            call_result = deps.run_sell_call_scan_fn(
+                py=inputs.py,
+                base=inputs.base,
+                symbol=symbol,
+                symbol_lower=symbol_lower,
+                symbol_cfg=symbol_cfg,
+                cc=cc,
+                top_n=inputs.top_n,
+                required_data_dir=inputs.required_data_dir,
+                report_dir=inputs.report_dir,
+                timeout_sec=inputs.timeout_sec,
+                is_scheduled=bool(inputs.is_scheduled),
+                stock=stock,
+                portfolio_ctx=inputs.portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+                locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
+                locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
+                global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
+                global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
+                risk_policy_version=inputs.risk_policy_version,
+                quote_snapshot_id=resolved_quote_snapshot_id or None,
+                all_decisions_sink_fn=call_capture_sink,
+            )
             _append_summary_result(
                 summary_rows,
-                deps.run_sell_call_scan_fn(
-                    py=inputs.py,
-                    base=inputs.base,
-                    symbol=symbol,
-                    symbol_lower=symbol_lower,
-                    symbol_cfg=symbol_cfg,
-                    cc=cc,
-                    top_n=inputs.top_n,
-                    required_data_dir=inputs.required_data_dir,
-                    report_dir=inputs.report_dir,
-                    timeout_sec=inputs.timeout_sec,
-                    is_scheduled=bool(inputs.is_scheduled),
-                    stock=stock,
-                    portfolio_ctx=inputs.portfolio_ctx,
-                    exchange_rate_converter=exchange_rate_converter,
-                    locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
-                    locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
-                    global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
-                    global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
-                    risk_policy_version=inputs.risk_policy_version,
-                    quote_snapshot_id=resolved_quote_snapshot_id or None,
-                    all_decisions_sink_fn=call_capture_sink,
-                )
+                call_result,
+            )
+            _publish_status(
+                family="covered_call",
+                status="completed",
+                candidate_count=_summary_candidate_count(call_result),
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
             )
             if configured_call:
                 _report_capture(
@@ -442,6 +634,13 @@ def run_symbol_monitoring(
             _append_summary_result(
                 summary_rows,
                 deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
+            )
+            _publish_status(
+                family="covered_call",
+                status="failed",
+                reason="covered_call_scan_failed",
+                snapshot_id=resolved_quote_snapshot_id,
+                receipt_relpath=quote_receipt_relpath,
             )
             if configured_call:
                 _report_capture(

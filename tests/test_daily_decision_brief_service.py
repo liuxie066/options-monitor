@@ -835,6 +835,97 @@ def test_prefetch_symbol_failure_is_a_local_gap_not_account_blocker(tmp_path: Pa
     assert any(item["contract_symbol"] == "PDD_VALID" for item in brief["actions"])
 
 
+def test_canonical_prefetch_shape_projects_one_symbol_gap_without_duplicate_aggregate(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame([_put_row(symbol="PDD", contract="PDD_VALID")]).to_csv(
+        account_dir / "pdd_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    state_dir = account_dir / "state"
+    (state_dir / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "errors": 1,
+                "symbols": [
+                    {"symbol": "NVDA", "status": "error"},
+                    {"symbol": "PDD", "status": "ok"},
+                ],
+                "results": {"NVDA": "empty_chain", "PDD": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+    matching = [
+        item
+        for item in brief["data_gaps"]
+        if item.get("symbol") == "NVDA"
+        and item.get("reason") == "empty_chain"
+    ]
+
+    assert len(matching) == 1
+    assert not any(
+        item.get("reason") == "required_data_prefetch_errors"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_status_index_treats_completed_zero_as_available_with_partial_failure(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=["symbol", "contract_symbol"]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    (account_dir / "nvda_sell_call_candidates.csv").write_bytes(b"\n")
+    (account_dir / "strategy_scan_status_index.v1.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "strategy_scan_status_index.v1",
+                "run_id": "run-1",
+                "account": "lx",
+                "items": [
+                    {
+                        "market": "US",
+                        "symbol": "NVDA",
+                        "strategy_family": "sell_put",
+                        "status": "completed",
+                        "candidate_count": 0,
+                        "source_status_path": "nvda_sell_put_scan_status.json",
+                    },
+                    {
+                        "market": "US",
+                        "symbol": "NVDA",
+                        "strategy_family": "covered_call",
+                        "status": "unavailable",
+                        "reason": "empty_chain",
+                        "source_status_path": "nvda_covered_call_scan_status.json",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    brief = _assemble(tmp_path)
+
+    assert brief["actionability"] == "live_actionable"
+    assert brief["status"] == "degraded"
+    assert not any(
+        "candidate_strategy_execution_failed" in str(item.get("reason"))
+        for item in brief["actions"]
+    )
+    assert any(
+        item.get("strategy_family") == "covered_call"
+        and item.get("reason") == "empty_chain"
+        for item in brief["data_gaps"]
+    )
+
+
 def test_rejection_summary_is_market_qualified(tmp_path: Path) -> None:
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,

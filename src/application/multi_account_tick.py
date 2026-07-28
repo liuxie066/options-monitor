@@ -542,6 +542,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     tick_metrics['accounts'].extend(account_execution.account_metrics)
+    tick_metrics["required_data_prefetch_invocation_count"] = (
+        account_execution.prefetch_invocation_count
+    )
+    tick_metrics["required_data_snapshot_status"] = (
+        account_execution.snapshot_status
+    )
+    tick_metrics["required_data_snapshot_manifest_sha256"] = (
+        account_execution.snapshot_manifest_sha256
+    )
+    tick_metrics["prepared_portfolio_contexts"] = list(
+        account_execution.prepared_context_metrics
+    )
     results.extend(account_execution.results)
 
     return run_tick_notification_flow(

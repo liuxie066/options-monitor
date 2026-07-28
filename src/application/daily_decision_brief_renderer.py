@@ -127,6 +127,22 @@ def build_daily_brief_user_view(
     strategy_failure_labels = _strategy_failure_labels(brief)
     if strategy_failure_labels:
         reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
+    evidence_holds = [
+        item
+        for item in brief.get("actions") or []
+        if isinstance(item, Mapping)
+        and _lower(item.get("evidence_state")) == "unavailable"
+        and _lower(item.get("state")) == "observe"
+    ]
+    for item in evidence_holds:
+        symbol = _upper(item.get("symbol")) or "相关标的"
+        strategy = _STRATEGY_LABELS.get(
+            _lower(item.get("strategy_family")),
+            "候选",
+        )
+        reminders.append(
+            f"{symbol} {strategy} 行情证据不可用，待恢复（不是当前推荐）"
+        )
     view = {
         "account": account,
         "market": market,
@@ -142,7 +158,11 @@ def build_daily_brief_user_view(
         "candidate_empty_summary": (
             "本轮候选结果不完整，部分策略扫描失败。"
             if strategy_failure_labels
-            else "本轮暂无符合条件的候选。"
+            else (
+                "本轮行情证据不可用，原候选仅保留待恢复身份，不是当前推荐。"
+                if evidence_holds
+                else "本轮暂无符合条件的候选。"
+            )
         ),
         "positions": position_views,
         "position_total": position_total,
@@ -1304,6 +1324,16 @@ def _change_summaries(diff: Mapping[str, Any], *, market: str) -> list[str]:
                     invalidated_candidate_labels.append(label)
             else:
                 grouped[(change_type, family)] = grouped.get((change_type, family), 0) + 1
+        elif change_type == "candidate_evidence_unavailable":
+            label = _change_contract_label(action, market=market)
+            summaries.append(
+                f"较上一轮：{label or '候选'} 行情证据不可用，待恢复"
+            )
+        elif change_type == "candidate_evidence_recovered":
+            label = _change_contract_label(action, market=market)
+            summaries.append(
+                f"较上一轮：{label or '候选'} 行情证据已恢复"
+            )
         elif change_type in {
             "candidate_priority_upgraded_to_p0",
             "candidate_priority_downgraded",
