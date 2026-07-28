@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.6.4 - 2026-07-28
+
+### New Features
+- Added an automatic daily Position Advice promotion-evidence refresh that discovers the exact current v2-shadow plan generation, computes safety counters from immutable plans, runs deterministic critical replays, and publishes the fixed gate without performing the final v2 authority CAS.
+
+### Improvements
+- Added promotion refresh/status CLI operations, preserved exact shadow sources in a compressed content-addressed archive without pinning complete output runs, and surfaced the exact passing evidence path and expected policy hash for the final human CAS.
+
 ## 1.6.3 - 2026-07-28
 
 ### Improvements

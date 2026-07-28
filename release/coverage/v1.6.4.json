@@ -1,0 +1,32 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.6.4",
+  "base": {
+    "tag": "v1.6.3",
+    "commit": "7da625964456c37b25effec6bc6bcf691bb157dc"
+  },
+  "reviewed_head": "8ac9b75f0e663cd4700dac1beacf1138fd82d8c4",
+  "commits": [
+    {
+      "sha": "8ac9b75f0e663cd4700dac1beacf1138fd82d8c4",
+      "subject": "feat: automate position advice promotion evidence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added an automatic daily Position Advice promotion-evidence refresh that discovers the exact current v2-shadow plan generation, computes safety counters from immutable plans, runs deterministic critical replays, and publishes the fixed gate without performing the final v2 authority CAS.",
+      "commits": [
+        "8ac9b75f0e663cd4700dac1beacf1138fd82d8c4"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added promotion refresh/status CLI operations, preserved exact shadow sources in a compressed content-addressed archive without pinning complete output runs, and surfaced the exact passing evidence path and expected policy hash for the final human CAS.",
+      "commits": [
+        "8ac9b75f0e663cd4700dac1beacf1138fd82d8c4"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
