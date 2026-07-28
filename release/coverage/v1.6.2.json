@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.6.2",
+  "base": {
+    "tag": "v1.6.1",
+    "commit": "2710d03d14841123c6217371e0456df20a25068e"
+  },
+  "reviewed_head": "8fe7ec43d456f423894e999937b3ba07acd65bfb",
+  "commits": [
+    {
+      "sha": "8fe7ec43d456f423894e999937b3ba07acd65bfb",
+      "subject": "fix: unblock position advice shadow bootstrap"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed first-use Position Advice authority binding to validate production nested portfolio receipts and made repeated quote observations within one multi-account run publish distinct immutable snapshots, so every account can enter and accumulate v2 shadow evidence.",
+      "commits": [
+        "8fe7ec43d456f423894e999937b3ba07acd65bfb"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
