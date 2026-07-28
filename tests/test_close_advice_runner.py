@@ -116,6 +116,96 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
     assert rows[0]["strategy_exit_mode"] == "standard_short_option"
 
 
+def test_run_close_advice_preserves_last_good_report_when_context_is_malformed(
+    tmp_path: Path,
+) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text("{not-json", encoding="utf-8")
+    out_dir = tmp_path / "reports"
+    out_dir.mkdir()
+    csv_path = out_dir / "close_advice.csv"
+    text_path = out_dir / "close_advice.txt"
+    csv_path.write_text("last-known-good-csv", encoding="utf-8")
+    text_path.write_text("last-known-good-text", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing or malformed"):
+        run_close_advice(
+            config={"close_advice": {"enabled": True}},
+            context_path=ctx_path,
+            required_data_root=tmp_path / "required_data",
+            output_dir=out_dir,
+            base_dir=Path.cwd(),
+        )
+
+    assert csv_path.read_text(encoding="utf-8") == "last-known-good-csv"
+    assert text_path.read_text(encoding="utf-8") == "last-known-good-text"
+
+
+def test_run_close_advice_rejects_unknown_quote_provenance_for_current_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "context_status": "available",
+        "filters": {"account": "lx"},
+        "open_positions_min": [
+            {
+                "record_id": "lot-nvda-current",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration": "2026-05-15",
+            }
+        ],
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context), encoding="utf-8")
+    parsed = tmp_path / "required_data" / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 29,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=ctx_path,
+        required_data_root=tmp_path / "required_data",
+        output_dir=tmp_path / "reports",
+        base_dir=Path.cwd(),
+        markets_to_run=["US"],
+    )
+
+    assert result["notify_rows"] == 0
+    assert result["evaluable_rows"] == 0
+    assert result["quote_freshness"]["enforced"] is True
+    assert (
+        result["quote_freshness"]["symbols"]["NVDA"]["reason"]
+        == "quote_provenance_missing"
+    )
+    row = pd.read_csv(tmp_path / "reports" / "close_advice.csv").iloc[0]
+    assert row["evaluation_status"] == "quote_unusable"
+
+
 def test_run_close_advice_keeps_distinct_lot_ids_for_same_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

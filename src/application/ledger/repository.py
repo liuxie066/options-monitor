@@ -588,23 +588,29 @@ class SQLiteOptionPositionsRepository:
             active_conn.execute(
                 """
                 INSERT INTO trade_lifecycle_cases (
-                  case_id, case_key, account, symbol, option_type, position_side,
-                  strike, expiration_ymd, status, decision_type, target_lot_ids_json,
-                  pending_until_ms, created_at_ms, updated_at_ms, raw_json
+                  case_id, case_key, account, broker, symbol, option_type, position_side,
+                  strike, expiration_ymd, contract_key, status, decision_type,
+                  target_lot_ids_json, target_contracts_by_lot_json,
+                  observation_start_ms, pending_until_ms, created_at_ms, updated_at_ms,
+                  raw_json
                 ) VALUES (
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(case_id) DO UPDATE SET
                   case_key = excluded.case_key,
                   account = excluded.account,
+                  broker = excluded.broker,
                   symbol = excluded.symbol,
                   option_type = excluded.option_type,
                   position_side = excluded.position_side,
                   strike = excluded.strike,
                   expiration_ymd = excluded.expiration_ymd,
+                  contract_key = excluded.contract_key,
                   status = excluded.status,
                   decision_type = excluded.decision_type,
                   target_lot_ids_json = excluded.target_lot_ids_json,
+                  target_contracts_by_lot_json = excluded.target_contracts_by_lot_json,
+                  observation_start_ms = excluded.observation_start_ms,
                   pending_until_ms = excluded.pending_until_ms,
                   updated_at_ms = excluded.updated_at_ms,
                   raw_json = excluded.raw_json
@@ -613,14 +619,26 @@ class SQLiteOptionPositionsRepository:
                     case_id,
                     case_key,
                     str(payload.get("account") or "").strip().lower(),
+                    str(payload.get("broker") or "").strip().lower() or None,
                     str(payload.get("symbol") or "").strip().upper(),
                     (str(payload.get("option_type") or "").strip().lower() or None),
                     (str(payload.get("position_side") or "").strip().lower() or None),
                     float(payload["strike"]) if payload.get("strike") is not None else None,
                     (str(payload.get("expiration_ymd") or "").strip() or None),
+                    (str(payload.get("contract_key") or "").strip() or None),
                     str(payload.get("status") or "pending").strip().lower(),
                     (str(payload.get("decision_type") or "").strip().lower() or None),
                     json.dumps(list(payload.get("target_lot_ids") or []), ensure_ascii=False, sort_keys=True),
+                    json.dumps(
+                        dict(payload.get("target_contracts_by_lot") or {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    (
+                        int(payload["observation_start_ms"])
+                        if payload.get("observation_start_ms") is not None
+                        else None
+                    ),
                     int(payload["pending_until_ms"]) if payload.get("pending_until_ms") is not None else None,
                     created_at_ms,
                     ts,

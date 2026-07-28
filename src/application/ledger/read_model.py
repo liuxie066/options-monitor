@@ -175,17 +175,11 @@ def canonicalize_position_lot_record(item: dict[str, Any]) -> dict[str, Any]:
 
 def load_position_lot_records(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:
     _ = base
-    try:
-        primary_repo = require_option_positions_read_repo(repo)
-    except Exception:
-        return []
-    try:
-        projected = primary_repo.list_position_lots()
-    except Exception:
-        return []
-    if isinstance(projected, list):
-        return projected
-    return []
+    primary_repo = require_option_positions_read_repo(repo)
+    projected = primary_repo.list_position_lots()
+    if not isinstance(projected, list):
+        raise TypeError("position lot repository returned a non-list payload")
+    return projected
 
 
 def load_canonical_position_lot_records(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:

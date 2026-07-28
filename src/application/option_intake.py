@@ -316,6 +316,11 @@ def main() -> int:
     ap.add_argument('--apply', action='store_true', help='request a write; trade-event writes also require --confirm or --yes')
     ap.add_argument('--confirm', action='store_true', help='confirm high-risk trade-event writes')
     ap.add_argument('--yes', action='store_true', help='non-interactive confirmation; emits an audit_id')
+    ap.add_argument(
+        '--request-id',
+        default=None,
+        help='stable human request identity; required for open writes and reused on retry',
+    )
     args = ap.parse_args()
 
     base = repo_base
@@ -350,6 +355,9 @@ def main() -> int:
         print("option_intake writes trade_events; use --confirm or --yes to apply")
         return 2
     write_requested = bool(control["write_requested"])
+    if action == "open" and write_requested and not str(args.request_id or "").strip():
+        print("manual open writes require --request-id so retries remain idempotent")
+        return 2
 
     runtime_config: dict[str, Any] | None = None
     cfg_path: Path | None = None
@@ -491,6 +499,7 @@ def main() -> int:
                 note=f"user_input: {parsed.get('raw')}",
                 opened_at_ms=intent.trade_time_ms,
                 dry_run=not write_requested,
+                request_id=str(args.request_id or "option-intake-preview"),
             )
         except ValueError as exc:
             print(str(exc))

@@ -25,7 +25,7 @@ from src.application.ledger.api import (
     record_lifecycle_exercise,
     record_lifecycle_expire_close,
 )
-from src.application.trades.deal_identity import active_ledger_events
+from src.application.trades.deal_identity import active_ledger_events, broker_deal_key
 from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
@@ -33,7 +33,12 @@ from src.application.trades.normalizer import NormalizedTradeDeal
 
 
 ASSIGNMENT_WAITING_STATUS = "waiting_settlement_evidence"
-PENDING_STATUSES = {"pending", ASSIGNMENT_WAITING_STATUS, "needs_review"}
+PENDING_STATUSES = {
+    "pending",
+    ASSIGNMENT_WAITING_STATUS,
+    "needs_review",
+    "partially_resolved",
+}
 FINAL_STATUSES = {"ledger_written"}
 EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
 
@@ -101,7 +106,8 @@ def _resolve_zero_price_option_close(
             operations=[_lifecycle_operation("lifecycle_conflict", diagnostics)],
             diagnostics={**diagnostics, "retryable": False},
         )
-    stock_evidence = _find_matching_stock_evidence(repo, option_case=case)
+    stock_evidences = _find_matching_stock_evidences(repo, option_case=case)
+    stock_evidence = stock_evidences[0] if stock_evidences else None
     adopted_events = _find_adoptable_expire_close_events(repo, case=case)
     if adopted_events and stock_evidence is None:
         target_lot_ids = [
@@ -191,13 +197,41 @@ def _resolve_zero_price_option_close(
             operations=[_lifecycle_operation("lifecycle_pending", diagnostics)],
             diagnostics={**diagnostics, "retryable": True},
         )
-    return _write_lifecycle_close_from_case(
-        repo,
-        case=case,
-        decision_type=str(decision["decision_type"]),
-        option_evidence=evidence,
-        stock_evidence=stock_evidence,
-        apply_changes=True,
+    results = [
+        _write_lifecycle_close_from_case(
+            repo,
+            case=case,
+            decision_type=str(decision["decision_type"]),
+            option_evidence=evidence,
+            stock_evidence=item,
+            apply_changes=True,
+        )
+        for item in stock_evidences
+    ]
+    final = results[-1]
+    if len(results) == 1:
+        return final
+    return LifecycleTradeResolution(
+        handled=True,
+        status=final.status,
+        action=final.action,
+        reason=final.reason,
+        operations=[
+            operation
+            for result in results
+            for operation in result.operations
+        ],
+        diagnostics={
+            **dict(final.diagnostics),
+            "settlement_results": [
+                {
+                    "status": result.status,
+                    "reason": result.reason,
+                    "operation_count": len(result.operations),
+                }
+                for result in results
+            ],
+        },
     )
 
 
@@ -293,6 +327,30 @@ def _write_lifecycle_close_from_case(
     )
     if v2_result is not None:
         return v2_result
+    settlement_contracts = _stock_settlement_contracts(case, stock)
+    case_contracts = int(case.get("contracts") or 0)
+    if settlement_contracts < case_contracts:
+        diagnostics = {
+            "lifecycle_case": case,
+            "option_evidence": option_evidence,
+            "stock_evidence": stock_evidence,
+            "settlement_contracts": settlement_contracts,
+            "case_contracts": case_contracts,
+            "retryable": True,
+        }
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action=normalized_decision,
+            reason="partial_settlement_requires_v2_case",
+            operations=[
+                _lifecycle_operation(
+                    f"{normalized_decision}_waiting_v2_case",
+                    diagnostics,
+                )
+            ],
+            diagnostics=diagnostics,
+        )
     try:
         record_fn = record_lifecycle_assignment if normalized_decision == "assignment" else record_lifecycle_exercise
         ledger_result = record_fn(
@@ -420,7 +478,7 @@ def _write_v2_lifecycle_close_from_case(
         "position_side": case.get("position_side"),
         "strike": case.get("strike"),
         "expiration_ymd": case.get("expiration_ymd"),
-        "contracts": int(case.get("contracts") or 0),
+        "contracts": _stock_settlement_contracts(case, stock_evidence),
         "event_time_ms": int(event_time_ms or 0),
         "currency": raw_option.get("currency"),
         "stock_settlement": {
@@ -454,9 +512,18 @@ def _write_v2_lifecycle_close_from_case(
         "stock_evidence": stock_evidence,
     }
     if result.status in {"applied", "idempotent"}:
+        read_model = (
+            dict(result.lifecycle_read_model)
+            if isinstance(result.lifecycle_read_model, dict)
+            else {}
+        )
+        remaining_by_lot = dict(read_model.get("remaining_contracts_by_lot") or {})
+        partially_resolved = any(
+            int(value or 0) > 0 for value in remaining_by_lot.values()
+        )
         legacy_mirror = _case_with_decision(
             case,
-            status="ledger_written",
+            status="partially_resolved" if partially_resolved else "ledger_written",
             decision_type=decision_type,
             target_lot_ids=[
                 str(item.get("target_lot_id") or "").strip()
@@ -489,7 +556,11 @@ def _write_v2_lifecycle_close_from_case(
             status="applied" if result.status == "applied" else "skipped",
             action=decision_type,
             reason=(
-                f"{decision_type}_recorded_v2"
+                (
+                    f"{decision_type}_partially_recorded_v2"
+                    if partially_resolved
+                    else f"{decision_type}_recorded_v2"
+                )
                 if result.status == "applied"
                 else "lifecycle_already_written_v2"
             ),
@@ -824,7 +895,7 @@ def _evidence_from_deal(
     evidence_type: str,
     case_id: str | None,
 ) -> dict[str, Any]:
-    source_event_id = str(deal.deal_id or "").strip()
+    source_event_id = str(broker_deal_key(deal) or "").strip()
     evidence_id = _stable_id("ev", f"{evidence_type}|{source_event_id or deal.to_dict()}")
     raw = deal.to_dict()
     out = {
@@ -868,16 +939,32 @@ def _get_case_by_key(repo: Any, case_key: str) -> dict[str, Any] | None:
 
 
 def _find_matching_stock_evidence(repo: Any, *, option_case: dict[str, Any]) -> dict[str, Any] | None:
+    rows = _find_matching_stock_evidences(repo, option_case=option_case)
+    return rows[-1] if rows else None
+
+
+def _find_matching_stock_evidences(
+    repo: Any,
+    *,
+    option_case: dict[str, Any],
+) -> list[dict[str, Any]]:
     list_fn = getattr(repo, "list_trade_lifecycle_evidence", None)
     if not callable(list_fn):
-        return None
+        return []
     rows = list_fn(account=option_case.get("account"), symbol=option_case.get("symbol"))
-    for row in reversed(rows):
+    out: list[dict[str, Any]] = []
+    for row in rows:
         if str(row.get("evidence_type") or "") != "stock_settlement_leg":
             continue
         if _stock_matches_lifecycle_close(option_case, row):
-            return dict(row)
-    return None
+            out.append(dict(row))
+    return sorted(
+        out,
+        key=lambda item: (
+            int(item.get("trade_time_ms") or 0),
+            str(item.get("evidence_id") or ""),
+        ),
+    )
 
 
 def _find_matching_option_case(
@@ -1166,11 +1253,18 @@ def _stock_matches_lifecycle_contract_terms(
     if side != expected_side:
         return False
     try:
-        expected_qty = int(case.get("contracts") or 0) * int(case.get("multiplier") or 100)
+        multiplier = int(case.get("multiplier") or 100)
+        expected_qty = int(case.get("contracts") or 0) * multiplier
         actual_qty = abs(int(stock_evidence.get("stock_qty") or 0))
     except Exception:
         return False
-    if expected_qty <= 0 or actual_qty != expected_qty:
+    if (
+        expected_qty <= 0
+        or actual_qty <= 0
+        or actual_qty > expected_qty
+        or multiplier <= 0
+        or actual_qty % multiplier != 0
+    ):
         return False
     try:
         strike = float(case.get("strike"))
@@ -1179,6 +1273,17 @@ def _stock_matches_lifecycle_contract_terms(
         return False
     tolerance = 0.01 if strict_price else max(0.01, abs(strike) * 0.001)
     return abs(price - strike) <= tolerance
+
+
+def _stock_settlement_contracts(
+    case: dict[str, Any],
+    stock_evidence: dict[str, Any],
+) -> int:
+    multiplier = int(case.get("multiplier") or 100)
+    shares = abs(int(stock_evidence.get("stock_qty") or 0))
+    if multiplier <= 0 or shares <= 0 or shares % multiplier != 0:
+        raise ValueError("stock settlement shares must be a positive contract multiple")
+    return shares // multiplier
 
 
 def _stock_trade_time_ms(stock_evidence: dict[str, Any] | None) -> int:

@@ -70,6 +70,8 @@ def _position_lot(
             "strike": strike,
             "multiplier": 100,
             "expiration": exp_ms,
+            "opened_at": 1,
+            "premium": 1.0,
             "note": "",
         },
     }

@@ -115,6 +115,7 @@ def assemble_daily_decision_brief(
         base=base_path,
         state_dir=state_dir,
         account=account_norm,
+        market=market_norm,
         config=config_map,
         now_utc=effective_now,
     )
@@ -327,7 +328,10 @@ def assemble_daily_decision_brief(
     if advice_authority["mode"] == "v2":
         for row in position_advice_rows:
             positions.append(_position_advice_position_view(row))
-            if row.get("actionable") is True:
+            if (
+                row.get("actionable") is True
+                or row.get("human_review_required") is True
+            ):
                 actions.append(
                     _position_advice_action(row, account=account_norm)
                 )
@@ -335,6 +339,13 @@ def assemble_daily_decision_brief(
         for row in close_rows:
             positions.append(_position_view(row))
             actions.append(_close_action(row, account=account_norm))
+        for row in advice_authority.get("human_review_rows") or []:
+            if not isinstance(row, Mapping):
+                continue
+            positions.append(_position_advice_position_view(row))
+            actions.append(
+                _position_advice_action(row, account=account_norm)
+            )
 
     portfolio_context = _load_json_artifact(
         path=state_dir / "portfolio_context.json",
@@ -753,6 +764,7 @@ def _daily_brief_advice_authority(
     base: Path,
     state_dir: Path,
     account: str,
+    market: str,
     config: Mapping[str, Any],
     now_utc: datetime,
 ) -> dict[str, Any]:
@@ -809,6 +821,7 @@ def _daily_brief_advice_authority(
             normalized_portfolio_source=source,
             portfolio_account_identity_hash=identity_hash,
             data_config_path=data_config_path,
+            requested_market=market,
             now=now_utc,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -833,6 +846,12 @@ def _daily_brief_advice_authority(
         "row_count": result.get("row_count"),
         "actionable_count": result.get("actionable_count"),
         "model_actionable_count": result.get("model_actionable_count"),
+        "model_trade_actionable_count": result.get(
+            "model_trade_actionable_count"
+        ),
+        "human_review_required_count": result.get(
+            "human_review_required_count"
+        ),
     }
     authority_common = {
         "resolved_mode": mode or None,
@@ -841,12 +860,27 @@ def _daily_brief_advice_authority(
         "normalized_portfolio_source": source,
         "portfolio_account_identity_hash": identity_hash,
     }
+    available = (
+        result.get("availability_status") == "available"
+        and freshness == "fresh"
+    )
+    human_review_rows = (
+        [
+            dict(item)
+            for item in result.get("rows") or []
+            if isinstance(item, Mapping)
+            and item.get("human_review_required") is True
+        ]
+        if available
+        else []
+    )
     if mode == "v1":
         return {
             "mode": "v1",
             "available": True,
             "blocker": None,
             "rows": [],
+            "human_review_rows": human_review_rows,
             "preview": preview,
             **authority_common,
         }
@@ -856,6 +890,7 @@ def _daily_brief_advice_authority(
             "available": True,
             "blocker": None,
             "rows": [],
+            "human_review_rows": human_review_rows,
             "preview": preview,
             **authority_common,
         }
@@ -868,10 +903,6 @@ def _daily_brief_advice_authority(
             "preview": preview,
             **authority_common,
         }
-    available = (
-        result.get("availability_status") == "available"
-        and freshness == "fresh"
-    )
     return {
         "mode": "v2",
         "available": available,
@@ -887,6 +918,7 @@ def _daily_brief_advice_authority(
             if available
             else []
         ),
+        "human_review_rows": human_review_rows,
         "portfolio_plan_id": result.get("portfolio_plan_id"),
         "preview": preview,
         **authority_common,
@@ -1707,6 +1739,13 @@ def _position_advice_action(
         "title": action_labels.get(recommendation, "持仓建议"),
         "reason": "; ".join(reasons),
         "recommendation": recommendation,
+        "model_trade_actionable": (
+            row.get("model_trade_actionable") is True
+        ),
+        "human_review_required": (
+            row.get("human_review_required") is True
+        ),
+        "action_scope": row.get("action_scope"),
         "portfolio_plan_id": row.get("portfolio_plan_id"),
         "execution_order": row.get("execution_order"),
         "depends_on": list(row.get("depends_on") or []),
@@ -1751,6 +1790,8 @@ def _position_advice_position_view(
             "group_structure_state",
             "recommendation",
             "actionable",
+            "model_trade_actionable",
+            "human_review_required",
             "action_scope",
             "reason_codes",
             "best_candidate",

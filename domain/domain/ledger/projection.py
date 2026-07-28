@@ -84,6 +84,7 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
         seen_event_ids.add(event.event_id)
         validated_events.append((event, event_diagnostics))
 
+    _append_target_event_graph_diagnostics(validated_events)
     voided_event_ids = {
         event.target_event_id
         for event, event_diagnostics in validated_events
@@ -139,6 +140,68 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
         allocations=allocations,
         diagnostics=diagnostics,
     )
+
+
+def _append_target_event_graph_diagnostics(
+    validated_events: list[tuple[TradeEvent, list[LedgerDiagnostic]]],
+) -> None:
+    events_by_id: dict[str, list[TradeEvent]] = {}
+    for event, _diagnostics in validated_events:
+        if event.event_id:
+            events_by_id.setdefault(event.event_id, []).append(event)
+    forbidden_target_types = {"void", "repair", "verification"}
+    for event, diagnostics in validated_events:
+        if event.event_type not in {"void", "repair"} or not event.target_event_id:
+            continue
+        target_id = event.target_event_id
+        if target_id == event.event_id:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_self_reference",
+                    message="event cannot target itself",
+                    details={"target_event_id": target_id},
+                )
+            )
+            continue
+        targets = events_by_id.get(target_id, [])
+        if not targets:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_not_found",
+                    message="target_event_id was not found",
+                    details={"target_event_id": target_id},
+                )
+            )
+            continue
+        if len(targets) != 1:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_ambiguous",
+                    message="target_event_id is not unique",
+                    details={"target_event_id": target_id, "match_count": len(targets)},
+                )
+            )
+            continue
+        target = targets[0]
+        if target.event_type in forbidden_target_types:
+            diagnostics.append(
+                LedgerDiagnostic(
+                    event_id=event.event_id,
+                    severity="error",
+                    code="target_event_type_invalid",
+                    message="void/repair cannot target a control or verification event",
+                    details={
+                        "target_event_id": target_id,
+                        "target_event_type": target.event_type,
+                    },
+                )
+            )
 
 
 def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]:

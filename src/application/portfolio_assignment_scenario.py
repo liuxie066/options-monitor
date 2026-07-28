@@ -193,14 +193,31 @@ def _snapshot_payload(
     }
 
 
-def _unavailable_evidence(message: str) -> dict[str, Any]:
+def _unavailable_evidence(
+    message: str,
+    *,
+    accounts: Sequence[str],
+) -> dict[str, Any]:
     return {
         "schema_version": PORTFOLIO_EVIDENCE_VERSION,
         "success": True,
         "status": "unavailable",
+        "freshness": {
+            "status": "unavailable",
+            "trust_status": "unavailable",
+            "observed_at_utc": None,
+            "dataset_ids": [],
+            "reason_codes": ["PORTFOLIO_EVIDENCE_UNAVAILABLE"],
+        },
+        "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "scope": {
+            "accounts": list(accounts),
+            "reporting_currency": "CNY",
+        },
         "snapshot": {},
         "holdings": [],
         "quotes": [],
+        "account_status": [],
         "warnings": [message],
     }
 
@@ -224,7 +241,8 @@ def query_portfolio_assignment_scenario(
         raise
     except Exception as exc:
         evidence = _unavailable_evidence(
-            f"option position ledger read failed: {exc}"
+            f"option position ledger read failed: {exc}",
+            accounts=normalized_accounts,
         )
         snapshot = _snapshot_payload(
             accounts=normalized_accounts,
@@ -260,7 +278,10 @@ def query_portfolio_assignment_scenario(
     except AssignmentScenarioInputError:
         raise
     except PortfolioEvidenceReadError as exc:
-        evidence = _unavailable_evidence(str(exc))
+        evidence = _unavailable_evidence(
+            str(exc),
+            accounts=normalized_accounts,
+        )
 
     snapshot = _snapshot_payload(
         accounts=normalized_accounts,

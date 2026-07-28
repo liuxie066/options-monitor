@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+import hashlib
+import json
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -64,6 +66,7 @@ from src.application.ledger.repository import (
     require_option_positions_read_repo,
 )
 from src.application.ledger.manual_trades import (
+    assert_manual_request_event_matches,
     existing_manual_close_event_result,
     persist_manual_adjust_event,
     persist_manual_adjust_events,
@@ -123,6 +126,17 @@ def persist_manual_open_event_with_ledger(repo: Any, command: OpenPositionComman
     resolved_command, fields, event = _manual_open_ledger_inputs(command)
     duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, record_id=event.lot_id)
     if duplicate_result is not None:
+        request_id = str(resolved_command.request_id or "").strip()
+        if request_id:
+            assert_manual_request_event_matches(
+                repo,
+                event_id=event.event_id,
+                request_id=request_id,
+                intent_hash=str(
+                    (event.raw_payload or {}).get("manual_request_intent_hash")
+                    or ""
+                ),
+            )
         return OpenLedgerResult(
             result=LedgerWriteResult.from_payload(duplicate_result),
             fields=fields,
@@ -706,6 +720,125 @@ def _manual_assignment_target_resolution(
     return resolve_fifo_close_targets(repo, selector, source="manual_assignment")
 
 
+def _manual_lifecycle_request_intent_hash(
+    event_type: str,
+    *,
+    record_id: str | None,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+) -> str:
+    payload = {
+        "event_type": str(event_type or "").strip().lower(),
+        "record_id": str(record_id or "").strip() or None,
+        "broker": str(broker or "").strip().lower(),
+        "account": str(account or "").strip().lower() or None,
+        "symbol": str(symbol or "").strip().upper() or None,
+        "option_type": str(option_type or "").strip().lower() or None,
+        "position_side": str(position_side or "").strip().lower() or None,
+        "strike": float(strike) if strike is not None else None,
+        "expiration_ymd": str(expiration_ymd or "").strip() or None,
+        "contracts_to_close": int(contracts_to_close),
+        "stock_side": str(stock_side or "").strip().lower(),
+        "stock_qty": int(stock_qty),
+        "stock_price": float(stock_price),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _manual_lifecycle_request_replay(
+    repo: Any,
+    *,
+    event_type: str,
+    request_id: str,
+    intent_hash: str,
+) -> dict[str, Any] | None:
+    list_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_events):
+        return None
+    matches: list[dict[str, Any]] = []
+    for event in list_events():
+        if not isinstance(event, dict):
+            continue
+        raw = event.get("raw_payload")
+        payload = raw if isinstance(raw, dict) else {}
+        if str(payload.get("manual_request_id") or "").strip() == request_id:
+            matches.append(event)
+    if not matches:
+        return None
+    for event in matches:
+        raw = event.get("raw_payload")
+        payload = raw if isinstance(raw, dict) else {}
+        if (
+            str(event.get("event_type") or "").strip().lower() != event_type
+            or str(payload.get("manual_request_intent_hash") or "").strip()
+            != intent_hash
+        ):
+            raise ValueError(f"manual request conflict for request_id={request_id}")
+    matches.sort(
+        key=lambda item: (
+            int(item.get("trade_time_ms") or 0),
+            str(item.get("event_id") or ""),
+        )
+    )
+    first_raw = matches[0].get("raw_payload")
+    first_payload = first_raw if isinstance(first_raw, dict) else {}
+    list_lots = getattr(repo, "list_position_lots", None)
+    lots = list_lots() if callable(list_lots) else []
+    lot_count = len(lots) if isinstance(lots, list) else 0
+    resolution = first_payload.get("close_target_resolution")
+    operations = []
+    for event in matches:
+        raw = event.get("raw_payload")
+        payload = raw if isinstance(raw, dict) else {}
+        operations.append(
+            {
+                "action": event_type,
+                "record_id": payload.get("record_id") or payload.get("target_lot_id"),
+                "contracts_to_close": int(event.get("contracts") or 0),
+                "event_id": event.get("event_id"),
+                "result": {
+                    "event_id": event.get("event_id"),
+                    "record_id": payload.get("record_id") or payload.get("target_lot_id"),
+                    "created": False,
+                    "position_lot_count": lot_count,
+                },
+                "close_target_resolution": resolution,
+                "details": {
+                    "stock_settlement": dict(
+                        payload.get("stock_settlement")
+                        if isinstance(payload.get("stock_settlement"), dict)
+                        else {}
+                    )
+                },
+            }
+        )
+    return {
+        "mode": "applied",
+        "event_type": event_type,
+        "manual_request_id": request_id,
+        "manual_request_intent_hash": intent_hash,
+        "stock_settlement": dict(
+            first_payload.get("stock_settlement")
+            if isinstance(first_payload.get("stock_settlement"), dict)
+            else {}
+        ),
+        "close_target_resolution": dict(resolution) if isinstance(resolution, dict) else {},
+        "operations": operations,
+        "result": operations[0]["result"],
+        "idempotent_duplicate": True,
+    }
+
+
 def _validate_lifecycle_stock_settlement(
     repo: Any,
     *,
@@ -817,6 +950,7 @@ def preview_manual_assignment(
     stock_qty: int,
     stock_price: float,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     resolution = _manual_assignment_target_resolution(
         repo,
@@ -860,9 +994,31 @@ def preview_manual_assignment(
                 details={"stock_settlement": stock_settlement},
             ).to_payload()
         )
+    request_id_value = str(request_id or "").strip()
+    intent_hash = (
+        _manual_lifecycle_request_intent_hash(
+            "assignment",
+            record_id=record_id,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            position_side=position_side,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+            contracts_to_close=contracts_to_close,
+            stock_side=stock_side,
+            stock_qty=stock_qty,
+            stock_price=stock_price,
+        )
+        if request_id_value
+        else None
+    )
     return {
         "mode": "dry_run",
         "event_type": "assignment",
+        "manual_request_id": request_id_value or None,
+        "manual_request_intent_hash": intent_hash,
         "stock_settlement": stock_settlement,
         "close_target_resolution": resolution.to_dict(),
         "operations": operations,
@@ -885,7 +1041,37 @@ def record_manual_assignment(
     stock_qty: int,
     stock_price: float,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id_value = str(request_id or "").strip()
+    intent_hash = (
+        _manual_lifecycle_request_intent_hash(
+            "assignment",
+            record_id=record_id,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            position_side=position_side,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+            contracts_to_close=contracts_to_close,
+            stock_side=stock_side,
+            stock_qty=stock_qty,
+            stock_price=stock_price,
+        )
+        if request_id_value
+        else None
+    )
+    if request_id_value and intent_hash:
+        replay = _manual_lifecycle_request_replay(
+            repo,
+            event_type="assignment",
+            request_id=request_id_value,
+            intent_hash=intent_hash,
+        )
+        if replay is not None:
+            return replay
     preview = preview_manual_assignment(
         repo,
         record_id=record_id,
@@ -901,6 +1087,7 @@ def record_manual_assignment(
         stock_qty=stock_qty,
         stock_price=stock_price,
         as_of_ms=as_of_ms,
+        request_id=request_id_value or None,
     )
     resolution = _manual_assignment_target_resolution(
         repo,
@@ -923,6 +1110,8 @@ def record_manual_assignment(
         evidence_ids=[],
         stock_settlement=preview["stock_settlement"],
         source="manual_assignment",
+        manual_request_id=request_id_value or None,
+        manual_request_intent_hash=intent_hash,
     )
     operations = [write.operation.to_payload() for write in writes]
     return {
@@ -985,6 +1174,7 @@ def preview_manual_exercise(
     stock_qty: int,
     stock_price: float,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     resolution = _manual_exercise_target_resolution(
         repo,
@@ -1028,9 +1218,31 @@ def preview_manual_exercise(
                 details={"stock_settlement": stock_settlement},
             ).to_payload()
         )
+    request_id_value = str(request_id or "").strip()
+    intent_hash = (
+        _manual_lifecycle_request_intent_hash(
+            "exercise",
+            record_id=record_id,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            position_side=position_side,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+            contracts_to_close=contracts_to_close,
+            stock_side=stock_side,
+            stock_qty=stock_qty,
+            stock_price=stock_price,
+        )
+        if request_id_value
+        else None
+    )
     return {
         "mode": "dry_run",
         "event_type": "exercise",
+        "manual_request_id": request_id_value or None,
+        "manual_request_intent_hash": intent_hash,
         "stock_settlement": stock_settlement,
         "close_target_resolution": resolution.to_dict(),
         "operations": operations,
@@ -1053,7 +1265,37 @@ def record_manual_exercise(
     stock_qty: int,
     stock_price: float,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id_value = str(request_id or "").strip()
+    intent_hash = (
+        _manual_lifecycle_request_intent_hash(
+            "exercise",
+            record_id=record_id,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            position_side=position_side,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+            contracts_to_close=contracts_to_close,
+            stock_side=stock_side,
+            stock_qty=stock_qty,
+            stock_price=stock_price,
+        )
+        if request_id_value
+        else None
+    )
+    if request_id_value and intent_hash:
+        replay = _manual_lifecycle_request_replay(
+            repo,
+            event_type="exercise",
+            request_id=request_id_value,
+            intent_hash=intent_hash,
+        )
+        if replay is not None:
+            return replay
     preview = preview_manual_exercise(
         repo,
         record_id=record_id,
@@ -1069,6 +1311,7 @@ def record_manual_exercise(
         stock_qty=stock_qty,
         stock_price=stock_price,
         as_of_ms=as_of_ms,
+        request_id=request_id_value or None,
     )
     resolution = _manual_exercise_target_resolution(
         repo,
@@ -1091,6 +1334,8 @@ def record_manual_exercise(
         evidence_ids=[],
         stock_settlement=preview["stock_settlement"],
         source="manual_exercise",
+        manual_request_id=request_id_value or None,
+        manual_request_intent_hash=intent_hash,
     )
     operations = [write.operation.to_payload() for write in writes]
     return {
@@ -1895,10 +2140,21 @@ def record_trade_event_repair(
     }
 
 
-def verify_position_lot_projection(*, base: Any, repo: Any, mode: str = "auto") -> dict[str, Any]:
+def verify_position_lot_projection(
+    *,
+    base: Any,
+    repo: Any,
+    mode: str = "auto",
+    publish_evidence: bool = False,
+) -> dict[str, Any]:
     from src.application.ledger.projection_verify import verify_position_projection
 
-    return verify_position_projection(base=base, repo=repo, mode=mode)
+    return verify_position_projection(
+        base=base,
+        repo=repo,
+        mode=mode,
+        publish_evidence=publish_evidence,
+    )
 
 
 __all__ = [

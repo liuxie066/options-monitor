@@ -8,6 +8,7 @@ from threading import Barrier
 
 import pytest
 
+import src.application.position_advice_authority_service as authority_service
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.position_advice_authority import scope_for
 from domain.domain.position_advice_promotion import (
@@ -421,6 +422,137 @@ def test_apply_writes_receipt_before_valid_policy_and_identity_drift_conflicts(
         "portfolio_source_identity_conflict",
         "portfolio_account_identity_conflict",
     }.issubset(drifted.reason_codes)
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "after_bootstrap",
+        "after_binding",
+        "after_receipt",
+        "before_policy",
+        "after_policy",
+        "during_readback",
+    ),
+)
+def test_first_use_apply_resumes_after_each_durable_crash_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    original_write_once = authority_service._write_json_once_or_verify
+    original_atomic = authority_service.atomic_write_json
+    original_read = authority_service._read_authority_resolution_locked
+    durable_writes = {"count": 0}
+
+    def crashing_write_once(path: Path, payload: dict) -> None:
+        original_write_once(path, payload)
+        durable_writes["count"] += 1
+        expected = {
+            "after_bootstrap": 1,
+            "after_binding": 2,
+            "after_receipt": 3,
+        }.get(crash_point)
+        if expected == durable_writes["count"]:
+            raise RuntimeError(f"crash:{crash_point}")
+
+    def crashing_atomic(path: Path, payload: dict, **kwargs: object) -> None:
+        if Path(path).name != "authority_policy.v1.json":
+            original_atomic(path, payload, **kwargs)
+            return
+        if crash_point == "before_policy":
+            raise RuntimeError(f"crash:{crash_point}")
+        original_atomic(path, payload, **kwargs)
+        if crash_point == "after_policy":
+            raise RuntimeError(f"crash:{crash_point}")
+
+    def crashing_read(**kwargs: object) -> object:
+        if crash_point == "during_readback":
+            raise RuntimeError(f"crash:{crash_point}")
+        return original_read(**kwargs)
+
+    monkeypatch.setattr(
+        authority_service,
+        "_write_json_once_or_verify",
+        crashing_write_once,
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "atomic_write_json",
+        crashing_atomic,
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "_read_authority_resolution_locked",
+        crashing_read,
+    )
+    with pytest.raises(RuntimeError, match=f"crash:{crash_point}"):
+        _apply_first_use(tmp_path)
+
+    monkeypatch.setattr(
+        authority_service,
+        "_write_json_once_or_verify",
+        original_write_once,
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "atomic_write_json",
+        original_atomic,
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "_read_authority_resolution_locked",
+        original_read,
+    )
+    resumed = _apply_first_use(tmp_path)
+
+    assert resumed["status"] in {"applied", "already_applied"}
+    assert resumed["policy"]["generation"] == 1
+    resolution = read_authority_resolution(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+    )
+    assert resolution.resolution_status == "resolved"
+
+
+def test_first_use_bootstrap_rejects_a_different_resume_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_write_once = authority_service._write_json_once_or_verify
+
+    def crash_after_bootstrap(path: Path, payload: dict) -> None:
+        original_write_once(path, payload)
+        raise RuntimeError("crash:after_bootstrap")
+
+    monkeypatch.setattr(
+        authority_service,
+        "_write_json_once_or_verify",
+        crash_after_bootstrap,
+    )
+    with pytest.raises(RuntimeError, match="crash:after_bootstrap"):
+        _apply_first_use(tmp_path)
+    monkeypatch.setattr(
+        authority_service,
+        "_write_json_once_or_verify",
+        original_write_once,
+    )
+
+    plan = plan_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v1",
+        expected_policy_hash="absent",
+        actor="different-operator@example",
+        requested_at=NOW,
+        identity_binding_evidence=_binding(),
+    )
+    assert plan["status"] == "blocked"
+    assert "authority_policy_missing_with_history" in plan["reason_codes"]
 
 
 def test_cas_and_cross_scope_identity_uniqueness_fail_without_write(tmp_path: Path) -> None:

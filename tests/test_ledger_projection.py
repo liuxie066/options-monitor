@@ -199,6 +199,54 @@ def test_projection_ignores_invalid_void_when_deciding_voided_events() -> None:
     assert [item.lot_id for item in result.lots] == ["lot_a", "lot_b"]
 
 
+def test_projection_rejects_missing_self_and_control_event_targets() -> None:
+    key = _key(option_type="put", strike=450.0, expiration_ymd="2026-05-28")
+
+    result = project_trade_events(
+        [
+            _event(
+                event_id="open-a",
+                event_type="open",
+                contract_key=key,
+                contracts=1,
+                event_time_ms=1000,
+                lot_id="lot_a",
+            ),
+            _event(
+                event_id="void-missing",
+                event_type="void",
+                contract_key=key,
+                contracts=0,
+                event_time_ms=2000,
+                target_event_id="missing",
+            ),
+            _event(
+                event_id="void-self",
+                event_type="void",
+                contract_key=key,
+                contracts=0,
+                event_time_ms=3000,
+                target_event_id="void-self",
+            ),
+            _event(
+                event_id="void-control",
+                event_type="void",
+                contract_key=key,
+                contracts=0,
+                event_time_ms=4000,
+                target_event_id="void-missing",
+            ),
+        ]
+    )
+
+    assert {item.code for item in result.diagnostics} == {
+        "target_event_not_found",
+        "target_event_self_reference",
+        "target_event_type_invalid",
+    }
+    assert [item.lot_id for item in result.lots] == ["lot_a"]
+
+
 def test_projection_applies_adjust_patch_to_target_lot_state() -> None:
     current_key = _key(
         account="lx",

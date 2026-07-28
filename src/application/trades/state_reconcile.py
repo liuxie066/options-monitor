@@ -12,9 +12,9 @@ from src.application.ledger.api import (
 )
 from src.application.trades.deal_identity import (
     active_ledger_events,
-    completed_ledger_deal_ids,
+    completed_ledger_deal_keys,
     structured_deal_ids_from_assigned_stock_event,
-    structured_deal_ids_from_ledger_event,
+    structured_deal_keys_from_ledger_event,
 )
 from src.application.trades.state import load_trade_intake_state, upsert_deal_state, write_trade_intake_state
 
@@ -276,7 +276,7 @@ def _ledger_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
     if not callable(list_trade_events):
         return {}
     rows = [item for item in list_trade_events() if isinstance(item, dict)]
-    complete_ids = completed_ledger_deal_ids(rows)
+    complete_ids = completed_ledger_deal_keys(rows)
     out: dict[str, list[dict[str, Any]]] = {}
     for event in active_ledger_events(rows):
         if not isinstance(event, dict):
@@ -344,7 +344,7 @@ def _evidence_source(event: dict[str, Any]) -> str:
 
 
 def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
-    return sorted(structured_deal_ids_from_ledger_event(event))
+    return sorted(structured_deal_keys_from_ledger_event(event))
 
 
 def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
@@ -356,6 +356,9 @@ def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]
 
 
 def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
+    external_key = str(event.get("external_event_key") or "").strip()
+    if external_key:
+        return [external_key]
     return sorted(structured_deal_ids_from_assigned_stock_event(event))
 
 

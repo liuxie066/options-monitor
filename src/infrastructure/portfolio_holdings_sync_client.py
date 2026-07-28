@@ -8,12 +8,17 @@ from typing import Any, Callable
 from src.infrastructure.portfolio_management_client import (
     PortfolioManagementClient,
     PortfolioManagementError,
+    PortfolioManagementTransportError,
     resolve_portfolio_service_origin as _resolve_origin,
 )
 
 
 class PortfolioHoldingsSyncError(RuntimeError):
     """Raised when the local portfolio holdings sync cannot be confirmed."""
+
+
+class PortfolioHoldingsSyncUnknownError(PortfolioHoldingsSyncError):
+    """The request may have committed, but no valid response was received."""
 
 
 def resolve_portfolio_service_origin(value: str | None = None) -> str:
@@ -38,5 +43,7 @@ def sync_portfolio_holdings(
             service_url=service_url,
             urlopen_fn=urlopen_fn,
         ).sync_holdings(account=account_label, timeout=float(timeout_sec))
+    except PortfolioManagementTransportError as exc:
+        raise PortfolioHoldingsSyncUnknownError(str(exc)) from exc
     except PortfolioManagementError as exc:
         raise PortfolioHoldingsSyncError(str(exc)) from exc

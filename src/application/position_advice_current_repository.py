@@ -29,6 +29,7 @@ def validate_current_artifacts_under_lock(
     *,
     base: Path,
     portfolio_scope_id: str,
+    market: str | None = None,
     now: datetime | str | None = None,
     require_fresh: bool = False,
 ) -> dict[str, Any]:
@@ -36,16 +37,18 @@ def validate_current_artifacts_under_lock(
 
     base_path = Path(base).resolve()
     scope_id = str(portfolio_scope_id or "").strip()
-    current_path = (
-        position_advice_state_root(base_path)
-        / scope_id
-        / "account_decision_current.v2.json"
-    )
+    scope_root = position_advice_state_root(base_path) / scope_id
+    current_path = _resolve_current_path(scope_root, market=market)
     try:
         current = _read_json_object(current_path)
         validate_current_manifest_hash(current)
         if current.get("portfolio_scope_id") != scope_id:
             raise PositionAdviceCurrentError("current manifest path scope mismatch")
+        requested_market = str(market or "").strip().upper()
+        if requested_market and current.get("current_market") != requested_market:
+            raise PositionAdviceCurrentError(
+                "current manifest market scope mismatch"
+            )
         run_id = str(current.get("account_run_id") or "").strip()
         if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
             raise PositionAdviceCurrentError("current run id is invalid")
@@ -91,6 +94,15 @@ def validate_current_artifacts_under_lock(
             "input_artifact_sha256"
         ):
             raise PositionAdviceCurrentError("current input artifact hash mismatch")
+        immutable_input = _read_json_object(input_path)
+        current_market = str(current.get("current_market") or "").strip().upper()
+        if current_market and current_market not in {
+            str(item or "").strip().upper()
+            for item in list(immutable_input.get("included_markets") or [])
+        }:
+            raise PositionAdviceCurrentError(
+                "current market is not bound by immutable input"
+            )
         source_manifest = _read_json_object(source_path)
         validated_source = validate_source_manifest(
             source_manifest,
@@ -117,7 +129,7 @@ def validate_current_artifacts_under_lock(
             "source_manifest_path": source_path,
             "advice": _read_json_object(advice_path),
             "advice_path": advice_path,
-            "immutable_input": _read_json_object(input_path),
+            "immutable_input": immutable_input,
             "input_path": input_path,
         }
     except (
@@ -148,11 +160,18 @@ def collect_protected_current_runs_under_global_lock(*, base: Path) -> set[Path]
             raise PositionAdviceCurrentError("position advice scope may not be a symlink")
         if not child.is_dir():
             raise PositionAdviceCurrentError("unexpected position advice control-plane file")
-        current_path = child / "account_decision_current.v2.json"
-        if current_path.exists():
+        current_paths = sorted(
+            child.glob("account_decision_current.*.v2.json")
+        )
+        legacy_path = child / "account_decision_current.v2.json"
+        if legacy_path.exists():
+            current_paths.append(legacy_path)
+        for current_path in current_paths:
+            market = _market_from_current_path(current_path)
             validated = validate_current_artifacts_under_lock(
                 base=base,
                 portfolio_scope_id=child.name,
+                market=market,
                 require_fresh=False,
             )
             protected.add(Path(validated["run_root"]).resolve())
@@ -170,6 +189,42 @@ def collect_protected_current_runs_under_global_lock(*, base: Path) -> set[Path]
                 + ",".join(policy_reasons)
             )
     return protected
+
+
+def _resolve_current_path(scope_root: Path, *, market: str | None) -> Path:
+    market_norm = str(market or "").strip().upper()
+    if market_norm:
+        if market_norm not in {"US", "HK"}:
+            raise PositionAdviceCurrentError("current market is invalid")
+        path = scope_root / f"account_decision_current.{market_norm}.v2.json"
+        if path.exists():
+            return path
+        legacy = scope_root / "account_decision_current.v2.json"
+        if legacy.exists():
+            return legacy
+        return path
+    legacy = scope_root / "account_decision_current.v2.json"
+    if legacy.exists():
+        return legacy
+    candidates = sorted(scope_root.glob("account_decision_current.*.v2.json"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise PositionAdviceCurrentError(
+            "current market is required when multiple market pointers exist"
+        )
+    return legacy
+
+
+def _market_from_current_path(path: Path) -> str | None:
+    parts = path.name.split(".")
+    if len(parts) == 4 and parts[:2] == [
+        "account_decision_current",
+        parts[1],
+    ]:
+        market = parts[1].upper()
+        return market if market in {"US", "HK"} else None
+    return None
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:

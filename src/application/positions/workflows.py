@@ -41,6 +41,9 @@ from src.application.cash_conversion import (
     utc_now_ms,
 )
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
+from src.application.positions.context_cache import (
+    invalidate_option_positions_context_cache_for_repo,
+)
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -57,13 +60,27 @@ def _apply_result_payload(
     payload: dict[str, Any],
     native_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del repo, record_id, native_event
+    del record_id, native_event
     idempotent_duplicate = result.get("created") is False
-    return payload | {
+    account = payload.get("account")
+    if not account:
+        fields = payload.get("fields")
+        account = fields.get("account") if isinstance(fields, dict) else None
+    cache_invalidation = invalidate_option_positions_context_cache_for_repo(
+        repo,
+        account=str(account or "").strip().lower() or None,
+    )
+    response = payload | {
         "mode": "applied",
         "result": result,
         "idempotent_duplicate": bool(idempotent_duplicate),
+        "context_cache_invalidation": cache_invalidation,
     }
+    if not cache_invalidation.get("ok"):
+        response["warnings"] = [
+            "position write committed but one or more context cache files could not be invalidated"
+        ]
+    return response
 
 
 def _manual_open_record_id(result: dict[str, Any]) -> str:
@@ -604,7 +621,11 @@ def execute_manual_open(
     dry_run: bool,
     opened_at_ms: int | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id_value = str(request_id or "").strip()
+    if not request_id_value:
+        raise ValueError("manual open requires a stable request_id")
     command = OpenPositionCommand(
         broker=broker,
         account=account,
@@ -621,6 +642,7 @@ def execute_manual_open(
         note=note,
         opened_at_ms=opened_at_ms,
         strategy_snapshot=(dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None),
+        request_id=request_id_value,
     )
     if dry_run:
         return {"mode": "dry_run", **preview_manual_position_open(repo, command).to_payload()}
@@ -762,7 +784,11 @@ def execute_manual_assignment(
     stock_price: float,
     dry_run: bool,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id_value = str(request_id or "").strip()
+    if not request_id_value:
+        raise ValueError("manual assignment requires a stable request_id")
     kwargs = {
         "record_id": record_id,
         "broker": broker,
@@ -777,6 +803,7 @@ def execute_manual_assignment(
         "stock_qty": int(stock_qty),
         "stock_price": float(stock_price),
         "as_of_ms": as_of_ms,
+        "request_id": request_id_value,
     }
     if dry_run:
         return preview_manual_assignment(repo, **kwargs)
@@ -808,7 +835,11 @@ def execute_manual_exercise(
     stock_price: float,
     dry_run: bool,
     as_of_ms: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id_value = str(request_id or "").strip()
+    if not request_id_value:
+        raise ValueError("manual exercise requires a stable request_id")
     kwargs = {
         "record_id": record_id,
         "broker": broker,
@@ -823,6 +854,7 @@ def execute_manual_exercise(
         "stock_qty": int(stock_qty),
         "stock_price": float(stock_price),
         "as_of_ms": as_of_ms,
+        "request_id": request_id_value,
     }
     if dry_run:
         return preview_manual_exercise(repo, **kwargs)

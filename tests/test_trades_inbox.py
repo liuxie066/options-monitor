@@ -77,3 +77,22 @@ def test_trade_inbox_keeps_retryable_unresolved_result_pending(
     assert rows[0]["deal_id"] == "deal-waiting"
     assert rows[0]["attempt_count"] == 1
     assert rows[0]["last_error"] == ""
+
+
+def test_trade_inbox_scopes_same_deal_id_by_broker_account(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    lx_id = enqueue_trade_payload(
+        path,
+        payload={"deal_id": "same-id"},
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:same-id",
+    )
+    sy_id = enqueue_trade_payload(
+        path,
+        payload={"deal_id": "same-id"},
+        source="push",
+        broker_deal_key="futu:sy:REAL_2:same-id",
+    )
+
+    assert lx_id != sy_id
+    assert trade_inbox_summary(path)["pending_count"] == 2

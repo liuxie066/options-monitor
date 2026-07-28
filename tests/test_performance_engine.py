@@ -253,6 +253,50 @@ def test_voided_open_does_not_contribute_activity_or_cash() -> None:
     assert report["rows"] == []
 
 
+def test_adjust_event_restates_open_activity_and_cash_economics() -> None:
+    open_event = _event(
+        "open-adjusted",
+        "open",
+        "2026-05-03T10:00:00",
+        contracts=1,
+        price=2.5,
+    )
+    adjust = TradeEvent(
+        event_id="adjust-open",
+        event_type="adjust",
+        event_time_ms=_ms("2026-05-04T10:00:00"),
+        contract_key=open_event.contract_key,
+        contracts=0,
+        price=0,
+        currency="USD",
+        source="manual_adjust",
+        multiplier=100,
+        target_lot_id="lot-open-adjusted",
+        raw_payload={
+            "patch": {
+                "contracts": 2,
+                "contracts_open": 2,
+                "contracts_closed": 0,
+                "premium": 3.1,
+                "multiplier": 100,
+            }
+        },
+    )
+
+    report = _report([open_event, adjust])
+
+    assert report["activity"]["contracts_opened"] == 2
+    assert report["activity"]["premium_collected_gross"]["by_currency"] == {
+        "USD": 620.0
+    }
+    assert report["cash"]["option_trade_cash_gross"]["by_currency"] == {
+        "USD": 620.0
+    }
+    assert {row["source_event_id"] for row in report["rows"]} == {
+        "open-adjusted"
+    }
+
+
 def test_diagnostics_are_filtered_by_period_and_scope_but_selected_decode_errors_remain_partial() -> None:
     events = [_event("lx-open", "open", "2026-05-03T10:00:00", account="lx", price=2)]
     projection = project_trade_events(events)
@@ -330,15 +374,15 @@ def test_invalid_event_and_allocation_currency_fail_closed_without_erasing_known
     report = _report(events)
 
     assert report["activity"]["contracts_opened"] == 1
-    assert report["activity"]["contracts_closed"] == 1
+    assert report["activity"]["contracts_closed"] == 0
     assert report["cash"]["option_trade_cash_gross"]["by_currency"] == {"USD": 100.0}
     assert report["cash"]["option_trade_cash_gross"]["status"] == "partial"
     assert report["pnl"]["realized_gross"]["by_currency"] == {}
-    assert report["pnl"]["realized_gross"]["status"] == "partial"
+    assert report["pnl"]["realized_gross"]["status"] == "not_observed"
     assert report["quality"]["status"] == "partial"
-    bad_rows = [row for row in report["rows"] if row["source_event_id"] == "bad-close"]
-    assert bad_rows
-    assert all(row["currency"] is None for row in bad_rows)
+    assert all(
+        row["source_event_id"] != "bad-close" for row in report["rows"]
+    )
 
 
 def test_negative_assignment_shares_fail_closed_without_losing_option_realized_pnl() -> None:

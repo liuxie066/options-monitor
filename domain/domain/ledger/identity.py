@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from domain.domain.option_position_identity import (
@@ -19,6 +20,8 @@ def _normalize_strike(value: Any) -> float:
     if value in (None, ""):
         raise ValueError("strike is required")
     numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0:
+        raise ValueError("strike must be finite and > 0")
     return round(numeric, 6)
 
 

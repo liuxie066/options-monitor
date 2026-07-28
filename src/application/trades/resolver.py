@@ -23,9 +23,10 @@ from src.application.ledger.api import (
     resolve_broker_trade_close_targets,
     summarize_broker_trade_close_candidates,
 )
+from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.lifecycle import LifecycleTradeResolution, resolve_lifecycle_trade_deal
-from src.application.trades.state import is_failed_deal, is_retryable_unresolved_deal, lookup_deal_state
+from src.application.trades.state import lookup_deal_state_entry
 from src.application.trades.workflows import (
     BrokerAssignedStockSaleMatchError,
     apply_trade_close_with,
@@ -310,10 +311,11 @@ def resolve_trade_deal(
     retry_failed_deal: bool = False,
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
-    can_retry_existing_deal = is_retryable_unresolved_deal(state, deal.deal_id) or (
-        retry_failed_deal and is_failed_deal(state, deal.deal_id)
+    state_entry = _deal_state_entry(state, deal)
+    can_retry_existing_deal = _state_entry_is_retryable_unresolved(state_entry) or (
+        retry_failed_deal and _state_entry_is_failed(state_entry)
     )
-    if lookup_deal_state(state, deal.deal_id) is not None and not can_retry_existing_deal:
+    if state_entry is not None and not can_retry_existing_deal:
         return _failure(status="skipped", action=None, reason="duplicate_deal_id", deal=deal)
 
     if not deal.deal_id:
@@ -481,6 +483,50 @@ def resolve_trade_deal(
         account=deal.internal_account,
         operations=operations,
         diagnostics={**position_effect_diagnostics, **close_target_diagnostics},
+    )
+
+
+def _deal_state_entry(
+    state: dict[str, Any] | None,
+    deal: NormalizedTradeDeal,
+) -> tuple[str, dict[str, Any]] | None:
+    scoped_key = broker_deal_key(deal)
+    entry = lookup_deal_state_entry(state, scoped_key)
+    if entry is not None:
+        return entry
+    legacy_key = str(deal.deal_id or "").strip()
+    if not legacy_key or legacy_key == scoped_key:
+        return None
+    legacy = lookup_deal_state_entry(state, legacy_key)
+    if legacy is None:
+        return None
+    payload_account = str(legacy[1].get("account") or "").strip().lower()
+    deal_account = str(deal.internal_account or "").strip().lower()
+    return legacy if payload_account and payload_account == deal_account else None
+
+
+def _state_entry_is_retryable_unresolved(
+    entry: tuple[str, dict[str, Any]] | None,
+) -> bool:
+    if entry is None:
+        return False
+    bucket, payload = entry
+    return (
+        bucket == "unresolved_deal_ids"
+        and str(payload.get("status") or "").strip().lower() == "unresolved"
+        and bool(payload.get("retryable"))
+    )
+
+
+def _state_entry_is_failed(
+    entry: tuple[str, dict[str, Any]] | None,
+) -> bool:
+    if entry is None:
+        return False
+    bucket, payload = entry
+    return (
+        bucket == "failed_deal_ids"
+        and str(payload.get("status") or "").strip().lower() == "failed"
     )
 
 

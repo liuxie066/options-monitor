@@ -22,7 +22,10 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.publisher import (
+    ensure_projection_publishable,
+    project_stored_trade_events_to_position_lots,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
     with_sqlite_repo_transaction,
@@ -503,12 +506,14 @@ def persist_manual_repair_event(
             void_created = sqlite_repo.upsert_trade_event(void_event, conn=conn)
             repair_created = sqlite_repo.upsert_trade_event(repair_event, conn=conn)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
+            ensure_projection_publishable(projection, operation="trade event repair projection")
             records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
         else:
             void_created = sqlite_repo.upsert_trade_event(void_event)
             repair_created = sqlite_repo.upsert_trade_event(repair_event)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
+            ensure_projection_publishable(projection, operation="trade event repair projection")
             records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records)
         result = {

@@ -732,7 +732,10 @@ def _split_close_deal_for_target(
 
 
 def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositionCommand, dict[str, Any], TradeEvent]:
-    from src.application.ledger.manual_trades import _manual_open_event_id
+    from src.application.ledger.manual_trades import (
+        _manual_open_event_id,
+        manual_open_request_intent_hash,
+    )
 
     event_time_ms = int(command.opened_at_ms or now_ms())
     resolved_command = replace(command, opened_at_ms=event_time_ms)
@@ -764,7 +767,10 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         expiration_ymd=str(resolved_command.expiration_ymd or "").strip() or None,
         currency=currency,
         trade_time_ms=event_time_ms,
+        request_id=resolved_command.request_id,
     )
+    request_id = str(resolved_command.request_id or "").strip()
+    intent_hash = manual_open_request_intent_hash(resolved_command, fields=fields)
     event = TradeEvent(
         event_id=event_id,
         event_type="open",
@@ -779,6 +785,8 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         raw_payload={
             "source": "om option-positions",
             "mode": "manual_open",
+            "manual_request_id": request_id or None,
+            "manual_request_intent_hash": intent_hash if request_id else None,
             **strategy_metadata_fields_from_payload(
                 {
                     "strategy_snapshot": (

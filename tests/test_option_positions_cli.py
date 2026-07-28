@@ -296,8 +296,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    ledger_writer.persist_trade_event_object(
-        repo,
+    repo.upsert_trade_event(
         TradeEvent(
             event_id="manual-close-missing-lot",
             source_type="manual_trade_event",
@@ -384,6 +383,7 @@ def test_option_positions_cli_verify_projection_writes_report_and_checkpoint(mon
             "--data-config",
             str(data_config),
             "verify-projection",
+            "--publish-evidence",
             "--format",
             "json",
         ],
@@ -420,6 +420,88 @@ def test_option_positions_cli_verify_projection_writes_report_and_checkpoint(mon
     assert reused["mode_used"] == "checkpoint_reuse"
     assert reused["checkpoint_reused"] is True
 
+    checkpoint_path = (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "option_positions"
+        / "current"
+        / "projection_verify.checkpoint.json"
+    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["projection_contract_version"] = "position_lot_projection.v1"
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    cli_mod.main()
+    stale_contract = json.loads(capsys.readouterr().out)
+    assert stale_contract["ok"] is True
+    assert stale_contract["mode_used"] == "full_replay"
+    assert stale_contract["checkpoint_reused"] is False
+
+
+def test_option_positions_cli_verify_projection_is_read_only_by_default(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "verify-projection",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["evidence_published"] is False
+    assert not (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "option_positions"
+    ).exists()
+
 
 def test_option_positions_cli_inspect_surfaces_projection_verify_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
@@ -455,6 +537,7 @@ def test_option_positions_cli_inspect_surfaces_projection_verify_state(monkeypat
             "--data-config",
             str(data_config),
             "verify-projection",
+            "--publish-evidence",
             "--format",
             "json",
         ],
@@ -498,6 +581,8 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
             "--data-config",
             str(data_config),
             "add",
+            "--request-id",
+            "test-add-hk-dry-run",
             "--account",
             "lx",
             "--symbol",
@@ -543,6 +628,8 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
             "--data-config",
             str(data_config),
             "add",
+            "--request-id",
+            "test-add-us-dry-run",
             "--account",
             "lx",
             "--symbol",
@@ -579,6 +666,8 @@ def test_option_positions_cli_add_apply_alone_requires_confirm() -> None:
     with pytest.raises(SystemExit, match="use --confirm or --yes"):
         cli_mod.main([
             "add",
+            "--request-id",
+            "test-add-apply-guard",
             "--account",
             "lx",
             "--symbol",
@@ -613,6 +702,8 @@ def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatc
         "--data-config",
         str(data_config),
         "add",
+        "--request-id",
+        "test-add-confirm",
         "--account",
         "lx",
         "--symbol",
@@ -874,6 +965,8 @@ def test_option_positions_cli_assign_confirm_writes_assignment_event(monkeypatch
             "--data-config",
             str(data_config),
             "assign",
+            "--request-id",
+            "test-assignment-confirm",
             "--account",
             "lx",
             "--symbol",
@@ -945,6 +1038,8 @@ def test_option_positions_cli_assign_rejects_wrong_stock_side(monkeypatch, tmp_p
             "--data-config",
             str(data_config),
             "assign",
+            "--request-id",
+            "test-assignment-wrong-side",
             "--account",
             "lx",
             "--symbol",
@@ -1008,6 +1103,8 @@ def test_option_positions_cli_exercise_confirm_writes_exercise_event(monkeypatch
             "--data-config",
             str(data_config),
             "exercise",
+            "--request-id",
+            "test-exercise-confirm",
             "--account",
             "lx",
             "--symbol",
@@ -1675,6 +1772,69 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     assert rows[1]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
     assert rows[3]["void_target_event_id"] == close_result.event_id
     assert rows[4]["void_target_event_id"] == adjust_result.event_id
+
+
+def test_option_positions_cli_history_reads_voided_open_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    open_result = ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot_id = str(open_result.record_id)
+    ledger_interventions.persist_manual_void_event(
+        repo,
+        target_event_id=str(open_result.event_id),
+        void_reason="bad open",
+        as_of_ms=2000,
+    )
+    assert repo.list_position_lots() == []
+
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+    cli_mod.main(
+        [
+            "--data-config",
+            str(data_config),
+            "history",
+            "--record-id",
+            lot_id,
+            "--format",
+            "json",
+        ]
+    )
+
+    rows = json.loads(capsys.readouterr().out)
+    assert [row["position_effect"] for row in rows] == ["open", "void"]
+    assert rows[1]["void_target_event_id"] == open_result.event_id
 
 
 

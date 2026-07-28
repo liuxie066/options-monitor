@@ -1000,6 +1000,7 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
             underlying_share_locked=100 if option_type == "call" else None,
             note=None,
             dry_run=False,
+            request_id=f"inbound-seed-{symbol}-{option_type}-{strike}",
         )
 
     initial_events = repo.list_trade_events()

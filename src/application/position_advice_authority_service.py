@@ -28,6 +28,7 @@ from src.infrastructure.position_advice_manifest_lock import (
 
 AUTHORITY_CHANGE_RECEIPT_SCHEMA = "position_advice_authority_change_intent.v1"
 AUTHORITY_CHANGE_PLAN_SCHEMA = "position_advice_authority_change_plan.v1"
+AUTHORITY_BOOTSTRAP_SCHEMA = "position_advice_authority_bootstrap.v1"
 IDENTITY_BINDING_SCHEMA = "position_advice_first_use_identity_binding.v1"
 NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA = (
     "position_advice_notification_authority_receipt.v1"
@@ -43,6 +44,13 @@ class PositionAdviceAuthorityError(RuntimeError):
 
 def authority_policy_path(base: Path, portfolio_scope_id: str) -> Path:
     return portfolio_scope_state_dir(base, portfolio_scope_id) / "authority_policy.v1.json"
+
+
+def authority_bootstrap_path(base: Path, portfolio_scope_id: str) -> Path:
+    return (
+        portfolio_scope_state_dir(base, portfolio_scope_id)
+        / "authority_bootstrap.v1.json"
+    )
 
 
 def authority_change_dir(base: Path, portfolio_scope_id: str) -> Path:
@@ -271,6 +279,28 @@ def apply_authority_change(
         scope_mode="exclusive",
         timeout_seconds=timeout_seconds,
     ):
+        request_hash = _authority_bootstrap_request_hash(
+            normalized_account=account,
+            normalized_portfolio_source=source,
+            portfolio_account_identity_hash=identity_hash,
+            target_mode=target_mode,
+            expected_policy_hash=expected_policy_hash,
+            actor=actor,
+            requested_at=requested_at,
+            identity_binding_evidence=identity_binding_evidence,
+            promotion_evidence=promotion_evidence,
+        )
+        if first_use:
+            completed = _completed_first_use_bootstrap(
+                base=base,
+                portfolio_scope_id=scope_id,
+                request_hash=request_hash,
+                normalized_account=account,
+                normalized_portfolio_source=source,
+                portfolio_account_identity_hash=identity_hash,
+            )
+            if completed is not None:
+                return completed
         plan = _plan_authority_change_locked(
             base=base,
             normalized_account=account,
@@ -290,7 +320,44 @@ def apply_authority_change(
         if plan["would_change"] is not True:
             return {**plan, "status": "unchanged", "applied": False}
 
+        receipt = dict(plan["change_receipt"])
+        receipt_hash = canonical_sha256(receipt)
+        receipt_path = authority_change_dir(base, scope_id) / f"{receipt_hash}.json"
+        promotion_hash = plan.get("promotion_evidence_hash")
+        policy = build_authority_policy(
+            normalized_account=account,
+            normalized_portfolio_source=source,
+            portfolio_account_identity_hash_value=identity_hash,
+            mode=plan["target_mode"],
+            generation=plan["next_generation"],
+            updated_at=plan["requested_at"],
+            change_receipt_hash=receipt_hash,
+            promotion_evidence_hash=promotion_hash,
+            covered_strategy_families=plan["covered_strategy_families"],
+        )
+        if canonical_sha256(_authority_state_payload(policy)) != receipt["after_state_hash"]:
+            raise PositionAdviceAuthorityError("authority after-state binding mismatch")
+
         identity_binding_path: Path | None = None
+        if first_use:
+            bootstrap_payload = {
+                "schema_version": AUTHORITY_BOOTSTRAP_SCHEMA,
+                "portfolio_scope_id": scope_id,
+                "request_hash": request_hash,
+                "plan_hash": plan["plan_hash"],
+                "change_receipt_hash": receipt_hash,
+                "policy_hash": policy["policy_hash"],
+                "identity_binding_hash": receipt["identity_binding_hash"],
+                "created_at": plan["requested_at"],
+            }
+            bootstrap = {
+                **bootstrap_payload,
+                "bootstrap_hash": canonical_sha256(bootstrap_payload),
+            }
+            _write_json_once_or_verify(
+                authority_bootstrap_path(base, scope_id),
+                bootstrap,
+            )
         if first_use:
             binding_payload = dict(identity_binding_evidence or {})
             binding_hash = str(binding_payload.get("identity_binding_hash") or "")
@@ -300,7 +367,6 @@ def apply_authority_change(
             )
             _write_json_once_or_verify(identity_binding_path, binding_payload)
 
-        promotion_hash = plan.get("promotion_evidence_hash")
         if promotion_hash:
             evidence_path = (
                 authority_promotion_evidence_dir(base, scope_id)
@@ -331,23 +397,7 @@ def apply_authority_change(
             )
             _write_json_once_or_verify(gate_path, gate_payload)
 
-        receipt = dict(plan["change_receipt"])
-        receipt_hash = canonical_sha256(receipt)
-        receipt_path = authority_change_dir(base, scope_id) / f"{receipt_hash}.json"
         _write_json_once_or_verify(receipt_path, receipt)
-        policy = build_authority_policy(
-            normalized_account=account,
-            normalized_portfolio_source=source,
-            portfolio_account_identity_hash_value=identity_hash,
-            mode=plan["target_mode"],
-            generation=plan["next_generation"],
-            updated_at=plan["requested_at"],
-            change_receipt_hash=receipt_hash,
-            promotion_evidence_hash=promotion_hash,
-            covered_strategy_families=plan["covered_strategy_families"],
-        )
-        if canonical_sha256(_authority_state_payload(policy)) != receipt["after_state_hash"]:
-            raise PositionAdviceAuthorityError("authority after-state binding mismatch")
         atomic_write_json(authority_policy_path(base, scope_id), policy, sort_keys=True)
         verified = _read_authority_resolution_locked(
             base=base,
@@ -464,6 +514,7 @@ def _plan_authority_change_locked(
     policy_path = authority_policy_path(base, scope_id)
     reasons: list[str] = []
     current_policy: dict[str, Any] | None = None
+    history_conflict = False
     if policy_path.exists():
         try:
             current_policy = _read_json_object(policy_path)
@@ -490,7 +541,7 @@ def _plan_authority_change_locked(
             normalized_account=account,
         )
         if history_status == "conflict":
-            reasons.append("authority_policy_missing_with_history")
+            history_conflict = True
         elif history_status == "implicit_v1_notifications" and mode != "v1":
             reasons.append("authority_implicit_v1_history_requires_v1_bootstrap")
 
@@ -639,6 +690,27 @@ def _plan_authority_change_locked(
             outstanding_notification_receipt_ids
         ),
     }
+    if history_conflict:
+        request_hash = _authority_bootstrap_request_hash(
+            normalized_account=account,
+            normalized_portfolio_source=source,
+            portfolio_account_identity_hash=identity_hash,
+            target_mode=mode,
+            expected_policy_hash=expected_hash,
+            actor=actor_value,
+            requested_at=requested_at_value,
+            identity_binding_evidence=identity_binding_evidence,
+            promotion_evidence=promotion_evidence,
+        )
+        if not _pending_first_use_bootstrap_matches(
+            base=base,
+            portfolio_scope_id=scope_id,
+            normalized_account=account,
+            request_hash=request_hash,
+            change_receipt=change_receipt,
+            identity_binding_evidence=identity_binding_evidence,
+        ):
+            reasons.append("authority_policy_missing_with_history")
     plan_payload = {
         "schema_version": AUTHORITY_CHANGE_PLAN_SCHEMA,
         "status": "ready" if not reasons else "blocked",
@@ -821,6 +893,238 @@ def _published_promotion_artifacts_match(
         published_evidence == dict(promotion_evidence)
         and published_gate == dict(promotion_gate)
     )
+
+
+def _authority_bootstrap_request_hash(
+    *,
+    normalized_account: str,
+    normalized_portfolio_source: str,
+    portfolio_account_identity_hash: str,
+    target_mode: str,
+    expected_policy_hash: str,
+    actor: str,
+    requested_at: datetime | str,
+    identity_binding_evidence: Mapping[str, Any] | None,
+    promotion_evidence: Mapping[str, Any] | None,
+) -> str:
+    expected_hash = str(expected_policy_hash or "").strip()
+    if expected_hash != "absent":
+        expected_hash = _sha256(expected_hash, "expected_policy_hash")
+    payload = {
+        "normalized_account": normalize_account_label(normalized_account),
+        "normalized_portfolio_source": normalize_portfolio_source(
+            normalized_portfolio_source
+        ),
+        "portfolio_account_identity_hash": _sha256(
+            portfolio_account_identity_hash,
+            "portfolio_account_identity_hash",
+        ),
+        "target_mode": str(target_mode or "").strip(),
+        "expected_policy_hash": expected_hash,
+        "actor": str(actor or "").strip(),
+        "requested_at": _timestamp(requested_at),
+        "identity_binding_hash": str(
+            dict(identity_binding_evidence or {}).get(
+                "identity_binding_hash"
+            )
+            or ""
+        )
+        or None,
+        "promotion_evidence_hash": (
+            canonical_sha256(dict(promotion_evidence))
+            if isinstance(promotion_evidence, Mapping)
+            else None
+        ),
+    }
+    return canonical_sha256(payload)
+
+
+def _read_valid_authority_bootstrap(
+    *,
+    base: Path,
+    portfolio_scope_id: str,
+) -> dict[str, Any] | None:
+    path = authority_bootstrap_path(base, portfolio_scope_id)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        payload = _read_json_object(path)
+    except (OSError, ValueError, PositionAdviceAuthorityError):
+        return None
+    unhashed = {
+        key: value
+        for key, value in payload.items()
+        if key != "bootstrap_hash"
+    }
+    if (
+        payload.get("schema_version") != AUTHORITY_BOOTSTRAP_SCHEMA
+        or payload.get("portfolio_scope_id") != portfolio_scope_id
+        or payload.get("bootstrap_hash") != canonical_sha256(unhashed)
+        or not _is_sha256(payload.get("request_hash"))
+        or not _is_sha256(payload.get("plan_hash"))
+        or not _is_sha256(payload.get("change_receipt_hash"))
+        or not _is_sha256(payload.get("policy_hash"))
+        or not _is_sha256(payload.get("identity_binding_hash"))
+        or not _is_timestamp(payload.get("created_at"))
+    ):
+        return None
+    return payload
+
+
+def _pending_first_use_bootstrap_matches(
+    *,
+    base: Path,
+    portfolio_scope_id: str,
+    normalized_account: str,
+    request_hash: str,
+    change_receipt: Mapping[str, Any],
+    identity_binding_evidence: Mapping[str, Any] | None,
+) -> bool:
+    bootstrap = _read_valid_authority_bootstrap(
+        base=base,
+        portfolio_scope_id=portfolio_scope_id,
+    )
+    receipt_hash = canonical_sha256(change_receipt)
+    binding = dict(identity_binding_evidence or {})
+    binding_hash = str(binding.get("identity_binding_hash") or "")
+    if (
+        bootstrap is None
+        or bootstrap.get("request_hash") != request_hash
+        or bootstrap.get("change_receipt_hash") != receipt_hash
+        or bootstrap.get("identity_binding_hash") != binding_hash
+        or authority_policy_path(base, portfolio_scope_id).exists()
+    ):
+        return False
+    scope_dir = portfolio_scope_state_dir(base, portfolio_scope_id)
+    allowed = {
+        ".current.lock",
+        "authority_bootstrap.v1.json",
+        "authority_changes",
+        "identity_bindings",
+        "notification_authority",
+    }
+    try:
+        entries = list(scope_dir.iterdir())
+    except OSError:
+        return False
+    if any(path.name not in allowed or path.is_symlink() for path in entries):
+        return False
+    expected_artifacts = (
+        (
+            authority_identity_binding_dir(base, portfolio_scope_id),
+            f"{binding_hash}.json",
+            binding,
+        ),
+        (
+            authority_change_dir(base, portfolio_scope_id),
+            f"{receipt_hash}.json",
+            dict(change_receipt),
+        ),
+    )
+    for directory, expected_name, expected_payload in expected_artifacts:
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            return False
+        try:
+            files = list(directory.iterdir())
+        except OSError:
+            return False
+        if any(
+            path.name != expected_name
+            or path.is_symlink()
+            or not path.is_file()
+            for path in files
+        ):
+            return False
+        if files:
+            try:
+                if _read_json_object(files[0]) != expected_payload:
+                    return False
+            except (OSError, ValueError, PositionAdviceAuthorityError):
+                return False
+    notification_dir = scope_dir / "notification_authority"
+    if notification_dir.exists() and not _implicit_v1_notification_history_is_valid(
+        state_dir=notification_dir,
+        portfolio_scope_id=portfolio_scope_id,
+        normalized_account=normalized_account,
+    ):
+        return False
+    return True
+
+
+def _completed_first_use_bootstrap(
+    *,
+    base: Path,
+    portfolio_scope_id: str,
+    request_hash: str,
+    normalized_account: str,
+    normalized_portfolio_source: str,
+    portfolio_account_identity_hash: str,
+) -> dict[str, Any] | None:
+    bootstrap = _read_valid_authority_bootstrap(
+        base=base,
+        portfolio_scope_id=portfolio_scope_id,
+    )
+    policy_path = authority_policy_path(base, portfolio_scope_id)
+    if (
+        bootstrap is None
+        or bootstrap.get("request_hash") != request_hash
+        or not policy_path.is_file()
+        or policy_path.is_symlink()
+    ):
+        return None
+    try:
+        policy = _read_json_object(policy_path)
+        if (
+            policy.get("policy_hash") != bootstrap.get("policy_hash")
+            or validate_authority_policy(
+                policy,
+                expected_scope_id=portfolio_scope_id,
+            )
+        ):
+            return None
+        receipt_hash = str(
+            bootstrap.get("change_receipt_hash") or ""
+        )
+        receipt_path = (
+            authority_change_dir(base, portfolio_scope_id)
+            / f"{receipt_hash}.json"
+        )
+        receipt = _read_json_object(receipt_path)
+        if canonical_sha256(receipt) != receipt_hash:
+            return None
+        _validate_change_receipt_binding(receipt, policy, base=base)
+        resolution = _read_authority_resolution_locked(
+            base=base,
+            normalized_account=normalized_account,
+            normalized_portfolio_source=normalized_portfolio_source,
+            portfolio_account_identity_hash=portfolio_account_identity_hash,
+        )
+        if (
+            resolution.resolution_status != "resolved"
+            or resolution.policy_hash != policy.get("policy_hash")
+        ):
+            return None
+    except (OSError, ValueError, PositionAdviceAuthorityError):
+        return None
+    binding_hash = str(bootstrap.get("identity_binding_hash") or "")
+    return {
+        "schema_version": AUTHORITY_CHANGE_PLAN_SCHEMA,
+        "status": "already_applied",
+        "reason_codes": [],
+        "portfolio_scope_id": portfolio_scope_id,
+        "would_change": False,
+        "applied": False,
+        "resumed": True,
+        "policy": policy,
+        "policy_path": str(policy_path),
+        "change_receipt_path": str(receipt_path),
+        "identity_binding_path": str(
+            authority_identity_binding_dir(base, portfolio_scope_id)
+            / f"{binding_hash}.json"
+        ),
+    }
 
 
 def _classify_authority_history(

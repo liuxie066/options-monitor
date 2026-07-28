@@ -23,6 +23,9 @@ from src.application.ledger.event_codec import import_stored_trade_events, trade
 from src.application.ledger.position_records import PositionLotRecord
 
 
+PROJECTION_CONTRACT_VERSION = "position_lot_projection.v2"
+
+
 @dataclass(frozen=True)
 class PublishedPositionLotProjection:
     lots: list[PositionLotRecord]
@@ -51,11 +54,35 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     }
     ledger_events, import_diagnostics = import_stored_trade_events(stored_events)
     ledger_projection = project_trade_events(ledger_events)
+    invalid_event_ids = {
+        str(item.event_id or "").strip()
+        for item in ledger_projection.diagnostics
+        if item.severity == "error" and str(item.event_id or "").strip()
+    }
+    voided_event_ids = {
+        str(event.target_event_id or "").strip()
+        for event in ledger_events
+        if (
+            event.event_type == "void"
+            and event.event_id not in invalid_event_ids
+            and str(event.target_event_id or "").strip()
+        )
+    }
+    applied_adjust_event_ids = {
+        event.event_id
+        for event in ledger_events
+        if (
+            event.event_type == "adjust"
+            and event.event_id not in invalid_event_ids
+            and event.event_id not in voided_event_ids
+        )
+    }
     lots = [
         _position_lot_to_legacy_record(
             lot,
             ledger_events=ledger_events,
             legacy_by_event_id=stored_by_event_id,
+            applied_adjust_event_ids=applied_adjust_event_ids,
         )
         for lot in ledger_projection.lots
     ]
@@ -66,18 +93,43 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     )
 
 
+def ensure_projection_publishable(
+    projection: PublishedPositionLotProjection,
+    *,
+    operation: str,
+) -> None:
+    error_codes = sorted(
+        {
+            str(item.code or "").strip() or "unknown"
+            for item in projection.diagnostics
+            if item.severity == "error"
+        }
+    )
+    if error_codes:
+        raise ValueError(
+            f"{str(operation or 'position projection').strip()} failed: "
+            + ",".join(error_codes)
+        )
+
+
 def _position_lot_to_legacy_record(
     lot: PositionLot,
     *,
     ledger_events: list[TradeEvent],
     legacy_by_event_id: dict[str, dict[str, Any]],
+    applied_adjust_event_ids: set[str],
 ) -> PositionLotRecord:
     ledger_by_event_id = {event.event_id: event for event in ledger_events}
     open_event = ledger_by_event_id.get(lot.open_event_id)
     legacy_open_event = legacy_by_event_id.get(lot.open_event_id, {})
     base_fields = _base_fields_for_lot(lot, open_event=open_event, legacy_open_event=legacy_open_event)
     fields = _apply_lot_state_fields(base_fields, lot, ledger_by_event_id=ledger_by_event_id)
-    fields = _apply_adjust_strategy_patch_fields(fields, lot, ledger_events=ledger_events)
+    fields = _apply_adjust_strategy_patch_fields(
+        fields,
+        lot,
+        ledger_events=ledger_events,
+        applied_adjust_event_ids=applied_adjust_event_ids,
+    )
     close_event = ledger_by_event_id.get(lot.close_event_ids[-1]) if lot.close_event_ids else None
     if close_event is not None:
         fields.update(_close_fields(close_event, legacy_by_event_id=legacy_by_event_id, lot=lot))
@@ -236,12 +288,17 @@ def _apply_adjust_strategy_patch_fields(
     lot: PositionLot,
     *,
     ledger_events: list[TradeEvent],
+    applied_adjust_event_ids: set[str],
 ) -> dict[str, Any]:
     out = dict(fields)
     adjust_events = [
         event
         for event in ledger_events
-        if event.event_type == "adjust" and str(event.target_lot_id or "").strip() == lot.lot_id
+        if (
+            event.event_type == "adjust"
+            and event.event_id in applied_adjust_event_ids
+            and str(event.target_lot_id or "").strip() == lot.lot_id
+        )
     ]
     adjust_events.sort(key=lambda event: (int(event.event_time_ms), str(event.event_id)))
     for event in adjust_events:
@@ -279,6 +336,8 @@ def _compact_number(value: Any) -> int | float:
 
 
 __all__ = [
+    "PROJECTION_CONTRACT_VERSION",
     "PublishedPositionLotProjection",
+    "ensure_projection_publishable",
     "project_stored_trade_events_to_position_lots",
 ]

@@ -24,7 +24,10 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.publisher import (
+    ensure_projection_publishable,
+    project_stored_trade_events_to_position_lots,
+)
 from src.application.ledger.results import LedgerWriteResult
 from src.application.ledger.targets import assert_position_lot_target_matches_current_state
 from src.application.ledger.writer import (
@@ -53,7 +56,12 @@ def _manual_open_event_id(
     expiration_ymd: str | None,
     currency: str,
     trade_time_ms: int,
+    request_id: str | None = None,
 ) -> str:
+    request_id_value = str(request_id or "").strip()
+    if request_id_value:
+        digest = hashlib.sha256(request_id_value.encode("utf-8")).hexdigest()[:24]
+        return f"manual-open-request-{digest}"
     key_parts = [
         str(broker).strip().lower(),
         str(account).strip().lower(),
@@ -72,6 +80,59 @@ def _manual_open_event_id(
     key_str = "|".join(key_parts)
     h = hashlib.sha256(key_str.encode()).hexdigest()[:16]
     return f"manual-open-{h}"
+
+
+def manual_open_request_intent_hash(
+    command: OpenPositionCommand,
+    *,
+    fields: dict[str, Any] | None = None,
+) -> str:
+    resolved_fields = dict(fields or build_position_lot_fields(command).to_dict())
+    payload = {
+        "broker": normalize_broker(command.broker),
+        "account": normalize_account(command.account),
+        "symbol": _canonical_trade_symbol(command.symbol),
+        "option_type": str(command.option_type or "").strip().lower(),
+        "side": str(command.side or "").strip().lower(),
+        "contracts": int(command.contracts),
+        "currency": resolve_open_currency(command.symbol, command.currency),
+        "strike": float(command.strike) if command.strike is not None else None,
+        "multiplier": float(effective_multiplier(resolved_fields) or 100),
+        "expiration_ymd": str(command.expiration_ymd or "").strip() or None,
+        "premium_per_share": float(resolved_fields.get("premium")),
+        "underlying_share_locked": command.underlying_share_locked,
+        "note": command.note,
+        "strategy_snapshot": (
+            dict(command.strategy_snapshot)
+            if isinstance(command.strategy_snapshot, dict)
+            else None
+        ),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def assert_manual_request_event_matches(
+    repo: Any,
+    *,
+    event_id: str,
+    request_id: str,
+    intent_hash: str,
+) -> None:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_trade_events):
+        return
+    for item in list_trade_events():
+        if not isinstance(item, dict) or str(item.get("event_id") or "").strip() != event_id:
+            continue
+        raw = item.get("raw_payload")
+        payload = raw if isinstance(raw, dict) else {}
+        if (
+            str(payload.get("manual_request_id") or "").strip() != request_id
+            or str(payload.get("manual_request_intent_hash") or "").strip() != intent_hash
+        ):
+            raise ValueError(f"manual request conflict for request_id={request_id}")
+        return
 
 
 def _stable_manual_event_id(prefix: str, payload: dict[str, Any]) -> str:
@@ -227,6 +288,8 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
     strike = float(command.strike) if command.strike is not None else None
     expiration_ymd = str(command.expiration_ymd or "").strip() or None
     trade_time_ms = int(command.opened_at_ms or now_ms())
+    request_id = str(command.request_id or "").strip()
+    intent_hash = manual_open_request_intent_hash(command, fields=fields)
     event_id = _manual_open_event_id(
         broker=str(command.broker),
         account=str(command.account),
@@ -240,7 +303,22 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
         expiration_ymd=expiration_ymd,
         currency=currency,
         trade_time_ms=trade_time_ms,
+        request_id=request_id or None,
     )
+    existing_result = _existing_trade_event_result(
+        repo,
+        event_id=event_id,
+        record_id=f"lot_{event_id}",
+    )
+    if existing_result is not None:
+        if request_id:
+            assert_manual_request_event_matches(
+                repo,
+                event_id=event_id,
+                request_id=request_id,
+                intent_hash=intent_hash,
+            )
+        return existing_result
     strategy_payload = strategy_metadata_fields_from_payload(
         {
             "strategy_snapshot": (
@@ -273,6 +351,8 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
             "mode": "manual_open",
             "side": normalized_side,
             "multiplier_source": "payload" if command.multiplier is not None else None,
+            "manual_request_id": request_id or None,
+            "manual_request_intent_hash": intent_hash if request_id else None,
             **strategy_payload,
         },
     )
@@ -538,6 +618,10 @@ def persist_manual_adjust_events(
             else sqlite_repo.list_trade_events()
         )
         current_projection = project_stored_trade_events_to_position_lots(current_events)
+        ensure_projection_publishable(
+            current_projection,
+            operation="manual adjustment precondition projection",
+        )
         current_by_record_id = {
             str(lot.record_id or "").strip(): dict(lot.fields)
             for lot in current_projection.lots
@@ -579,6 +663,7 @@ def persist_manual_adjust_events(
             )
         events = sqlite_repo.list_trade_events(conn=conn) if conn is not None else sqlite_repo.list_trade_events()
         projection = project_stored_trade_events_to_position_lots(events)
+        ensure_projection_publishable(projection, operation="manual adjustment projection")
         lot_count = (
             sqlite_repo.replace_position_lots(projection.lots, conn=conn)
             if conn is not None

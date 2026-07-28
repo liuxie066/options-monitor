@@ -256,6 +256,108 @@ def _status_from(*, unavailable: bool, partial: bool) -> str:
     return "partial" if partial else "complete"
 
 
+def _portfolio_evidence_quality(
+    *,
+    accounts: Sequence[str],
+    portfolio_evidence: Mapping[str, Any],
+) -> tuple[bool, bool, list[str], dict[str, Any]]:
+    warnings = [
+        str(item)
+        for item in (portfolio_evidence.get("warnings") or [])
+        if str(item).strip()
+    ]
+    evidence_status = _text(portfolio_evidence.get("status")).lower()
+    freshness = (
+        dict(portfolio_evidence.get("freshness"))
+        if isinstance(portfolio_evidence.get("freshness"), Mapping)
+        else {}
+    )
+    freshness_status = _text(freshness.get("status")).lower()
+    trust_status = _text(freshness.get("trust_status")).lower()
+    unavailable = False
+    partial = False
+
+    if portfolio_evidence.get("success") is not True:
+        unavailable = True
+        warnings.append("portfolio evidence success is unconfirmed")
+    if _text(portfolio_evidence.get("schema_version")) != PORTFOLIO_EVIDENCE_VERSION:
+        unavailable = True
+        warnings.append("portfolio evidence schema is missing or incompatible")
+    if evidence_status == "unavailable":
+        unavailable = True
+    elif evidence_status == "partial":
+        partial = True
+    elif evidence_status != "complete":
+        unavailable = True
+        warnings.append("portfolio evidence status is missing or unsupported")
+
+    if freshness_status in {"unavailable", "unknown", ""}:
+        unavailable = True
+        warnings.append("portfolio evidence freshness is unavailable")
+    elif freshness_status == "stale":
+        partial = True
+        warnings.append("portfolio evidence is stale")
+    elif freshness_status != "fresh":
+        unavailable = True
+        warnings.append("portfolio evidence freshness status is unsupported")
+
+    if trust_status in {"unavailable", "untrusted", ""}:
+        unavailable = True
+        warnings.append("portfolio evidence is not trusted")
+    elif trust_status == "partial":
+        partial = True
+        warnings.append("portfolio evidence trust is partial")
+    elif trust_status != "trusted":
+        unavailable = True
+        warnings.append("portfolio evidence trust status is unsupported")
+
+    normalized_accounts = [
+        _text(item).lower()
+        for item in accounts
+        if _text(item)
+    ]
+    scope = (
+        portfolio_evidence.get("scope")
+        if isinstance(portfolio_evidence.get("scope"), Mapping)
+        else {}
+    )
+    scope_accounts = [
+        _text(item).lower()
+        for item in (scope.get("accounts") or [])
+        if _text(item)
+    ]
+    if scope_accounts != normalized_accounts:
+        unavailable = True
+        warnings.append("portfolio evidence account scope mismatch")
+
+    source_snapshot = (
+        portfolio_evidence.get("snapshot")
+        if isinstance(portfolio_evidence.get("snapshot"), Mapping)
+        else {}
+    )
+    if not _text(source_snapshot.get("snapshot_id")) or not _text(
+        source_snapshot.get("observed_at")
+        or source_snapshot.get("observed_at_utc")
+    ):
+        unavailable = True
+        warnings.append("portfolio evidence snapshot identity is incomplete")
+
+    return unavailable, partial, warnings, {
+        "status": evidence_status or "unavailable",
+        "freshness_status": freshness_status or "unavailable",
+        "trust_status": trust_status or "unavailable",
+        "observed_at_utc": freshness.get("observed_at_utc"),
+        "dataset_ids": list(freshness.get("dataset_ids") or []),
+        "reason_codes": list(freshness.get("reason_codes") or []),
+        "retrieved_at_utc": portfolio_evidence.get("retrieved_at_utc"),
+        "source_snapshot_id": source_snapshot.get("snapshot_id"),
+        "source_observed_at": (
+            source_snapshot.get("observed_at")
+            or source_snapshot.get("observed_at_utc")
+        ),
+    }
+
+
 def project_assignment_scenario(
     *,
     accounts: Sequence[str],
@@ -270,10 +372,10 @@ def project_assignment_scenario(
     """
 
     normalized_accounts = list(dict.fromkeys(_text(item).lower() for item in accounts if _text(item)))
-    evidence_status = _text(portfolio_evidence.get("status")).lower()
-    unavailable = evidence_status == "unavailable"
-    warnings = list(portfolio_evidence.get("warnings") or [])
-    partial = evidence_status not in {"complete", ""} and not unavailable
+    unavailable, partial, warnings, evidence_quality = _portfolio_evidence_quality(
+        accounts=normalized_accounts,
+        portfolio_evidence=portfolio_evidence,
+    )
 
     holdings = [
         dict(row)
@@ -286,7 +388,7 @@ def project_assignment_scenario(
 
     cash_rows: list[dict[str, Any]] = []
     security_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-    distribution_incomplete = False
+    distribution_incomplete = unavailable
     for index, holding in enumerate(holdings):
         raw_type = _text(holding.get("asset_type") or holding.get("type")).lower()
         if "option" in raw_type:
@@ -343,7 +445,7 @@ def project_assignment_scenario(
             grouped["opening_market_value_cny"] += market_value
 
     starting_cash = _ZERO
-    cash_complete = True
+    cash_complete = not unavailable
     cash_components: list[dict[str, Any]] = []
     for row in cash_rows:
         value = row["market_value_decimal"]
@@ -924,6 +1026,7 @@ def project_assignment_scenario(
             "include_long_options": False,
         },
         "snapshot": dict(snapshot),
+        "portfolio_evidence": evidence_quality,
         "summary": {
             "assignment_count": len(assignment_rows),
             "short_put_count": sum(1 for row in assignment_rows if row["option_type"] == "put"),

@@ -30,6 +30,7 @@ from domain.domain.position_advice_promotion import (
 )
 from src.application.position_advice_authority_service import (
     authority_policy_path,
+    plan_authority_change,
     read_authority_resolution,
     read_authority_resolution_under_lock,
 )
@@ -569,15 +570,49 @@ def position_advice_promotion_status(
     _, evidence, evidence_path, gate, gate_path = max(
         candidates, key=lambda item: item[0]
     )
-    ready = gate["status"] == "pass"
+    authority_plan = plan_authority_change(
+        base=base,
+        normalized_account=account,
+        normalized_portfolio_source=str(
+            policy["normalized_portfolio_source"]
+        ),
+        portfolio_account_identity_hash=str(
+            policy["portfolio_account_identity_hash"]
+        ),
+        target_mode="v2",
+        expected_policy_hash=str(policy["policy_hash"]),
+        actor="position-advice-promotion-status",
+        requested_at=datetime.now(timezone.utc),
+        promotion_evidence=evidence,
+    )
+    ready = (
+        gate["status"] == "pass"
+        and authority_plan["status"] == "ready"
+    )
+    status = (
+        str(gate["status"])
+        if gate["status"] != "pass" or ready
+        else "blocked"
+    )
+    reason_codes = (
+        list(gate["reason_codes"])
+        if gate["status"] != "pass"
+        else list(authority_plan["reason_codes"])
+    )
     return {
         **_promotion_status_payload(
             account=account,
-            status=str(gate["status"]),
-            reason_codes=list(gate["reason_codes"]),
+            status=status,
+            reason_codes=reason_codes,
             policy=policy,
         ),
         "ready_for_final_cas": ready,
+        "promotion_gate_status": gate["status"],
+        "authority_transition_status": authority_plan["status"],
+        "authority_plan_hash": authority_plan["plan_hash"],
+        "outstanding_notification_receipt_ids": list(
+            authority_plan["outstanding_notification_receipt_ids"]
+        ),
         "promotion_evidence_hash": canonical_sha256(evidence),
         "promotion_gate_hash": gate["gate_hash"],
         "evidence_path": str(evidence_path),

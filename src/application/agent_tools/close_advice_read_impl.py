@@ -22,6 +22,9 @@ from src.application.assistant.position_query import PositionExpirationQuery, Po
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+from src.application.close_advice_report_manifest import (
+    validate_close_advice_report_manifest,
+)
 
 
 CLOSE_ADVICE_CSV = "close_advice.csv"
@@ -61,7 +64,7 @@ def close_advice_read_tool(
             },
         ) from exc
     config_market = _desired_market(payload, cfg=cfg, config_path=config_path)
-    query_market = None if _has_explicit_source_scope(payload) else _query_market(query)
+    query_market = _query_market(query)
     payload_market_scope = _payload_market_scope(payload)
     desired_market = query_market or (None if payload_market_scope == "all" else config_market)
     sources = _resolve_sources(
@@ -74,8 +77,19 @@ def close_advice_read_tool(
         mask_path=mask_path,
     )
     rows: list[dict[str, Any]] = []
+    used_sources: list[_Source] = []
     for source in sources:
-        rows.extend(_read_rows(source))
+        source_rows = _read_rows(source)
+        if desired_market:
+            source_rows = [
+                row
+                for row in source_rows
+                if _normalize_market(symbol_market(row.get("symbol")))
+                == desired_market
+            ]
+        rows.extend(source_rows)
+        used_sources.append(source)
+    sources = used_sources
 
     matched = [_public_row(row) for row in rows if _matches(row, query)]
     matched.sort(key=_sort_key)
@@ -185,6 +199,7 @@ def _resolve_sources(
         payload,
         base=base,
         config_path=config_path,
+        query=query,
         desired_market=desired_market,
         resolve_output_root=resolve_output_root,
     )
@@ -307,6 +322,7 @@ def _agent_tool_report_sources(
     *,
     base: Path,
     config_path: Path | None,
+    query: PositionQuery,
     desired_market: str | None,
     resolve_output_root: Callable[[Any], Path],
 ) -> list[_Source]:
@@ -327,15 +343,33 @@ def _agent_tool_report_sources(
     out: list[_Source] = []
     seen: set[Path] = set()
     for root in roots:
-        for path in (root / "reports" / CLOSE_ADVICE_CSV, root / CLOSE_ADVICE_CSV):
+        request_paths = sorted(
+            (root / "requests").glob("*/reports/close_advice.csv")
+            if (root / "requests").is_dir()
+            else [],
+            key=lambda item: (item.stat().st_mtime, str(item)),
+            reverse=True,
+        )
+        for path in (
+            *request_paths,
+            root / "reports" / CLOSE_ADVICE_CSV,
+            root / CLOSE_ADVICE_CSV,
+        ):
             resolved = path.resolve()
             if resolved in seen:
                 continue
             seen.add(resolved)
-            if resolved.exists():
+            if not resolved.exists():
+                continue
+            manifest = validate_close_advice_report_manifest(
+                csv_path=resolved,
+                desired_market=desired_market,
+                account=query.account,
+            )
+            if manifest.get("ok"):
                 out.append(_Source(resolved, source_type="agent_tool"))
         if out:
-            return out
+            return out[:1]
     return out
 
 

@@ -3,12 +3,39 @@ from __future__ import annotations
 from domain.domain.portfolio_assignment_scenario import project_assignment_scenario
 
 
-def _evidence(*, holdings=None, quotes=None, status="complete", warnings=None):
+def _evidence(
+    *,
+    holdings=None,
+    quotes=None,
+    status="complete",
+    warnings=None,
+    freshness_status="fresh",
+    trust_status="trusted",
+):
     return {
         "schema_version": "portfolio.valuation_evidence.v1",
+        "success": True,
         "status": status,
+        "freshness": {
+            "status": freshness_status,
+            "trust_status": trust_status,
+            "observed_at_utc": "2026-07-24T01:00:00+00:00",
+            "dataset_ids": [
+                "pm.holdings_quantity",
+                "pm.prices",
+                "pm.fx",
+            ],
+            "reason_codes": [],
+        },
+        "retrieved_at_utc": "2026-07-24T01:00:01+00:00",
+        "scope": {"accounts": ["lx"], "reporting_currency": "CNY"},
+        "snapshot": {
+            "snapshot_id": "valuation-test",
+            "observed_at": "2026-07-24T01:00:00+00:00",
+        },
         "holdings": list(holdings or []),
         "quotes": list(quotes or []),
+        "account_status": [{"account": "lx", "status": status}],
         "warnings": list(warnings or []),
     }
 
@@ -353,3 +380,46 @@ def test_expired_open_short_is_projected_but_marks_result_partial():
     assert result["status"] == "partial"
     assert result["summary"]["assignment_count"] == 1
     assert any("expired_position_marked_open" in warning for warning in result["warnings"])
+
+
+def test_missing_freshness_fails_closed_instead_of_projecting_zero_portfolio():
+    evidence = _evidence()
+    evidence.pop("freshness")
+
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=evidence,
+        option_positions=[],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None
+    assert result["distribution"]["net_assets_cny"] is None
+    assert result["portfolio_evidence"]["freshness_status"] == "unavailable"
+
+
+def test_stale_evidence_is_propagated_as_partial():
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(freshness_status="stale"),
+        option_positions=[],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "partial"
+    assert result["portfolio_evidence"]["freshness_status"] == "stale"
+    assert any("stale" in warning for warning in result["warnings"])
+
+
+def test_untrusted_evidence_is_unavailable():
+    result = project_assignment_scenario(
+        accounts=["lx"],
+        portfolio_evidence=_evidence(trust_status="untrusted"),
+        option_positions=[],
+        snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["portfolio_evidence"]["trust_status"] == "untrusted"
+    assert result["cash_coverage"]["available_cash_and_mmf_cny"] is None

@@ -10,6 +10,7 @@ from domain.domain.position_advice_authority import (
     normalize_portfolio_source,
     scope_for,
 )
+from domain.domain.symbol_identity import symbol_market
 from src.application.ledger.api import (
     decision_state_snapshot,
     open_position_ledger,
@@ -58,6 +59,7 @@ def read_position_advice_v2_from_ledger(
     portfolio_account_identity_hash: str,
     data_config_path: Path,
     requested_portfolio_plan_id: str | None = None,
+    requested_market: str | None = None,
     now: datetime | str | None = None,
     timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
@@ -76,6 +78,7 @@ def read_position_advice_v2_from_ledger(
             portfolio_scope_id=scope_for(account),
         ),
         requested_portfolio_plan_id=requested_portfolio_plan_id,
+        requested_market=requested_market,
         now=now,
         timeout_seconds=timeout_seconds,
     )
@@ -89,6 +92,7 @@ def read_position_advice_v2(
     portfolio_account_identity_hash: str,
     decision_snapshot_reader: Callable[[], Mapping[str, Any]],
     requested_portfolio_plan_id: str | None = None,
+    requested_market: str | None = None,
     now: datetime | str | None = None,
     timeout_seconds: float = 5.0,
     max_attempts: int = 2,
@@ -106,6 +110,7 @@ def read_position_advice_v2(
     requested_plan_id = (
         str(requested_portfolio_plan_id or "").strip() or None
     )
+    market = _market(requested_market)
 
     for attempt in range(attempts):
         try:
@@ -146,11 +151,20 @@ def read_position_advice_v2(
                 validated = validate_current_artifacts_under_lock(
                     base=base,
                     portfolio_scope_id=scope_id,
+                    market=market,
                     now=checked_at,
                     require_fresh=False,
                 )
                 current = dict(validated["current"])
                 advice = dict(validated["advice"])
+                effective_market = market or _market(
+                    current.get("current_market")
+                )
+                if effective_market:
+                    advice = _advice_for_market(
+                        advice,
+                        market=effective_market,
+                    )
                 immutable_input = dict(validated["immutable_input"])
                 source_manifest = dict(validated["source_manifest"])
                 _validate_current_binding(
@@ -310,6 +324,30 @@ def read_position_advice_v2(
     )
 
 
+def _advice_for_market(
+    advice: Mapping[str, Any],
+    *,
+    market: str,
+) -> dict[str, Any]:
+    out = dict(advice)
+    out["rows"] = [
+        dict(item)
+        for item in advice.get("rows") or []
+        if isinstance(item, Mapping)
+        and str(symbol_market(item.get("symbol")) or "").upper() == market
+    ]
+    return out
+
+
+def _market(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    if text not in {"US", "HK"}:
+        raise ValueError("requested_market must be US or HK")
+    return text
+
+
 def _validate_current_binding(
     *,
     current: Mapping[str, Any],
@@ -448,6 +486,16 @@ def _response(
         "model_actionable_count": sum(
             1 for item in rows if item.get("model_actionable") is True
         ),
+        "model_trade_actionable_count": sum(
+            1
+            for item in rows
+            if item.get("model_trade_actionable") is True
+        ),
+        "human_review_required_count": sum(
+            1
+            for item in rows
+            if item.get("human_review_required") is True
+        ),
         "source_manifest": [
             dict(item)
             for item in advice.get("source_manifest") or []
@@ -495,6 +543,8 @@ def _unavailable_response(
         "row_count": 0,
         "actionable_count": 0,
         "model_actionable_count": 0,
+        "model_trade_actionable_count": 0,
+        "human_review_required_count": 0,
         "source_manifest": [],
         "advisory_only": True,
         "execution_authorized": False,
@@ -509,7 +559,11 @@ def _zero_actionability(
     for raw in rows:
         item = dict(raw)
         item["actionable"] = False
-        item["action_scope"] = "none"
+        item["action_scope"] = (
+            str(item.get("action_scope") or "human_fact_review")
+            if item.get("human_review_required") is True
+            else "none"
+        )
         item["reason_codes"] = sorted(
             {
                 *(

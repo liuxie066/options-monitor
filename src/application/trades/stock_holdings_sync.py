@@ -10,7 +10,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 from src.application.trades.state import append_trade_intake_audit
 from src.infrastructure.io_utils import atomic_write_json, read_json, utc_now
-from src.infrastructure.portfolio_holdings_sync_client import sync_portfolio_holdings
+from src.infrastructure.portfolio_holdings_sync_client import (
+    PortfolioHoldingsSyncUnknownError,
+    sync_portfolio_holdings,
+)
+from src.infrastructure.portfolio_management_client import (
+    validate_holdings_sync_response,
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,10 @@ class StockHoldingsSyncDispatcher:
         }
         self._recent_succeeded = {
             account: set(self._states[account]["recent_succeeded_deal_ids"])
+            for account in self._accounts
+        }
+        self._recent_unknown = {
+            account: set(self._states[account]["recent_unknown_deal_ids"])
             for account in self._accounts
         }
         self._threads = [
@@ -152,6 +162,13 @@ class StockHoldingsSyncDispatcher:
                     "account": account,
                     "deal_id": deal_id,
                 }
+            if deal_id in self._recent_unknown[account]:
+                return {
+                    "status": "rejected",
+                    "reason": "sync_result_unknown_requires_reconciliation",
+                    "account": account,
+                    "deal_id": deal_id,
+                }
             if deal_id in self._pending[account]:
                 return {
                     "status": "coalesced",
@@ -176,6 +193,74 @@ class StockHoldingsSyncDispatcher:
             "account": account,
             "deal_id": deal_id,
             "source": source,
+        }
+
+    def reconcile_unknown(
+        self,
+        *,
+        account: str,
+        deal_ids: Sequence[str],
+        outcome: str,
+        evidence: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized_account = str(account or "").strip().lower()
+        normalized_ids = list(
+            dict.fromkeys(
+                str(deal_id or "").strip()
+                for deal_id in deal_ids
+                if str(deal_id or "").strip()
+            )
+        )
+        normalized_outcome = str(outcome or "").strip().lower()
+        if normalized_account not in self._states:
+            raise ValueError("unknown stock holdings sync account")
+        if not normalized_ids:
+            raise ValueError("deal_ids are required")
+        if normalized_outcome not in {"succeeded", "failed"}:
+            raise ValueError("outcome must be succeeded or failed")
+        if not isinstance(evidence, Mapping) or not str(
+            evidence.get("reference") or ""
+        ).strip():
+            raise ValueError("reconciliation evidence reference is required")
+
+        reconciled_at = utc_now()
+        with self._lock:
+            unknown = self._recent_unknown[normalized_account]
+            if any(deal_id not in unknown for deal_id in normalized_ids):
+                raise ValueError("deal_id is not awaiting reconciliation")
+            state = self._states[normalized_account]
+            recent_unknown = dict(state["recent_unknown_deal_ids"])
+            recent_succeeded = dict(state["recent_succeeded_deal_ids"])
+            for deal_id in normalized_ids:
+                unknown.discard(deal_id)
+                recent_unknown.pop(deal_id, None)
+                if normalized_outcome == "succeeded":
+                    self._recent_succeeded[normalized_account].add(deal_id)
+                    recent_succeeded[deal_id] = {
+                        "source": "reconciliation",
+                        "succeeded_at_utc": reconciled_at,
+                        "evidence": dict(evidence),
+                    }
+            state["recent_unknown_deal_ids"] = recent_unknown
+            state["recent_succeeded_deal_ids"] = recent_succeeded
+            state_snapshot = _state_snapshot(state)
+        self._write_account_state(normalized_account, state_snapshot)
+        self._append_audit(
+            normalized_account,
+            {
+                "phase": "stock_holdings_sync_reconciled",
+                "account": normalized_account,
+                "deal_ids": normalized_ids,
+                "outcome": normalized_outcome,
+                "evidence": dict(evidence),
+                "observed_at_utc": reconciled_at,
+            },
+        )
+        return {
+            "status": "reconciled",
+            "account": normalized_account,
+            "deal_ids": normalized_ids,
+            "outcome": normalized_outcome,
         }
 
     def wait_until_idle(self, timeout_sec: float = 30.0) -> bool:
@@ -316,14 +401,19 @@ class StockHoldingsSyncDispatcher:
         for attempt in range(1, self._max_attempts + 1):
             try:
                 response = dict(self._sync_fn(account))
-                if response.get("success") is not True:
-                    raise RuntimeError(
-                        str(
-                            response.get("error")
-                            or response.get("message")
-                            or "portfolio holdings sync did not confirm success=true"
-                        )
-                    )
+                response = validate_holdings_sync_response(
+                    response,
+                    requested_account=account,
+                )
+            except PortfolioHoldingsSyncUnknownError as exc:
+                self._record_unknown_result(
+                    account,
+                    intents,
+                    attempt=attempt,
+                    started_at=started_at,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 self._append_audit(
@@ -409,16 +499,71 @@ class StockHoldingsSyncDispatcher:
             },
         )
 
+    def _record_unknown_result(
+        self,
+        account: str,
+        intents: Sequence[StockHoldingsSyncIntent],
+        *,
+        attempt: int,
+        started_at: str,
+        error: str,
+    ) -> None:
+        deal_ids = list(dict.fromkeys(intent.deal_id for intent in intents))
+        sources = sorted({intent.source for intent in intents})
+        observed_at = utc_now()
+        with self._lock:
+            state = self._states[account]
+            recent_unknown = dict(state["recent_unknown_deal_ids"])
+            for intent in intents:
+                recent_unknown[intent.deal_id] = {
+                    "source": intent.source,
+                    "received_at_utc": intent.received_at,
+                    "unknown_at_utc": observed_at,
+                    "error": error,
+                }
+                self._recent_unknown[account].add(intent.deal_id)
+            state["recent_unknown_deal_ids"] = recent_unknown
+            state["last_batch"] = {
+                "status": "unknown",
+                "deal_ids": deal_ids,
+                "sources": sources,
+                "attempts": attempt,
+                "started_at_utc": started_at,
+                "finished_at_utc": observed_at,
+                "error": error,
+            }
+            state_snapshot = _state_snapshot(state)
+        self._write_account_state(account, state_snapshot)
+        self._append_audit(
+            account,
+            {
+                "phase": "stock_holdings_sync_result_unknown",
+                "account": account,
+                "deal_ids": deal_ids,
+                "sources": sources,
+                "attempts": attempt,
+                "started_at_utc": started_at,
+                "finished_at_utc": observed_at,
+                "error": error,
+            },
+        )
+
     def _load_account_state(self, account: str) -> dict[str, Any]:
         raw = read_json(self._state_path(account), default={})
         data = raw if isinstance(raw, dict) else {}
         recent = data.get("recent_succeeded_deal_ids")
+        recent_unknown = data.get("recent_unknown_deal_ids")
         return {
-            "version": 1,
+            "version": 2,
             "account": account,
             "recent_succeeded_deal_ids": (
                 dict(recent)
                 if isinstance(recent, dict)
+                else {}
+            ),
+            "recent_unknown_deal_ids": (
+                dict(recent_unknown)
+                if isinstance(recent_unknown, dict)
                 else {}
             ),
             "last_batch": (
@@ -492,10 +637,13 @@ def _portfolio_result_summary(response: Mapping[str, Any]) -> dict[str, Any]:
 
 def _state_snapshot(state: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "version": int(state.get("version") or 1),
+        "version": int(state.get("version") or 2),
         "account": str(state.get("account") or ""),
         "recent_succeeded_deal_ids": dict(
             state.get("recent_succeeded_deal_ids") or {}
+        ),
+        "recent_unknown_deal_ids": dict(
+            state.get("recent_unknown_deal_ids") or {}
         ),
         "last_batch": dict(state.get("last_batch") or {}),
     }

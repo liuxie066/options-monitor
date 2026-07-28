@@ -92,6 +92,7 @@ INLINE_SECRET_CONFIG_KEYS = {
     'refresh_token',
     'tenant_access_token',
 }
+VALID_FUTU_TRD_ENVS = {'REAL', 'SIMULATE'}
 ASSISTANT_CONFIG_KEYS = {
     'active_model',
     'context_window_messages',
@@ -794,6 +795,14 @@ def _validate_no_inline_secrets_or_retired_callback_cfg(value, path: str = '') -
             _validate_no_inline_secrets_or_retired_callback_cfg(item, f'{path}[{index}]')
 
 
+def _validate_futu_trd_env(value, path: str) -> None:
+    if value in (None, ''):
+        return
+    normalized = str(value).strip().upper()
+    if normalized not in VALID_FUTU_TRD_ENVS:
+        die(f'{path} must be one of: REAL, SIMULATE')
+
+
 def validate_config(cfg: dict):
     if 'watchlist' in cfg:
         die('watchlist is no longer supported; use symbols')
@@ -816,6 +825,19 @@ def validate_config(cfg: dict):
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
     _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
+
+    portfolio_cfg = cfg.get('portfolio') or {}
+    if portfolio_cfg and not isinstance(portfolio_cfg, dict):
+        die('portfolio must be an object')
+    if isinstance(portfolio_cfg, dict):
+        portfolio_futu = portfolio_cfg.get('futu')
+        if portfolio_futu is not None and not isinstance(portfolio_futu, dict):
+            die('portfolio.futu must be an object')
+        if isinstance(portfolio_futu, dict):
+            _validate_futu_trd_env(
+                portfolio_futu.get('trd_env'),
+                'portfolio.futu.trd_env',
+            )
 
     # intake config (optional)
     intake = cfg.get('intake') or {}
@@ -979,6 +1001,11 @@ def validate_config(cfg: dict):
                 close_advice.get('max_items_per_account'),
                 'close_advice.max_items_per_account',
             )
+        if 'quote_max_age_sec' in close_advice and close_advice.get('quote_max_age_sec') is not None:
+            validate_positive_integer(
+                close_advice.get('quote_max_age_sec'),
+                'close_advice.quote_max_age_sec',
+            )
         for key in ('max_spread_ratio', 'strong_remaining_annualized_max', 'medium_remaining_annualized_max'):
             if key not in close_advice or close_advice.get(key) is None:
                 continue
@@ -1052,6 +1079,10 @@ def validate_config(cfg: dict):
                     die(f'account_settings.{account}.futu must be an object')
                 if not str(futu_cfg.get('account_id') or '').strip():
                     die(f'account_settings.{account}.futu.account_id must be a non-empty string')
+                _validate_futu_trd_env(
+                    futu_cfg.get('trd_env'),
+                    f'account_settings.{account}.futu.trd_env',
+                )
                 for key in ('port', 'telnet_port'):
                     if key not in futu_cfg or futu_cfg.get(key) in (None, ''):
                         continue
@@ -1202,6 +1233,10 @@ def validate_config(cfg: dict):
                 die(f"{sym}.fetch.source unsupported: {src_raw}; use futu")
             if str(src_raw or '').strip().lower() == 'opend':
                 warn(f"{sym}.fetch.source=opend is legacy; prefer futu")
+            _validate_futu_trd_env(
+                fetch.get('trd_env'),
+                f'{sym}.fetch.trd_env',
+            )
             if fetch.get('limit_expirations') is not None:
                 warn(
                     f"{sym}.fetch.limit_expirations is ignored by strategy required-data "

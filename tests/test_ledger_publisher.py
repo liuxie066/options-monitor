@@ -219,3 +219,104 @@ def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
     assert fields["leg_role"] == "enhancement_call"
     assert fields["strategy_group_id"] == "ye_nvda_1"
     assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+
+
+def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:
+    open_key = _key(
+        strike=140.0,
+        expiration_ymd="2026-06-19",
+        option_type="call",
+        position_side="long",
+    )
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-nvda-call",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=open_key,
+                contracts=1,
+                price=1.0,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_open-nvda-call",
+            ),
+            TradeEvent(
+                event_id="adjust-nvda-call",
+                event_type="adjust",
+                event_time_ms=2000,
+                contract_key=open_key,
+                contracts=0,
+                price=0.0,
+                currency="USD",
+                source="cli_manual_adjust",
+                multiplier=100,
+                target_lot_id="lot_open-nvda-call",
+                raw_payload={
+                    "patch": {
+                        "strategy": "yield_enhancement",
+                        "leg_role": "enhancement_call",
+                    }
+                },
+            ),
+            TradeEvent(
+                event_id="void-adjust-nvda-call",
+                event_type="void",
+                event_time_ms=3000,
+                contract_key=open_key,
+                contracts=0,
+                price=0.0,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                target_event_id="adjust-nvda-call",
+            ),
+        ]
+    )
+
+    assert projection.diagnostics == []
+    fields = projection.lots[0].fields
+    assert "strategy" not in fields
+    assert "leg_role" not in fields
+
+
+def test_publisher_does_not_apply_strategy_patch_from_rejected_adjust() -> None:
+    open_key = _key(
+        strike=140.0,
+        expiration_ymd="2026-06-19",
+        option_type="call",
+        position_side="long",
+    )
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-nvda-call",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=open_key,
+                contracts=1,
+                price=1.0,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_open-nvda-call",
+            ),
+            TradeEvent(
+                event_id="adjust-missing-lot",
+                event_type="adjust",
+                event_time_ms=2000,
+                contract_key=open_key,
+                contracts=0,
+                price=0.0,
+                currency="USD",
+                source="cli_manual_adjust",
+                multiplier=100,
+                target_lot_id="lot_missing",
+                raw_payload={"patch": {"strategy": "yield_enhancement"}},
+            ),
+        ]
+    )
+
+    assert [item.code for item in projection.diagnostics] == ["target_lot_not_found"]
+    assert "strategy" not in projection.lots[0].fields

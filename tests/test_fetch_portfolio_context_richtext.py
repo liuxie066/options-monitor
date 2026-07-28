@@ -202,3 +202,95 @@ def test_build_context_does_not_apply_partial_cost_basis_to_all_shares() -> None
     assert stock["cost_basis_complete"] is False
     assert stock["cost_known_shares"] == 50
     assert stock["cost_unknown_shares"] == 50
+
+
+def test_feishu_record_update_time_is_business_observation_not_read_time() -> None:
+    records = [
+        {
+            "last_modified_time": "1785110400000",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "cash",
+                "asset_id": "USD-CASH",
+                "currency": "USD",
+                "quantity": "100",
+            },
+        },
+        {
+            "last_modified_time": "1785114000000",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "NVDA",
+                "currency": "USD",
+                "quantity": "10",
+                "avg_cost": "100",
+            },
+        },
+    ]
+
+    first = build_context(records, broker="富途", account="lx")
+    second = build_context(records, broker="富途", account="lx")
+
+    assert first["source_observed_at"] == "2026-07-27T00:00:00Z"
+    assert second["source_observed_at"] == first["source_observed_at"]
+    assert first["retrieved_at_utc"] != first["source_observed_at"]
+    assert first["source_observation_status"] == "trusted"
+    assert (
+        first["source_observation_basis"]
+        == "feishu_record:last_modified_time"
+    )
+
+
+def test_missing_or_invalid_record_observation_is_unknown() -> None:
+    base = {
+        "fields": {
+            "broker": "富途",
+            "account": "lx",
+            "asset_type": "cash",
+            "asset_id": "USD-CASH",
+            "currency": "USD",
+            "quantity": "100",
+        }
+    }
+
+    missing = build_context([base], broker="富途", account="lx")
+    invalid = build_context(
+        [{**base, "last_modified_time": "not-a-time"}],
+        broker="富途",
+        account="lx",
+    )
+
+    assert missing["source_observed_at"] is None
+    assert missing["source_observation_status"] == "unknown"
+    assert invalid["source_observed_at"] is None
+    assert invalid["source_observation_status"] == "unknown"
+
+
+def test_owner_snapshot_time_takes_precedence_over_feishu_read_metadata() -> None:
+    context = build_context(
+        [
+            {
+                "last_modified_time": "1785114000000",
+                "fields": {
+                    "snapshot_observed_at": "2026-07-26T20:00:00Z",
+                    "broker": "富途",
+                    "account": "lx",
+                    "asset_type": "cash",
+                    "asset_id": "USD-CASH",
+                    "currency": "USD",
+                    "quantity": "100",
+                },
+            }
+        ],
+        broker="富途",
+        account="lx",
+    )
+
+    assert context["source_observed_at"] == "2026-07-26T20:00:00Z"
+    assert (
+        context["source_observation_basis"]
+        == "holdings_field:snapshot_observed_at"
+    )

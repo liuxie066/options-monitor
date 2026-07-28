@@ -157,6 +157,8 @@ def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
                 "strike": 120.0,
                 "multiplier": 100,
                 "expiration": expiration_ms,
+                "opened_at": 1,
+                "premium": 1.0,
             },
         }
     ]
@@ -551,6 +553,20 @@ def test_load_position_lot_records_returns_empty_when_projection_empty() -> None
     assert rows == []
 
 
+def test_load_position_lot_records_propagates_repository_failure() -> None:
+    class _PrimaryRepo:
+        def list_position_lots(self) -> list[dict[str, Any]]:
+            raise RuntimeError("ledger unavailable")
+
+    class _Repo:
+        primary_repo = _PrimaryRepo()
+
+    import pytest  # pyright: ignore[reportMissingImports]
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        load_position_lot_records(_Repo())
+
+
 def test_list_position_rows_requires_broker_on_persisted_rows() -> None:
     class _Repo:
         def list_position_lots(self) -> list[dict[str, Any]]:
@@ -650,8 +666,10 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
                     "strike": 80.0 if option_type == "put" else 100.0,
                     "multiplier": 100,
                     "expiration": expiration_ms,
-                    "expiration_ymd": expiration,
-                    "strategy": "combo_yield",
+                        "expiration_ymd": expiration,
+                        "opened_at": 1,
+                        "premium": 1.0,
+                        "strategy": "combo_yield",
                     "leg_role": leg_role,
                     "strategy_group_id": group_id,
                     "strategy_snapshot": {"expiry_structure": "diagonal", "strategy_group_id": group_id},

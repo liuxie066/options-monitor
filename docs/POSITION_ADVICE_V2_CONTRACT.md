@@ -168,6 +168,17 @@ Recommendation values:
 | `not_evaluable` | No |
 | `none` | No |
 
+Actionability has two independent fields:
+
+- `model_trade_actionable`: the model selected a supported trade proposal;
+- `human_review_required`: a lifecycle or identity fact needs an explicit
+  operator review, even though no trade is authorized.
+
+`model_actionable` remains a compatibility alias for
+`model_trade_actionable`. A `review` row is therefore
+`model_trade_actionable=false`, `human_review_required=true`, and is rendered
+as a P0 human operation in Daily Brief under `v1`, `v2_shadow`, and `v2`.
+
 `settlement_pending` and `partially_resolved` lifecycle states cannot produce
 an option action.
 

@@ -8,6 +8,9 @@ from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 from domain.domain.ledger import TradeEvent
+from domain.domain.performance.cash_conversion import (
+    validate_observed_cash_conversion,
+)
 from domain.domain.performance.engine import cash_facts_for_trade_event
 from domain.domain.performance.models import FXRateFact, normalize_currency, select_fx_rate, to_decimal
 from src.application.cash_conversion import (
@@ -246,6 +249,7 @@ def _build_plan(
             if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
                 "",
                 "pending",
+                "observed",
             }:
                 unresolved.append(
                     _unresolved(
@@ -341,6 +345,7 @@ def _build_plan(
             if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
                 "",
                 "pending",
+                "observed",
             }:
                 unresolved.append(
                     _unresolved(
@@ -556,31 +561,31 @@ def _in_scope(
 def _existing_conversion_is_observed(existing: Any, *, fact: Any) -> bool:
     if not isinstance(existing, Mapping):
         return False
-    try:
-        native_amount = to_decimal(existing.get("native_amount"), field_name="native_amount")
-    except (TypeError, ValueError):
-        return False
-    return (
-        existing.get("schema_version") == "cash_conversion.v1"
-        and str(existing.get("status") or "").lower() == "observed"
-        and str(existing.get("cash_fact_id") or "") == fact.fact_id
-        and str(existing.get("native_currency") or "").upper() == str(fact.currency or "").upper()
-        and str(existing.get("quote_currency") or "").upper() == "CNY"
-        and native_amount == fact.amount
-        and existing.get("amount_cny") is not None
+    amount_cny, issue = validate_observed_cash_conversion(
+        existing,
+        cash_fact_id=fact.fact_id,
+        native_amount=fact.amount,
+        native_currency=str(fact.currency or ""),
+        effective_at_ms=int(fact.effective_at_ms),
     )
+    return issue is None and amount_cny is not None
 
 
 def _existing_conversion_matches(existing: Any, candidate: Mapping[str, Any]) -> bool:
     if not isinstance(existing, Mapping):
         return False
+    amount_cny, issue = validate_observed_cash_conversion(
+        existing,
+        cash_fact_id=str(candidate.get("cash_fact_id") or ""),
+        native_amount=candidate.get("native_amount"),
+        native_currency=str(candidate.get("native_currency") or ""),
+        effective_at_ms=int(candidate.get("effective_at_ms") or 0),
+    )
     return (
-        str(existing.get("status") or "").lower() == "observed"
-        and str(existing.get("cash_fact_id") or "") == str(candidate.get("cash_fact_id") or "")
-        and str(existing.get("native_currency") or "").upper()
-        == str(candidate.get("native_currency") or "").upper()
-        and str(existing.get("native_amount") or "") == str(candidate.get("native_amount") or "")
-        and existing.get("amount_cny") is not None
+        issue is None
+        and amount_cny is not None
+        and str(existing.get("conversion_id") or "")
+        == str(candidate.get("conversion_id") or "")
     )
 
 

@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 from src.application.trades.intake import process_trade_payload
 from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
+from src.infrastructure.portfolio_holdings_sync_client import (
+    PortfolioHoldingsSyncUnknownError,
+)
 
 
 def _context(
@@ -28,12 +31,35 @@ def _context(
     }
 
 
+def _sync_receipt(account: str = "lx") -> dict:
+    return {
+        "success": True,
+        "status": "written",
+        "account": account,
+        "broker": "futu",
+        "dry_run": False,
+        "source": "futu-openapi",
+        "source_snapshot_id": f"snapshot-{account}",
+        "sync_run_id": f"sync-{account}",
+        "receipt_persisted": True,
+        "partial_write_possible": False,
+        "stages": {
+            name: {
+                "status": "succeeded",
+                "partial_write_possible": False,
+            }
+            for name in ("positions", "securities_cash", "fund_mmf")
+        },
+        "positions": [],
+    }
+
+
 def test_option_deal_never_calls_portfolio_sync(tmp_path: Path) -> None:
     calls: list[str] = []
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path,
-        sync_fn=lambda account: calls.append(account) or {"success": True},
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0,
     )
 
@@ -55,11 +81,7 @@ def test_stock_fills_are_coalesced_and_persisted_once(tmp_path: Path) -> None:
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path,
-        sync_fn=lambda account: calls.append(account) or {
-            "success": True,
-            "account": account,
-            "write_applied": True,
-        },
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0.05,
     )
 
@@ -97,7 +119,7 @@ def test_succeeded_deal_is_deduplicated_after_restart(tmp_path: Path) -> None:
     first = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path,
-        sync_fn=lambda account: calls.append(account) or {"success": True},
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0,
     )
     assert first.handle_normalized_deal(_context("stock-1"))["status"] == "queued"
@@ -106,7 +128,7 @@ def test_succeeded_deal_is_deduplicated_after_restart(tmp_path: Path) -> None:
     second = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path,
-        sync_fn=lambda account: calls.append(account) or {"success": True},
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0,
     )
     result = second.handle_normalized_deal(
@@ -126,7 +148,7 @@ def test_failed_sync_retries_without_rolling_back_intent(tmp_path: Path) -> None
         attempts.append(account)
         if len(attempts) == 1:
             raise RuntimeError("temporary failure")
-        return {"success": True, "account": account}
+        return _sync_receipt(account)
 
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
@@ -157,7 +179,7 @@ def test_accounts_execute_independently(tmp_path: Path) -> None:
             raise RuntimeError("lx unavailable")
         else:
             sy_finished.set()
-        return {"success": True, "account": account}
+        return _sync_receipt(account)
 
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx", "sy"],
@@ -191,7 +213,7 @@ def test_account_queue_is_bounded_and_enqueue_does_not_wait_for_http(
     def _sync(account: str) -> dict:
         sync_started.set()
         assert release_sync.wait(2)
-        return {"success": True, "account": account}
+        return _sync_receipt(account)
 
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
@@ -280,10 +302,7 @@ def test_ordinary_stock_skips_om_ledger_and_triggers_pm_sync(
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path / "pm-sync",
-        sync_fn=lambda account: calls.append(account) or {
-            "success": True,
-            "account": account,
-        },
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0,
     )
     deal = SimpleNamespace(
@@ -345,15 +364,13 @@ def test_assignment_updates_om_and_pm_independently(tmp_path: Path) -> None:
     dispatcher = StockHoldingsSyncDispatcher(
         accounts=["lx"],
         state_dir=tmp_path / "pm-sync",
-        sync_fn=lambda account: calls.append(account) or {
-            "success": True,
-            "account": account,
-        },
+        sync_fn=lambda account: calls.append(account) or _sync_receipt(account),
         debounce_sec=0,
     )
     deal = SimpleNamespace(
         deal_id="assignment-stock-1",
         internal_account="lx",
+        futu_account_id="REAL_1",
         option_type=None,
         position_effect=None,
         to_dict=lambda: {
@@ -418,7 +435,7 @@ def test_auto_intake_factory_wires_apply_mode_to_portfolio_client(
         lambda account, *, timeout_sec: calls.append(
             (account, timeout_sec)
         )
-        or {"success": True, "account": account},
+        or _sync_receipt(account),
     )
     dispatcher = auto_intake._build_stock_holdings_sync_dispatcher(
         intake_cfg={
@@ -443,3 +460,75 @@ def test_auto_intake_factory_wires_apply_mode_to_portfolio_client(
     assert dispatcher.close()
     assert calls == [("lx", 45.0)]
     assert (tmp_path / "pm-sync" / "lx" / "state.json").exists()
+
+
+def test_invalid_success_payload_is_not_persisted_as_synchronized(
+    tmp_path: Path,
+) -> None:
+    dispatcher = StockHoldingsSyncDispatcher(
+        accounts=["lx"],
+        state_dir=tmp_path,
+        sync_fn=lambda _account: {
+            "success": True,
+            "account": "sy",
+        },
+        debounce_sec=0,
+        max_attempts=1,
+    )
+
+    assert dispatcher.handle_normalized_deal(_context("stock-invalid"))["status"] == "queued"
+    assert dispatcher.close()
+    state = json.loads(
+        (tmp_path / "lx" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["last_batch"]["status"] == "failed"
+    assert "stock-invalid" not in state["recent_succeeded_deal_ids"]
+
+
+def test_transport_unknown_is_not_retried_and_requires_reconciliation(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def _sync(account: str) -> dict:
+        calls.append(account)
+        raise PortfolioHoldingsSyncUnknownError("response lost after request")
+
+    dispatcher = StockHoldingsSyncDispatcher(
+        accounts=["lx"],
+        state_dir=tmp_path,
+        sync_fn=_sync,
+        debounce_sec=0,
+        max_attempts=3,
+        retry_backoff_sec=0,
+    )
+    assert dispatcher.handle_normalized_deal(_context("stock-unknown"))["status"] == "queued"
+    assert dispatcher.close()
+    assert calls == ["lx"]
+
+    state = json.loads(
+        (tmp_path / "lx" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state["last_batch"]["status"] == "unknown"
+    assert "stock-unknown" in state["recent_unknown_deal_ids"]
+    blocked = dispatcher.handle_normalized_deal(_context("stock-unknown"))
+    assert blocked["reason"] == "dispatcher_stopping"
+
+    restarted = StockHoldingsSyncDispatcher(
+        accounts=["lx"],
+        state_dir=tmp_path,
+        sync_fn=lambda account: _sync_receipt(account),
+        debounce_sec=0,
+    )
+    blocked = restarted.handle_normalized_deal(_context("stock-unknown"))
+    assert blocked["status"] == "rejected"
+    assert blocked["reason"] == "sync_result_unknown_requires_reconciliation"
+    reconciled = restarted.reconcile_unknown(
+        account="lx",
+        deal_ids=["stock-unknown"],
+        outcome="failed",
+        evidence={"reference": "operator-readback-1"},
+    )
+    assert reconciled["outcome"] == "failed"
+    assert restarted.handle_normalized_deal(_context("stock-unknown"))["status"] == "queued"
+    assert restarted.close()

@@ -616,6 +616,86 @@ def test_daily_brief_uses_only_v2_position_authority_when_promoted(
     assert brief["position_advice_preview"]["authority_mode"] == "v2"
 
 
+@pytest.mark.parametrize("authority_mode", ("v1", "v2_shadow", "v2"))
+def test_daily_brief_keeps_lifecycle_human_review_visible_in_every_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authority_mode: str,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "state" / "position_advice_sources.v2.json").write_text(
+        json.dumps(
+            {
+                "account": "lx",
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        service,
+        "read_position_advice_v2_from_ledger",
+        lambda **_kwargs: {
+            "availability_status": "available",
+            "freshness": {"status": "fresh", "reason_codes": []},
+            "authority_mode": authority_mode,
+            "portfolio_plan_id": "plan-review",
+            "account_run_id": "run-review",
+            "row_count": 1,
+            "actionable_count": 0,
+            "model_actionable_count": 0,
+            "model_trade_actionable_count": 0,
+            "human_review_required_count": 1,
+            "rows": [
+                {
+                    "position_id": "review-lot",
+                    "strategy_family": "short_put",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "expiration": "2026-07-01",
+                    "strike": 100,
+                    "contract_symbol": "NVDA260701P00100000",
+                    "lifecycle_state": "needs_review",
+                    "group_structure_state": "standalone",
+                    "recommendation": "review",
+                    "model_trade_actionable": False,
+                    "model_actionable": False,
+                    "human_review_required": True,
+                    "actionable": False,
+                    "action_scope": "lifecycle_fact_review",
+                    "reason_codes": [
+                        "lifecycle_needs_review",
+                        "lifecycle_read_model_missing",
+                    ],
+                    "portfolio_plan_id": "plan-review",
+                    "depends_on": [],
+                }
+            ],
+        },
+    )
+
+    brief = _assemble(tmp_path)
+    review = next(
+        item
+        for item in brief["actions"]
+        if item.get("position_lot_id") == "review-lot"
+    )
+
+    assert review["priority"] == "P0"
+    assert review["action_type"] == "position_review"
+    assert review["human_review_required"] is True
+    assert review["model_trade_actionable"] is False
+    assert review["requires_user_confirmation"] is True
+    assert any(
+        item.get("position_lot_id") == "review-lot"
+        for item in brief["positions"]
+    )
+
+
 def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(

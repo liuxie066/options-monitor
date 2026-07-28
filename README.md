@@ -231,6 +231,7 @@ om-agent run --tool option_positions_read \
 
 ```bash
 om option-positions add \
+  --request-id manual-open-<stable-id> \
   --account lx \
   --symbol NVDA \
   --option-type put \
@@ -243,7 +244,9 @@ om option-positions add \
   --dry-run
 ```
 
-写入前确认目标 runtime root、SQLite、account、lot 和 event 语义。修账流程见 [Option Positions Repair](docs/OPTION_POSITIONS_REPAIR.md)。
+写入前确认目标 runtime root、SQLite、account、lot 和 event 语义。`add`、`assign`、
+`exercise` 在 dry-run、确认写入和重试时必须复用同一个 `--request-id`，以便在响应丢失后
+安全返回原结果。修账流程见 [Option Positions Repair](docs/OPTION_POSITIONS_REPAIR.md)。
 
 ### 指派后资产分布
 

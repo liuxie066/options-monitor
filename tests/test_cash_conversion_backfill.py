@@ -194,6 +194,51 @@ def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(
     assert len(sy.unresolved) == 2
 
 
+def test_backfill_replaces_corrupt_observed_conversion(tmp_path: Path) -> None:
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    conversion = build_cash_conversion(
+        cash_fact_id="option_trade_cash_gross:corrupt",
+        amount=200,
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": "7.2"},
+            "timestamp": datetime.fromtimestamp(
+                RATE_MS / 1000,
+                tz=TZ,
+            ).isoformat(),
+        },
+        effective_at_ms=EVENT_MS,
+        observed_at_ms=MIGRATION_MS,
+    )
+    conversion["amount_cny"] = "999999"
+    repo.upsert_trade_event(
+        _event(
+            "corrupt",
+            raw_payload={
+                "cash_conversions": {
+                    "option_trade_cash_gross": conversion,
+                }
+            },
+        )
+    )
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    _import_rate(evidence_repo)
+
+    result = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS,
+    )
+
+    assert result.existing_observed_count == 0
+    assert result.migrated_conversion_count == 2
+    repaired = repo.list_trade_events()[0]["raw_payload"]["cash_conversions"]
+    assert repaired["option_trade_cash_gross"]["amount_cny"] == "1440"
+
+
 def test_backfill_enriches_assigned_stock_sale_cash(tmp_path: Path) -> None:
     db_path = tmp_path / "option_positions.sqlite3"
     repo = SQLiteOptionPositionsRepository(db_path)

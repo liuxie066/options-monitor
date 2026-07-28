@@ -83,6 +83,73 @@ def _record_broker_text(fields: dict) -> str:
     return _as_text(fields.get("market")).strip()
 
 
+def _source_timestamp(value) -> datetime | None:
+    if isinstance(value, (int, float)) or (
+        isinstance(value, str) and value.strip().isdigit()
+    ):
+        try:
+            numeric = float(value)
+            if numeric >= 10_000_000_000:
+                numeric /= 1000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _record_source_observation(record: dict) -> tuple[datetime | None, str | None]:
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    for key in (
+        "snapshot_observed_at",
+        "source_observed_at",
+        "observed_at_utc",
+    ):
+        if key in fields:
+            return _source_timestamp(fields.get(key)), f"holdings_field:{key}"
+    for key in ("last_modified_time", "updated_at_utc"):
+        if key in record:
+            return _source_timestamp(record.get(key)), f"feishu_record:{key}"
+    return None, None
+
+
+def _portfolio_source_observation(
+    *,
+    records: list[dict],
+    source_observed_at: str | None,
+) -> tuple[str | None, str, str]:
+    if source_observed_at is not None:
+        parsed = _source_timestamp(source_observed_at)
+        if parsed is None:
+            return None, "invalid", "producer_provided"
+        return (
+            parsed.isoformat().replace("+00:00", "Z"),
+            "trusted",
+            "producer_provided",
+        )
+    if not records:
+        return None, "unknown", "no_selected_holdings"
+    observations = [_record_source_observation(record) for record in records]
+    if any(observed is None for observed, _basis in observations):
+        return None, "unknown", "record_observation_missing"
+    timestamps = [observed for observed, _basis in observations if observed is not None]
+    bases = sorted({str(basis) for _observed, basis in observations if basis})
+    oldest = min(timestamps)
+    return (
+        oldest.isoformat().replace("+00:00", "Z"),
+        "trusted",
+        bases[0] if len(bases) == 1 else "mixed_owner_metadata",
+    )
+
+
 def build_context(
     records: list[dict],
     broker: str | None = None,
@@ -95,6 +162,7 @@ def build_context(
     # holding schema fields we saw:
     # asset_id, asset_type, broker/market, account, quantity, avg_cost, currency
     selected = []
+    selected_records: list[dict] = []
     broker_norm = str(broker).strip() if broker else None
     account_norm = normalize_account(account) if account else None
 
@@ -121,6 +189,7 @@ def build_context(
         if "account" in fields:
             fields["account"] = normalize_account(_as_text(fields.get("account")))
         selected.append(fields)
+        selected_records.append({**rec, "fields": fields})
 
     stocks_by_symbol: dict[str, dict] = {}
     stock_cost_basis: dict[str, dict[str, float | int]] = {}
@@ -207,7 +276,13 @@ def build_context(
         if not existing.get("currency") and currency:
             existing["currency"] = currency
 
-    observed_at = str(source_observed_at or datetime.now(timezone.utc).isoformat())
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    observed_at, observation_status, observation_basis = (
+        _portfolio_source_observation(
+            records=selected_records,
+            source_observed_at=source_observed_at,
+        )
+    )
     identifiers = sorted(
         {
             str(item or "").strip().lower()
@@ -218,8 +293,11 @@ def build_context(
     if not identifiers and account_norm:
         identifiers = [account_norm]
     return {
-        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "as_of_utc": retrieved_at,
+        "retrieved_at_utc": retrieved_at,
         "source_observed_at": observed_at,
+        "source_observation_status": observation_status,
+        "source_observation_basis": observation_basis,
         "source_account_identifiers": identifiers,
         "filters": {"broker": broker_norm, "account": account_norm},
         "cash_by_currency": cash_by_currency,
@@ -237,7 +315,6 @@ def build_shared_context(
     portfolio_source_name: str = "holdings",
 ) -> dict:
     broker_norm = str(broker).strip() if broker else None
-    observed_at = str(source_observed_at or datetime.now(timezone.utc).isoformat())
     accounts: set[str] = set()
     for rec in records:
         fields0 = rec.get("fields") or {}
@@ -255,26 +332,34 @@ def build_shared_context(
             records,
             broker=broker_norm,
             account=acct,
-            source_observed_at=observed_at,
+            source_observed_at=source_observed_at,
             portfolio_source_name=portfolio_source_name,
             source_account_identifiers=[acct],
         )
         for acct in sorted(accounts)
     }
+    all_accounts = build_context(
+        records,
+        broker=broker_norm,
+        account=None,
+        source_observed_at=source_observed_at,
+        portfolio_source_name=portfolio_source_name,
+        source_account_identifiers=sorted(accounts),
+    )
     return {
-        "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "source_observed_at": observed_at,
+        "as_of_utc": all_accounts["as_of_utc"],
+        "retrieved_at_utc": all_accounts["retrieved_at_utc"],
+        "source_observed_at": all_accounts["source_observed_at"],
+        "source_observation_status": all_accounts[
+            "source_observation_status"
+        ],
+        "source_observation_basis": all_accounts[
+            "source_observation_basis"
+        ],
         "source_account_identifiers": sorted(accounts),
         "portfolio_source_name": str(portfolio_source_name or "holdings"),
         "filters": {"broker": broker_norm, "account": None},
-        "all_accounts": build_context(
-            records,
-            broker=broker_norm,
-            account=None,
-            source_observed_at=observed_at,
-            portfolio_source_name=portfolio_source_name,
-            source_account_identifiers=sorted(accounts),
-        ),
+        "all_accounts": all_accounts,
         "by_account": by_account,
     }
 
@@ -322,12 +407,10 @@ def load_holdings_portfolio_context(
     account: str | None = None,
 ) -> dict:
     records = load_holdings_records(data_config_path)
-    observed_at = datetime.now(timezone.utc).isoformat()
     return build_context(
         records,
         broker=broker,
         account=account,
-        source_observed_at=observed_at,
         portfolio_source_name="external_holdings",
         source_account_identifiers=([account] if account else []),
     )
@@ -342,7 +425,6 @@ def load_holdings_portfolio_shared_context(
     return build_shared_context(
         records,
         broker=broker,
-        source_observed_at=datetime.now(timezone.utc).isoformat(),
         portfolio_source_name="external_holdings",
     )
 

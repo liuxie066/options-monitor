@@ -18,7 +18,10 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.publisher import (
+    ensure_projection_publishable,
+    project_stored_trade_events_to_position_lots,
+)
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     _load_data_config,
@@ -227,12 +230,14 @@ def materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: 
                 sqlite_repo.upsert_trade_event(event, conn=conn)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
             _raise_if_local_bootstrap_projection_failed(events, projection)
+            ensure_projection_publishable(projection, operation="ledger bootstrap projection")
             sqlite_repo.replace_position_lots(projection.lots, conn=conn)
         else:
             for event in events:
                 sqlite_repo.upsert_trade_event(event)
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
             _raise_if_local_bootstrap_projection_failed(events, projection)
+            ensure_projection_publishable(projection, operation="ledger bootstrap projection")
             sqlite_repo.replace_position_lots(projection.lots)
         return len(events)
 
@@ -281,6 +286,7 @@ def load_option_positions_repo(
         repo.bootstrap_message = "trade_events already present"
         if repo.count_position_lots() == 0:
             projection = project_stored_trade_events_to_position_lots(repo.list_trade_events())
+            ensure_projection_publishable(projection, operation="ledger startup projection")
             repo.replace_position_lots(projection.lots)
         return repo
 

@@ -21,6 +21,11 @@ from src.application.position_advice_authority_service import (
     apply_authority_change,
     build_identity_binding_evidence,
 )
+from src.application.position_advice_notification_authority import (
+    build_notification_authority_token,
+    execute_notification_with_authority,
+    resolve_notification_unknown,
+)
 from src.application.position_advice_promotion import (
     PositionAdvicePromotionError,
     build_position_advice_promotion_evidence,
@@ -565,6 +570,63 @@ def test_automatic_refresh_is_deterministic_and_status_exposes_final_cas(
     assert status["final_cas"]["evidence_path"] == published[
         "evidence_path"
     ]
+
+    token = build_notification_authority_token(
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        selected_advice_contract="v1",
+        resolved_mode="v2_shadow",
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+        account_run_id="promotion-status-unknown",
+    )
+    unknown = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        send=lambda: {
+            "ok": False,
+            "command_ok": True,
+            "delivery_confirmed": False,
+            "error_code": "SEND_UNCONFIRMED",
+            "ambiguous_send": True,
+        },
+        now=NOW,
+    )
+    blocked = position_advice_promotion_status(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["promotion_gate_status"] == "pass"
+    assert blocked["ready_for_final_cas"] is False
+    assert (
+        "notification_authority_unknown_unresolved"
+        in blocked["reason_codes"]
+    )
+    assert blocked["outstanding_notification_receipt_ids"] == [
+        unknown["authority_receipt_id"]
+    ]
+
+    resolve_notification_unknown(
+        base=tmp_path,
+        normalized_account="lx",
+        receipt_id=str(unknown["authority_receipt_id"]),
+        resolution="failed",
+        evidence={"provider_audit_id": "promotion-failed"},
+        actor="operator@example",
+        resolved_at=NOW,
+        confirm=True,
+        dry_run=False,
+    )
+    recovered = position_advice_promotion_status(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+    assert recovered["status"] == "pass"
+    assert recovered["ready_for_final_cas"] is True
+    assert recovered["outstanding_notification_receipt_ids"] == []
 
 
 def test_refresh_archives_sources_and_allows_ordinary_run_cleanup(

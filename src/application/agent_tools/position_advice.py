@@ -153,6 +153,9 @@ def _position_advice_read_tool(
         requested_portfolio_plan_id=(
             str(payload.get("portfolio_plan_id") or "").strip() or None
         ),
+        requested_market=str(
+            payload.get("config_key") or ""
+        ).strip().upper() or None,
     )
     warnings: list[str] = []
     freshness = dict(result.get("freshness") or {})

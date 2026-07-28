@@ -419,7 +419,10 @@ def _position_row_and_proposals(
     if lifecycle in BLOCKED_LIFECYCLE_STATES:
         if lifecycle in {"needs_review", "conflict"}:
             row["recommendation"] = "review"
+            row["model_trade_actionable"] = False
             row["model_actionable"] = False
+            row["human_review_required"] = True
+            row["action_scope"] = "lifecycle_fact_review"
         row["reason_codes"] = sorted(
             {*row["reason_codes"], f"lifecycle_{lifecycle}"}
         )
@@ -431,7 +434,9 @@ def _position_row_and_proposals(
         "review_required",
     }:
         row["recommendation"] = "review"
-        row["model_actionable"] = True
+        row["model_trade_actionable"] = False
+        row["model_actionable"] = False
+        row["human_review_required"] = True
         row["action_scope"] = "group_fact_review"
         row["reason_codes"] = sorted(
             {
@@ -891,6 +896,7 @@ def _apply_selected_proposal(
     row.update(
         {
             "recommendation": selected.get("proposed_action"),
+            "model_trade_actionable": True,
             "model_actionable": True,
             "action_scope": (
                 "combo_group"
@@ -1060,16 +1066,22 @@ def _apply_authority_scope(
     else:
         status = "v1_authoritative"
     row["promotion_scope_status"] = status
-    model_actionable = bool(row.get("model_actionable"))
+    model_trade_actionable = bool(
+        row.get(
+            "model_trade_actionable",
+            row.get("model_actionable"),
+        )
+    )
+    row["model_actionable"] = model_trade_actionable
     row["actionable"] = bool(
-        model_actionable
+        model_trade_actionable
         and mode == "v2"
         and (
             promotable_family is None
             or promotable_family in covered
         )
     )
-    if model_actionable and not row["actionable"]:
+    if model_trade_actionable and not row["actionable"]:
         row["reason_codes"] = sorted(
             {
                 *row.get("reason_codes", []),
@@ -1112,7 +1124,9 @@ def _base_row(
         "lifecycle_state": lifecycle_state,
         "group_structure_state": group_structure_state,
         "recommendation": "hold" if lifecycle_state == "open" else "not_evaluable",
+        "model_trade_actionable": False,
         "model_actionable": False,
+        "human_review_required": False,
         "actionable": False,
         "action_scope": "none",
         "current_extrinsic": None,
@@ -1179,6 +1193,7 @@ def _apply_long_call_facts(
         return
     row.update(facts)
     row["recommendation"] = "not_evaluable"
+    row["model_trade_actionable"] = False
     row["model_actionable"] = False
     row["reason_codes"] = ["long_call_forward_model_not_approved"]
 
