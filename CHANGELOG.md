@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.6.2 - 2026-07-28
+
+### Bug Fixes
+- Allowed first-use Position Advice authority binding to validate production nested portfolio receipts and made repeated quote observations within one multi-account run publish distinct immutable snapshots, so every account can enter and accumulate v2 shadow evidence.
+
 ## 1.6.1 - 2026-07-28
 
 ### Improvements
