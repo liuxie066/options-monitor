@@ -229,8 +229,8 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "NVDA｜Sell Put｜08-21 $100 Put（备选 2）" in message
     assert "AAPL｜Covered Call｜08-21 $250 Call（首选）" in message
     assert "TSLA｜组合增强（首选）" in message
-    assert "Put｜08-21 $300 Put · 卖出参考 $3.45" in message
-    assert "Call｜09-18 $400 Call · 买入参考 $1.05" in message
+    assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
+    assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "暂无法评估" not in message
     assert "PDD" not in message
     assert "FUTU" not in message
@@ -1172,8 +1172,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
     assert "### 组合增强" in message
     assert "**TSLA｜组合增强（首选）**" in message
-    assert "Put｜08-21 $300 Put · 卖出参考 $3.45" in message
-    assert "Call｜09-18 $400 Call · 买入参考 $1.05" in message
+    assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
+    assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "指标｜年化 15.4% · 预计净收入 $620.00" in message
     assert "\n\n事件｜" in message
     assert "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |" in message
@@ -1185,6 +1185,23 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "| 项目 | 数值 |" not in message
     assert "<br>" not in message
     _assert_no_internal_leak(message)
+
+
+def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
+
+    brief = _brief()
+    combo = brief["candidates"]["combo_yield"][0]
+    combo.pop("put_sell_reference")
+    combo.pop("call_buy_reference")
+
+    message = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert "Put｜08-21 $300 Put｜推荐卖出价暂不可用" in message
+    assert "Call｜09-18 $400 Call｜推荐买入价暂不可用" in message
 
 
 def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit() -> None:
