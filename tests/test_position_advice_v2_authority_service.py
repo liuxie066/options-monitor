@@ -23,6 +23,10 @@ from src.application.position_advice_authority_service import (
     plan_authority_change,
     read_authority_resolution,
 )
+from src.application.position_advice_notification_authority import (
+    build_notification_authority_token,
+    execute_notification_with_authority,
+)
 from src.infrastructure.position_advice_manifest_lock import (
     portfolio_scope_state_dir,
 )
@@ -174,6 +178,33 @@ def _publish_promotion_artifacts(
     )
 
 
+def _record_implicit_v1_notification(base: Path) -> str:
+    token = build_notification_authority_token(
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        selected_advice_contract="v1",
+        resolved_mode="v1",
+        authority_generation=0,
+        authority_policy_hash=None,
+        account_run_id="implicit-v1-run",
+    )
+    result = execute_notification_with_authority(
+        base=base,
+        token=token,
+        channel="feishu_app",
+        send=lambda: {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": "message-1",
+            "idempotency_key": "provider-1",
+        },
+        now=NOW,
+    )
+    return str(result["authority_receipt_id"])
+
+
 def test_first_use_defaults_v1_only_when_scope_has_no_history(tmp_path: Path) -> None:
     resolution = read_authority_resolution(
         base=tmp_path,
@@ -195,6 +226,105 @@ def test_first_use_defaults_v1_only_when_scope_has_no_history(tmp_path: Path) ->
     )
     assert conflict.resolution_status == "authority_conflict"
     assert conflict.reason_codes == ("authority_policy_missing_with_history",)
+
+
+def test_first_use_formalizes_verified_implicit_v1_notification_history(
+    tmp_path: Path,
+) -> None:
+    receipt_id = _record_implicit_v1_notification(tmp_path)
+    notification_dir = (
+        portfolio_scope_state_dir(tmp_path, scope_for("lx")) / "notification_authority"
+    )
+    receipt_paths = sorted(notification_dir.glob("*/*.json"))
+    original_receipts = {path: path.read_bytes() for path in receipt_paths}
+
+    resolution = read_authority_resolution(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+    )
+    assert resolution.resolution_status == "first_use_default_v1"
+    assert resolution.mode == "v1"
+    assert resolution.generation == 0
+
+    direct_shadow = plan_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        identity_binding_evidence=_binding(),
+    )
+    assert direct_shadow["status"] == "blocked"
+    assert (
+        "authority_implicit_v1_history_requires_v1_bootstrap"
+        in direct_shadow["reason_codes"]
+    )
+
+    formal_v1 = plan_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v1",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        identity_binding_evidence=_binding(),
+    )
+    assert formal_v1["status"] == "ready"
+    assert formal_v1["outstanding_notification_receipt_ids"] == []
+
+    applied = _apply_first_use(tmp_path)
+    assert applied["policy"]["mode"] == "v1"
+    assert applied["policy"]["generation"] == 1
+    assert receipt_id in {path.stem.split(".", 1)[0] for path in receipt_paths}
+    assert {path: path.read_bytes() for path in receipt_paths} == original_receipts
+
+
+def test_malformed_implicit_notification_history_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    receipt_id = _record_implicit_v1_notification(tmp_path)
+    accepted_path = (
+        portfolio_scope_state_dir(tmp_path, scope_for("lx"))
+        / "notification_authority"
+        / "accepted"
+        / f"{receipt_id}.json"
+    )
+    accepted = json.loads(accepted_path.read_text(encoding="utf-8"))
+    accepted["authority_generation"] = 1
+    accepted["authority_policy_hash"] = "f" * 64
+    unsigned = {key: value for key, value in accepted.items() if key != "receipt_hash"}
+    accepted["receipt_hash"] = canonical_sha256(unsigned)
+    accepted_path.write_text(json.dumps(accepted), encoding="utf-8")
+
+    resolution = read_authority_resolution(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+    )
+    assert resolution.resolution_status == "authority_conflict"
+    assert resolution.reason_codes == ("authority_policy_missing_with_history",)
+
+    plan = plan_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v1",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        identity_binding_evidence=_binding(),
+    )
+    assert plan["status"] == "blocked"
+    assert "authority_policy_missing_with_history" in plan["reason_codes"]
 
 
 def test_authority_dry_run_has_no_write_and_apply_requires_confirm(tmp_path: Path) -> None:
