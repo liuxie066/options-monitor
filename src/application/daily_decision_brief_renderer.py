@@ -653,14 +653,20 @@ def _candidate_views(
                     option_type="call",
                     market=market,
                 )
-                put_leg = f"Put：{put_contract}"
                 put_ref = _number(row.get("put_sell_reference"))
-                if put_ref is not None:
-                    put_leg += f" · 卖出参考 {_money(put_ref, market=market)}"
-                call_leg = f"Call：{call_contract}"
+                put_recommendation = (
+                    f"推荐卖出 {_money(put_ref, market=market)}"
+                    if put_ref is not None
+                    else "推荐卖出价暂不可用"
+                )
+                put_leg = f"Put：{put_contract}｜{put_recommendation}"
                 call_ref = _number(row.get("call_buy_reference"))
-                if call_ref is not None:
-                    call_leg += f" · 买入参考 {_money(call_ref, market=market)}"
+                call_recommendation = (
+                    f"推荐买入 {_money(call_ref, market=market)}"
+                    if call_ref is not None
+                    else "推荐买入价暂不可用"
+                )
+                call_leg = f"Call：{call_contract}｜{call_recommendation}"
                 out.append(
                     {
                         "family": family,

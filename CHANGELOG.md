@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Added direction-aware recommended prices to both Combo Yield legs in Daily Brief cards, using pipe-separated mobile-friendly lines and explicit unavailable states when a leg quote is missing.
+
 ## 1.6.4 - 2026-07-28
 
 ### New Features
