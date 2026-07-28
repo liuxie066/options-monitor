@@ -359,7 +359,13 @@ Position Advice v2 remains an independent immutable portfolio plan. Its Agent
 surface is pure-read; shared authority changes and unknown-delivery resolution
 are human CLI operations only. `v2_shadow` must not enter scheduled
 notifications, and v2 reader failures always zero actionable rows rather than
-falling back to v1.
+falling back to v1. The mandatory daily promotion maintenance timer may append
+compressed content-addressed source copies plus immutable evidence and gate
+artifacts after calculating safety counters and running deterministic replay
+fixtures; it must never perform the final v2 CAS or pin complete output runs.
+Use `om position-advice --runtime-root <root> promotion status --account
+<account>` to obtain the reviewed evidence path and expected policy hash for
+that separate human operation.
 
 ### Notifications
 

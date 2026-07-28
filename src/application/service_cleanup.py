@@ -180,7 +180,7 @@ def _output_run_cleanup_plan(
     if pointer is not None:
         protected[pointer.resolve()] = "last_run_dir_pointer"
     for current_run in position_advice_protected_runs or set():
-        protected[current_run.resolve()] = "position_advice_current_manifest"
+        protected[current_run.resolve()] = "position_advice_current"
 
     delete_runs: list[dict[str, Any]] = []
     protected_runs: list[dict[str, Any]] = []

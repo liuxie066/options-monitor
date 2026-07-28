@@ -24,6 +24,11 @@ from src.application.position_advice_authority_service import (
 from src.application.position_advice_notification_authority import (
     resolve_notification_unknown,
 )
+from src.application.position_advice_promotion import (
+    PositionAdvicePromotionError,
+    position_advice_promotion_status,
+    refresh_position_advice_promotion,
+)
 from src.application.runtime_paths import resolve_runtime_root
 
 
@@ -40,6 +45,9 @@ def handle_position_advice_command(args: argparse.Namespace) -> dict[str, Any]:
         repo_root=repo_root,
         runtime_root=getattr(args, "runtime_root", None),
     ).runtime_root
+    command = args.position_advice_command
+    if command == "promotion":
+        return _promotion_command(args, runtime_root=runtime_root)
     if args.authority_command == "set":
         return _set_authority(
             args,
@@ -63,6 +71,57 @@ def handle_position_advice_command(args: argparse.Namespace) -> dict[str, Any]:
             dry_run=not bool(args.confirm),
         )
     raise ValueError(f"unsupported position advice authority command: {args.authority_command}")
+
+
+def _promotion_command(
+    args: argparse.Namespace,
+    *,
+    runtime_root: Path,
+) -> dict[str, Any]:
+    if args.promotion_command == "status":
+        return position_advice_promotion_status(
+            base=runtime_root,
+            normalized_account=args.account,
+        )
+    if args.promotion_command != "refresh":
+        raise ValueError(
+            f"unsupported position advice promotion command: "
+            f"{args.promotion_command}"
+        )
+    results: list[dict[str, Any]] = []
+    for raw_account in args.accounts:
+        account = normalize_account_label(raw_account)
+        try:
+            result = refresh_position_advice_promotion(
+                base=runtime_root,
+                normalized_account=account,
+                confirm=bool(args.confirm),
+            )
+        except (OSError, TypeError, ValueError, PositionAdvicePromotionError) as exc:
+            result = {
+                "schema_version": "position_advice_promotion_refresh.v1",
+                "status": "error",
+                "reason_codes": ["promotion_refresh_failed"],
+                "failure_detail": str(exc),
+                "normalized_account": account,
+                "dry_run": not bool(args.confirm),
+                "published": False,
+            }
+        results.append(result)
+    status = (
+        "error"
+        if any(item.get("status") == "error" for item in results)
+        else "pass"
+        if results and all(item.get("status") == "pass" for item in results)
+        else "completed"
+    )
+    return {
+        "schema_version": "position_advice_promotion_refresh_batch.v1",
+        "status": status,
+        "dry_run": not bool(args.confirm),
+        "runtime_root": str(runtime_root),
+        "results": results,
+    }
 
 
 def _set_authority(
@@ -169,10 +228,11 @@ def _parser() -> argparse.ArgumentParser:
         description="human-only Position Advice control-plane operations",
     )
     parser.add_argument("--runtime-root", default=None)
-    authority = parser.add_subparsers(
+    top_commands = parser.add_subparsers(
         dest="position_advice_command",
         required=True,
-    ).add_parser("authority")
+    )
+    authority = top_commands.add_parser("authority")
     commands = authority.add_subparsers(
         dest="authority_command",
         required=True,
@@ -207,6 +267,26 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument("--evidence", required=True)
     resolve.add_argument("--actor", default=getpass.getuser())
     _add_apply_mode(resolve)
+
+    promotion_parser = top_commands.add_parser(
+        "promotion",
+        help="refresh or inspect v2-shadow promotion evidence",
+    )
+    promotion_commands = promotion_parser.add_subparsers(
+        dest="promotion_command",
+        required=True,
+    )
+    refresh = promotion_commands.add_parser(
+        "refresh",
+        help="build promotion evidence; publish only with --confirm",
+    )
+    refresh.add_argument("--accounts", nargs="+", required=True)
+    _add_apply_mode(refresh)
+    status = promotion_commands.add_parser(
+        "status",
+        help="show the newest valid evidence for the current shadow policy",
+    )
+    status.add_argument("--account", required=True)
     return parser
 
 

@@ -13,6 +13,9 @@ from domain.domain.position_advice_authority import scope_for
 from src.application.position_advice_plan_builder import (
     build_position_advice_plan,
 )
+from src.application.position_advice_promotion_checks import (
+    evaluate_position_advice_plan_safety,
+)
 
 
 NOW = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
@@ -276,6 +279,67 @@ def _build(*, combo: bool = False) -> dict[str, object]:
         fx_payload={"rates": {"USDCNY": 7.2}},
         checked_at=NOW,
     )
+
+
+def test_production_built_shadow_plans_pass_automatic_promotion_safety() -> None:
+    for combo in (False, True):
+        immutable_input = _input(combo=combo)
+        immutable_input["authority_mode"] = "v2_shadow"
+        immutable_input["source_manifest"] = [
+            {
+                "source_kind": source_kind,
+                "snapshot_id": f"{index + 1:x}" * 64,
+                "receipt_hash": f"{index + 8:x}" * 64,
+                "payload_sha256": f"{index + 1:x}" * 64,
+                "expires_at": "2026-07-27T10:30:00Z",
+            }
+            for index, source_kind in enumerate(
+                (
+                    "quotes",
+                    "candidate_decisions",
+                    "portfolio",
+                    "ledger_decision_state",
+                    "cash_capacity",
+                    "share_coverage",
+                    "fx",
+                )
+            )
+        ]
+        plan = build_position_advice_plan(
+            immutable_input=immutable_input,
+            candidate_decisions=[_candidate()],
+            quote_rows=_quotes(combo=combo),
+            cash_capacity={
+                "status": "available",
+                "uncommitted_cash_headroom_base_cny": "0",
+            },
+            share_coverage={
+                "by_symbol": {
+                    "NVDA": {
+                        "status": "available",
+                        "uncommitted_covered_shares": 0,
+                        "avg_cost": 100,
+                        "currency": "USD",
+                    }
+                }
+            },
+            fx_payload={"rates": {"USDCNY": 7.2}},
+            checked_at=NOW,
+        )
+        plan["artifact_hash"] = canonical_sha256(plan)
+
+        report = evaluate_position_advice_plan_safety(
+            [(plan, immutable_input)]
+        )
+
+        assert report["safety"] == {
+            "false_assignment_confirmation": 0,
+            "invalid_combo_continuation": 0,
+            "stale_or_incomplete_actionable_exposure": 0,
+            "allocator_invariant_violation": 0,
+            "authority_mixed_exposure": 0,
+            "lifecycle_or_identity_conflict_actionable": 0,
+        }
 
 
 def test_standalone_put_roll_uses_released_collateral_and_becomes_actionable() -> None:

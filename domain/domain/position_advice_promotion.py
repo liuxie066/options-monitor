@@ -13,6 +13,8 @@ from domain.domain.position_advice_authority import PROMOTABLE_STRATEGY_FAMILIES
 
 PROMOTION_EVIDENCE_SCHEMA = "position_advice_promotion_evidence.v1"
 PROMOTION_GATE_SCHEMA = "position_advice_promotion_gate.v1"
+PROMOTION_CHECKS_SCHEMA = "position_advice_promotion_checks.v1"
+CRITICAL_REPLAY_SCHEMA = "position_advice_critical_replay.v1"
 MIN_DISTINCT_SESSIONS = 10
 MIN_ELAPSED_DAYS = 14
 MIN_ELIGIBLE_EVALUATIONS = 30
@@ -101,6 +103,27 @@ def evaluate_promotion_gate(evidence: dict[str, Any]) -> dict[str, Any]:
                 reasons.append(f"safety_nonzero:{metric}")
         except (TypeError, ValueError, OverflowError):
             reasons.append(f"safety_invalid:{metric}")
+    automatic_safety = payload.get("automatic_safety_evaluation")
+    if not isinstance(automatic_safety, dict):
+        reasons.append("automatic_safety_evidence_missing")
+    else:
+        safety_report = dict(automatic_safety)
+        safety_report_hash = safety_report.pop("artifact_hash", None)
+        if safety_report_hash != canonical_sha256(safety_report):
+            reasons.append("automatic_safety_evidence_hash_mismatch")
+        if (
+            safety_report.get("schema_version")
+            != PROMOTION_CHECKS_SCHEMA
+            or safety_report.get("evaluator_version")
+            != PROMOTION_CHECKS_SCHEMA
+        ):
+            reasons.append("automatic_safety_evidence_schema_invalid")
+        if safety_report.get("source_plan_hashes") != sorted(
+            set(payload.get("source_plan_hashes") or [])
+        ):
+            reasons.append("automatic_safety_plan_binding_mismatch")
+        if safety_report.get("safety") != safety:
+            reasons.append("automatic_safety_result_mismatch")
 
     sessions = {str(item) for item in payload.get("market_session_ids") or [] if str(item)}
     if len(sessions) < MIN_DISTINCT_SESSIONS:
@@ -177,6 +200,18 @@ def evaluate_promotion_gate(evidence: dict[str, Any]) -> dict[str, Any]:
     critical_replay = dict(payload.get("critical_replay_fixtures") or {})
     if any(critical_replay.get(name) is not True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES):
         reasons.append("critical_replay_incomplete")
+    automatic_replay = payload.get("automatic_critical_replay")
+    if not isinstance(automatic_replay, dict):
+        reasons.append("automatic_critical_replay_missing")
+    else:
+        replay_report = dict(automatic_replay)
+        replay_report_hash = replay_report.pop("artifact_hash", None)
+        if replay_report_hash != canonical_sha256(replay_report):
+            reasons.append("automatic_critical_replay_hash_mismatch")
+        if replay_report.get("schema_version") != CRITICAL_REPLAY_SCHEMA:
+            reasons.append("automatic_critical_replay_schema_invalid")
+        if replay_report.get("fixture_results") != critical_replay:
+            reasons.append("automatic_critical_replay_result_mismatch")
 
     economic = dict(payload.get("economic") or {})
     for field in (
@@ -254,6 +289,8 @@ __all__ = [
     "MIN_FAMILY_SELECTED",
     "MIN_REPLACEMENT_OPPORTUNITIES",
     "MIN_SELECTED_PROPOSALS",
+    "CRITICAL_REPLAY_SCHEMA",
+    "PROMOTION_CHECKS_SCHEMA",
     "PROMOTION_EVIDENCE_SCHEMA",
     "PROMOTION_GATE_SCHEMA",
     "REQUIRED_CRITICAL_REPLAY_FIXTURES",
