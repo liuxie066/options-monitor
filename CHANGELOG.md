@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Replaced compact recommendation comparison tables in Feishu Daily Brief cards with mobile-friendly per-candidate summaries that keep the contract and key metrics together.
+
 ## 1.6.2 - 2026-07-28
 
 ### Bug Fixes
