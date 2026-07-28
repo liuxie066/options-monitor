@@ -707,6 +707,83 @@ def test_v2_exact_transition_rejects_mismatched_transport_or_payload(tmp_path: P
         )
 
 
+def test_operator_resolution_reconciles_exact_daily_brief_envelope(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        read_retryable_daily_decision_brief_delivery,
+        reconcile_daily_decision_brief_delivery_resolution,
+        record_daily_decision_brief_candidates,
+        record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=persisted["current_revision"],
+        brief_digest=persisted["current_brief_digest"],
+        candidate_identities=persisted["current_candidate_identities"],
+    )
+    envelope = _prepare_fixed(tmp_path, persisted)["envelope"]
+    transport_key = build_notification_transport_key(
+        envelope["delivery_key"]
+    )
+    identity = {
+        "base": tmp_path,
+        "account": "lx",
+        "market": "US",
+        "market_trading_date": MARKET_DATE,
+        "delivery_key": envelope["delivery_key"],
+        "source_digest": envelope["source_digest"],
+        "message_sha256": envelope["message_sha256"],
+        "transport_idempotency_key": transport_key,
+    }
+    record_daily_decision_brief_delivery_attempt(
+        **identity,
+        ambiguous=True,
+    )
+
+    failed = reconcile_daily_decision_brief_delivery_resolution(
+        **identity,
+        resolution="failed",
+        resolved_at_utc="2026-07-21T14:10:00+00:00",
+    )
+    assert failed["envelope"]["status"] == "pending"
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert retry["envelope"]["delivery_key"] == envelope["delivery_key"]
+
+    record_daily_decision_brief_delivery_attempt(
+        **identity,
+        ambiguous=True,
+    )
+    delivered = reconcile_daily_decision_brief_delivery_resolution(
+        **identity,
+        resolution="delivered",
+        resolved_at_utc="2026-07-21T14:20:00+00:00",
+    )
+    assert delivered["envelope"]["status"] == "confirmed"
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    day = state["days"][MARKET_DATE]
+    assert day["pending_candidates"] == {}
+    assert IDENTITY_NVDA in day["alerted_candidates"]
+
+
 def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import (
         confirm_daily_decision_brief_delivery_v2,

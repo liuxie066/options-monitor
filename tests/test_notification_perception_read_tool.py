@@ -58,6 +58,97 @@ def test_notification_perception_read_tool_is_registered_and_read_only(monkeypat
     assert meta["audit_paths"]
 
 
+def test_notification_perception_read_tool_uses_runtime_root_from_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.agent_tools.notification_perception as notification_tools
+    from src.application.agent_tool_registry import get_tool_definition
+
+    repo_root = tmp_path / "release"
+    runtime_root = tmp_path / "runtime"
+    repo_audit = (
+        repo_root / "output_shared" / "state" / "audit_events.jsonl"
+    )
+    runtime_audit = (
+        runtime_root
+        / "output_shared"
+        / "state"
+        / "audit_events.jsonl"
+    )
+    repo_audit.parent.mkdir(parents=True)
+    runtime_audit.parent.mkdir(parents=True)
+    _append(repo_audit, _row("repo-run", "notification_prepared", "c"))
+    _append(
+        runtime_audit,
+        _row("runtime-run", "notification_delivery_completed", "c"),
+    )
+    monkeypatch.setattr(notification_tools, "repo_base", lambda: repo_root)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+
+    tool = get_tool_definition("notification_perception_read")
+    assert tool is not None
+    data, warnings, meta = tool.call({"limit": 10})
+
+    assert warnings == []
+    assert [item["run_id"] for item in data["events"]] == [
+        "runtime-run"
+    ]
+    assert data["runtime_root"]["source"] == "env:OM_RUNTIME_ROOT"
+    assert meta["runtime_root_source"] == "env:OM_RUNTIME_ROOT"
+
+
+def test_notification_perception_reader_reports_partial_corruption(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    audit.write_text(
+        json.dumps(
+            _row("run-ok", "notification_prepared", "conversation")
+        )
+        + "\n{broken-json\n[]\n",
+        encoding="utf-8",
+    )
+
+    data = read_notification_perception_events(
+        repo_root=tmp_path,
+        limit=10,
+    )
+
+    assert data["summary"]["ok"] is False
+    assert data["summary"]["status"] == "partial"
+    assert data["summary"]["malformed_count"] == 2
+    assert data["summary"]["returned_count"] == 1
+    assert data["read_statuses"][0]["status"] == "partially_corrupt"
+
+
+def test_notification_perception_reader_reports_unreadable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("placeholder\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == audit:
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    data = read_notification_perception_events(
+        repo_root=tmp_path,
+        limit=10,
+    )
+
+    assert data["summary"]["ok"] is False
+    assert data["summary"]["status"] == "failed"
+    assert data["summary"]["unreadable_count"] == 1
+    assert data["read_statuses"][0]["status"] == "unreadable"
+
+
 def test_notification_perception_read_tool_rejects_explicit_audit_path(tmp_path: Path) -> None:
     from src.application.agent_tool_registry import get_tool_definition
 
@@ -76,6 +167,16 @@ def test_notification_perception_reader_rejects_paths_outside_repo_root(tmp_path
 
     with pytest.raises(ValueError, match="under repo_root"):
         read_notification_perception_events(repo_root=tmp_path, audit_path=outside)
+
+
+def test_notification_perception_run_id_cannot_escape_runtime_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="under repo_root"):
+        read_notification_perception_events(
+            repo_root=tmp_path,
+            run_id="../../outside",
+        )
 
 
 def _append(path: Path, payload: dict) -> None:

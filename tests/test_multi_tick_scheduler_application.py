@@ -164,3 +164,64 @@ def test_run_scheduler_flow_passes_force_to_global_and_account_decisions() -> No
 
     assert global_calls[0]['force'] is True
     assert account_calls[0]['force'] is True
+
+
+def test_run_scheduler_flow_fails_closed_for_one_account_exception() -> None:
+    from domain.domain import SnapshotDTO
+    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
+    from src.application.multi_tick_scheduler import run_scheduler_flow
+
+    global_payload = {
+        "should_run_scan": True,
+        "is_notify_window_open": True,
+        "reason": "global_due",
+    }
+    audit_events: list[dict[str, Any]] = []
+
+    def account_payload(**kwargs):
+        if kwargs["account"] == "lx":
+            raise ValueError("broken account waterline")
+        return {
+            "should_run_scan": True,
+            "is_notify_window_open": True,
+            "reason": "sy_due",
+        }
+
+    out = run_scheduler_flow(
+        vpy=Path("/repo/.venv/bin/python"),
+        base=Path("/repo"),
+        cfg_path=Path("/repo/config.us.json"),
+        base_cfg={},
+        state_path=Path("/repo/output_shared/state/scheduler_state.json"),
+        scheduler_schedule_key="schedule",
+        accounts=["lx", "sy"],
+        force_mode=False,
+        smoke=False,
+        snapshot_cls=SnapshotDTO,
+        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+        account_view_cls=AccountSchedulerDecisionView,
+        run_scan_scheduler_cli=lambda **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(global_payload),
+            stderr="",
+        ),
+        build_failure_audit_fields=lambda **_kwargs: {},
+        audit_fn=lambda event_type, action, **kwargs: audit_events.append(
+            {"event_type": event_type, "action": action, **kwargs}
+        ),
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(kwargs)
+        ),
+        build_scheduler_decision_payload_fn=account_payload,
+    )
+
+    assert out.scan_decision_by_account["lx"]["should_run"] is False
+    assert out.scan_decision_by_account["lx"]["reason"] == "scheduler_unavailable"
+    assert out.notify_decision_by_account["lx"].is_notify_window_open is False
+    assert out.scan_decision_by_account["sy"]["should_run"] is True
+    assert any(
+        event["action"] == "scan_scheduler_account"
+        and event["status"] == "error"
+        and event["extra"]["fail_closed"] is True
+        for event in audit_events
+    )

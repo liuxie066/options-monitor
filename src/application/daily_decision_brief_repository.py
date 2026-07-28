@@ -587,24 +587,11 @@ def confirm_daily_decision_brief_delivery_v2(
                 "envelope": dict(envelope),
                 "path": delivery_path,
             }
-        envelope["status"] = "confirmed"
-        envelope["last_attempt_at_utc"] = confirmed_at
-        envelope["confirmed_at_utc"] = confirmed_at
-        if envelope["delivery_kind"] in {"fixed_report", "candidate_alert"}:
-            revision = int(envelope["revision"])
-            via = str(envelope["delivery_kind"])
-            for identity in envelope["candidate_identities"]:
-                day["alerted_candidates"].setdefault(
-                    identity,
-                    {
-                        "revision": revision,
-                        "brief_digest": str(envelope["source_digest"]),
-                        "delivery_key": str(envelope["delivery_key"]),
-                        "confirmed_at_utc": confirmed_at,
-                        "via": via,
-                    },
-                )
-                day["pending_candidates"].pop(identity, None)
+        _mark_delivery_envelope_confirmed(
+            day=day,
+            envelope=envelope,
+            confirmed_at=confirmed_at,
+        )
         atomic_write_json(delivery_path, state)
         return {
             "advanced": True,
@@ -612,6 +599,110 @@ def confirm_daily_decision_brief_delivery_v2(
             "envelope": dict(envelope),
             "path": delivery_path,
         }
+
+
+def reconcile_daily_decision_brief_delivery_resolution(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+    resolution: str,
+    resolved_at_utc: datetime | str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Bind an operator resolution to the exact frozen delivery envelope."""
+
+    outcome = str(resolution or "").strip().lower()
+    if outcome not in {"delivered", "failed"}:
+        raise ValueError("daily brief delivery resolution must be delivered or failed")
+    resolved_at = _coerce_utc_iso(resolved_at_utc)
+    with _locked_delivery_envelope(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_trading_date,
+        delivery_key=delivery_key,
+        source_digest=source_digest,
+        message_sha256=message_sha256,
+        transport_idempotency_key=transport_idempotency_key,
+    ) as (state, day, envelope, delivery_path):
+        status = str(envelope["status"])
+        if outcome == "delivered":
+            if status == "expired_unconfirmed":
+                raise DailyDecisionBriefStateError(
+                    "expired daily brief delivery cannot be resolved as delivered"
+                )
+            would_change = status != "confirmed"
+            if would_change and not dry_run:
+                _mark_delivery_envelope_confirmed(
+                    day=day,
+                    envelope=envelope,
+                    confirmed_at=resolved_at,
+                )
+        else:
+            if status == "confirmed":
+                raise DailyDecisionBriefStateError(
+                    "confirmed daily brief delivery cannot be resolved as failed"
+                )
+            if status == "expired_unconfirmed":
+                raise DailyDecisionBriefStateError(
+                    "expired daily brief delivery cannot be retried"
+                )
+            would_change = status != "pending"
+            if not dry_run:
+                envelope["status"] = "pending"
+                envelope["last_attempt_at_utc"] = resolved_at
+                envelope["confirmed_at_utc"] = None
+        if would_change and not dry_run:
+            atomic_write_json(delivery_path, state)
+        return {
+            "updated": bool(would_change and not dry_run),
+            "would_change": would_change,
+            "dry_run": bool(dry_run),
+            "reason": (
+                "confirmed"
+                if outcome == "delivered" and would_change
+                else "already_confirmed"
+                if outcome == "delivered"
+                else "retry_enabled"
+                if would_change
+                else "already_pending"
+            ),
+            "envelope": dict(envelope),
+            "path": delivery_path,
+        }
+
+
+def _mark_delivery_envelope_confirmed(
+    *,
+    day: dict[str, Any],
+    envelope: dict[str, Any],
+    confirmed_at: str,
+) -> None:
+    envelope["status"] = "confirmed"
+    envelope["last_attempt_at_utc"] = confirmed_at
+    envelope["confirmed_at_utc"] = confirmed_at
+    if envelope["delivery_kind"] not in {"fixed_report", "candidate_alert"}:
+        return
+    revision = int(envelope["revision"])
+    via = str(envelope["delivery_kind"])
+    for identity in envelope["candidate_identities"]:
+        day["alerted_candidates"].setdefault(
+            identity,
+            {
+                "revision": revision,
+                "brief_digest": str(envelope["source_digest"]),
+                "delivery_key": str(envelope["delivery_key"]),
+                "confirmed_at_utc": confirmed_at,
+                "via": via,
+            },
+        )
+        day["pending_candidates"].pop(identity, None)
 
 
 def expire_daily_decision_brief_delivery_day(
@@ -2388,6 +2479,7 @@ __all__ = [
     "persist_daily_decision_brief_success",
     "prepare_daily_decision_brief",
     "prepare_daily_decision_brief_delivery",
+    "reconcile_daily_decision_brief_delivery_resolution",
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery",
     "read_daily_decision_brief_delivery_state",

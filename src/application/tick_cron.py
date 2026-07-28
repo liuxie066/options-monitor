@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -128,7 +129,7 @@ def build_tick_cron_plan(
         tick_argv.append("--allow-stale-config")
 
     trigger_env = {
-        "OM_TRIGGER_SOURCE": "cron",
+        "OM_TRIGGER_SOURCE": "diagnostic" if symbol_values else "cron",
         "OM_TRIGGER_JOB_ID": str(trigger_job_id or defaults["trigger_job_id"]),
         "OM_TRIGGER_JOB_NAME": str(trigger_job_name or defaults["trigger_job_name"]),
         "OM_TRIGGER_TIMEZONE": str(defaults["trigger_timezone"]),
@@ -217,7 +218,7 @@ def run_tick_cron(
     allow_stale_config: bool = False,
     cwd: str | Path | None = None,
     dry_run_command: bool = False,
-    run_cmd: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    run_cmd: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     preflight_config_fn: Callable[..., Any] | None = _preflight_runtime_config,
     stdout: Any = None,
     stderr: Any = None,
@@ -277,13 +278,21 @@ def run_tick_cron(
         env = dict(environ if environ is not None else os.environ)
         env.update(plan.trigger_env)
         try:
-            proc = run_cmd(
-                list(plan.tick_argv),
-                cwd=str(cwd) if cwd is not None else None,
-                env=env,
-                timeout=plan.timeout_seconds,
-                check=False,
-            )
+            if run_cmd is None:
+                proc = _run_tick_process_group(
+                    command=list(plan.tick_argv),
+                    cwd=cwd,
+                    env=env,
+                    timeout_seconds=plan.timeout_seconds,
+                )
+            else:
+                proc = run_cmd(
+                    list(plan.tick_argv),
+                    cwd=str(cwd) if cwd is not None else None,
+                    env=env,
+                    timeout=plan.timeout_seconds,
+                    check=False,
+                )
         except subprocess.TimeoutExpired:
             _write_line(stderr, "EXEC_TIMEOUT_RC_124")
             return 124
@@ -297,6 +306,39 @@ def run_tick_cron(
     if rc != 0:
         _write_line(stderr, f"EXEC_FAILED_RC_{rc}")
     return rc
+
+
+def _run_tick_process_group(
+    *,
+    command: list[str],
+    cwd: str | Path | None,
+    env: dict[str, str],
+    timeout_seconds: int,
+    terminate_grace_seconds: float = 5.0,
+) -> subprocess.CompletedProcess[Any]:
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        returncode = proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=max(0.1, float(terminate_grace_seconds)))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        raise
+    return subprocess.CompletedProcess(command, int(returncode))
 
 
 __all__ = ["TickCronPlan", "build_tick_cron_plan", "run_tick_cron"]

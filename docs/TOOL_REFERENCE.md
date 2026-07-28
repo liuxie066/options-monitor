@@ -135,6 +135,11 @@
   --input-json '{"config_key":"us"}'
 ```
 
+`healthcheck` 对 Ledger 只做 SQLite read-only inspection：数据库不存在时会报告
+warning，但不会创建数据库、迁移 schema 或重建 projection。Tool Gateway envelope
+的 `ok` 表示工具执行成功；readiness 结论以 `data.summary.ok` 为准。对应的人类
+`om healthcheck` / `om doctor` 命令会在 readiness 为 false 时返回非零退出码。
+
 ### Runtime 状态
 
 本地 checkout：
@@ -150,6 +155,22 @@
 ./om-agent run --tool runtime_status \
   --input-json '{"config_path":"/var/lib/options-monitor/config.us.json"}'
 ```
+
+指定 `run_id` 时，该 run 自身的 tick metrics 是通知计数权威；只有字段缺失且
+shared `last_run.json.run_id` 与所选 run 相同时才会回退 shared 计数。通知明确
+失败、部分失败或 unresolved duplicate risk 会进入 `summary.warning_codes`，
+并令 `summary.ok=false`。
+
+### 通知感知证据
+
+```bash
+./om-agent run --tool notification_perception_read \
+  --input-json '{"runtime_root":"/var/lib/options-monitor","limit":100}'
+```
+
+root 解析顺序是显式 `runtime_root`、`OM_RUNTIME_ROOT`、repo fallback；结果会报告
+root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partially_corrupt`
+或 `unreadable` 状态。partial/unreadable 不能解释为“没有通知事件”。
 
 ### 指派后资产分布
 

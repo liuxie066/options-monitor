@@ -109,3 +109,50 @@ def test_validator_accepts_nested_alert_policy() -> None:
         "sell_call": {"high_annual": 0.10, "high_total": 0.15, "medium_annual": 0.06},
     }
     mod.validate_config(cfg)
+
+
+def test_alert_engine_classification_consumes_nested_strategy_thresholds() -> None:
+    import pandas as pd
+    from src.application import alert_engine
+
+    previous = alert_engine.POLICY
+    alert_engine.POLICY = {
+        "change_annual_threshold": 0.02,
+        "sell_put": {
+            "high_annual": 0.99,
+            "high_spread_max": 0.05,
+            "medium_annual": 0.50,
+        },
+        "sell_call": {
+            "high_annual": 0.99,
+            "high_total": 0.99,
+            "medium_annual": 0.50,
+        },
+    }
+    try:
+        put_level, _ = alert_engine.classify_alert(
+            pd.Series(
+                {
+                    "candidate_count": 1,
+                    "strategy": "sell_put",
+                    "annualized_return": 0.15,
+                    "spread_ratio": 0.01,
+                }
+            )
+        )
+        call_level, _ = alert_engine.classify_alert(
+            pd.Series(
+                {
+                    "candidate_count": 1,
+                    "strategy": "covered_call",
+                    "annualized_return": 0.15,
+                    "if_exercised_total_return": 0.20,
+                    "cover_avail": 1,
+                }
+            )
+        )
+    finally:
+        alert_engine.POLICY = previous
+
+    assert put_level == "low"
+    assert call_level == "low"

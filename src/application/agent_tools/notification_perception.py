@@ -7,6 +7,7 @@ from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.notification_perception_read import read_notification_perception_events
+from src.application.runtime_paths import resolve_runtime_root
 
 
 _OUTPUT_CONTRACT: dict[str, Any] = {
@@ -16,6 +17,11 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
     "fact_fields": [
         "summary.total_count",
         "summary.returned_count",
+        "summary.status",
+        "summary.malformed_count",
+        "summary.unreadable_count",
+        "read_statuses[].status",
+        "read_statuses[].malformed_count",
         "events[].run_id",
         "events[].event_kind",
         "events[].threshold_met",
@@ -26,15 +32,25 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
         "coverage.returned_count",
     ],
     "freshness_fields": ["freshness.kind", "freshness.latest_event_at_utc"],
-    "model_preview_fields": ["scope", "coverage", "freshness", "events"],
+    "model_preview_fields": [
+        "scope",
+        "coverage",
+        "freshness",
+        "read_statuses",
+        "events",
+    ],
 }
 
 
 def _notification_perception_read_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    data = read_notification_perception_events(
+    runtime_resolution = resolve_runtime_root(
         repo_root=repo_base(),
+        runtime_root=payload.get("runtime_root"),
+    )
+    data = read_notification_perception_events(
+        repo_root=runtime_resolution.runtime_root,
         run_id=payload.get("run_id"),
         conversation_id=payload.get("conversation_id"),
         event_kind=payload.get("event_kind"),
@@ -43,6 +59,10 @@ def _notification_perception_read_tool(
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     events = data.get("events") if isinstance(data.get("events"), list) else []
     data["source"] = {"label": "OM tick audit notification perception events", "kind": "audit_snapshot"}
+    data["runtime_root"] = {
+        "path": mask_path(runtime_resolution.runtime_root),
+        "source": runtime_resolution.source,
+    }
     data["scope"] = {
         "run_id": summary.get("run_id"),
         "conversation_id": summary.get("conversation_id"),
@@ -52,12 +72,27 @@ def _notification_perception_read_tool(
         "total_count": summary.get("total_count", 0),
         "returned_count": summary.get("returned_count", 0),
         "limit": summary.get("limit"),
+        "malformed_count": summary.get("malformed_count", 0),
+        "unreadable_count": summary.get("unreadable_count", 0),
     }
     data["freshness"] = {
         "kind": "audit_snapshot",
         "latest_event_at_utc": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
     }
-    return data, [], {"audit_paths": [mask_path(path) for path in data.get("audit_paths") or []]}
+    warnings: list[str] = []
+    if summary.get("status") == "failed":
+        warnings.append("Notification perception audit is unreadable.")
+    elif summary.get("status") == "partial":
+        warnings.append(
+            "Notification perception audit is partially corrupt; "
+            f"malformed_rows={summary.get('malformed_count', 0)}."
+        )
+    return data, warnings, {
+        "audit_paths": [
+            mask_path(path) for path in data.get("audit_paths") or []
+        ],
+        "runtime_root_source": runtime_resolution.source,
+    }
 
 
 def _notification_perception_input_validator(payload: dict[str, Any]) -> None:
@@ -81,6 +116,10 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         "conversation_id": "optional assistant conversation scope such as wechat:<chat_key>",
         "event_kind": "optional event kind filter",
         "limit": "optional number of events to return; defaults to 10",
+        "runtime_root": (
+            "optional canonical runtime root; defaults to "
+            "OM_RUNTIME_ROOT then repository fallback"
+        ),
     },
     handler=_notification_perception_read_tool,
     pure_read=True,
@@ -91,7 +130,13 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
     output_contract=_OUTPUT_CONTRACT,
-    copilot_input_fields=("run_id", "conversation_id", "event_kind", "limit"),
+    copilot_input_fields=(
+        "run_id",
+        "conversation_id",
+        "event_kind",
+        "limit",
+        "runtime_root",
+    ),
 )
 
 

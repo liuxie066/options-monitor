@@ -484,6 +484,7 @@ def decide(
     schedule_key: str = 'schedule',
     force: bool = False,
 ) -> SchedulerDecision:
+    schedule_enabled = bool(schedule_cfg.get('enabled', True))
     market_tz = ZoneInfo(str(schedule_cfg.get('timezone') or 'America/New_York'))
     now_market = now_utc.astimezone(market_tz)
 
@@ -491,7 +492,10 @@ def decide(
     now_bj = now_utc.astimezone(bj_tz)
 
     run_start, run_end, breaks = _resolve_run_window(schedule_cfg)
-    in_run_window = is_run_window_open(now_market, run_start, run_end, breaks)
+    in_run_window = bool(
+        schedule_enabled
+        and is_run_window_open(now_market, run_start, run_end, breaks)
+    )
     run_points = schedule_cfg.get('run_points') if isinstance(schedule_cfg.get('run_points'), dict) else {}
     if not run_points:
         run_points = {'start_plus_min': 10, 'hourly_minute': 0, 'end_minus_min': 10}
@@ -528,6 +532,19 @@ def decide(
         is_notify_window_open = True
         reason = 'force 模式：忽略交易时段目标点直接执行。'
         next_run = now_utc
+    elif not schedule_enabled:
+        should_run_scan = False
+        is_notify_window_open = False
+        reason = '调度已禁用：不扫描、不通知。'
+        next_run = _next_target_after(
+            now_market=now_market,
+            market_tz=market_tz,
+            run_start=run_start,
+            run_end=run_end,
+            breaks=breaks,
+            run_points=run_points,
+            gates=gates,
+        )
     elif not in_run_window:
         should_run_scan = False
         is_notify_window_open = False

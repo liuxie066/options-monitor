@@ -17,10 +17,12 @@ from pandas.errors import EmptyDataError
 from domain.domain.alert_rules import (
     SELL_CALL_NOTIFICATION_HIGH,
     SELL_CALL_NOTIFICATION_LOW,
+    SELL_CALL_NOTIFICATION_MEDIUM,
     SELL_PUT_NOTIFICATION_HIGH,
     SELL_PUT_NOTIFICATION_LOW,
+    SELL_PUT_NOTIFICATION_MEDIUM,
 )
-from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
+from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy, resolve_alert_policy
 from domain.domain.engine import yield_enhancement_rank_key
 from domain.domain.strategy_vocab import (
     STRATEGY_COVERED_CALL,
@@ -613,8 +615,16 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if (cash_free is None) and (cash_free_cny is None) and (cash_free_total_cny is None) and cash_free_est is not None and cash_req is not None and cash_req > cash_free_est:
             return 'low', f'所需担保现金约 ${cash_req:,.0f}，但账户可用担保现金(折算USD)约 ${cash_free_est:,.0f}（已扣占用）；可能无法再加仓，仅供观察。'
 
-        if annual > 0:
+        policy = resolve_alert_policy(POLICY).sell_put
+        spread = _row_float(row.get('spread_ratio'), default=None)
+        spread_within_high = (
+            spread is None
+            or spread <= policy.high_spread_max
+        )
+        if annual >= policy.high_annual and spread_within_high:
             return 'high', SELL_PUT_NOTIFICATION_HIGH
+        if annual >= policy.medium_annual:
+            return 'medium', SELL_PUT_NOTIFICATION_MEDIUM
         return 'low', SELL_PUT_NOTIFICATION_LOW
 
     if strategy == STRATEGY_COVERED_CALL:
@@ -626,8 +636,12 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if cover_avail <= 0:
             return 'low', '当前富途可覆盖张数为 0（可能已占用或持仓不足），仅供观察。'
 
-        if annual > 0:
+        policy = resolve_alert_policy(POLICY).sell_call
+        total = _row_float(row.get('if_exercised_total_return'), default=0.0) or 0.0
+        if annual >= policy.high_annual and total >= policy.high_total:
             return 'high', SELL_CALL_NOTIFICATION_HIGH
+        if annual >= policy.medium_annual:
+            return 'medium', SELL_CALL_NOTIFICATION_MEDIUM
         return 'low', SELL_CALL_NOTIFICATION_LOW
 
     if strategy == STRATEGY_YIELD_ENHANCEMENT:

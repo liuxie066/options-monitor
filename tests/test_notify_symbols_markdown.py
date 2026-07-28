@@ -507,7 +507,7 @@ def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
             "strategy": "sell_put",
             "candidate_count": 1,
             "top_contract": "2026-06-19 180P",
-            "annualized_return": 0.12,
+            "annualized_return": 0.22,
             "net_income": 120.0,
             "dte": 30,
             "strike": 180.0,
@@ -537,6 +537,7 @@ def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
             "cover_avail": 1,
             "shares_total": 100,
             "shares_locked": 0,
+            "if_exercised_total_return": 0.16,
         },
         {
             "symbol": "BABA",

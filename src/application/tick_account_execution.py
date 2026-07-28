@@ -150,19 +150,24 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     account_count = len(request.account_ids)
     shared_event_prefetch_state: dict[str, object] = {}
     shared_event_prefetch_lock = Lock() if account_count > 1 else None
-    account_configs = {
-        str(account).strip().lower(): build_account_runtime_config(
-            base_cfg=request.base_cfg,
-            cfg_path=request.cfg_path,
-            account=str(account).strip().lower(),
-            markets_to_run=request.markets_to_run,
-            symbols_arg=request.symbols_arg,
-        )
-        for account in request.account_ids
-    }
+    account_configs: dict[str, dict[str, Any]] = {}
+    account_config_errors: dict[str, Exception] = {}
+    for raw_account in request.account_ids:
+        account = str(raw_account).strip().lower()
+        try:
+            account_configs[account] = build_account_runtime_config(
+                base_cfg=request.base_cfg,
+                cfg_path=request.cfg_path,
+                account=account,
+                markets_to_run=request.markets_to_run,
+                symbols_arg=request.symbols_arg,
+            )
+        except Exception as exc:
+            account_config_errors[account] = exc
     scanning_accounts = [
         account
         for account in request.account_ids
+        if str(account).strip().lower() in account_configs
         if _account_pipeline_is_required(
             request=request,
             account=str(account).strip().lower(),
@@ -380,49 +385,93 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
 
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip()
-        return run_one_account(
-            request=AccountRunRequest(
-                acct=acct,
-                base=request.base,
-                repo_root=request.repo_root,
-                base_cfg=request.base_cfg,
-                cfg_path=request.cfg_path,
-                vpy=request.vpy,
-                markets_to_run=request.markets_to_run,
-                scheduler_ms=request.scheduler_ms,
-                scheduler_view=request.scheduler_view,
-                notify_decision_by_account=request.notify_decision_by_account,
-                should_run_global=request.should_run_global,
-                reason_global=request.reason_global,
+        try:
+            config_error = account_config_errors.get(acct)
+            if config_error is not None:
+                raise config_error
+            return run_one_account(
+                request=AccountRunRequest(
+                    acct=acct,
+                    base=request.base,
+                    repo_root=request.repo_root,
+                    base_cfg=request.base_cfg,
+                    cfg_path=request.cfg_path,
+                    vpy=request.vpy,
+                    markets_to_run=request.markets_to_run,
+                    scheduler_ms=request.scheduler_ms,
+                    scheduler_view=request.scheduler_view,
+                    notify_decision_by_account=request.notify_decision_by_account,
+                    should_run_global=request.should_run_global,
+                    reason_global=request.reason_global,
+                    run_id=request.run_id,
+                    run_dir=request.run_dir,
+                    shared_required=request.shared_required,
+                    accounts_root=request.accounts_root,
+                    prefetch_done=prefetch_done,
+                    force_mode=request.force_mode,
+                    allow_mutations=(not request.smoke),
+                    allow_notifications=(not request.no_send),
+                    prefetch_lock=shared_event_prefetch_lock,
+                    prefetch_state=shared_event_prefetch_state,
+                    scan_decision_by_account=request.scan_decision_by_account,
+                    symbols_arg=request.symbols_arg,
+                    required_data_snapshot_manifest=(
+                        snapshot_manifest_path if acct in scanning_accounts else None
+                    ),
+                    prepared_portfolio_context_manifest=(
+                        prepared_manifest_paths.get(acct)
+                    ),
+                    required_data_snapshot_status=snapshot_status,
+                    required_data_snapshot_sha256=snapshot_manifest_sha256,
+                ),
+                runlog=request.runlog,
+                audit_fn=request.audit_helper.audit,
+                fail_schema_validation=lambda *, stage, exc, run_id=None: request.audit_helper.fail_schema_validation(
+                    stage=stage,
+                    exc=exc,
+                    run_id=run_id,
+                ),
+            )
+        except Exception as exc:
+            reason = f"account_execution_exception:{type(exc).__name__}"
+            request.audit_helper.audit(
+                "account_run",
+                "account_execution_exception",
                 run_id=request.run_id,
-                run_dir=request.run_dir,
-                shared_required=request.shared_required,
-                accounts_root=request.accounts_root,
+                account=acct,
+                status="error",
+                message=str(exc),
+                extra={"exception_type": type(exc).__name__, "isolated": True},
+            )
+            request.runlog.safe_event(
+                "account_run",
+                "error",
+                error_code="ACCOUNT_EXECUTION_EXCEPTION",
+                message=str(exc),
+                data={"account": acct, "exception_type": type(exc).__name__},
+            )
+            return AccountRunOutcome(
+                result=AccountResult(
+                    account=acct,
+                    ran_scan=False,
+                    should_notify=False,
+                    decision_reason=reason,
+                    notification_text="",
+                ),
+                acct_metrics={
+                    "account": acct,
+                    "scheduler_ms": request.scheduler_ms,
+                    "pipeline_ms": None,
+                    "ran_scan": False,
+                    "ran_pipeline": False,
+                    "should_notify": False,
+                    "meaningful": False,
+                    "reason": reason,
+                    "error": str(exc),
+                },
                 prefetch_done=prefetch_done,
-                force_mode=request.force_mode,
-                allow_mutations=(not request.smoke),
-                allow_notifications=(not request.no_send),
-                prefetch_lock=shared_event_prefetch_lock,
-                prefetch_state=shared_event_prefetch_state,
-                scan_decision_by_account=request.scan_decision_by_account,
-                symbols_arg=request.symbols_arg,
-                required_data_snapshot_manifest=(
-                    snapshot_manifest_path if acct in scanning_accounts else None
-                ),
-                prepared_portfolio_context_manifest=(
-                    prepared_manifest_paths.get(acct)
-                ),
-                required_data_snapshot_status=snapshot_status,
-                required_data_snapshot_sha256=snapshot_manifest_sha256,
-            ),
-            runlog=request.runlog,
-            audit_fn=request.audit_helper.audit,
-            fail_schema_validation=lambda *, stage, exc, run_id=None: request.audit_helper.fail_schema_validation(
-                stage=stage,
-                exc=exc,
-                run_id=run_id,
-            ),
-        )
+                ran_pipeline=False,
+            )
 
     ran_any_pipeline = False
     ran_pipeline_accounts: list[str] = []

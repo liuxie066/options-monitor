@@ -537,7 +537,11 @@ def _plan_authority_change_locked(
     promotion_gate: dict[str, Any] | None = None
     covered_families: list[str] = []
     outstanding_notification_receipt_ids = (
-        _unresolved_notification_receipt_ids(base, scope_id)
+        _unresolved_notification_receipt_ids(
+            base,
+            scope_id,
+            normalized_account=account,
+        )
     )
     if mode == "v2":
         if first_use or current_mode != "v2_shadow":
@@ -590,9 +594,10 @@ def _plan_authority_change_locked(
                         )
                     }
                 )
-        if outstanding_notification_receipt_ids:
-            reasons.append("notification_authority_unknown_unresolved")
-    elif mode == "v2_shadow" and outstanding_notification_receipt_ids:
+    if (
+        (first_use or current_mode != mode)
+        and outstanding_notification_receipt_ids
+    ):
         reasons.append("notification_authority_unknown_unresolved")
 
     would_change = not first_use and current_mode == mode
@@ -926,16 +931,11 @@ def _implicit_v1_notification_history_is_valid(
         intent = receipts.get(("inflight", receipt_id, attempt))
         if intent is None or not _notification_receipt_pair_matches(intent, terminal):
             return False
-    unknown_receipts = {
-        receipt_id: payload
-        for (status, receipt_id, _attempt), payload in receipts.items()
-        if status == "unknown"
-    }
     return all(
         _implicit_v1_notification_resolution_is_valid(
             path=path,
             payload=payload,
-            unknown_receipts=unknown_receipts,
+            receipts=receipts,
         )
         for path, payload in resolutions
     )
@@ -961,11 +961,21 @@ def _validate_implicit_v1_notification_receipt(
         or authority_generation != 0
     ):
         return None
-    expected_name = (
-        f"{receipt_id}.{attempt}.json"
-        if status in {"failed", "inflight"}
-        else f"{receipt_id}.json"
-    )
+    notification_key = str(
+        payload.get("notification_key") or ""
+    ).strip()
+    if notification_key:
+        expected_name = (
+            f"{notification_key}.{attempt}.json"
+            if status == "inflight"
+            else f"{receipt_id}.json"
+        )
+    else:
+        expected_name = (
+            f"{receipt_id}.{attempt}.json"
+            if status in {"failed", "inflight"}
+            else f"{receipt_id}.json"
+        )
     required = {
         "schema_version": NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA,
         "status": status,
@@ -977,6 +987,7 @@ def _validate_implicit_v1_notification_receipt(
     }
     if (
         not _is_sha256(receipt_id)
+        or (notification_key and not _is_sha256(notification_key))
         or attempt < 1
         or path.name != expected_name
         or any(payload.get(field) != value for field, value in required.items())
@@ -988,6 +999,12 @@ def _validate_implicit_v1_notification_receipt(
         return None
     if status == "inflight":
         if payload.get("receipt_hash") is not None:
+            return None
+        lease_expires_at = payload.get("lease_expires_at")
+        if lease_expires_at is not None and (
+            not _is_timestamp(lease_expires_at)
+            or str(lease_expires_at) < str(payload.get("recorded_at"))
+        ):
             return None
     elif not _is_timestamp(payload.get("completed_at")) or payload.get(
         "receipt_hash"
@@ -1005,6 +1022,7 @@ def _notification_receipt_pair_matches(
     fields = (
         "schema_version",
         "receipt_id",
+        "notification_key",
         "attempt_number",
         "portfolio_scope_id",
         "normalized_account",
@@ -1015,7 +1033,9 @@ def _notification_receipt_pair_matches(
         "account_run_id",
         "channel",
         "token_hash",
+        "delivery_identity",
         "recorded_at",
+        "lease_expires_at",
     )
     return all(intent.get(field) == terminal.get(field) for field in fields)
 
@@ -1024,16 +1044,38 @@ def _implicit_v1_notification_resolution_is_valid(
     *,
     path: Path,
     payload: Mapping[str, Any],
-    unknown_receipts: Mapping[str, Mapping[str, Any]],
+    receipts: Mapping[tuple[str, str, int], Mapping[str, Any]],
 ) -> bool:
     receipt_id = str(payload.get("receipt_id") or "").strip()
-    unknown = unknown_receipts.get(receipt_id)
+    source_kind = str(
+        payload.get("source_receipt_kind") or "unknown"
+    ).strip()
+    sources = [
+        receipt
+        for (status, candidate_id, _attempt), receipt in receipts.items()
+        if status == source_kind and candidate_id == receipt_id
+    ]
+    source = sources[0] if len(sources) == 1 else None
     evidence = payload.get("evidence")
+    source_hash = (
+        str(payload.get("source_receipt_hash") or "").strip()
+        if payload.get("source_receipt_kind") is not None
+        else str(payload.get("unknown_receipt_hash") or "").strip()
+    )
+    expected_source_hash = (
+        (
+            str(source.get("receipt_hash") or "").strip()
+            or canonical_sha256(source)
+        )
+        if source is not None
+        else ""
+    )
     if (
-        unknown is None
+        source is None
+        or source_kind not in {"unknown", "inflight"}
         or path.name != f"{receipt_id}.json"
         or payload.get("schema_version") != NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA
-        or payload.get("unknown_receipt_hash") != unknown.get("receipt_hash")
+        or source_hash != expected_source_hash
         or payload.get("resolution") not in {"delivered", "failed"}
         or not isinstance(evidence, Mapping)
         or not evidence
@@ -1063,6 +1105,8 @@ def _is_timestamp(value: Any) -> bool:
 def _unresolved_notification_receipt_ids(
     base: Path,
     portfolio_scope_id: str,
+    *,
+    normalized_account: str,
 ) -> list[str]:
     state_dir = (
         portfolio_scope_state_dir(base, portfolio_scope_id)
@@ -1084,7 +1128,7 @@ def _unresolved_notification_receipt_ids(
             continue
         final_exists = any(
             (state_dir / status / f"{receipt_id}.json").is_file()
-            for status in ("accepted", "unknown")
+            for status in ("accepted", "unknown", "failed")
         )
         attempt_number = intent.get("attempt_number")
         if isinstance(attempt_number, bool):
@@ -1100,13 +1144,130 @@ def _unresolved_notification_receipt_ids(
             / "failed"
             / f"{receipt_id}.{attempt}.json"
         ).is_file()
-        if not final_exists and not failed_exists:
+        resolution = _read_optional_notification_resolution(
+            resolution_dir,
+            receipt_id,
+            source_kind="inflight",
+            source_receipt=intent,
+        )
+        if (
+            not final_exists
+            and not failed_exists
+            and resolution not in {"delivered", "failed"}
+        ):
             outstanding.add(receipt_id)
     for path in unknown_dir.glob("*.json"):
         receipt_id = path.stem
-        if not (resolution_dir / f"{receipt_id}.json").exists():
+        try:
+            unknown_receipt = _read_json_object(path)
+        except (OSError, ValueError, PositionAdviceAuthorityError):
             outstanding.add(receipt_id)
+            continue
+        if (
+            _read_optional_notification_resolution(
+                resolution_dir,
+                receipt_id,
+                source_kind="unknown",
+                source_receipt=unknown_receipt,
+            )
+            not in {"delivered", "failed"}
+        ):
+            outstanding.add(receipt_id)
+    from domain.storage import paths as storage_paths
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+    )
+
+    account_state_dir = storage_paths.account_state_dir(
+        Path(base).resolve(),
+        normalized_account,
+    )
+    for path in account_state_dir.glob(
+        "daily_decision_brief.*.delivery.json"
+    ):
+        parts = path.name.split(".")
+        if len(parts) != 4:
+            outstanding.add(f"daily_brief:invalid:{path.name}")
+            continue
+        market = parts[1]
+        result = read_daily_decision_brief_delivery_state(
+            base=base,
+            account=normalized_account,
+            market=market,
+        )
+        if not result.get("available"):
+            outstanding.add(f"daily_brief:{market}:state_invalid")
+            continue
+        state = result.get("state") or {}
+        for market_date, day in (state.get("days") or {}).items():
+            envelopes = list(
+                (day.get("fixed_reports") or {}).values()
+            )
+            candidate = day.get("candidate_delivery")
+            if isinstance(candidate, Mapping):
+                envelopes.append(candidate)
+            for envelope in envelopes:
+                if envelope.get("status") in {"pending", "ambiguous"}:
+                    outstanding.add(
+                        "daily_brief:"
+                        f"{market}:{market_date}:"
+                        f"{envelope.get('delivery_key')}"
+                    )
     return sorted(outstanding)
+
+
+def _read_optional_notification_resolution(
+    resolution_dir: Path,
+    receipt_id: str,
+    *,
+    source_kind: str,
+    source_receipt: Mapping[str, Any],
+) -> str | None:
+    path = resolution_dir / f"{receipt_id}.json"
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        payload = _read_json_object(path)
+    except (OSError, ValueError, PositionAdviceAuthorityError):
+        return None
+    outcome = str(payload.get("resolution") or "").strip().lower()
+    evidence = payload.get("evidence")
+    source_hash = (
+        str(payload.get("source_receipt_hash") or "").strip()
+        if payload.get("source_receipt_kind") is not None
+        else str(payload.get("unknown_receipt_hash") or "").strip()
+    )
+    expected_source_hash = (
+        str(source_receipt.get("receipt_hash") or "").strip()
+        or canonical_sha256(source_receipt)
+    )
+    if (
+        payload.get("schema_version")
+        != NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA
+        or payload.get("receipt_id") != receipt_id
+        or str(
+            payload.get("source_receipt_kind") or "unknown"
+        ).strip()
+        != source_kind
+        or source_hash != expected_source_hash
+        or outcome not in {"delivered", "failed"}
+        or not isinstance(evidence, Mapping)
+        or not evidence
+        or payload.get("evidence_hash")
+        != canonical_sha256(dict(evidence))
+        or not str(payload.get("actor") or "").strip()
+        or not _is_timestamp(payload.get("resolved_at"))
+        or payload.get("resolution_hash")
+        != canonical_sha256(
+            {
+                key: value
+                for key, value in payload.items()
+                if key != "resolution_hash"
+            }
+        )
+    ):
+        return None
+    return outcome
 
 
 def _normalize_market_binding(raw: Mapping[str, Any] | Any) -> dict[str, Any]:
