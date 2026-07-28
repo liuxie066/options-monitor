@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,6 +129,35 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     }
 
 
+def test_build_account_runtime_config_is_pure_and_applies_shared_filters(
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import build_account_runtime_config
+
+    base_cfg = {
+        "portfolio": {"broker": "富途"},
+        "symbols": [
+            {"symbol": "NVDA", "broker": "US"},
+            {"symbol": "0700.HK", "broker": "HK"},
+        ],
+    }
+    original = deepcopy(base_cfg)
+    cfg = build_account_runtime_config(
+        base_cfg=base_cfg,
+        cfg_path=tmp_path / "config.us.json",
+        account="LX",
+        markets_to_run=["US"],
+        symbols_arg="NVDA",
+    )
+
+    assert base_cfg == original
+    assert cfg["portfolio"]["account"] == "lx"
+    assert cfg["symbols"] == [{"symbol": "NVDA", "broker": "US"}]
+    assert cfg["config_source_path"] == str(
+        (tmp_path / "config.us.json").resolve()
+    )
+
+
 def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
@@ -145,7 +175,6 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
             "result_reason": "scheduler_skip",
         },
     )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
     monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
 
     outcome = run_one_account(
@@ -165,10 +194,13 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
     assert any(name == "account_metrics.json" for name, _ in env["state_writes"])
 
 
-def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfully(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(tmp_path)
+    request = _make_request(tmp_path, prefetch_done=True)
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
@@ -182,12 +214,6 @@ def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, 
             "result_reason": "run",
         },
     )
-    monkeypatch.setattr(
-        env["mod"],
-        "prefetch_required_data",
-        lambda **kwargs: {"errors": 0, "audit": [{"ok": True, "tool_name": "required_data_prefetch", "symbol": "NVDA", "message": "ok"}]},
-    )
-
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -209,8 +235,12 @@ def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, 
     assert outcome.prefetch_done is True
     assert outcome.result.notification_text == "hello world"
     assert outcome.acct_metrics["ran_scan"] is True
-    assert any(evt["action"] == "required_data_prefetch" for evt in env["audit_events"])
-    assert any(evt["step"] == "fetch_chain_cache" and evt["status"] == "start" for evt in runlog.events)
+    assert any(evt["action"] == "event_prefetch" for evt in env["audit_events"])
+    assert any(
+        evt["step"] == "event_prefetch" and evt["status"] == "start"
+        for evt in runlog.events
+    )
+    assert not any(evt["step"] == "fetch_chain_cache" for evt in runlog.events)
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
 
@@ -219,7 +249,10 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
 
     repo_root = tmp_path / "code"
     repo_root.mkdir()
-    request = replace(_make_request(tmp_path), repo_root=repo_root)
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True),
+        repo_root=repo_root,
+    )
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
@@ -233,12 +266,7 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
             "result_reason": "run",
         },
     )
-    seen_prefetch: dict[str, Any] = {}
     seen_pipeline: dict[str, Any] = {}
-
-    def _prefetch_required_data(**kwargs):
-        seen_prefetch.update(kwargs)
-        return {"errors": 0, "audit": []}
 
     def _run_pipeline_script(**kwargs):
         seen_pipeline.update(kwargs)
@@ -247,7 +275,6 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
         (report_dir / "symbols_notification.txt").write_text("process split\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", _prefetch_required_data)
     monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
     monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
     monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
@@ -260,8 +287,6 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
     )
 
     assert outcome.ran_pipeline is True
-    assert seen_prefetch["base"] == request.base
-    assert seen_prefetch["repo_root"] == repo_root
     assert seen_pipeline["base"] == repo_root
     assert seen_pipeline["env"]["PYTHONPATH"] == str(repo_root)
     assert seen_pipeline["shared_context_dir"] == request.base / "output_runs" / "run-1" / "state"
@@ -387,10 +412,17 @@ def test_run_one_account_appends_candidate_reject_summary_for_no_candidate_run(m
     assert "样例" not in outcome.result.notification_text
 
 
-def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_passes_force_mode_only_to_event_prefetch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(tmp_path, force_mode=True)
+    request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        force_mode=True,
+    )
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
@@ -404,14 +436,6 @@ def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Pa
             "result_reason": "run",
         },
     )
-
-    seen: dict[str, Any] = {}
-
-    def _prefetch_required_data(**kwargs):
-        seen.update(kwargs)
-        return {"errors": 0, "audit": []}
-
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", _prefetch_required_data)
 
     def _run_pipeline_script(**kwargs):
         report_dir = kwargs["report_dir"]
@@ -431,14 +455,21 @@ def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Pa
     )
 
     assert outcome.ran_pipeline is True
-    assert seen["force_refresh"] is True
+    assert env["event_prefetch_calls"][0]["force_refresh"] is True
     assert outcome.prefetch_done is True
 
 
-def test_run_one_account_force_prefetch_uses_shared_state_once(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_force_event_prefetch_uses_shared_state_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
-    base_request = _make_request(tmp_path, force_mode=True)
+    base_request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        force_mode=True,
+    )
     shared_prefetch_state: dict[str, Any] = {"done": False}
     prefetch_calls: list[str] = []
 
@@ -462,11 +493,14 @@ def test_run_one_account_force_prefetch_uses_shared_state_once(monkeypatch, tmp_
             },
         )
 
-        def _prefetch_required_data(**kwargs):
+        def _prefetch_event_data(**kwargs):
             prefetch_calls.append(acct)
-            return {"errors": 0, "audit": []}
+            return {
+                "summary": {"errors": 0},
+                "symbols": {},
+            }
 
-        monkeypatch.setattr(env["mod"], "prefetch_required_data", _prefetch_required_data)
+        monkeypatch.setattr(env["mod"], "prefetch_event_data", _prefetch_event_data)
 
         def _run_pipeline_script(**kwargs):
             report_dir = kwargs["report_dir"]
@@ -500,17 +534,27 @@ def test_run_one_account_force_prefetch_uses_shared_state_once(monkeypatch, tmp_
     assert second.ran_pipeline is True
     assert first.prefetch_done is True
     assert second.prefetch_done is True
-    assert shared_prefetch_state["done"] is True
-    assert shared_prefetch_state["force_done"] is True
+    assert shared_prefetch_state["event_done"] is True
+    assert shared_prefetch_state["event_force_done"] is True
     assert prefetch_calls == ["lx"]
 
 
-def test_run_one_account_force_prefetch_failure_does_not_mark_shared_done(monkeypatch, tmp_path: Path) -> None:
+def test_run_one_account_force_event_prefetch_failure_does_not_mark_shared_done(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.account_run import run_one_account
 
-    base_request = _make_request(tmp_path, force_mode=True)
+    base_request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        force_mode=True,
+    )
     shared_prefetch_state: dict[str, Any] = {"done": False}
-    prefetch_results = [{"errors": 1, "audit": []}, {"errors": 0, "audit": []}]
+    prefetch_results: list[object] = [
+        RuntimeError("event provider unavailable"),
+        {"summary": {"errors": 0}, "symbols": {}},
+    ]
     prefetch_calls: list[str] = []
 
     def _run(acct: str):
@@ -533,11 +577,14 @@ def test_run_one_account_force_prefetch_failure_does_not_mark_shared_done(monkey
             },
         )
 
-        def _prefetch_required_data(**kwargs):
+        def _prefetch_event_data(**kwargs):
             prefetch_calls.append(acct)
-            return prefetch_results.pop(0)
+            result = prefetch_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
 
-        monkeypatch.setattr(env["mod"], "prefetch_required_data", _prefetch_required_data)
+        monkeypatch.setattr(env["mod"], "prefetch_event_data", _prefetch_event_data)
 
         def _run_pipeline_script(**kwargs):
             report_dir = kwargs["report_dir"]
@@ -566,15 +613,15 @@ def test_run_one_account_force_prefetch_failure_does_not_mark_shared_done(monkey
 
     first = _run("lx")
     assert first.ran_pipeline is True
-    assert first.prefetch_done is False
-    assert shared_prefetch_state["done"] is False
-    assert "force_done" not in shared_prefetch_state
+    assert first.prefetch_done is True
+    assert "event_done" not in shared_prefetch_state
+    assert "event_force_done" not in shared_prefetch_state
 
     second = _run("sy")
     assert second.ran_pipeline is True
     assert second.prefetch_done is True
-    assert shared_prefetch_state["done"] is True
-    assert shared_prefetch_state["force_done"] is True
+    assert shared_prefetch_state["event_done"] is True
+    assert shared_prefetch_state["event_force_done"] is True
     assert prefetch_calls == ["lx", "sy"]
 
 

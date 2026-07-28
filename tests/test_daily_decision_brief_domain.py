@@ -152,6 +152,62 @@ def test_normalize_brief_builds_stable_ids_and_rejects_invalid_contracts() -> No
         normalize_daily_decision_brief(invalid)
 
 
+def test_candidate_evidence_hold_lifecycle_preserves_identity_without_false_invalidation() -> None:
+    from domain.domain.daily_decision_brief import (
+        diff_daily_decision_briefs,
+        normalize_daily_decision_brief,
+        reconcile_daily_decision_brief_evidence,
+    )
+
+    active = normalize_daily_decision_brief(
+        _brief(revision=0, actions=[_action()])
+    )
+    unavailable_source = _brief(revision=1)
+    unavailable_source["status"] = "degraded"
+    unavailable_source["data_gaps"] = [
+        {
+            "scope": "strategy",
+            "market": "US",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "reason": "empty_chain",
+        }
+    ]
+    held = reconcile_daily_decision_brief_evidence(
+        active,
+        unavailable_source,
+    )
+    held_action = held["actions"][0]
+
+    assert held_action["action_id"] == active["actions"][0]["action_id"]
+    assert held_action["state"] == "observe"
+    assert held_action["evidence_state"] == "unavailable"
+    first_diff = diff_daily_decision_briefs(active, held)
+    assert [item["change_type"] for item in first_diff["changes"]] == [
+        "candidate_evidence_unavailable"
+    ]
+
+    held_again = reconcile_daily_decision_brief_evidence(
+        held,
+        {**unavailable_source, "revision": 2, "run_id": "run-2"},
+    )
+    assert diff_daily_decision_briefs(held, held_again)["changes"] == []
+
+    recovered = normalize_daily_decision_brief(
+        _brief(revision=3, actions=[_action()])
+    )
+    assert [
+        item["change_type"]
+        for item in diff_daily_decision_briefs(held_again, recovered)["changes"]
+    ] == ["candidate_evidence_recovered"]
+
+    absent = normalize_daily_decision_brief(_brief(revision=3))
+    assert [
+        item["change_type"]
+        for item in diff_daily_decision_briefs(held_again, absent)["changes"]
+    ] == ["candidate_invalidated"]
+
+
 
 
 def test_candidate_identity_is_canonical_stable_and_contract_independent() -> None:

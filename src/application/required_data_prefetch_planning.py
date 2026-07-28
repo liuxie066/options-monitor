@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 from typing import Any
 
+from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
@@ -17,6 +19,15 @@ from src.application.strategy_policy import (
     assert_strategy_config_resolved,
     strategy_semantics_for_side_config,
 )
+from src.application.config_profiles import apply_profiles
+from src.application.config_sections import (
+    resolve_templates_config,
+    resolve_watchlist_config,
+    set_watchlist_config,
+)
+from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
+from src.application.prefilters import apply_prefilters
+from src.application.required_data_plan_identity import required_data_plan_id
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_staggered_expiry_gap_days,
@@ -26,6 +37,120 @@ from src.application.yield_enhancement_config import (
 
 DEFAULT_STRIKE_EXPAND_PCT = 0.20
 DEFAULT_CALL_STRIKE_BUFFER_PCT = 0.02
+
+
+def build_cross_account_prefetch_config(
+    *,
+    base_config: dict[str, Any],
+    account_configs: dict[str, dict[str, Any]],
+    prepared_portfolio_contexts: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Build an order-independent union of effective per-account market demand."""
+
+    source_items: list[dict[str, Any]] = []
+    base_profiles = resolve_templates_config(base_config)
+    for raw in resolve_watchlist_config(base_config):
+        if not isinstance(raw, dict):
+            continue
+        resolved = resolve_watchlist_item_runtime_config(
+            item=raw,
+            profiles=base_profiles,
+            apply_profiles_fn=apply_profiles,
+        )
+        base_item = deepcopy(resolved)
+        call_cfg = dict(_as_dict(base_item.get("sell_call")))
+        call_cfg["enabled"] = False
+        base_item["sell_call"] = call_cfg
+        if _has_non_account_market_demand(base_item):
+            source_items.append(base_item)
+
+    configs_by_account = {
+        str(account or "").strip().lower(): cfg
+        for account, cfg in account_configs.items()
+        if str(account or "").strip() and isinstance(cfg, dict)
+    }
+    contexts_by_account = {
+        str(account or "").strip().lower(): context
+        for account, context in prepared_portfolio_contexts.items()
+        if str(account or "").strip()
+    }
+    for account in sorted(configs_by_account):
+        cfg = configs_by_account[account]
+        context = contexts_by_account.get(account)
+        profiles = resolve_templates_config(cfg)
+        for raw in resolve_watchlist_config(cfg):
+            if not isinstance(raw, dict):
+                continue
+            resolved = resolve_watchlist_item_runtime_config(
+                item=raw,
+                profiles=profiles,
+                apply_profiles_fn=apply_profiles,
+            )
+            symbol = str(resolved.get("symbol") or "").strip()
+            sp = dict(_as_dict(resolved.get("sell_put")))
+            cc = dict(_as_dict(resolved.get("sell_call")))
+            filtered = apply_prefilters(
+                symbol=symbol,
+                sp=sp,
+                cc=cc,
+                want_put=bool(sp.get("enabled", False)),
+                want_call=bool(cc.get("enabled", False)),
+                portfolio_ctx=context,
+            )
+            effective = deepcopy(resolved)
+            sp = dict(filtered.sp)
+            sp["enabled"] = bool(filtered.want_put)
+            cc = dict(filtered.cc)
+            cc["enabled"] = bool(filtered.want_call)
+            if filtered.want_call and isinstance(filtered.stock, dict):
+                min_strike = resolve_effective_sell_call_min_strike(
+                    min_strike=cc.get("min_strike"),
+                    avg_cost=filtered.stock.get("avg_cost"),
+                    cost_multiplier=cc.get("min_strike_cost_multiplier", 1.0),
+                )
+                if min_strike is not None:
+                    cc["min_strike"] = min_strike
+            effective["sell_put"] = sp
+            effective["sell_call"] = cc
+            if _has_any_market_demand(effective):
+                source_items.append(effective)
+
+    source_items.sort(key=_stable_symbol_config_key)
+    out = deepcopy(base_config)
+    set_watchlist_config(out, source_items)
+    return out
+
+
+def _has_non_account_market_demand(symbol_cfg: dict[str, Any]) -> bool:
+    return bool(
+        _as_dict(symbol_cfg.get("sell_put")).get("enabled", False)
+        or derive_yield_enhancement_policy(
+            resolve_yield_enhancement_cfg(symbol_cfg)
+        ).enabled
+    )
+
+
+def _has_any_market_demand(symbol_cfg: dict[str, Any]) -> bool:
+    return bool(
+        _has_non_account_market_demand(symbol_cfg)
+        or _as_dict(symbol_cfg.get("sell_call")).get("enabled", False)
+    )
+
+
+def _stable_symbol_config_key(symbol_cfg: dict[str, Any]) -> tuple[str, str, str]:
+    fetch = _as_dict(symbol_cfg.get("fetch"))
+    canonical = json.dumps(
+        symbol_cfg,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return (
+        str(symbol_cfg.get("symbol") or "").strip().upper(),
+        f"{fetch.get('source') or ''}:{fetch.get('host') or ''}:{fetch.get('port') or ''}",
+        canonical,
+    )
 
 
 @dataclass(frozen=True)

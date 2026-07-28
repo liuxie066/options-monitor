@@ -1242,3 +1242,36 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "现金总额｜暂不可用" in message
     assert "可用于期权开仓｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
+
+
+def test_evidence_hold_is_rendered_as_waiting_not_current_recommendation() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["candidates"] = {
+        "sell_put": [],
+        "covered_call": [],
+        "combo_yield": [],
+    }
+    brief["actions"] = [
+        {
+            "priority": "P1",
+            "state": "observe",
+            "action_type": "open_candidate",
+            "strategy_family": "sell_put",
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "expiration": "2026-08-21",
+            "strike": 100,
+            "contract_symbol": "NVDA260821P00100000",
+            "evidence_state": "unavailable",
+            "evidence_reason": "empty_chain",
+        }
+    ]
+
+    rendered = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "行情证据不可用，待恢复（不是当前推荐）" in rendered
+    assert "原候选仅保留待恢复身份，不是当前推荐" in rendered

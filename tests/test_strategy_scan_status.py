@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from src.application.strategy_scan_status import (
+    publish_strategy_scan_status,
+    publish_strategy_scan_status_index,
+)
+
+
+def test_completed_zero_candidates_is_available_and_bound_to_artifacts(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "nvda_sell_put_candidates.csv").write_text(
+        "symbol\n",
+        encoding="utf-8",
+    )
+    (report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        "symbol\n",
+        encoding="utf-8",
+    )
+    publish_strategy_scan_status(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="sell_put",
+        status="completed",
+        candidate_count=0,
+        snapshot_id="snapshot-1",
+        receipt_relpath="quotes/receipt.json",
+    )
+
+    index = publish_strategy_scan_status_index(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+            }
+        ],
+    )
+
+    assert index["counts"] == {
+        "completed": 1,
+        "unavailable": 0,
+        "failed": 0,
+    }
+    assert index["items"][0]["candidate_count"] == 0
+
+
+def test_index_synthesizes_missing_and_invalid_statuses(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "nvda_sell_call_candidates.csv").write_text(
+        "symbol\n",
+        encoding="utf-8",
+    )
+    status = publish_strategy_scan_status(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="covered_call",
+        status="completed",
+        candidate_count=1,
+    )
+    (report_dir / "nvda_sell_call_candidates.csv").write_text(
+        "symbol\nNVDA\n",
+        encoding="utf-8",
+    )
+
+    index = publish_strategy_scan_status_index(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "covered_call",
+            },
+            {
+                "market": "US",
+                "symbol": "AMD",
+                "strategy_family": "sell_put",
+            },
+        ],
+    )
+
+    reasons = {item.get("reason") for item in index["items"]}
+    assert reasons == {
+        "strategy_scan_status_invalid",
+        "strategy_scan_status_missing",
+    }
+    assert index["counts"]["failed"] == 2
+    payload = json.loads(
+        (report_dir / "strategy_scan_status_index.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["expected_count"] == 2
+    assert status["status"] == "completed"

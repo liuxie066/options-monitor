@@ -132,6 +132,42 @@ def test_same_day_revision_is_monotonic_and_new_day_resets_to_zero(tmp_path: Pat
     assert next_day["paths"]["revision"].name.endswith("2026-07-20.r0000.json")
 
 
+def test_success_persistence_reconciles_evidence_hold_inside_current_lock(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+    )
+
+    first = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=_brief(run_id="run-a", actions=[_action()]),
+    )
+    degraded = _brief(run_id="run-b")
+    degraded["status"] = "degraded"
+    degraded["data_gaps"] = [
+        {
+            "scope": "strategy",
+            "market": "US",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "reason": "required_data_snapshot_unavailable",
+        }
+    ]
+    second = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief=degraded,
+    )
+
+    assert second["current_revision"] == 1
+    assert second["brief"]["actions"][0]["action_id"] == (
+        first["brief"]["actions"][0]["action_id"]
+    )
+    assert second["brief"]["actions"][0]["evidence_state"] == "unavailable"
+    assert second["current_candidate_identities"] == []
+    assert second["newly_detected_candidate_identities"] == []
+
+
 @pytest.mark.parametrize("seed_current", [False, True])
 def test_prepare_advances_past_orphan_revision_after_interrupted_publication(
     tmp_path: Path,

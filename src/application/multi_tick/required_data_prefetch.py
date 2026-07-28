@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
 import time
@@ -40,6 +39,9 @@ from src.application.required_data_observability import (
     summarize_prefetch_fetch_metrics,
     summarize_required_data_prefetch_run,
 )
+from src.application.multiplier_steps import (
+    apply_multiplier_cache_to_required_data_csv,
+)
 from src.application.required_data_planning import (
     RequiredDataFetchPlanBundle,
     _merge_same_side_plans as _merge_required_data_side_plans,
@@ -49,6 +51,7 @@ from src.application.required_data_planning import (
 from src.application.required_data_prefetch_planning import (
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
+    required_data_plan_id,
 )
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
@@ -330,9 +333,8 @@ def _global_required_data_plan_summary(
                 "fetch_plan": fetch_plan.to_debug_dict(),
             }
         )
-    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {
-        "plan_id": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "plan_id": required_data_plan_id(items),
         "planning_scope": "run",
         "strategy_expiration_limit": None,
         "symbols": items,
@@ -425,6 +427,11 @@ def _fetch_one_inprocess(
         message = str(meta.get('error') or meta.get('status') or 'fetched')
         quote_receipt_relpath: str | None = None
         if ok and str(producer_run_id or "").strip():
+            apply_multiplier_cache_to_required_data_csv(
+                base=base,
+                required_data_dir=shared_required,
+                symbol=symbol,
+            )
             if (
                 not isinstance(saved_paths, tuple)
                 or len(saved_paths) != 2
@@ -765,6 +772,11 @@ def _prefetch_required_data_unlocked(
             source_observed_at = datetime.now(timezone.utc)
             raw_path = shared_required / "raw" / f"{symbol}_required_data.json"
             csv_path = shared_required / "parsed" / f"{symbol}_required_data.csv"
+            apply_multiplier_cache_to_required_data_csv(
+                base=base,
+                required_data_dir=shared_required,
+                symbol=symbol,
+            )
             quote_receipt_path, _quote_receipt = publish_required_data_quote_snapshot(
                 producer_root=shared_required,
                 producer_run_id=str(producer_run_id),
@@ -798,6 +810,45 @@ def _prefetch_required_data_unlocked(
         return payload
 
     todo_cfgs = [it for it in fetch_syms if _need_fetch(it)]
+    todo_ids = {id(item) for item in todo_cfgs}
+    if str(producer_run_id or "").strip():
+        for symbol_cfg in fetch_syms:
+            if id(symbol_cfg) in todo_ids:
+                continue
+            symbol = str(symbol_cfg.get("symbol") or "").strip()
+            fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+            fetch_plan = _get_fetch_plan(symbol_cfg)
+            raw_path = shared_required / "raw" / f"{symbol}_required_data.json"
+            csv_path = shared_required / "parsed" / f"{symbol}_required_data.csv"
+            apply_multiplier_cache_to_required_data_csv(
+                base=base,
+                required_data_dir=shared_required,
+                symbol=symbol,
+            )
+            publish_required_data_quote_snapshot(
+                producer_root=shared_required,
+                producer_run_id=str(producer_run_id),
+                symbol=symbol,
+                raw_path=raw_path,
+                csv_path=csv_path,
+                fetch_plan=fetch_plan.to_debug_dict(),
+                fetch_policy={
+                    "source": str(fetch_cfg.get("source") or "futu"),
+                    "host": str(fetch_cfg.get("host") or "127.0.0.1"),
+                    "port": _to_int(fetch_cfg.get("port") or 11111, 11111),
+                    "limit_expirations": _prefetch_limit_expirations(
+                        symbol_cfg,
+                        fetch_plan,
+                    ),
+                    "fetch_kwargs": _prefetch_fetch_kwargs_from_plan(fetch_plan),
+                    "opend_fetch": opend_fetch_cfg,
+                    "execution_mode": "cached",
+                },
+                source_observed_at=datetime.fromtimestamp(
+                    raw_path.stat().st_mtime,
+                    tz=timezone.utc,
+                ),
+            )
     unique_cached_count = max(0, len(fetch_syms) - len(todo_cfgs))
     budget_plan = build_prefetch_budget_plan(
         todo_cfgs,
