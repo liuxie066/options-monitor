@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.6.1 - 2026-07-28
+
 ### Improvements
 - Added a mandatory release-delta coverage manifest and publication gate that maps every commit since the previous stable tag to an exact release note or an explicit no-user-impact reason.
 
