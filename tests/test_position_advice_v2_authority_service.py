@@ -89,7 +89,7 @@ def _promotion_evidence(
                 "outcome_reason": "selected" if index < 5 else "eligible",
             }
         )
-    return {
+    return _with_automatic_reports({
         "schema_version": "position_advice_promotion_evidence.v1",
         "normalized_account": "lx",
         "portfolio_scope_id": scope_for("lx"),
@@ -126,7 +126,30 @@ def _promotion_evidence(
             ],
         },
         "opportunities": opportunities,
+    })
+
+
+def _with_automatic_reports(
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    evidence["source_plan_hashes"] = ["9" * 64]
+    safety_report: dict[str, object] = {
+        "schema_version": "position_advice_promotion_checks.v1",
+        "evaluator_version": "position_advice_promotion_checks.v1",
+        "source_plan_hashes": ["9" * 64],
+        "safety": evidence["safety"],
+        "violations": [],
     }
+    safety_report["artifact_hash"] = canonical_sha256(safety_report)
+    replay_report: dict[str, object] = {
+        "schema_version": "position_advice_critical_replay.v1",
+        "fixture_results": evidence["critical_replay_fixtures"],
+        "details": {},
+    }
+    replay_report["artifact_hash"] = canonical_sha256(replay_report)
+    evidence["automatic_safety_evaluation"] = safety_report
+    evidence["automatic_critical_replay"] = replay_report
+    return evidence
 
 
 def _apply_first_use(

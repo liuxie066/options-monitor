@@ -14,6 +14,7 @@ from domain.domain.combo_identity import (
 from domain.domain.decision_state_fingerprint import (
     DecisionStateNormalizationError,
     build_decision_state_fingerprint,
+    canonical_sha256,
 )
 from domain.domain.lifecycle_allocation import (
     allocation_id_for,
@@ -568,7 +569,7 @@ def _promotion_evidence() -> dict:
                 "outcome_reason": "selected" if selected else "eligible",
             }
         )
-    return {
+    return _with_automatic_reports({
         "schema_version": "position_advice_promotion_evidence.v1",
         "authority_mode": "v2_shadow",
         "safety": {metric: 0 for metric in SAFETY_METRICS},
@@ -599,7 +600,28 @@ def _promotion_evidence() -> dict:
             ],
         },
         "opportunities": opportunities,
+    })
+
+
+def _with_automatic_reports(evidence: dict) -> dict:
+    evidence["source_plan_hashes"] = ["9" * 64]
+    safety_report = {
+        "schema_version": "position_advice_promotion_checks.v1",
+        "evaluator_version": "position_advice_promotion_checks.v1",
+        "source_plan_hashes": ["9" * 64],
+        "safety": evidence["safety"],
+        "violations": [],
     }
+    safety_report["artifact_hash"] = canonical_sha256(safety_report)
+    replay_report = {
+        "schema_version": "position_advice_critical_replay.v1",
+        "fixture_results": evidence["critical_replay_fixtures"],
+        "details": {},
+    }
+    replay_report["artifact_hash"] = canonical_sha256(replay_report)
+    evidence["automatic_safety_evaluation"] = safety_report
+    evidence["automatic_critical_replay"] = replay_report
+    return evidence
 
 
 def test_promotion_gate_is_non_vacuous_deduplicated_and_economic() -> None:

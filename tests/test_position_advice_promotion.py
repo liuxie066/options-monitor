@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.lifecycle_allocation import (
+    allocation_id_for,
+    terminal_event_id_for,
+)
 from domain.domain.position_advice_authority import scope_for
 from domain.domain.position_advice_promotion import (
     REQUIRED_CRITICAL_REPLAY_FIXTURES,
@@ -19,7 +24,12 @@ from src.application.position_advice_authority_service import (
 from src.application.position_advice_promotion import (
     PositionAdvicePromotionError,
     build_position_advice_promotion_evidence,
+    position_advice_promotion_status,
     publish_position_advice_promotion_evidence,
+    refresh_position_advice_promotion,
+)
+from src.application.position_advice_current_repository import (
+    collect_protected_current_runs_under_global_lock,
 )
 
 
@@ -81,6 +91,8 @@ def _plan(
     immutable_input: dict[str, object] = {
         "schema_version": "position_advice_input.v2",
         "account_run_id": run_id,
+        "normalized_account": "lx",
+        "normalized_portfolio_source": "futu",
         "portfolio_scope_id": scope_for("lx"),
         "portfolio_account_identity_hash": IDENTITY,
         "authority_mode": "v2_shadow",
@@ -88,6 +100,18 @@ def _plan(
         "authority_policy_hash": authority_policy_hash,
         "decision_state_fingerprint": fingerprint,
         "source_manifest_hash": source_manifest_hash,
+        "decision_state_snapshot": {
+            "schema_version": "decision_state_snapshot.v2",
+            "snapshot_status": "trusted",
+            "actionable": True,
+            "decision_state_fingerprint": fingerprint,
+            "account_position_lots": [
+                {
+                    "record_id": f"lot-{index}",
+                    "fields": {"contracts_open": 1},
+                }
+            ],
+        },
         "economic_inputs": {"fees": "v1", "index": index},
     }
     immutable_input["input_hash"] = canonical_sha256(immutable_input)
@@ -116,6 +140,28 @@ def _plan(
         ),
         "risk_eligibility_status": "accepted",
     }
+    pool_key = str(proposal["resource_deltas"][0]["pool_key"])
+    if alternative:
+        proposal["resource_deltas"][0].update(
+            {"released": "0", "required": "90"}
+        )
+        proposal["allocator_reason"] = "portfolio_capacity_conflict"
+        proposal["selected"] = False
+        proposal["actionable"] = False
+        proposal["depends_on"] = []
+    elif selected:
+        proposal["resource_deltas"][0]["net_after"] = "10"
+        proposal.update(
+            {
+                "selected": True,
+                "actionable": True,
+                "allocator_reason": "selected",
+                "execution_order": 1,
+                "depends_on": [],
+                "candidate_quantity_before": 1,
+                "candidate_quantity_after": 0,
+            }
+        )
     advice_checked_at = checked_at or NOW + timedelta(days=index % 15)
     plan: dict[str, object] = {
         "schema_version": "position_advice.output.v2",
@@ -123,6 +169,7 @@ def _plan(
         "normalized_account": "lx",
         "included_markets": included_markets or ["US"],
         "portfolio_scope_id": scope_for("lx"),
+        "normalized_portfolio_source": "futu",
         "portfolio_account_identity_hash": IDENTITY,
         "authority_mode": "v2_shadow",
         "authority_generation": authority_generation,
@@ -135,6 +182,30 @@ def _plan(
         "freshness": {"status": "fresh"},
         "advice_checked_at": advice_checked_at.isoformat(),
         "portfolio_plan_id": f"portfolio-plan-{index}",
+        "resource_pools_before": {
+            pool_key: {
+                "resource_kind": "cash_base_cny",
+                "unit": "CNY",
+                "available": "0",
+            }
+        },
+        "resource_pools_after": {
+            pool_key: {
+                "resource_kind": "cash_base_cny",
+                "unit": "CNY",
+                "available": "10" if selected else "0",
+            }
+        },
+        "candidate_quantity_before": {
+            f"candidate-{index}": 1
+        }
+        if selected or alternative
+        else {},
+        "candidate_quantity_after": {
+            f"candidate-{index}": 0 if selected else 1
+        }
+        if selected or alternative
+        else {},
         "selected_proposals": [proposal] if selected else [],
         "alternative_proposals": [proposal] if alternative else [],
         "rows": [
@@ -142,6 +213,10 @@ def _plan(
                 "position_id": f"lot-{index}",
                 "strategy_family": "short_put",
                 "lifecycle_state": "open",
+                "model_actionable": selected,
+                "actionable": False,
+                "promotion_scope_status": "shadow_evaluation",
+                "action_scope": "position" if selected else "none",
                 "reason_codes": (
                     []
                     if selected or alternative
@@ -209,11 +284,9 @@ def test_promotion_aggregator_builds_non_vacuous_passing_evidence(
         portfolio_account_identity_hash=IDENTITY,
         authority_generation=GENERATION,
         authority_policy_hash=POLICY_HASH,
-        covered_strategy_families=["short_put"],
-        safety={metric: 0 for metric in SAFETY_METRICS},
-        critical_replay_fixtures={
-            name: True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
-        },
+        covered_strategy_families=None,
+        safety=None,
+        critical_replay_fixtures=None,
         generated_at=NOW + timedelta(days=15),
     )
 
@@ -335,11 +408,9 @@ def test_promotion_publish_binds_current_shadow_policy_and_writes_once(
         normalized_account="lx",
         normalized_portfolio_source="futu",
         portfolio_account_identity_hash=IDENTITY,
-        covered_strategy_families=["short_put"],
-        safety={metric: 0 for metric in SAFETY_METRICS},
-        critical_replay_fixtures={
-            name: True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
-        },
+        covered_strategy_families=None,
+        safety=None,
+        critical_replay_fixtures=None,
         generated_at=NOW + timedelta(days=15),
     )
 
@@ -421,3 +492,326 @@ def test_promotion_sessions_use_exchange_local_dates(tmp_path: Path) -> None:
         "HK:2026-07-01",
         "US:2026-06-30",
     ]
+
+
+def test_automatic_refresh_is_deterministic_and_status_exposes_final_cas(
+    tmp_path: Path,
+) -> None:
+    applied = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
+        identity_binding_evidence=_binding(),
+    )
+    policy = dict(applied["policy"])
+    _plans(
+        tmp_path,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+    )
+
+    preview = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+    assert preview["status"] == "pass"
+    assert preview["published"] is False
+    assert not (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "position_advice"
+        / scope_for("lx")
+        / "promotion_evidence"
+    ).exists()
+
+    published = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+        confirm=True,
+    )
+    repeated = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+        confirm=True,
+    )
+    assert published["status"] == "pass"
+    assert repeated["promotion_evidence_hash"] == published[
+        "promotion_evidence_hash"
+    ]
+
+    assert published["evidence"]["automatic_safety_evaluation"][
+        "safety"
+    ] == {metric: 0 for metric in SAFETY_METRICS}
+    assert all(
+        published["evidence"]["critical_replay_fixtures"].values()
+    )
+
+    status = position_advice_promotion_status(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+    assert status["status"] == "pass"
+    assert status["ready_for_final_cas"] is True
+    assert status["final_cas"]["expected_policy_hash"] == policy[
+        "policy_hash"
+    ]
+    assert status["final_cas"]["evidence_path"] == published[
+        "evidence_path"
+    ]
+
+
+def test_refresh_archives_sources_and_allows_ordinary_run_cleanup(
+    tmp_path: Path,
+) -> None:
+    applied = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
+        identity_binding_evidence=_binding(),
+    )
+    policy = dict(applied["policy"])
+    _plans(
+        tmp_path,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+    )
+
+    preview = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+    archive_root = (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "position_advice"
+        / scope_for("lx")
+        / "promotion_sources"
+    )
+    assert preview["status"] == "pass"
+    assert not archive_root.exists()
+    (archive_root / ".tmp.interrupted").mkdir(parents=True)
+
+    published = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+        confirm=True,
+    )
+    protected = collect_protected_current_runs_under_global_lock(
+        base=tmp_path
+    )
+    archived_plans = sorted(
+        archive_root.glob("*/position_advice.v2.json.gz")
+    )
+    archived_inputs = sorted(
+        archive_root.glob("*/state/position_advice_input.v2.json.gz")
+    )
+
+    assert protected == set()
+    assert len(archived_plans) == 30
+    assert len(archived_inputs) == 30
+    assert all(path.read_bytes().startswith(b"\x1f\x8b") for path in archived_plans)
+    assert all(path.read_bytes().startswith(b"\x1f\x8b") for path in archived_inputs)
+
+    shutil.rmtree(tmp_path / "output_runs")
+    repeated = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+        confirm=True,
+    )
+
+    assert repeated["promotion_evidence_hash"] == published[
+        "promotion_evidence_hash"
+    ]
+
+    archived_plans[0].write_bytes(b"not-gzip")
+    with pytest.raises(
+        PositionAdvicePromotionError,
+        match="promotion source is unreadable",
+    ):
+        refresh_position_advice_promotion(
+            base=tmp_path,
+            normalized_account="lx",
+            confirm=True,
+        )
+
+
+def test_automatic_safety_counts_shadow_authority_and_allocator_drift(
+    tmp_path: Path,
+) -> None:
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+    )
+    plan = json.loads(path.read_text())
+    plan["rows"][0]["actionable"] = True
+    pool_key = next(iter(plan["resource_pools_after"]))
+    plan["resource_pools_after"][pool_key]["available"] = "999"
+    plan.pop("artifact_hash")
+    plan["artifact_hash"] = canonical_sha256(plan)
+    _write_json(path, plan)
+
+    evidence = build_position_advice_promotion_evidence(
+        plan_paths=[path],
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        authority_generation=GENERATION,
+        authority_policy_hash=POLICY_HASH,
+        covered_strategy_families=None,
+        safety=None,
+        critical_replay_fixtures={
+            name: True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
+        },
+        generated_at=NOW,
+    )
+
+    safety = evidence["safety"]
+    assert safety["authority_mixed_exposure"] == 1
+    assert safety["allocator_invariant_violation"] == 1
+
+
+def test_automatic_safety_rejects_actionable_lifecycle_replay_mismatch(
+    tmp_path: Path,
+) -> None:
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+    )
+    input_path = path.parent / "state" / "position_advice_input.v2.json"
+    immutable_input = json.loads(input_path.read_text())
+    snapshot = immutable_input["decision_state_snapshot"]
+    lot = snapshot["account_position_lots"][0]
+    lot["fields"].update(
+        {
+            "symbol": "NVDA",
+            "expiration_ymd": "2026-06-20",
+            "contracts_open": 1,
+        }
+    )
+    case_id = "case-0"
+    evidence_id = "evidence-0"
+    lot_id = "lot-0"
+    snapshot["account_lifecycle_cases"] = [
+        {
+            "schema_version": "lifecycle_case.v2",
+            "case_id": case_id,
+            "symbol": "NVDA",
+            "expiration_ymd": "2026-06-20",
+            "market": "US",
+            "status": "open",
+            "target_contracts_by_lot": {lot_id: 1},
+        }
+    ]
+    snapshot["account_lifecycle_evidence"] = [
+        {"case_id": case_id, "evidence_id": evidence_id}
+    ]
+    snapshot["account_lifecycle_allocations"] = [
+        {
+            "allocation_id": allocation_id_for(
+                case_id=case_id,
+                evidence_id=evidence_id,
+                target_lot_id=lot_id,
+            ),
+            "case_id": case_id,
+            "evidence_id": evidence_id,
+            "target_lot_id": lot_id,
+            "terminal_type": "assignment",
+            "contracts_allocated": 1,
+            "canonical_terminal_event_id": terminal_event_id_for(
+                case_id=case_id,
+                evidence_id=evidence_id,
+                target_lot_id=lot_id,
+                terminal_type="assignment",
+                contracts_allocated=1,
+            ),
+        }
+    ]
+    immutable_input.pop("input_hash")
+    immutable_input["input_hash"] = canonical_sha256(immutable_input)
+    _write_json(input_path, immutable_input)
+    plan = json.loads(path.read_text())
+    plan["input_hash"] = immutable_input["input_hash"]
+    plan.pop("artifact_hash")
+    plan["artifact_hash"] = canonical_sha256(plan)
+    _write_json(path, plan)
+
+    evidence = build_position_advice_promotion_evidence(
+        plan_paths=[path],
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        authority_generation=GENERATION,
+        authority_policy_hash=POLICY_HASH,
+        covered_strategy_families=None,
+        safety=None,
+        critical_replay_fixtures={
+            name: True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
+        },
+        generated_at=NOW,
+    )
+
+    assert (
+        evidence["safety"][
+            "lifecycle_or_identity_conflict_actionable"
+        ]
+        == 1
+    )
+
+
+def test_automatic_safety_counts_terminal_combo_and_stale_source_drift(
+    tmp_path: Path,
+) -> None:
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+    )
+    plan = json.loads(path.read_text())
+    row = plan["rows"][0]
+    row["lifecycle_state"] = "assigned"
+    row["group_structure_state"] = "active_combo"
+    row["action_scope"] = "combo_group"
+    for source in plan["source_manifest"]:
+        source["expires_at"] = "2026-06-30T00:00:00Z"
+    plan.pop("artifact_hash")
+    plan["artifact_hash"] = canonical_sha256(plan)
+    _write_json(path, plan)
+
+    evidence = build_position_advice_promotion_evidence(
+        plan_paths=[path],
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        authority_generation=GENERATION,
+        authority_policy_hash=POLICY_HASH,
+        covered_strategy_families=None,
+        safety=None,
+        critical_replay_fixtures={
+            name: True for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
+        },
+        generated_at=NOW,
+    )
+
+    safety = evidence["safety"]
+    assert safety["false_assignment_confirmation"] == 1
+    assert safety["invalid_combo_continuation"] == 1
+    assert safety["stale_or_incomplete_actionable_exposure"] == 1

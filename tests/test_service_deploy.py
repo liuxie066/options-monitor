@@ -76,6 +76,12 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
     verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
+    promotion = files[
+        "systemd/options-monitor-position-advice-promotion.service"
+    ]["content"]
+    promotion_timer = files[
+        "systemd/options-monitor-position-advice-promotion.timer"
+    ]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in tick
@@ -111,11 +117,31 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "verify-projection --mode auto" in verify
     assert "[Install]\nWantedBy=multi-user.target" not in verify
     assert "OnCalendar=*-*-* 09:30:00 Asia/Shanghai" in verify_timer
+    assert (
+        str(repo / "om")
+        + " position-advice --runtime-root "
+        + str(runtime)
+        + " promotion refresh --accounts lx --confirm"
+        in promotion
+    )
+    assert "RuntimeMaxSec=600" in promotion
+    assert (
+        "OnCalendar=*-*-* 05:15:00 Asia/Shanghai"
+        in promotion_timer
+    )
     assert profile["service_provider"] == "systemd"
     assert profile["runtime_root"] == str(runtime)
     assert {"name": "options-monitor-tick-us.service"} in profile["services"]
     assert {"name": "options-monitor-tick-us.timer"} in profile["services"]
     assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
+    assert {
+        "name": "options-monitor-position-advice-promotion.timer"
+    } in profile["services"]
+    assert profile["position_advice_promotion"] == {
+        "enabled": True,
+        "schedule_beijing": "05:15",
+        "automatic_authority_cas": False,
+    }
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
 
@@ -1527,6 +1553,9 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     tick = files["launchd/com.options-monitor.tick-hk.plist"]["content"]
     auto_close = files["launchd/com.options-monitor.auto-close-hk.plist"]["content"]
     verify = files["launchd/com.options-monitor.projection-verify.plist"]["content"]
+    promotion = files[
+        "launchd/com.options-monitor.position-advice-promotion.plist"
+    ]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<key>Label</key>" in tick
@@ -1545,9 +1574,21 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert "<key>Minute</key>" in verify
     assert "<integer>30</integer>" in verify
     assert "verify-projection" in verify
+    assert (
+        "<string>com.options-monitor.position-advice-promotion</string>"
+        in promotion
+    )
+    assert "<integer>5</integer>" in promotion
+    assert "<integer>15</integer>" in promotion
+    assert "<string>promotion</string>" in promotion
+    assert "<string>refresh</string>" in promotion
+    assert "<string>--confirm</string>" in promotion
     assert profile["service_provider"] == "launchd"
     assert {"name": "com.options-monitor.tick-hk"} in profile["services"]
     assert {"name": "com.options-monitor.projection-verify"} in profile["services"]
+    assert {
+        "name": "com.options-monitor.position-advice-promotion"
+    } in profile["services"]
 
 
 def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
@@ -1799,9 +1840,21 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert ["systemctl", "is-active", "options-monitor-trade-intake.service"] in calls
     assert ["systemctl", "is-enabled", "options-monitor-trade-intake.service"] in calls
     assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+    assert [
+        "systemctl",
+        "enable",
+        "--now",
+        "options-monitor-position-advice-promotion.timer",
+    ] in calls
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert {"name": "options-monitor-projection-verify.timer"} in refreshed_profile["services"]
+    assert {
+        "name": "options-monitor-position-advice-promotion.timer"
+    } in refreshed_profile["services"]
     assert (systemd_root / "options-monitor-projection-verify.timer").exists()
+    assert (
+        systemd_root / "options-monitor-position-advice-promotion.timer"
+    ).exists()
     assert out["service_reconcile"]["summary"]["status"] == "ok"
     assert out["service_health"]["status"] == "ok"
     assert out["release_materialize"]["method"] == "git_cache_archive"

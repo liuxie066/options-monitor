@@ -28,6 +28,10 @@ AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 09:00:00 Asia/Shanghai"
 AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 0}
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
+POSITION_ADVICE_PROMOTION_SYSTEMD_CALENDAR = (
+    "*-*-* 05:15:00 Asia/Shanghai"
+)
+POSITION_ADVICE_PROMOTION_LAUNCHD_CALENDAR = {"Hour": 5, "Minute": 15}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
 STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD = "6h"
@@ -546,6 +550,7 @@ def build_service_profile(
     wechat_clawbot: dict[str, Any] | None = None,
     strategy_lab_recorder: dict[str, Any] | None = None,
     quality_monitoring: dict[str, Any] | None = None,
+    position_advice_promotion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
@@ -623,6 +628,10 @@ def build_service_profile(
         profile["strategy_lab_recorder"] = dict(strategy_lab_recorder)
     if quality_monitoring is not None:
         profile["quality_monitoring"] = dict(quality_monitoring)
+    if position_advice_promotion is not None:
+        profile["position_advice_promotion"] = dict(
+            position_advice_promotion
+        )
     return profile
 
 
@@ -895,6 +904,55 @@ def render_service_bundle(
             install_path=f"/etc/systemd/system/{verify_timer}",
             kind="systemd_timer",
             service_name=verify_timer,
+        )
+
+        promotion_service = (
+            "options-monitor-position-advice-promotion.service"
+        )
+        promotion_timer = "options-monitor-position-advice-promotion.timer"
+        promotion_args = [
+            om,
+            "position-advice",
+            "--runtime-root",
+            str(runtime),
+            "promotion",
+            "refresh",
+            "--accounts",
+            *account_values,
+            "--confirm",
+        ]
+        add(
+            f"systemd/{promotion_service}",
+            _systemd_unit(
+                description=(
+                    "Options Monitor Position Advice shadow promotion "
+                    "evidence refresh"
+                ),
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=promotion_args,
+                runtime_max_sec=600,
+            ),
+            install_path=f"/etc/systemd/system/{promotion_service}",
+            kind="systemd_service",
+            service_name=promotion_service,
+        )
+        add(
+            f"systemd/{promotion_timer}",
+            _systemd_timer(
+                description=(
+                    "Options Monitor Position Advice shadow promotion "
+                    "evidence refresh timer"
+                ),
+                unit_name=promotion_service,
+                calendar=POSITION_ADVICE_PROMOTION_SYSTEMD_CALENDAR,
+            ),
+            install_path=f"/etc/systemd/system/{promotion_timer}",
+            kind="systemd_timer",
+            service_name=promotion_timer,
         )
 
         opend_dependency_units = [item.systemd_service_name for item in opend_service_plans]
@@ -1496,6 +1554,38 @@ def render_service_bundle(
             service_name=verify_label,
         )
 
+        promotion_label = "com.options-monitor.position-advice-promotion"
+        promotion_args = [
+            om,
+            "position-advice",
+            "--runtime-root",
+            str(runtime),
+            "promotion",
+            "refresh",
+            "--accounts",
+            *account_values,
+            "--confirm",
+        ]
+        add(
+            f"launchd/{promotion_label}.plist",
+            _launchd_plist(
+                label=promotion_label,
+                repo_root=repo,
+                runtime_root=runtime,
+                program_args=promotion_args,
+                log_root=log_root,
+                env_file=env_file_path,
+                start_calendar_interval=(
+                    POSITION_ADVICE_PROMOTION_LAUNCHD_CALENDAR
+                ),
+            ),
+            install_path=(
+                f"~/Library/LaunchAgents/{promotion_label}.plist"
+            ),
+            kind="launchd_plist",
+            service_name=promotion_label,
+        )
+
         for opend_plan in opend_service_plans:
             add(
                 f"launchd/{opend_plan.launchd_label}.plist",
@@ -1841,6 +1931,11 @@ def render_service_bundle(
                 for market in market_values
             },
         } if include_quality_monitoring else None,
+        position_advice_promotion={
+            "enabled": True,
+            "schedule_beijing": "05:15",
+            "automatic_authority_cas": False,
+        },
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(

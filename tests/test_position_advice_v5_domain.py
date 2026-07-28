@@ -174,7 +174,7 @@ def _promotion_evidence() -> dict[str, object]:
                 "outcome_reason": "selected" if selected else "not_selected",
             }
         )
-    return {
+    return _with_automatic_reports({
         "schema_version": PROMOTION_EVIDENCE_SCHEMA,
         "authority_mode": "v2_shadow",
         "safety": {metric: 0 for metric in SAFETY_METRICS},
@@ -199,7 +199,30 @@ def _promotion_evidence() -> dict[str, object]:
                 }
             ],
         },
+    })
+
+
+def _with_automatic_reports(
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    evidence["source_plan_hashes"] = ["9" * 64]
+    safety_report: dict[str, object] = {
+        "schema_version": "position_advice_promotion_checks.v1",
+        "evaluator_version": "position_advice_promotion_checks.v1",
+        "source_plan_hashes": ["9" * 64],
+        "safety": evidence["safety"],
+        "violations": [],
     }
+    safety_report["artifact_hash"] = canonical_sha256(safety_report)
+    replay_report: dict[str, object] = {
+        "schema_version": "position_advice_critical_replay.v1",
+        "fixture_results": evidence["critical_replay_fixtures"],
+        "details": {},
+    }
+    replay_report["artifact_hash"] = canonical_sha256(replay_report)
+    evidence["automatic_safety_evaluation"] = safety_report
+    evidence["automatic_critical_replay"] = replay_report
+    return evidence
 
 
 def test_decision_fingerprint_normalizes_decimal_forms_and_set_like_rows() -> None:
@@ -706,6 +729,14 @@ def test_promotion_gate_fails_closed_on_empty_or_malformed_evidence() -> None:
     malformed["safety"]["false_assignment_confirmation"] = "zero"
     gate = evaluate_promotion_gate(malformed)
     assert "safety_invalid:false_assignment_confirmation" in gate["reason_codes"]
+
+    caller_claimed = _promotion_evidence()
+    caller_claimed.pop("automatic_safety_evaluation")
+    caller_claimed.pop("automatic_critical_replay")
+    claimed_gate = evaluate_promotion_gate(caller_claimed)
+    assert claimed_gate["status"] == "insufficient_evidence"
+    assert "automatic_safety_evidence_missing" in claimed_gate["reason_codes"]
+    assert "automatic_critical_replay_missing" in claimed_gate["reason_codes"]
 
 
 def test_promotion_gate_rejects_conflicting_duplicate_opportunity() -> None:

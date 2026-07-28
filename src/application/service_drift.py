@@ -14,8 +14,14 @@ from src.application.service_deploy import (
 )
 
 
-SYSTEMD_REQUIRED_MAINTENANCE_UNITS = ("options-monitor-projection-verify.timer",)
-LAUNCHD_REQUIRED_MAINTENANCE_UNITS = ("com.options-monitor.projection-verify",)
+SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
+    "options-monitor-position-advice-promotion.timer",
+    "options-monitor-projection-verify.timer",
+)
+LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
+    "com.options-monitor.position-advice-promotion",
+    "com.options-monitor.projection-verify",
+)
 
 
 def service_drift(
@@ -528,6 +534,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "wechat_clawbot",
         "strategy_lab_recorder",
         "quality_monitoring",
+        "position_advice_promotion",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
