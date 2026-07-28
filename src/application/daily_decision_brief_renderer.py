@@ -477,13 +477,7 @@ def _render_user_view_card(
             family_rows = [item for item in candidates if item.get("family") == family]
             if not family_rows:
                 continue
-            lines.extend(
-                _render_candidate_family_card(
-                    family,
-                    family_rows,
-                    use_table=not (projection == "candidate_alert" and len(family_rows) == 1),
-                )
-            )
+            lines.extend(_render_candidate_family_card(family, family_rows))
         event_lines = _render_candidate_event_card(candidates)
         if event_lines:
             lines.extend(["", *event_lines])
@@ -544,16 +538,19 @@ def _render_user_view_card(
 def _render_candidate_family_card(
     family: str,
     rows: list[Mapping[str, Any]],
-    *,
-    use_table: bool,
 ) -> list[str]:
     heading = _STRATEGY_LABELS.get(family, family)
     lines = ["", f"### {heading}"]
-    if not use_table:
-        item = rows[0]
+    for item in rows:
         lines.extend(
             [
+                "",
                 f"**{_flat_title(item.get('title'))}**",
+                *[
+                    _flat_field_line(leg)
+                    for leg in item.get("legs") or []
+                    if str(leg).strip()
+                ],
                 *[
                     f"{_candidate_detail_label(detail)}｜{detail}"
                     for detail in item.get("details") or []
@@ -561,41 +558,6 @@ def _render_candidate_family_card(
                 ],
             ]
         )
-        return lines
-    if family == "combo_yield":
-        lines.extend(
-            [
-                "",
-                "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |",
-                "|---|---|---|---|---|",
-                *[
-                    "| "
-                    + " | ".join(
-                        _table_cell(item.get(key) or "—")
-                        for key in ("choice", "symbol", "put_leg_card", "call_leg_card", "return_card")
-                    )
-                    + " |"
-                    for item in rows
-                ],
-            ]
-        )
-        return lines
-    lines.extend(
-        [
-            "",
-            "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |",
-            "|---|---|---|---:|---|",
-            *[
-                "| "
-                + " | ".join(
-                    _table_cell(item.get(key) or "—")
-                    for key in ("choice", "contract_card", "income_card", "annualized_card", "risk_capacity_card")
-                )
-                + " |"
-                for item in rows
-            ],
-        ]
-    )
     return lines
 
 

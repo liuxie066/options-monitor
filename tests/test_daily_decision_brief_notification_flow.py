@@ -449,10 +449,12 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
     assert transport["schema_version"] == "feishu-proactive-notification.v1"
     assert transport["render_mode"] == "card_markdown_v2"
     assert transport["text"] == envelope["rendered_message"]
-    assert transport["render_meta"]["markdown_table_detected"] is True
+    assert transport["render_meta"]["markdown_table_detected"] is False
     assert calls[0]["transport_envelope"] == transport
     card_markdown = transport["transport"]["content"]["body"]["elements"][0]["content"]
-    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" in card_markdown
+    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in card_markdown
+    assert "**NVDA｜Sell Put｜08-21 $100 Put（首选）**" in card_markdown
+    assert "指标｜权利金 $1.20" in card_markdown
     assert "现金总额｜$100,000.00" in card_markdown
     assert "可用于期权开仓｜$60,000.00" in card_markdown
     assert "| 项目 | 数值 |" not in card_markdown

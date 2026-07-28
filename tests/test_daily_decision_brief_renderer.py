@@ -1125,7 +1125,7 @@ def test_data_recovery_keeps_candidate_event_change_summary() -> None:
     assert "事件证据已恢复，现预计 8 月 5 日发布财报" in message
 
 
-def test_fixed_report_card_groups_regular_combo_and_actionable_position_tables() -> None:
+def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_table() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
 
     brief = _brief()
@@ -1158,15 +1158,23 @@ def test_fixed_report_card_groups_regular_combo_and_actionable_position_tables()
         context=_scheduled_context(),
     )
 
-    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" in message
-    assert "| 首选 | MSFT 08-21 $400 Put | $5.25 / $480.00 | 18.1% | Δ -0.24 · 32天 · 可开2手 |" in message
+    assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
+    assert "### Sell Put" in message
+    assert "**MSFT｜Sell Put｜08-21 $400 Put（首选）**" in message
+    assert "**NVDA｜Sell Put｜08-21 $100 Put（备选 2）**" in message
+    assert (
+        "指标｜权利金 $5.25 · 年化 18.1% · Delta -0.24 · 32 天 · "
+        "预计净收入 $480.00"
+        in message
+    )
     assert "### Covered Call" in message
-    assert "AAPL 08-21 $250 Call" in message
-    assert "可卖1手" in message
-    assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" in message
-    assert "卖 08-21 $300 Put @ $3.45" in message
-    assert "买 09-18 $400 Call @ $1.05" in message
-    assert "年化 15.4% · 净收入 $620.00" in message
+    assert "**AAPL｜Covered Call｜08-21 $250 Call（首选）**" in message
+    assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
+    assert "### 组合增强" in message
+    assert "**TSLA｜组合增强（首选）**" in message
+    assert "Put｜08-21 $300 Put · 卖出参考 $3.45" in message
+    assert "Call｜09-18 $400 Call · 买入参考 $1.05" in message
+    assert "指标｜年化 15.4% · 预计净收入 $620.00" in message
     assert "\n\n事件｜" in message
     assert "| 持仓 | 建议 | 参考平仓价 | 预计锁定损益 | 剩余年化 |" in message
     assert "NVDA · 组合增强（Put 侧） · 08-21 $100 Put" in message
