@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.6.1",
+  "base": {
+    "tag": "v1.6.0",
+    "commit": "ae612e1192af9b04b59df461e0843f0fa0c13c6a"
+  },
+  "reviewed_head": "14123159208cfe4900366b9e2b5dbbc4b1c5b801",
+  "commits": [
+    {
+      "sha": "a69a4a58ac70985466b846835e803632a5e50296",
+      "subject": "fix: publish position advice source receipts"
+    },
+    {
+      "sha": "14123159208cfe4900366b9e2b5dbbc4b1c5b801",
+      "subject": "feat: enforce release delta coverage"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added a mandatory release-delta coverage manifest and publication gate that maps every commit since the previous stable tag to an exact release note or an explicit no-user-impact reason.",
+      "commits": [
+        "14123159208cfe4900366b9e2b5dbbc4b1c5b801"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Captured Position Advice source completion only after reading the ledger decision snapshot, allowing Account Runs to publish valid source receipts for v2 authority bootstrap.",
+      "commits": [
+        "a69a4a58ac70985466b846835e803632a5e50296"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
