@@ -48,6 +48,7 @@ def _empty_context(
     ledger_status: JsonDict | None = None,
 ) -> JsonDict:
     out = {
+        "context_status": "unavailable",
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_status": "unavailable",
@@ -239,6 +240,7 @@ def build_context(
                     cash_secured_total_cny = None
 
     out = {
+        "context_status": "available",
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_status": "available",

@@ -164,7 +164,11 @@ def evaluate_position_advice_plan_safety(
                 expected_lifecycle
                 and expected_lifecycle != lifecycle
                 and (
-                    row.get("model_actionable") is True
+                    row.get(
+                        "model_trade_actionable",
+                        row.get("model_actionable"),
+                    )
+                    is True
                     or position_id in selected_source_ids
                 )
             ):
@@ -192,7 +196,11 @@ def evaluate_position_advice_plan_safety(
                     code=f"shadow_row_authority_mixed:{position_id}",
                 )
             if (
-                row.get("model_actionable") is True
+                row.get(
+                    "model_trade_actionable",
+                    row.get("model_actionable"),
+                )
+                is True
                 and (
                     lifecycle in _BLOCKED_LIFECYCLE_STATES
                     or str(row.get("group_structure_state") or "")

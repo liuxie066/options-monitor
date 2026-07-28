@@ -277,7 +277,7 @@ def test_allocation_order_and_ids_are_deterministic_for_unsorted_input() -> None
     ]
 
 
-def test_economic_allocation_failure_keeps_lot_close_and_advances_open_fee_state() -> None:
+def test_invalid_close_is_rejected_without_advancing_lot_or_open_fee_state() -> None:
     result = project_trade_events(
         [
             _event("open", "open", contracts=2, price=2, fees=1, basis="actual"),
@@ -300,10 +300,10 @@ def test_economic_allocation_failure_keeps_lot_close_and_advances_open_fee_state
         ]
     )
 
-    assert result.lots[0].contracts_open == 0
+    assert result.lots[0].contracts_open == 1
     assert [item.close_event_id for item in result.allocations] == ["close-valid"]
     assert result.allocations[0].allocated_open_fee.amount == Decimal("0.500000")
-    assert [item.code for item in result.diagnostics] == ["economic_allocation_failed"]
+    assert [item.code for item in result.diagnostics] == ["event_price_invalid"]
 
 
 def test_currency_or_multiplier_mismatch_closes_lot_but_emits_no_economic_allocation() -> None:

@@ -15,7 +15,6 @@ from domain.domain.symbol_identity import (
 from src.application.account_config import resolve_futu_account_ids
 
 
-_DEFAULT_TRD_ENV = "REAL"
 _VALID_TRD_ENVS = {"REAL", "SIMULATE"}
 _LONG_POSITION_SIDE = "LONG"
 _NON_STOCK_SEC_TYPES = {"DRVT", "FUTURE", "IDX", "NONE", "N/A"}
@@ -44,9 +43,15 @@ _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
 
 def _resolve_trd_env(value: Any) -> str:
     raw = str(value or "").strip().upper()
+    if not raw:
+        raise ValueError(
+            "futu trd_env is required; configure REAL or SIMULATE explicitly"
+        )
     if raw in _VALID_TRD_ENVS:
         return raw
-    return _DEFAULT_TRD_ENV
+    raise ValueError(
+        f"invalid futu trd_env={value!r}; expected REAL or SIMULATE"
+    )
 
 
 def _row_trd_env(row: Mapping[str, Any]) -> str | None:
@@ -239,49 +244,54 @@ def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any, *, account: str 
     if not isinstance(cfg, Mapping):
         return {}
 
-    # 1. Prefer account-specific settings if account is provided
-    if account:
-        account_settings = cfg.get("account_settings")
-        if isinstance(account_settings, Mapping):
-            acc_cfg = account_settings.get(account)
-            if isinstance(acc_cfg, Mapping):
-                futu_cfg = acc_cfg.get("futu")
-                if isinstance(futu_cfg, Mapping):
-                    out = dict(futu_cfg)
-                    if out.get("host") and out.get("port"):
-                        return out
-
-    # 2. Fall back to global portfolio.futu
+    # Build the base from portfolio.futu and fill only missing connection keys
+    # from a Futu symbol fetch. Account settings then override individual keys.
     portfolio_cfg = cfg.get("portfolio")
-    portfolio_futu = {}
+    out: dict[str, Any] = {}
     if isinstance(portfolio_cfg, Mapping):
         raw = portfolio_cfg.get("futu")
         if isinstance(raw, Mapping):
-            portfolio_futu = dict(raw)
+            out.update(dict(raw))
 
-    out = dict(portfolio_futu)
-    if out.get("host") and out.get("port"):
-        return out
-
-    # 3. Fall back to symbol-level fetch settings
     symbols = cfg.get("symbols") or cfg.get("watchlist") or []
-    if not isinstance(symbols, list):
-        return out
+    if isinstance(symbols, list):
+        for item in symbols:
+            if not isinstance(item, Mapping):
+                continue
+            fetch = item.get("fetch")
+            if not isinstance(fetch, Mapping):
+                continue
+            src = normalize_fetch_source(fetch.get("source", "opend"))
+            if not is_futu_fetch_source(src):
+                continue
+            for key in (
+                "host",
+                "port",
+                "trd_env",
+                "acc_id",
+                "trd_market",
+                "cash_currency",
+            ):
+                if out.get(key) in (None, "") and fetch.get(key) not in (None, ""):
+                    out[key] = fetch.get(key)
+            if out.get("host") and out.get("port") and out.get("trd_env"):
+                break
 
-    for item in symbols:
-        if not isinstance(item, Mapping):
-            continue
-        fetch = item.get("fetch")
-        if not isinstance(fetch, Mapping):
-            continue
-        src = normalize_fetch_source(fetch.get("source", "opend"))
-        if not is_futu_fetch_source(src):
-            continue
-        for key in ("host", "port", "trd_env", "acc_id", "trd_market", "cash_currency"):
-            if out.get(key) in (None, "") and fetch.get(key) not in (None, ""):
-                out[key] = fetch.get(key)
-        if out.get("host") and out.get("port"):
-            break
+    account_key = normalize_account(account) if account else ""
+    if account_key:
+        account_settings = cfg.get("account_settings")
+        acc_cfg = (
+            account_settings.get(account_key)
+            if isinstance(account_settings, Mapping)
+            else None
+        )
+        futu_cfg = acc_cfg.get("futu") if isinstance(acc_cfg, Mapping) else None
+        if isinstance(futu_cfg, Mapping):
+            for key, value in futu_cfg.items():
+                if value not in (None, ""):
+                    out[str(key)] = value
+    if out.get("trd_env") not in (None, ""):
+        out["trd_env"] = _resolve_trd_env(out.get("trd_env"))
     return out
 
 
@@ -296,6 +306,9 @@ def _filter_rows_for_account_ids(
     out: list[dict[str, Any]] = []
     saw_account_column = False
     for row in rows:
+        row_env = _row_trd_env(row)
+        if trd_env and row_env and row_env != trd_env:
+            continue
         acc_id = str(
             _pick(
                 row,
@@ -312,9 +325,6 @@ def _filter_rows_for_account_ids(
             continue
         saw_account_column = True
         if acc_id not in account_ids:
-            continue
-        row_env = _row_trd_env(row)
-        if trd_env and row_env and row_env != trd_env:
             continue
         out.append(row)
     return out if saw_account_column else rows

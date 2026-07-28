@@ -280,6 +280,7 @@ class OpenPositionCommand:
     note: str | None = None
     opened_at_ms: int | None = None
     strategy_snapshot: dict[str, Any] | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)

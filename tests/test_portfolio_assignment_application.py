@@ -23,6 +23,42 @@ class _Response:
         return self.body if size < 0 else self.body[:size]
 
 
+def _valuation_response(*, accounts=None):
+    resolved_accounts = list(accounts or ["lx"])
+    return {
+        "schema_version": "portfolio.valuation_evidence.v1",
+        "success": True,
+        "status": "complete",
+        "freshness": {
+            "status": "fresh",
+            "trust_status": "trusted",
+            "observed_at_utc": "2026-07-24T01:00:00Z",
+            "dataset_ids": [
+                "pm.holdings_quantity",
+                "pm.prices",
+                "pm.fx",
+            ],
+            "reason_codes": [],
+        },
+        "retrieved_at_utc": "2026-07-24T01:00:01Z",
+        "scope": {
+            "accounts": resolved_accounts,
+            "reporting_currency": "CNY",
+        },
+        "snapshot": {
+            "snapshot_id": "valuation-1",
+            "observed_at": "2026-07-24T01:00:00Z",
+        },
+        "holdings": [],
+        "quotes": [],
+        "account_status": [
+            {"account": account, "status": "complete"}
+            for account in resolved_accounts
+        ],
+        "warnings": [],
+    }
+
+
 def test_normalize_assignment_accounts_trims_lowercases_and_deduplicates():
     assert application.normalize_assignment_accounts([" LX ", "sy", "lx"]) == ["lx", "sy"]
 
@@ -38,15 +74,7 @@ def test_valuation_evidence_client_posts_to_fixed_loopback_endpoint(monkeypatch)
     def fake_urlopen(request, timeout):
         seen["request"] = request
         seen["timeout"] = timeout
-        return _Response(
-            {
-                "schema_version": "portfolio.valuation_evidence.v1",
-                "success": True,
-                "status": "complete",
-                "holdings": [],
-                "quotes": [],
-            }
-        )
+        return _Response(_valuation_response(accounts=["lx", "sy"]))
 
     monkeypatch.delenv(application.SERVICE_URL_ENV, raising=False)
     monkeypatch.setattr(application.urllib.request, "urlopen", fake_urlopen)
@@ -111,27 +139,18 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
     def evidence_reader(*, accounts, supplemental_codes, price_timeout=30):
         seen["accounts"] = accounts
         seen["supplemental_codes"] = supplemental_codes
-        return {
-            "schema_version": "portfolio.valuation_evidence.v1",
-            "success": True,
-            "status": "complete",
-            "snapshot": {
-                "snapshot_id": "valuation-1",
-                "observed_at": "2026-07-24T01:00:00+00:00",
-            },
-            "holdings": [],
-            "quotes": [
-                {
-                    "code": "NVDA",
-                    "currency": "USD",
-                    "price_native": 120,
-                    "price_cny": 864,
-                    "exchange_rate_to_cny": 7.2,
-                    "source": "test",
-                }
-            ],
-            "warnings": [],
-        }
+        result = _valuation_response(accounts=["lx"])
+        result["quotes"] = [
+            {
+                "code": "NVDA",
+                "currency": "USD",
+                "price_native": 120,
+                "price_cny": 864,
+                "exchange_rate_to_cny": 7.2,
+                "source": "test",
+            }
+        ]
+        return result
 
     monkeypatch.setattr(
         application,

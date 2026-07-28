@@ -51,6 +51,7 @@ from src.application.ledger.commands import (
     verify_position_lot_projection,
 )
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
 )
@@ -108,6 +109,7 @@ __all__ = [
     "assigned_stock_event_log",
     "CashConversionBackfillResult",
     "backfill_cash_conversions",
+    "broker_external_event_key",
     "LedgerPreflightError",
     "LedgerStoreResolution",
     "BrokerTradeOpenPreviewResult",

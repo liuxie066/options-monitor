@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 import json
+import re
+import uuid
 
 from src.application.agent_tool_contracts import AgentToolError
 from domain.domain.close_advice import TIER_PRIORITY
@@ -23,6 +25,11 @@ from domain.domain.trade_contract_identity import (
     normalize_contract_option_type,
 )
 from src.application.expiration_normalization import find_unique_near_miss_expiration
+from src.application.close_advice_quote_cache import (
+    DEFAULT_QUOTE_MAX_AGE_SEC,
+    publish_quote_cache_metadata,
+    validate_quote_cache_metadata,
+)
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.account_config import accounts_from_config
 from src.application.performance.adapters import (
@@ -69,6 +76,44 @@ def _position_expiration_for_fetch(row: dict[str, Any]) -> str:
         if token.startswith("exp="):
             return _normalize_expiration(token.split("=", 1)[1])
     return ""
+
+
+def _close_advice_scope_root(out_root: Path, payload: dict[str, Any]) -> Path:
+    raw = str(payload.get("_close_advice_scope_id") or "").strip()
+    if not raw:
+        return out_root
+    scope_id = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw).strip(".-")
+    if not scope_id:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="close_advice request scope is invalid",
+        )
+    return (out_root / "requests" / scope_id).resolve()
+
+
+def _validate_close_advice_context(ctx: Any) -> dict[str, Any]:
+    if not isinstance(ctx, dict):
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="option positions context is unavailable",
+        )
+    status = str(ctx.get("context_status") or "").strip().lower()
+    ledger = ctx.get("ledger") if isinstance(ctx.get("ledger"), dict) else {}
+    if status == "unavailable" or bool(ledger.get("fail_closed")):
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="option positions context is explicitly unavailable",
+            details={
+                "context_status": status or None,
+                "ledger_status": ledger.get("status"),
+            },
+        )
+    if not isinstance(ctx.get("open_positions_min"), list):
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="option positions context has no valid open_positions_min list",
+        )
+    return ctx
 
 
 def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, Any]]:
@@ -912,28 +957,22 @@ def prepare_close_advice_inputs_tool(
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
     broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker"))
     out_root = resolve_output_root(payload.get("output_dir"))
-    state_dir = (out_root / "state").resolve()
-    shared_dir = (out_root / "shared").resolve()
-    required_data_root = (out_root / "required_data").resolve()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    shared_dir.mkdir(parents=True, exist_ok=True)
-    required_data_root.mkdir(parents=True, exist_ok=True)
+    request_root = _close_advice_scope_root(out_root, payload)
+    state_dir = (request_root / "state").resolve()
+    shared_dir = (request_root / "shared").resolve()
+    required_data_root = (request_root / "required_data").resolve()
     logs: list[str] = []
     context_path = state_dir / "option_positions_context.json"
     if not Path(data_config).exists():
-        empty_ctx = {"open_positions_min": []}
-        context_path.write_text(json.dumps(empty_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {
-            "account": account,
-            "broker": broker,
-            "context_rows": 0,
-            "symbols": [],
-            "symbol_count": 0,
-        }, [f"[WARN] option positions data config not found: {mask_path(Path(data_config))}"], {
-            "config_path": mask_path(config_path),
-            "context_path": mask_path(context_path),
-            "required_data_root": mask_path(required_data_root),
-        }
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message="option positions data config not found",
+            hint="Check portfolio.data_config / SQLite position-lot setup before preparing close_advice inputs.",
+            details={"data_config": mask_path(Path(data_config))},
+        )
+    state_dir.mkdir(parents=True, exist_ok=True)
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    required_data_root.mkdir(parents=True, exist_ok=True)
     try:
         ctx, _refreshed = load_option_positions_context(
             base=repo_base(),
@@ -952,8 +991,12 @@ def prepare_close_advice_inputs_tool(
             hint="Check portfolio.data_config / SQLite position-lot setup before preparing close_advice inputs.",
             details={"exit_code": str(exc)},
         ) from exc
-    if not isinstance(ctx, dict):
-        raise AgentToolError(code="DEPENDENCY_MISSING", message="option positions context is unavailable", details={"logs": logs[-5:]})
+    try:
+        ctx = _validate_close_advice_context(ctx)
+    except AgentToolError as exc:
+        if logs:
+            exc.details.setdefault("logs", logs[-5:])
+        raise
 
     position_requirements = _extract_position_fetch_requirements(ctx)
     if not position_requirements:
@@ -974,6 +1017,11 @@ def prepare_close_advice_inputs_tool(
     fetched: list[dict[str, Any]] = []
     warnings = [item for item in logs if item.startswith("[WARN]")]
     force_required_data_refresh = bool(payload.get("force_required_data_refresh", False))
+    quote_max_age_sec = int(
+        payload.get("quote_max_age_sec")
+        or ((cfg.get("close_advice") or {}).get("quote_max_age_sec") if isinstance(cfg.get("close_advice"), dict) else None)
+        or DEFAULT_QUOTE_MAX_AGE_SEC
+    )
     for spec in position_requirements:
         symbol = str(spec.get("symbol") or "").strip()
         raw_symbol_cfg = symbol_map.get(symbol)
@@ -990,6 +1038,14 @@ def prepare_close_advice_inputs_tool(
             fetched_expirations: set[str] = set()
         else:
             fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
+            freshness = validate_quote_cache_metadata(
+                csv_path=csv_path,
+                symbol=symbol,
+                max_age_sec=quote_max_age_sec,
+            )
+            if not freshness["ok"]:
+                fetched_contracts = set()
+                fetched_expirations = set()
 
         cache_covers_all = (
             not force_required_data_refresh
@@ -1015,6 +1071,17 @@ def prepare_close_advice_inputs_tool(
             meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
             if meta.get("error"):
                 warnings.append(f"{symbol}: {meta['error']}")
+            else:
+                publish_quote_cache_metadata(
+                    csv_path=csv_path,
+                    symbol=symbol,
+                    source=str(src or "opend"),
+                    source_run_id=str(
+                        payload.get("_close_advice_scope_id")
+                        or f"prepare-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+                    ),
+                    observed_at=datetime.now(timezone.utc),
+                )
             fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
             row_count = len(result.get("rows") or [])
             expiration_count = int(result.get("expiration_count") or 0)
@@ -1076,6 +1143,7 @@ def prepare_close_advice_inputs_tool(
         "context_path": mask_path(context_path),
         "required_data_root": mask_path(required_data_root),
         "force_required_data_refresh": force_required_data_refresh,
+        "quote_max_age_sec": quote_max_age_sec,
     }
 
 
@@ -1092,14 +1160,30 @@ def close_advice_tool(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     out_root = resolve_output_root(payload.get("output_dir"))
-    context_path = resolve_local_path(payload.get("context_path"), default=(out_root / "state" / "option_positions_context.json"))
-    required_data_root = resolve_local_path(payload.get("required_data_root"), default=(out_root / "required_data"))
-    report_dir = (out_root / "reports").resolve()
+    request_root = _close_advice_scope_root(out_root, payload)
+    context_path = resolve_local_path(payload.get("context_path"), default=(request_root / "state" / "option_positions_context.json"))
+    required_data_root = resolve_local_path(payload.get("required_data_root"), default=(request_root / "required_data"))
+    report_dir = (request_root / "reports").resolve()
     if not context_path.exists():
         raise AgentToolError(code="DEPENDENCY_MISSING", message="close_advice requires a local option_positions_context.json", hint="Run the scan/context pipeline first, or pass context_path explicitly.", details={"context_path": mask_path(context_path)})
     if not required_data_root.exists():
         raise AgentToolError(code="DEPENDENCY_MISSING", message="close_advice requires a local required_data directory", hint="Run the scan pipeline first, or pass required_data_root explicitly.", details={"required_data_root": mask_path(required_data_root)})
-    result = run_close_advice(config=cfg, context_path=context_path, required_data_root=required_data_root, output_dir=report_dir, base_dir=repo_base())
+    try:
+        market = str(payload.get("config_key") or "").strip().upper()
+        result = run_close_advice(
+            config=cfg,
+            context_path=context_path,
+            required_data_root=required_data_root,
+            output_dir=report_dir,
+            base_dir=repo_base(),
+            markets_to_run=[market] if market in {"US", "HK"} else None,
+        )
+    except ValueError as exc:
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message=str(exc),
+            details={"context_path": mask_path(context_path)},
+        ) from exc
     advice_summary = close_advice_rows_summary_fn(report_dir / "close_advice.csv", report_dir / "close_advice.txt")
     return {
         **result,
@@ -1124,8 +1208,14 @@ def get_close_advice_tool(
     prepare_close_advice_inputs_tool_fn,
     close_advice_tool_fn,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    prepared_data, prepare_warnings, prepare_meta = prepare_close_advice_inputs_tool_fn(payload)
-    advice_data, advice_warnings, advice_meta = close_advice_tool_fn(payload)
+    scope_id = (
+        str(payload.get("request_id") or "").strip()
+        or f"close-advice-{uuid.uuid4().hex}"
+    )
+    scoped_payload = dict(payload)
+    scoped_payload["_close_advice_scope_id"] = scope_id
+    prepared_data, prepare_warnings, prepare_meta = prepare_close_advice_inputs_tool_fn(scoped_payload)
+    advice_data, advice_warnings, advice_meta = close_advice_tool_fn(scoped_payload)
     combined_summary = {
         "prepared_symbol_count": int(prepared_data.get("symbol_count") or 0),
         "prepared_context_rows": int(prepared_data.get("context_rows") or 0),
@@ -1140,4 +1230,8 @@ def get_close_advice_tool(
         "summary": combined_summary,
         "top_rows": list(advice_data.get("top_rows") or []),
         "notification_preview": advice_data.get("notification_preview"),
-    }, [*prepare_warnings, *advice_warnings], {**prepare_meta, **advice_meta}
+    }, [*prepare_warnings, *advice_warnings], {
+        **prepare_meta,
+        **advice_meta,
+        "request_id": scope_id,
+    }

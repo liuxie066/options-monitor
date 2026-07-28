@@ -37,7 +37,10 @@ from domain.domain.trade_contract_identity import (
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
 from src.application.ledger.event_codec import encode_trade_event_for_storage
 from src.application.ledger.external_event_key import broker_external_event_key
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.publisher import (
+    ensure_projection_publishable,
+    project_stored_trade_events_to_position_lots,
+)
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
 from src.application.cash_conversion import (
@@ -86,10 +89,12 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
         if conn is not None:
             events = sqlite_repo.list_trade_events(conn=conn)
             projection = project_stored_trade_events_to_position_lots(events)
+            ensure_projection_publishable(projection, operation="position projection rebuild")
             inserted = sqlite_repo.replace_position_lots(projection.lots, conn=conn)
         else:
             events = sqlite_repo.list_trade_events()
             projection = project_stored_trade_events_to_position_lots(events)
+            ensure_projection_publishable(projection, operation="position projection rebuild")
             inserted = sqlite_repo.replace_position_lots(projection.lots)
         result = {
             "trade_event_count": int(len(events)),
@@ -128,11 +133,13 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         if conn is not None:
             created_flags = [sqlite_repo.upsert_trade_event(item, conn=conn) for item in storage_events]
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
+            ensure_projection_publishable(projection, operation="trade event persistence")
             records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
         else:
             created_flags = [sqlite_repo.upsert_trade_event(item) for item in storage_events]
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
+            ensure_projection_publishable(projection, operation="trade event persistence")
             records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records)
         payload = storage_events[0].raw_payload or {}
@@ -917,14 +924,21 @@ def persist_normalized_trade_events_atomically(
 def persist_trade_event_objects_atomically(
     repo: Any,
     events: Sequence[Any],
+    *,
+    lifecycle_case_update: dict[str, Any] | None = None,
+    lifecycle_allocations: Sequence[dict[str, Any]] | None = None,
 ) -> list[LedgerWriteResult]:
     """Persist explicitly targeted canonical events in one transaction."""
 
     events = list(events)
+    case_update = dict(lifecycle_case_update or {})
+    allocation_rows = [dict(item or {}) for item in (lifecycle_allocations or [])]
     if not events:
         raise ValueError("atomic trade persistence requires at least one event")
 
     def _run(sqlite_repo: Any, conn: Any | None) -> list[LedgerWriteResult]:
+        if (case_update or allocation_rows) and conn is None:
+            raise TypeError("lifecycle metadata persistence requires SQLite transaction authority")
         storage_events: list[TradeEvent] = []
         for event in events:
             expanded = [
@@ -977,11 +991,47 @@ def persist_trade_event_objects_atomically(
             else sqlite_repo.list_trade_events()
         )
         projection = project_stored_trade_events_to_position_lots(stored)
+        ensure_projection_publishable(projection, operation="atomic trade event persistence")
         lot_count = (
             sqlite_repo.replace_position_lots(projection.lots, conn=conn)
             if conn is not None
             else sqlite_repo.replace_position_lots(projection.lots)
         )
+        if case_update:
+            upsert_case = getattr(sqlite_repo, "upsert_trade_lifecycle_case", None)
+            if not callable(upsert_case):
+                raise TypeError("repository cannot persist lifecycle case state")
+            upsert_case(case_update, conn=conn)
+        if allocation_rows:
+            bind_evidence = getattr(
+                sqlite_repo,
+                "bind_trade_lifecycle_evidence_case_once",
+                None,
+            )
+            insert_allocation = getattr(
+                sqlite_repo,
+                "insert_trade_lifecycle_allocation",
+                None,
+            )
+            if not callable(bind_evidence) or not callable(insert_allocation):
+                raise TypeError("repository cannot persist lifecycle allocations")
+            for case_id, evidence_id in sorted(
+                {
+                    (
+                        str(row.get("case_id") or "").strip(),
+                        str(row.get("evidence_id") or "").strip(),
+                    )
+                    for row in allocation_rows
+                }
+            ):
+                bind_evidence(
+                    evidence_id=evidence_id,
+                    case_id=case_id,
+                    conn=conn,
+                )
+            for row in allocation_rows:
+                insert_allocation(row, conn=conn)
+            sqlite_repo.assert_foreign_keys_clean(conn=conn)
         diagnostics = projection_diagnostics_summary(projection.diagnostics)
         return [
             LedgerWriteResult.from_payload(

@@ -31,6 +31,62 @@ class _Response:
         return self._body
 
 
+def _sync_receipt(account: str = "lx") -> dict:
+    return {
+        "success": True,
+        "status": "written",
+        "account": account,
+        "broker": "futu",
+        "dry_run": False,
+        "source": "futu-openapi",
+        "source_snapshot_id": f"snapshot-{account}",
+        "sync_run_id": f"sync-{account}",
+        "receipt_persisted": True,
+        "partial_write_possible": False,
+        "stages": {
+            name: {
+                "status": "succeeded",
+                "partial_write_possible": False,
+            }
+            for name in ("positions", "securities_cash", "fund_mmf")
+        },
+        "positions": [],
+    }
+
+
+def _valuation_receipt(accounts=None) -> dict:
+    resolved = list(accounts or ["lx"])
+    return {
+        "success": True,
+        "schema_version": "portfolio.valuation_evidence.v1",
+        "status": "complete",
+        "freshness": {
+            "status": "fresh",
+            "trust_status": "trusted",
+            "observed_at_utc": "2026-07-24T01:00:00Z",
+            "dataset_ids": [
+                "pm.holdings_quantity",
+                "pm.prices",
+                "pm.fx",
+            ],
+            "reason_codes": [],
+        },
+        "retrieved_at_utc": "2026-07-24T01:00:01Z",
+        "scope": {"accounts": resolved},
+        "snapshot": {
+            "snapshot_id": "valuation-1",
+            "observed_at": "2026-07-24T01:00:00Z",
+        },
+        "holdings": [],
+        "quotes": [],
+        "account_status": [
+            {"account": account, "status": "complete"}
+            for account in resolved
+        ],
+        "warnings": [],
+    }
+
+
 def test_origin_accepts_ipv4_ipv6_and_rejects_remote_or_embedded_paths() -> None:
     assert resolve_portfolio_service_origin("http://127.0.0.1:8765") == "http://127.0.0.1:8765"
     assert resolve_portfolio_service_origin("http://[::1]:8765") == "http://[::1]:8765"
@@ -102,7 +158,7 @@ def test_sync_holdings_is_absolute_confirmed_and_not_retried() -> None:
     def open_ok(request, *, timeout):
         seen["url"] = request.full_url
         seen["body"] = json.loads(request.data)
-        return _Response({"success": True, "account": "lx"})
+        return _Response(_sync_receipt())
 
     result = PortfolioManagementClient(urlopen_fn=open_ok).sync_holdings(
         account="lx",
@@ -116,3 +172,62 @@ def test_sync_holdings_is_absolute_confirmed_and_not_retried() -> None:
         "confirm": True,
         "allow_empty_stock_snapshot": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("mutator", "error"),
+    [
+        (lambda item: item.pop("source_snapshot_id"), "missing required fields"),
+        (lambda item: item.update(account="sy"), "account mismatch"),
+        (lambda item: item.update(dry_run=True), "real write"),
+        (
+            lambda item: item["stages"]["positions"].update(status="failed"),
+            "stage positions",
+        ),
+    ],
+)
+def test_sync_holdings_rejects_unconfirmed_receipts(mutator, error) -> None:
+    receipt = _sync_receipt()
+    mutator(receipt)
+    client = PortfolioManagementClient(
+        urlopen_fn=lambda *_args, **_kwargs: _Response(receipt)
+    )
+
+    with pytest.raises(PortfolioManagementProtocolError, match=error):
+        client.sync_holdings(account="lx", timeout=30)
+
+
+@pytest.mark.parametrize(
+    ("mutator", "error"),
+    [
+        (lambda item: item.pop("freshness"), "missing required fields"),
+        (
+            lambda item: item["scope"].update(accounts=["sy"]),
+            "account scope mismatch",
+        ),
+        (
+            lambda item: item["snapshot"].update(snapshot_id=""),
+            "snapshot id",
+        ),
+        (
+            lambda item: item["snapshot"].update(observed_at="not-a-time"),
+            "snapshot observed_at",
+        ),
+    ],
+)
+def test_valuation_evidence_rejects_missing_or_misbound_contract(
+    mutator,
+    error,
+) -> None:
+    receipt = _valuation_receipt()
+    mutator(receipt)
+    client = PortfolioManagementClient(
+        urlopen_fn=lambda *_args, **_kwargs: _Response(receipt)
+    )
+
+    with pytest.raises(PortfolioManagementProtocolError, match=error):
+        client.read_valuation_evidence(
+            accounts=["lx"],
+            supplemental_codes=[],
+            price_timeout=10,
+        )

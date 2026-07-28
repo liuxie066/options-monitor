@@ -347,6 +347,8 @@ def test_standalone_put_roll_uses_released_collateral_and_becomes_actionable() -
     row = plan["rows"][0]
 
     assert row["recommendation"] == "roll"
+    assert row["model_trade_actionable"] is True
+    assert row["human_review_required"] is False
     assert row["actionable"] is True
     assert row["resource_deltas"] == [
         {
@@ -363,6 +365,34 @@ def test_standalone_put_roll_uses_released_collateral_and_becomes_actionable() -
     assert plan["resource_pools_before"][
         f"cash:{scope_for('lx')}:{CAPACITY_AUTHORITY}"
     ]["available"] == "0"
+
+
+def test_lifecycle_review_is_human_actionable_but_never_trade_actionable() -> None:
+    immutable_input = _input()
+    immutable_input["decision_state_snapshot"][
+        "account_position_lots"
+    ][0]["fields"]["expiration_ymd"] = "2026-07-01"
+    plan = build_position_advice_plan(
+        immutable_input=immutable_input,
+        candidate_decisions=[_candidate()],
+        quote_rows=_quotes(),
+        cash_capacity={
+            "status": "available",
+            "uncommitted_cash_headroom_base_cny": "0",
+        },
+        share_coverage={"by_symbol": {}},
+        fx_payload={"rates": {"USDCNY": 7.2}},
+        checked_at=NOW,
+    )
+    row = plan["rows"][0]
+
+    assert row["lifecycle_state"] == "needs_review"
+    assert row["recommendation"] == "review"
+    assert row["model_trade_actionable"] is False
+    assert row["model_actionable"] is False
+    assert row["human_review_required"] is True
+    assert row["actionable"] is False
+    assert row["action_scope"] == "lifecycle_fact_review"
 
 
 def test_active_combo_funding_put_action_decomposes_group_and_new_put_is_independent() -> None:

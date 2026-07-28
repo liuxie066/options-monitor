@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest  # pyright: ignore[reportMissingImports]
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from tests.ledger_legacy_helpers import LegacyTradeEvent
 from src.application.ledger import repository as ledger_repository
@@ -130,3 +132,33 @@ def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
     assert [item.code for item in projection.diagnostics] == ["non_canonical_trade_event_schema"]
     assert projection.lots[0].record_id == "lot_open-aapl"
     assert projection.lots[0].fields["contracts_open"] == 2
+
+
+def test_encode_rejects_event_values_that_cannot_form_a_publishable_lot() -> None:
+    base = {
+        "event_id": "invalid-open",
+        "event_type": "open",
+        "event_time_ms": 1000,
+        "contract_key": _contract_key(),
+        "contracts": 1,
+        "price": 1.0,
+        "currency": "USD",
+        "source": "test",
+        "multiplier": 100,
+        "lot_id": "lot-invalid-open",
+    }
+    invalid_variants = [
+        {"event_time_ms": 0},
+        {"price": float("nan")},
+        {"currency": "EUR"},
+        {"source": ""},
+        {"multiplier": 0},
+        {"multiplier": float("inf")},
+    ]
+
+    for overrides in invalid_variants:
+        with pytest.raises(
+            ValueError,
+            match="trade event could not be encoded|trade event failed validation",
+        ):
+            encode_trade_event_for_storage(TradeEvent(**(base | overrides)))

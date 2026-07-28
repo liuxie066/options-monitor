@@ -245,6 +245,16 @@ def run_position_advice_v2(
         "model_actionable_rows": sum(
             1 for row in advice["rows"] if row.get("model_actionable") is True
         ),
+        "model_trade_actionable_rows": sum(
+            1
+            for row in advice["rows"]
+            if row.get("model_trade_actionable") is True
+        ),
+        "human_review_required_rows": sum(
+            1
+            for row in advice["rows"]
+            if row.get("human_review_required") is True
+        ),
         "actionable_rows": sum(
             1 for row in advice["rows"] if row.get("actionable") is True
         ),
@@ -277,6 +287,8 @@ def render_position_advice_csv(advice: Mapping[str, Any]) -> str:
         "group_structure_state",
         "recommendation",
         "model_actionable",
+        "model_trade_actionable",
+        "human_review_required",
         "actionable",
         "action_scope",
         "comparison_currency",

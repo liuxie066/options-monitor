@@ -277,6 +277,34 @@ def test_current_switch_rechecks_source_state_and_authority_atomically(
     assert published["manifest"]["authority_mode"] == "v2_shadow"
     assert published["manifest"]["account_run_id"] == "run-1"
 
+    with pytest.raises(
+        PositionAdviceInputError,
+        match="source generation is not newer",
+    ):
+        publish_current_manifest(
+            base=tmp_path,
+            run_id="run-1",
+            account_run_root=Path(prepared["account_root"]),
+            normalized_account="lx",
+            broker="futu",
+            included_markets=["US"],
+            normalized_portfolio_source="futu",
+            portfolio_account_identity_hash=IDENTITY,
+            source_manifest_relpath=Path(prepared["source_manifest_path"])
+            .relative_to(prepared["run_root"])
+            .as_posix(),
+            advice_artifact_relpath=Path(prepared["advice_path"])
+            .relative_to(prepared["run_root"])
+            .as_posix(),
+            input_artifact_relpath=Path(prepared["input_path"])
+            .relative_to(prepared["run_root"])
+            .as_posix(),
+            expected_decision_state_fingerprint=FINGERPRINT,
+            decision_snapshot_reader=_trusted_snapshot,
+            now=NOW + timedelta(minutes=2),
+        )
+    assert Path(published["path"]).read_bytes() == current_before
+
     with pytest.raises(PositionAdviceInputError, match="input_changed"):
         publish_current_manifest(
             base=tmp_path,

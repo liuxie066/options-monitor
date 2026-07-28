@@ -39,7 +39,13 @@ def test_infer_futu_portfolio_settings_prefers_account_settings() -> None:
     from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 
     cfg = {
-        "portfolio": {"futu": {"host": "global-host", "port": 11111}},
+        "portfolio": {
+            "futu": {
+                "host": "global-host",
+                "port": 11111,
+                "trd_env": "REAL",
+            }
+        },
         "account_settings": {
             "lx": {
                 "futu": {"host": "lx-host", "port": 22222}
@@ -51,16 +57,67 @@ def test_infer_futu_portfolio_settings_prefers_account_settings() -> None:
     out = infer_futu_portfolio_settings(cfg, account="lx")
     assert out["host"] == "lx-host"
     assert out["port"] == 22222
+    assert out["trd_env"] == "REAL"
 
     # 2. Without account label, should use global portfolio.futu
     out = infer_futu_portfolio_settings(cfg)
     assert out["host"] == "global-host"
     assert out["port"] == 11111
+    assert out["trd_env"] == "REAL"
 
     # 3. Non-existent account label, should use global portfolio.futu
     out = infer_futu_portfolio_settings(cfg, account="unknown")
     assert out["host"] == "global-host"
     assert out["port"] == 11111
+    assert out["trd_env"] == "REAL"
+
+
+def test_infer_futu_settings_merges_partial_account_override_per_key() -> None:
+    from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+
+    cfg = {
+        "portfolio": {
+            "futu": {
+                "host": "global-host",
+                "port": 11111,
+                "trd_env": "REAL",
+            }
+        },
+        "account_settings": {
+            "lx": {
+                "futu": {
+                    "trd_env": "SIMULATE",
+                }
+            }
+        },
+    }
+
+    out = infer_futu_portfolio_settings(cfg, account="LX")
+
+    assert out == {
+        "host": "global-host",
+        "port": 11111,
+        "trd_env": "SIMULATE",
+    }
+
+
+def test_infer_futu_settings_rejects_unknown_environment() -> None:
+    import pytest
+
+    from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+
+    with pytest.raises(ValueError, match="invalid futu trd_env"):
+        infer_futu_portfolio_settings(
+            {
+                "portfolio": {
+                    "futu": {
+                        "host": "global-host",
+                        "port": 11111,
+                        "trd_env": "SIMULATED",
+                    }
+                }
+            }
+        )
 
 
 def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> None:
@@ -208,7 +265,13 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
         fc.build_ready_futu_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
             cfg={
-                "portfolio": {"futu": {"host": "127.0.0.1", "port": 11111}},
+                "portfolio": {
+                    "futu": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
+                        "trd_env": "REAL",
+                    }
+                },
                 "trade_intake": {
                     "account_mapping": {
                         "futu": {
@@ -261,6 +324,7 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
                             "account_id": FAKE_FUTU_ACC_ID_LX_PRIMARY,
                             "host": "127.0.0.1",
                             "port": 11111,
+                            "trd_env": "REAL",
                         },
                     }
                 },
@@ -297,7 +361,13 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
         with pytest.raises(ValueError, match="mapped account_id=not-a-number"):
             fc.fetch_futu_portfolio_context(
                 cfg={
-                    "portfolio": {"futu": {"host": "127.0.0.1", "port": 11111}},
+                    "portfolio": {
+                        "futu": {
+                            "host": "127.0.0.1",
+                            "port": 11111,
+                            "trd_env": "REAL",
+                        }
+                    },
                     "trade_intake": {
                         "account_mapping": {
                             "futu": {
@@ -397,7 +467,7 @@ def test_build_futu_portfolio_context_dedups_balance_rows_by_acc_env_currency() 
     assert out["cash_by_currency"] == {"USD": 1000.0, "HKD": 500.0}
 
 
-def test_filter_rows_for_account_ids_keeps_legacy_rows_without_acc_id_across_trd_env() -> None:
+def test_filter_rows_for_account_ids_rejects_wrong_env_even_without_acc_id() -> None:
     from src.application.futu_portfolio_context import _filter_rows_for_account_ids
 
     rows = [
@@ -410,9 +480,34 @@ def test_filter_rows_for_account_ids_keeps_legacy_rows_without_acc_id_across_trd
     out = _filter_rows_for_account_ids(rows, {FAKE_FUTU_ACC_ID_LX_PRIMARY}, trd_env="REAL")
 
     assert out == [
-        {"trd_env": "SIMULATE", "currency": "USD", "cash": 100},
         {"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "REAL", "currency": "USD", "cash": 1000},
     ]
+
+
+def test_fetch_futu_portfolio_context_requires_explicit_environment() -> None:
+    import pytest
+
+    import src.application.futu_portfolio_context as fc
+
+    with pytest.raises(ValueError, match="trd_env is required"):
+        fc.fetch_futu_portfolio_context(
+            cfg={
+                "portfolio": {
+                    "futu": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
+                    }
+                },
+                "account_settings": {
+                    "lx": {
+                        "futu": {
+                            "account_id": FAKE_FUTU_ACC_ID_LX_PRIMARY,
+                        }
+                    }
+                },
+            },
+            account="lx",
+        )
 
 
 def test_fetch_futu_portfolio_context_passes_trd_env_and_filters_simulate_rows() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Protocol, cast
 
 from src.application.positions.context_cache import invalidate_option_positions_context_cache
+from src.application.trades.deal_identity import broker_deal_key
 from src.infrastructure.io_utils import utc_now
 
 
@@ -59,8 +60,9 @@ def _record_failed_deal_state(
     result_dict: dict[str, Any],
     write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
     upsert_deal_state_fn: Callable[..., dict[str, Any]],
+    deal_key: str | None = None,
 ) -> dict[str, Any]:
-    deal_id = str(result_dict.get("deal_id") or "").strip()
+    deal_id = str(deal_key or result_dict.get("deal_id") or "").strip()
     if not deal_id:
         return state
     prior_receipt = _prior_receipt(state, deal_id)
@@ -98,6 +100,36 @@ def _prior_receipt(state: dict[str, Any] | None, deal_id: str | None) -> dict[st
         receipt = item.get("receipt")
         return dict(receipt) if isinstance(receipt, dict) else {}
     return {}
+
+
+def _migrate_compatible_legacy_deal_state(
+    state: dict[str, Any],
+    *,
+    deal: object,
+) -> dict[str, Any]:
+    scoped_key = str(broker_deal_key(deal) or "").strip()
+    legacy_key = str(getattr(deal, "deal_id", "") or "").strip()
+    account = str(getattr(deal, "internal_account", "") or "").strip().lower()
+    if not scoped_key or not legacy_key or scoped_key == legacy_key or not account:
+        return state
+    out = {
+        name: dict((state or {}).get(name) or {})
+        for name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids")
+    }
+    if any(scoped_key in out[name] for name in out):
+        return out
+    for name in out:
+        item = out[name].get(legacy_key)
+        item_account = (
+            str(item.get("account") or "").strip().lower()
+            if isinstance(item, dict)
+            else ""
+        )
+        if item_account == account:
+            out[name][scoped_key] = dict(item)
+            out[name].pop(legacy_key, None)
+            break
+    return out
 
 
 def _ledger_store_from_repo(repo: Any) -> dict[str, Any] | None:
@@ -308,7 +340,8 @@ def _finalize_trade_payload_result(
     )
     if apply_changes:
         deal_id = (
-            str(result_dict.get("deal_id") or "").strip()
+            str(broker_deal_key(deal) if deal is not None else "").strip()
+            or str(result_dict.get("deal_id") or "").strip()
             or str(getattr(deal, "deal_id", "") or "").strip()
             or _payload_deal_id(effective_payload)
             or _payload_deal_id(payload)
@@ -447,6 +480,8 @@ def process_trade_payload(
             source=source,
         )
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", source=source, deal=deal))
+    if apply_changes:
+        state = _migrate_compatible_legacy_deal_state(state, deal=deal)
     holdings_sync_intent: dict[str, Any] | None = None
     if on_stock_holdings_sync_fn is not None:
         try:
@@ -511,6 +546,7 @@ def process_trade_payload(
                 result_dict=result_dict,
                 write_trade_intake_state_fn=write_trade_intake_state_fn,
                 upsert_deal_state_fn=upsert_deal_state_fn,
+                deal_key=broker_deal_key(deal),
             )
         return _finalize_trade_payload_result(
             result_dict=result_dict,
@@ -527,17 +563,21 @@ def process_trade_payload(
             source=source,
         )
 
-    if apply_changes and deal.deal_id:
+    deal_key = broker_deal_key(deal)
+    if apply_changes and deal_key:
         if result.status == "applied" or _is_terminal_ledger_result(result_dict):
             reconciled_terminal = result.status != "applied"
             state = upsert_deal_state_fn(
                 state,
                 bucket="processed_deal_ids",
-                deal_id=deal.deal_id,
+                deal_id=deal_key,
                 payload={
                     "status": "reconciled" if reconciled_terminal else "applied",
                     "action": result.action,
                     "account": result.account,
+                    "source_deal_id": deal.deal_id,
+                    "futu_account_id": deal.futu_account_id,
+                    "broker_deal_key": deal_key,
                     "applied_record_ids": [op.record_id for op in result.operations if op.record_id],
                     "reason": result.reason,
                     "diagnostics": (
@@ -558,12 +598,12 @@ def process_trade_payload(
                     "source": source,
                     "deal_id": deal.deal_id,
                     "account": result.account,
-                    "event_id": deal.deal_id,
+                    "event_id": deal_key,
                 },
             )
         elif result.status == "unresolved":
             try:
-                prior = dict((state.get("unresolved_deal_ids") or {}).get(deal.deal_id) or {})
+                prior = dict((state.get("unresolved_deal_ids") or {}).get(deal_key) or {})
             except Exception:
                 prior = {}
             diagnostics = dict(result_dict.get("diagnostics") or {})
@@ -572,28 +612,34 @@ def process_trade_payload(
                 "status": "unresolved",
                 "action": result.action,
                 "account": result.account,
+                "source_deal_id": deal.deal_id,
+                "futu_account_id": deal.futu_account_id,
+                "broker_deal_key": deal_key,
                 "applied_record_ids": [],
                 "reason": result.reason,
                 "retryable": retryable,
                 "attempt_count": int(prior.get("attempt_count") or 0) + 1,
                 "diagnostics": diagnostics,
             }
-            prior_receipt = _prior_receipt(state, deal.deal_id)
+            prior_receipt = _prior_receipt(state, deal_key)
             if prior_receipt:
                 payload["receipt"] = prior_receipt
             state = upsert_deal_state_fn(
                 state,
                 bucket="unresolved_deal_ids",
-                deal_id=deal.deal_id,
+                deal_id=deal_key,
                 payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
         elif result.status == "failed":
-            prior_receipt = _prior_receipt(state, deal.deal_id)
+            prior_receipt = _prior_receipt(state, deal_key)
             payload = {
                 "status": "failed",
                 "action": result.action,
                 "account": result.account,
+                "source_deal_id": deal.deal_id,
+                "futu_account_id": deal.futu_account_id,
+                "broker_deal_key": deal_key,
                 "applied_record_ids": [],
                 "reason": result.reason,
                 "diagnostics": dict(result_dict.get("diagnostics") or {}),
@@ -603,7 +649,7 @@ def process_trade_payload(
             state = upsert_deal_state_fn(
                 state,
                 bucket="failed_deal_ids",
-                deal_id=deal.deal_id,
+                deal_id=deal_key,
                 payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)

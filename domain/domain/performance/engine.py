@@ -13,6 +13,9 @@ from domain.domain.performance.attribution import (
     resolve_allocation_attribution,
     resolve_event_attribution,
 )
+from domain.domain.performance.cash_conversion import (
+    validate_observed_cash_conversion,
+)
 from domain.domain.performance.models import (
     CAPITAL_DAYS_QUANTUM,
     CapitalExposureSegment,
@@ -815,11 +818,73 @@ def _effective_events(events: Sequence[TradeEvent]) -> list[TradeEvent]:
         for event, has_error in validated
         if event.event_type == "void" and event.target_event_id and not has_error
     }
-    return [
+    active = [
         event
         for event, has_error in validated
         if not has_error and event.event_type != "void" and event.event_id not in voided
     ]
+    adjust_events = [event for event in active if event.event_type == "adjust"]
+    if not adjust_events:
+        return active
+
+    from domain.domain.ledger.projection import project_trade_events
+
+    projection = project_trade_events(active)
+    lots_by_open_event_id = {
+        lot.open_event_id: lot
+        for lot in projection.lots
+        if lot.open_event_id
+    }
+    patches_by_lot_id: dict[str, list[dict[str, Any]]] = {}
+    for event in adjust_events:
+        patch = (
+            event.raw_payload.get("patch")
+            if isinstance(event.raw_payload, dict)
+            else None
+        )
+        if event.target_lot_id and isinstance(patch, dict):
+            patches_by_lot_id.setdefault(event.target_lot_id, []).append(dict(patch))
+
+    restated: list[TradeEvent] = []
+    for event in active:
+        if event.event_type == "adjust":
+            continue
+        if event.event_type != "open":
+            restated.append(event)
+            continue
+        lot = lots_by_open_event_id.get(event.event_id)
+        lot_id = lot_id_for_open_event(event)
+        if lot is None or lot_id not in patches_by_lot_id:
+            restated.append(event)
+            continue
+        raw_payload = dict(event.raw_payload)
+        for patch in patches_by_lot_id[lot_id]:
+            for key in (
+                "strategy",
+                "leg_role",
+                "strategy_group_id",
+                "yield_enhancement_mode",
+                "strategy_snapshot",
+            ):
+                if key in patch:
+                    raw_payload[key] = patch[key]
+        raw_payload["economic_restatement"] = {
+            "source": "active_adjust_events",
+            "adjustment_count": len(patches_by_lot_id[lot_id]),
+        }
+        restated.append(
+            replace(
+                event,
+                event_time_ms=int(lot.opened_at_ms),
+                contract_key=lot.contract_key,
+                contracts=int(lot.contracts_opened),
+                price=float(lot.premium_open),
+                currency=lot.currency,
+                multiplier=float(lot.multiplier),
+                raw_payload=raw_payload,
+            )
+        )
+    return restated
 
 
 def _open_event_facts(event: TradeEvent) -> list[PerformanceFact]:
@@ -1634,16 +1699,19 @@ def _cash_conversion_value(fact: PerformanceFact) -> tuple[Decimal | None, str |
             reason = str(conversion.get("missing_reason") or "booking FX unavailable").strip()
             return None, conversion_id, f"cash_conversion_pending:{fact.fact_id}:{reason}"
         return None, conversion_id, f"cash_conversion_invalid:{fact.fact_id}"
-    try:
-        native_amount = to_decimal(conversion.get("native_amount"), field_name="cash conversion native_amount")
-        amount_cny = to_decimal(conversion.get("amount_cny"), field_name="cash conversion amount_cny")
-    except (TypeError, ValueError):
-        return None, conversion_id, f"cash_conversion_invalid:{fact.fact_id}"
-    if (
-        str(conversion.get("native_currency") or "").upper() != str(fact.currency or "")
-        or native_amount != fact.amount
-    ):
-        return None, conversion_id, f"cash_conversion_mismatch:{fact.fact_id}"
+    amount_cny, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id=fact.fact_id,
+        native_amount=fact.amount,
+        native_currency=str(fact.currency or ""),
+        effective_at_ms=fact.effective_at_ms,
+    )
+    if issue is not None:
+        return (
+            None,
+            conversion_id,
+            f"cash_conversion_corrupt:{fact.fact_id}:{issue}",
+        )
     return amount_cny, conversion_id, None
 
 

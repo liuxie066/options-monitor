@@ -390,6 +390,8 @@ def test_option_intake_runtime_config_path_resolves_runtime_ledger_without_env(
             "--text",
             "/om -sy open 成交提醒",
             "--confirm",
+            "--request-id",
+            "option-intake-runtime-config-test",
         ],
     )
 
@@ -443,6 +445,8 @@ def test_option_intake_apply_fails_closed_when_release_local_store_has_rows(
             "--text",
             "/om -sy open 成交提醒",
             "--confirm",
+            "--request-id",
+            "option-intake-divergent-store-test",
         ],
     )
 

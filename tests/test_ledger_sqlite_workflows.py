@@ -889,6 +889,120 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     assert row["multiplier"] == 100.0
 
 
+def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="AAPL",
+        option_type="put",
+        position_side="short",
+        strike=150.0,
+        expiration_ymd="2026-06-19",
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="open-aapl",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=key,
+            contracts=1,
+            price=1.0,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            lot_id="lot-aapl",
+        ),
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="close-aapl",
+            event_type="close",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=1,
+            price=0.5,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            target_lot_id="lot-aapl",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="target_lot_already_closed"):
+        ledger_writer.persist_trade_event_object(
+            repo,
+            TradeEvent(
+                event_id="duplicate-close-aapl",
+                event_type="close",
+                event_time_ms=3000,
+                contract_key=key,
+                contracts=1,
+                price=0.4,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                target_lot_id="lot-aapl",
+            ),
+        )
+
+    assert [event["event_id"] for event in repo.list_trade_events()] == [
+        "open-aapl",
+        "close-aapl",
+    ]
+    assert repo.list_position_lots()[0]["fields"]["status"] == "close"
+
+
+def test_rebuild_preserves_existing_lots_when_event_history_is_invalid(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="AAPL",
+        option_type="put",
+        position_side="short",
+        strike=150.0,
+        expiration_ymd="2026-06-19",
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="open-aapl",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=key,
+            contracts=1,
+            price=1.0,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            lot_id="lot-aapl",
+        ),
+    )
+    original_lots = repo.list_position_lots()
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id="orphan-close-aapl",
+            event_type="close",
+            event_time_ms=2000,
+            contract_key=key,
+            contracts=1,
+            price=0.5,
+            currency="USD",
+            source="legacy-corruption-fixture",
+            multiplier=100,
+            target_lot_id="lot-missing",
+        )
+    )
+
+    with pytest.raises(ValueError, match="target_lot_not_found"):
+        ledger_writer.rebuild_position_lots_from_trade_events(repo)
+
+    assert repo.list_position_lots() == original_lots
+
+
 def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path: Path) -> None:
     from dataclasses import replace
 
@@ -1890,6 +2004,42 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
     assert len(lots) == 1
     events = repo.list_trade_events()
     assert len(events) == 1
+
+
+def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects_reuse(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    command = OpenPositionCommand(
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        request_id="manual-open-request-001",
+    )
+
+    first = ledger_manual_trades.persist_manual_open_event(repo, command)
+    second = ledger_manual_trades.persist_manual_open_event(repo, command)
+
+    assert first.created is True
+    assert second.created is False
+    assert first.event_id == second.event_id
+    assert len(repo.list_trade_events()) == 1
+    with pytest.raises(ValueError, match="manual request conflict"):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            replace(command, strike=101.0),
+        )
 
 
 def test_persist_manual_open_event_id_distinguishes_multiplier(tmp_path: Path) -> None:
@@ -3063,3 +3213,50 @@ def test_close_writer_preserves_invalid_explicit_fee_amount_as_missing(tmp_path:
     assert allocations[0].close_fee.amount is None
     assert "invalid fee provenance amount" in str(allocations[0].close_fee.reason)
     assert allocations[0].realized_pnl_net is None
+
+
+def test_manual_assignment_request_retry_returns_original_result_after_lot_closed(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import record_manual_assignment
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=0.2,
+            opened_at_ms=1000,
+        ),
+    )
+    lot_id = str(repo.list_position_lots()[0]["record_id"])
+    kwargs = {
+        "record_id": lot_id,
+        "contracts_to_close": 1,
+        "stock_side": "buy",
+        "stock_qty": 100,
+        "stock_price": 6.0,
+        "as_of_ms": 2000,
+        "request_id": "manual-assignment-request-001",
+    }
+
+    first = record_manual_assignment(repo, **kwargs)
+    second = record_manual_assignment(repo, **kwargs)
+
+    assert first["result"]["created"] is True
+    assert second["result"]["created"] is False
+    assert first["result"]["event_id"] == second["result"]["event_id"]
+    assert repo.get_position_lot_fields(lot_id)["status"] == "close"
+    assert len(repo.list_trade_events()) == 2
+    with pytest.raises(ValueError, match="manual request conflict"):
+        record_manual_assignment(repo, **(kwargs | {"stock_qty": 200}))

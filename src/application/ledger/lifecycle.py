@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.lifecycle_allocation import allocation_id_for, terminal_event_id_for
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     effective_contracts_open,
@@ -49,6 +51,8 @@ def persist_assignment_events(
     evidence_ids: list[str] | tuple[str, ...] | None = None,
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
+    manual_request_id: str | None = None,
+    manual_request_intent_hash: str | None = None,
 ) -> list[LifecycleLedgerWrite]:
     return _persist_lifecycle_close_events(
         repo,
@@ -60,6 +64,8 @@ def persist_assignment_events(
         evidence_ids=evidence_ids,
         stock_settlement=stock_settlement,
         source=source,
+        manual_request_id=manual_request_id,
+        manual_request_intent_hash=manual_request_intent_hash,
     )
 
 
@@ -73,6 +79,8 @@ def persist_exercise_events(
     evidence_ids: list[str] | tuple[str, ...] | None = None,
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
+    manual_request_id: str | None = None,
+    manual_request_intent_hash: str | None = None,
 ) -> list[LifecycleLedgerWrite]:
     return _persist_lifecycle_close_events(
         repo,
@@ -84,6 +92,8 @@ def persist_exercise_events(
         evidence_ids=evidence_ids,
         stock_settlement=stock_settlement,
         source=source,
+        manual_request_id=manual_request_id,
+        manual_request_intent_hash=manual_request_intent_hash,
     )
 
 
@@ -112,6 +122,38 @@ def persist_expire_close_events(
     )
 
 
+def persist_lifecycle_expire_close_events_atomically(
+    repo: Any,
+    *,
+    close_target_resolution: CloseTargetResolution,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+    lifecycle_case: dict[str, Any],
+    option_evidence: dict[str, Any],
+    close_reason: str = "expired_unassigned",
+    source: str = "option_lifecycle_decision",
+) -> list[LifecycleLedgerWrite]:
+    case = dict(lifecycle_case or {})
+    case_id = str(case.get("case_id") or "").strip()
+    evidence_id = str(option_evidence.get("evidence_id") or "").strip()
+    if not case_id or not evidence_id:
+        raise ValueError("lifecycle auto-expire requires case_id and evidence_id")
+    return _persist_lifecycle_close_events(
+        repo,
+        event_type="expire_close",
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=contracts_to_close,
+        event_time_ms=event_time_ms,
+        case_id=case_id,
+        evidence_ids=[evidence_id],
+        stock_settlement=None,
+        source=source,
+        close_reason=close_reason,
+        lifecycle_case_update=case,
+        allocation_evidence_id=evidence_id,
+    )
+
+
 def _persist_lifecycle_close_events(
     repo: Any,
     *,
@@ -124,6 +166,10 @@ def _persist_lifecycle_close_events(
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
     close_reason: str | None = None,
+    lifecycle_case_update: dict[str, Any] | None = None,
+    allocation_evidence_id: str | None = None,
+    manual_request_id: str | None = None,
+    manual_request_intent_hash: str | None = None,
 ) -> list[LifecycleLedgerWrite]:
     normalized_event_type = str(event_type or "").strip().lower()
     if normalized_event_type not in {"assignment", "exercise", "expire_close"}:
@@ -154,6 +200,29 @@ def _persist_lifecycle_close_events(
             as_of_ms=as_of_ms,
             event_type=normalized_event_type,
         )
+        allocation_id = None
+        event_id = None
+        if allocation_evidence_id:
+            if not case_id:
+                raise ValueError("lifecycle allocation requires case_id")
+            allocation_id = allocation_id_for(
+                case_id=case_id,
+                evidence_id=allocation_evidence_id,
+                target_lot_id=record_id,
+            )
+            event_id = terminal_event_id_for(
+                case_id=case_id,
+                evidence_id=allocation_evidence_id,
+                target_lot_id=record_id,
+                terminal_type=normalized_event_type,
+                contracts_allocated=contracts,
+            )
+        elif str(manual_request_id or "").strip():
+            stable_request = str(manual_request_id).strip()
+            digest = hashlib.sha256(
+                f"{normalized_event_type}|{stable_request}|{record_id}".encode("utf-8")
+            ).hexdigest()[:24]
+            event_id = f"manual-{normalized_event_type}-request-{digest}"
         event = _lifecycle_close_event(
             fields=fields,
             record_id=record_id,
@@ -166,13 +235,55 @@ def _persist_lifecycle_close_events(
             close_target_resolution=close_target_resolution.to_dict(),
             stock_settlement=dict(stock_settlement or {}),
             close_reason=close_reason,
+            event_id=event_id,
+            evidence_id=allocation_evidence_id,
+            allocation_id=allocation_id,
+            manual_request_id=manual_request_id,
+            manual_request_intent_hash=manual_request_intent_hash,
         )
         prepared.append((match, contracts, ledger_preflight, event))
         as_of_ms = int(ledger_preflight.event_time_ms) + 1
 
+    allocation_rows = [
+        {
+            "allocation_id": allocation_id_for(
+                case_id=str(case_id),
+                evidence_id=str(allocation_evidence_id),
+                target_lot_id=str(match.record_id),
+            ),
+            "case_id": str(case_id),
+            "evidence_id": str(allocation_evidence_id),
+            "target_lot_id": str(match.record_id),
+            "terminal_type": normalized_event_type,
+            "contracts_allocated": int(contracts),
+            "canonical_terminal_event_id": event.event_id,
+        }
+        for match, contracts, _preflight, event in prepared
+    ] if allocation_evidence_id else []
+    case_update = dict(lifecycle_case_update or {})
+    if case_update:
+        case_update.update(
+            {
+                "status": "ledger_written",
+                "decision_type": normalized_event_type,
+                "target_lot_ids": [
+                    str(match.record_id)
+                    for match, _contracts, _preflight, _event in prepared
+                ],
+                "target_contracts_by_lot": {
+                    str(match.record_id): int(contracts)
+                    for match, contracts, _preflight, _event in prepared
+                },
+            }
+        )
+        first_event = prepared[0][3]
+        case_update.setdefault("broker", first_event.contract_key.broker)
+        case_update.setdefault("contract_key", first_event.contract_key.position_key)
     persisted = persist_trade_event_objects_atomically(
         repo,
         [event for _match, _contracts, _preflight, event in prepared],
+        lifecycle_case_update=case_update or None,
+        lifecycle_allocations=allocation_rows,
     )
     writes: list[LifecycleLedgerWrite] = []
     for (match, contracts, ledger_preflight, _event), result in zip(
@@ -294,14 +405,19 @@ def _lifecycle_close_event(
     close_target_resolution: dict[str, Any],
     stock_settlement: dict[str, Any],
     close_reason: str | None = None,
+    event_id: str | None = None,
+    evidence_id: str | None = None,
+    allocation_id: str | None = None,
+    manual_request_id: str | None = None,
+    manual_request_intent_hash: str | None = None,
 ) -> TradeEvent:
     strike = effective_strike(fields)
     multiplier = effective_multiplier(fields)
-    event_id = f"{event_type}-{record_id}-{uuid.uuid4().hex}"
+    canonical_event_id = str(event_id or "").strip() or f"{event_type}-{record_id}-{uuid.uuid4().hex}"
     raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
     strategy_payload = strategy_metadata_fields_from_payload(fields)
     return TradeEvent(
-        event_id=event_id,
+        event_id=canonical_event_id,
         event_type=event_type,
         event_time_ms=int(event_time_ms),
         contract_key=ContractKey.from_values(
@@ -331,6 +447,13 @@ def _lifecycle_close_event(
             "close_reason": str(close_reason or event_type),
             "case_id": case_id,
             "evidence_ids": list(evidence_ids),
+            "evidence_id": str(evidence_id or "").strip() or None,
+            "allocation_id": str(allocation_id or "").strip() or None,
+            "contracts": int(contracts_to_close),
+            "manual_request_id": str(manual_request_id or "").strip() or None,
+            "manual_request_intent_hash": (
+                str(manual_request_intent_hash or "").strip() or None
+            ),
             "stock_settlement": dict(stock_settlement),
             "close_target_resolution": dict(close_target_resolution),
             "contracts_open_before": effective_contracts_open(fields),
@@ -354,4 +477,5 @@ __all__ = [
     "persist_exercise_event",
     "persist_exercise_events",
     "persist_expire_close_events",
+    "persist_lifecycle_expire_close_events_atomically",
 ]

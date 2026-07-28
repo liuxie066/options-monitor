@@ -135,6 +135,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
         opened_at_ms=1000,
         strategy_snapshot=snapshot("sell_put"),
         dry_run=True,
+        request_id="combo-yield-preview-put",
     )
     assert preview["fields"]["strategy_group_id"] == group_id
     assert preview["fields"]["strategy"] == "combo_yield"
@@ -161,6 +162,7 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
             opened_at_ms=opened_at_ms,
             strategy_snapshot=snapshot(role),
             dry_run=False,
+            request_id=f"combo-yield-{role}",
         )
         assert result["fields"]["strategy_group_id"] == group_id
 
@@ -172,6 +174,44 @@ def test_manual_open_preview_projection_restart_reconstructs_diagonal_group(tmp_
     assert groups[0]["summary_classification"] == "active_combo"
     assert groups[0]["put_expiration"] == "2026-08-21"
     assert groups[0]["call_expiration"] == "2026-09-18"
+
+
+def test_manual_open_invalidates_position_context_cache(tmp_path: Path) -> None:
+    from src.application.positions.workflows import execute_manual_open
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    cache_path = (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "option_positions_context.json"
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text('{"stale": true}', encoding="utf-8")
+
+    result = execute_manual_open(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.0,
+        underlying_share_locked=None,
+        note=None,
+        dry_run=False,
+        request_id="cache-invalidation-open-001",
+    )
+
+    assert result["context_cache_invalidation"]["ok"] is True
+    assert not cache_path.exists()
 
 
 def test_full_group_lifecycle_classifies_residual_and_assignment_states() -> None:

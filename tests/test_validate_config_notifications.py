@@ -492,6 +492,36 @@ def test_validate_config_requires_host_port_for_multiple_futu_accounts() -> None
         assert "account_settings.user1.futu.host must be set when multiple futu accounts are configured" in str(exc)
 
 
+def test_validate_config_rejects_unknown_futu_trade_environments() -> None:
+    import src.application.config_validator as mod
+
+    cases = [
+        ("portfolio.futu.trd_env", lambda cfg: cfg["portfolio"].update(
+            futu={"host": "127.0.0.1", "port": 11111, "trd_env": "SIMULATED"}
+        )),
+        (
+            "account_settings.user1.futu.trd_env",
+            lambda cfg: cfg["account_settings"]["user1"]["futu"].update(
+                trd_env="PAPER"
+            ),
+        ),
+        (
+            "NVDA.fetch.trd_env",
+            lambda cfg: cfg["symbols"][0]["fetch"].update(
+                trd_env="PRODUCTION"
+            ),
+        ),
+    ]
+    for expected, mutate in cases:
+        cfg = _base_cfg()
+        mutate(cfg)
+        try:
+            mod.validate_config(cfg)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert expected in str(exc)
+
+
 def test_validate_config_accepts_option_positions_auto_close_enabled_boolean() -> None:
     import src.application.config_validator as mod
 

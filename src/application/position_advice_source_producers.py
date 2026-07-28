@@ -30,6 +30,13 @@ def publish_portfolio_source_snapshot(
     completed_at: datetime | str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     context = dict(portfolio_context or {})
+    observation_status = str(
+        context.get("source_observation_status") or ""
+    ).strip().lower()
+    if observation_status and observation_status != "trusted":
+        raise ValueError(
+            "portfolio source observation is not trusted"
+        )
     observed_at = _required_text(
         context.get("source_observed_at"),
         "portfolio source_observed_at",

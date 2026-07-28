@@ -369,7 +369,11 @@ def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:
     result = resolve_trade_deal(
         _deal(),
         repo=FakeRepo(),
-        state={"processed_deal_ids": {"deal-open-1": {"status": "applied"}}},
+        state={
+            "processed_deal_ids": {
+                "futu:lx:REAL_1:deal-open-1": {"status": "applied"}
+            }
+        },
         apply_changes=False,
     )
 

@@ -261,6 +261,7 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
+    payload = _payload_with_manual_request_id(payload, command_id)
     payload, preview = _prepare_operation_preview(payload)
     return _save_prepared_preview(
         payload,
@@ -271,6 +272,19 @@ def _preview_and_save(
         store=store,
         ttl_seconds=ttl_seconds,
     )
+
+
+def _payload_with_manual_request_id(
+    payload: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    if payload.get("operation_type") not in {"manual_open", "manual_assignment"}:
+        return payload
+    out = dict(payload)
+    arguments = dict(out.get("arguments") or {})
+    arguments["request_id"] = str(request_id)
+    out["arguments"] = arguments
+    return out
 
 
 def _prepare_operation_preview(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:

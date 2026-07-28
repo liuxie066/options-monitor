@@ -30,7 +30,7 @@ from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.errors import LedgerPreflightError
-from src.application.ledger.lifecycle import persist_expire_close_events
+from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
 from src.application.ledger.lot_resolver import LotCloseResolutionError, resolve_explicit_close_target
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
@@ -603,8 +603,30 @@ def _same_float(left: Any, right: Any, *, tolerance: float = 1e-9) -> bool:
         return False
 
 
+def _lifecycle_case_broker(case: dict[str, Any]) -> str:
+    broker = normalize_broker(case.get("broker"))
+    if broker:
+        return broker
+    case_key = str(case.get("case_key") or "").strip()
+    return normalize_broker(case_key.split("|", 1)[0]) if "|" in case_key else ""
+
+
+def _lifecycle_evidence_broker(evidence: dict[str, Any]) -> str:
+    broker = normalize_broker(evidence.get("broker"))
+    if broker:
+        return broker
+    raw = evidence.get("raw_payload")
+    if not isinstance(raw, dict):
+        raw = evidence.get("raw_json")
+    return normalize_broker(raw.get("broker")) if isinstance(raw, dict) else ""
+
+
 def _same_lifecycle_contract(fields: dict[str, Any], case: dict[str, Any]) -> bool:
     if normalize_account(fields.get("account")) != normalize_account(case.get("account")):
+        return False
+    fields_broker = normalize_broker(fields.get("broker"))
+    case_broker = _lifecycle_case_broker(case)
+    if not fields_broker or not case_broker or fields_broker != case_broker:
         return False
     if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(case.get("symbol")):
         return False
@@ -626,6 +648,10 @@ def _stock_evidence_matches_lifecycle_lot(
     if str(evidence.get("evidence_type") or "") != "stock_settlement_leg":
         return False
     if normalize_account(fields.get("account")) != normalize_account(evidence.get("account")):
+        return False
+    fields_broker = normalize_broker(fields.get("broker"))
+    evidence_broker = _lifecycle_evidence_broker(evidence)
+    if not fields_broker or not evidence_broker or fields_broker != evidence_broker:
         return False
     if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(evidence.get("symbol")):
         return False
@@ -706,6 +732,18 @@ def _matching_lifecycle_stock_evidence(
             for evidence in evidence_rows:
                 if not isinstance(evidence, dict):
                     continue
+                evidence_account = normalize_account(evidence.get("account"))
+                evidence_symbol = _canonical_trade_symbol(evidence.get("symbol"))
+                if (
+                    str(evidence.get("evidence_type") or "") == "stock_settlement_leg"
+                    and evidence_account == normalize_account(fields.get("account"))
+                    and evidence_symbol == _canonical_trade_symbol(fields.get("symbol"))
+                    and not _lifecycle_evidence_broker(evidence)
+                ):
+                    return {
+                        **dict(evidence),
+                        "identity_status": "broker_missing",
+                    }
                 if _stock_evidence_matches_lifecycle_lot(
                     fields,
                     evidence,
@@ -782,22 +820,6 @@ def _lifecycle_auto_close_blocker(
     return None
 
 
-def _mark_lifecycle_expire_close_written(
-    repo: Any,
-    *,
-    case: dict[str, Any],
-    target_lot_ids: list[str],
-) -> None:
-    upsert_case = getattr(repo, "upsert_trade_lifecycle_case", None)
-    if not callable(upsert_case):
-        return
-    updated = dict(case)
-    updated["status"] = "ledger_written"
-    updated["decision_type"] = "expire_close"
-    updated["target_lot_ids"] = list(target_lot_ids)
-    upsert_case(updated)
-
-
 def _persist_lifecycle_auto_expire_close_event(
     repo: Any,
     *,
@@ -807,18 +829,15 @@ def _persist_lifecycle_auto_expire_close_event(
     contracts_to_close: int,
     event_time_ms: int,
 ) -> LedgerWriteResult:
-    evidence_id = str(option_evidence.get("evidence_id") or "").strip()
-    writes = persist_expire_close_events(
+    writes = persist_lifecycle_expire_close_events_atomically(
         repo,
         close_target_resolution=close_target_resolution,
         contracts_to_close=int(contracts_to_close),
         event_time_ms=int(event_time_ms),
-        case_id=str(case.get("case_id") or ""),
-        evidence_ids=[evidence_id] if evidence_id else [],
+        lifecycle_case=case,
+        option_evidence=option_evidence,
         close_reason="expired_unassigned",
     )
-    target_lot_ids = [str(write.operation.record_id) for write in writes if write.operation.record_id]
-    _mark_lifecycle_expire_close_written(repo, case=case, target_lot_ids=target_lot_ids)
     result = writes[-1].operation.result if writes else None
     return result if isinstance(result, LedgerWriteResult) else LedgerWriteResult()
 

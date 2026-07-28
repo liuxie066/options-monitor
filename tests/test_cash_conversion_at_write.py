@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.performance.cash_conversion import (
+    validate_observed_cash_conversion,
+)
 from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger import writer as ledger_writer
@@ -126,6 +132,86 @@ def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monke
     assert stale["status"] == "pending"
     assert stale["amount_cny"] is None
     assert stale["missing_reason"] == "USDCNY booking FX outside 24h event window"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("conversion_id", "cashfx_forged", "conversion_id_mismatch"),
+        ("amount_cny", "999999", "fx_arithmetic_mismatch"),
+        ("fx_rate", "-7.2", "fx_rate_invalid"),
+        ("method", "unknown", "fx_provenance_invalid"),
+        ("rate_timestamp", "2026-07-10T02:00:00+00:00", "rate_timestamp_outside_booking_window"),
+    ],
+)
+def test_observed_cash_conversion_rejects_tampered_contract(
+    field: str,
+    value: str,
+    reason: str,
+) -> None:
+    effective_at_ms = _ms("2026-07-03T10:00:00")
+    conversion = build_cash_conversion(
+        cash_fact_id="option_trade_cash_gross:tamper",
+        amount=200,
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": 7.2},
+            "timestamp": "2026-07-03T02:00:00+00:00",
+        },
+        effective_at_ms=effective_at_ms,
+        observed_at_ms=effective_at_ms + 1_000,
+    )
+    conversion[field] = value
+
+    amount_cny, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id="option_trade_cash_gross:tamper",
+        native_amount=200,
+        native_currency="USD",
+        effective_at_ms=effective_at_ms,
+    )
+
+    assert amount_cny is None
+    assert issue == reason
+
+
+def test_performance_keeps_native_cash_but_rejects_forged_cny(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "forged.sqlite3")
+    event = _open_event("forged", price=2.0)
+    conversion = build_cash_conversion(
+        cash_fact_id="option_trade_cash_gross:forged",
+        amount=200,
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": 7.2},
+            "timestamp": "2026-07-03T02:00:00+00:00",
+        },
+        effective_at_ms=event.event_time_ms,
+        observed_at_ms=event.event_time_ms + 1_000,
+    )
+    conversion["amount_cny"] = "999999"
+    repo.upsert_trade_event(
+        replace(
+            event,
+            raw_payload={
+                **event.raw_payload,
+                "cash_conversions": {
+                    "option_trade_cash_gross": conversion,
+                },
+            },
+        )
+    )
+
+    metric = _report(repo)["cash"]["option_trade_cash_gross"]
+
+    assert metric["by_currency"] == {"USD": 200.0}
+    assert metric["cny"] is None
+    assert metric["status"] == "partial"
+    assert metric["missing"] == [
+        "cash_conversion_corrupt:option_trade_cash_gross:forged:fx_arithmetic_mismatch"
+    ]
 
 
 def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(

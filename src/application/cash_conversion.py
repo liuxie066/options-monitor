@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -9,11 +7,13 @@ from typing import Any, Mapping
 
 from domain.domain.ledger import TradeEvent
 from domain.domain.performance.engine import cash_facts_for_trade_event
-from domain.domain.performance.models import canonical_decimal_text, normalize_currency, quantize_money, to_decimal
+from domain.domain.performance.cash_conversion import (
+    MAX_BOOKING_RATE_DISTANCE_MS,
+    cash_conversion_id,
+    cash_conversion_identity,
+)
+from domain.domain.performance.models import normalize_currency, quantize_money, to_decimal
 from src.infrastructure.exchange_rates import get_cached_exchange_rates
-
-
-_MAX_BOOKING_RATE_DISTANCE_MS = 24 * 60 * 60 * 1000
 
 
 def load_cash_fx_payload(repo: Any) -> dict[str, Any] | None:
@@ -132,27 +132,24 @@ def build_cash_conversion(
         if rate is not None and rate_timestamp_ms is None:
             rate = None
             missing_reason = f"{native_currency}CNY booking FX timestamp unavailable"
-        if rate is not None and abs(rate_timestamp_ms - int(effective_at_ms)) > _MAX_BOOKING_RATE_DISTANCE_MS:
+        if rate is not None and abs(rate_timestamp_ms - int(effective_at_ms)) > MAX_BOOKING_RATE_DISTANCE_MS:
             rate = None
             missing_reason = f"{native_currency}CNY booking FX outside 24h event window"
         amount_cny = quantize_money(native_amount * rate) if rate is not None else None
     status = "observed" if amount_cny is not None else "pending"
     source_id = str(rate_source_id or "").strip() or f"{native_currency}CNY:{rate_timestamp or int(observed_at_ms)}"
-    identity = {
-        "cash_fact_id": str(cash_fact_id),
-        "native_amount": canonical_decimal_text(native_amount, field_name="native_amount"),
-        "native_currency": native_currency,
-        "fx_rate": canonical_decimal_text(rate, field_name="fx_rate") if rate is not None else None,
-        "amount_cny": canonical_decimal_text(amount_cny, field_name="amount_cny") if amount_cny is not None else None,
-        "rate_source_id": source_id,
-        "effective_at_ms": int(effective_at_ms),
-    }
-    digest = hashlib.sha256(
-        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:24]
+    identity = cash_conversion_identity(
+        cash_fact_id=str(cash_fact_id),
+        native_amount=native_amount,
+        native_currency=native_currency,
+        fx_rate=rate,
+        amount_cny=amount_cny,
+        rate_source_id=source_id,
+        effective_at_ms=int(effective_at_ms),
+    )
     return {
         "schema_version": "cash_conversion.v1",
-        "conversion_id": f"cashfx_{digest}",
+        "conversion_id": cash_conversion_id(identity),
         **identity,
         "quote_currency": "CNY",
         "status": status,

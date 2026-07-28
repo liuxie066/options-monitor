@@ -523,9 +523,10 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
         "processed_deal_ids": {},
         "failed_deal_ids": {},
         "unresolved_deal_ids": {
-            "deal-retry-1": {
-                "status": "unresolved",
-                "retryable": True,
+                "deal-retry-1": {
+                    "status": "unresolved",
+                    "account": "lx",
+                    "retryable": True,
                 "attempt_count": 2,
                 "receipt": {"status": "sent", "delivery_confirmed": True},
             }
@@ -549,7 +550,7 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     )
 
     assert out["status"] == "unresolved"
-    state_item = writes[-1]["unresolved_deal_ids"]["deal-retry-1"]
+    state_item = writes[-1]["unresolved_deal_ids"]["futu:lx:REAL_1:deal-retry-1"]
     assert state_item["retryable"] is True
     assert state_item["attempt_count"] == 3
     assert state_item["diagnostics"]["missing_fields"] == ["multiplier"]
@@ -660,9 +661,10 @@ def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
             "processed_deal_ids": {},
             "failed_deal_ids": {},
             "unresolved_deal_ids": {
-                deal.deal_id: {
-                    "status": "unresolved",
-                    "retryable": True,
+                    deal.deal_id: {
+                        "status": "unresolved",
+                        "account": "lx",
+                        "retryable": True,
                     "attempt_count": 7,
                 }
             },
@@ -678,7 +680,9 @@ def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
     assert out["status"] == "skipped"
     state = writes[-1]
     assert deal.deal_id not in state["unresolved_deal_ids"]
-    processed = state["processed_deal_ids"][deal.deal_id]
+    processed = state["processed_deal_ids"][
+        "futu:lx:REAL_1:deal-lifecycle-final"
+    ]
     assert processed["status"] == "reconciled"
     assert processed["reason"] == "lifecycle_already_written"
     assert processed["applied_record_ids"] == ["lot-final"]
@@ -800,7 +804,7 @@ def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Pat
 
     assert out["status"] == "failed"
     assert out["reason"] == "exception:RuntimeError"
-    failed = writes[-1]["failed_deal_ids"]["deal-failed-1"]
+    failed = writes[-1]["failed_deal_ids"]["futu:lx:REAL_1:deal-failed-1"]
     assert failed["status"] == "failed"
     assert failed["diagnostics"]["exception_type"] == "RuntimeError"
     assert any(event.get("phase") == "failed" and event.get("deal_id") == "deal-failed-1" for event in events)
@@ -937,7 +941,9 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
     )
 
     assert out["receipt"]["status"] == "sent"
-    receipt = writes[-1]["processed_deal_ids"]["deal-receipt-1"]["receipt"]
+    receipt = writes[-1]["processed_deal_ids"][
+        "futu:lx:REAL_1:deal-receipt-1"
+    ]["receipt"]
     assert receipt["delivery_confirmed"] is True
     assert receipt["message_id"] == "msg-1"
     assert receipt["attempt_count"] == 1
@@ -1023,7 +1029,9 @@ def test_process_payload_preserves_confirmed_receipt_on_duplicate_skip(tmp_path:
     )
 
     assert out["receipt"]["reason"] == "skipped_duplicate"
-    receipt = writes[-1]["processed_deal_ids"]["deal-duplicate-1"]["receipt"]
+    receipt = writes[-1]["processed_deal_ids"][
+        "futu:lx:REAL_1:deal-duplicate-1"
+    ]["receipt"]
     assert receipt["status"] == "sent"
     assert receipt["delivery_confirmed"] is True
     assert receipt["message_id"] == "msg-confirmed"

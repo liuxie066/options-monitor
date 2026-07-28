@@ -328,6 +328,17 @@ def publish_current_manifest(
             authority_resolution=resolution,
             expected_decision_state_fingerprint=expected_decision_state_fingerprint,
         )
+        requested_markets = sorted(
+            {
+                str(item or "").strip().upper()
+                for item in included_markets
+                if str(item or "").strip().upper() in {"US", "HK"}
+            }
+        )
+        if immutable_input.get("included_markets") != requested_markets:
+            raise PositionAdviceInputError(
+                "current manifest market binding mismatch"
+            )
 
         state_c = dict(decision_snapshot_reader() or {})
         fingerprint_c = _trusted_fingerprint(state_c)
@@ -338,9 +349,7 @@ def publish_current_manifest(
             "schema_version": POSITION_ADVICE_CURRENT_SCHEMA,
             "broker": str(broker or "").strip().lower(),
             "account": account,
-            "included_markets": sorted(
-                {str(item or "").strip().upper() for item in included_markets}
-            ),
+            "included_markets": requested_markets,
             "portfolio_scope_id": scope_id,
             "normalized_portfolio_source": source,
             "portfolio_account_identity_hash": identity_hash,
@@ -354,6 +363,11 @@ def publish_current_manifest(
                 source_manifest_path,
             ),
             "source_manifest_hash": validated_source["source_manifest_hash"],
+            "source_observed_at_max": max(
+                str(item.get("source_observed_at") or "")
+                for item in validated_source["source_manifest"]
+                if isinstance(item, Mapping)
+            ),
             "advice_artifact_relpath": _relative_to_run(run_root, advice_path),
             "advice_artifact_sha256": sha256_bytes(advice_path.read_bytes()),
             "input_artifact_relpath": _relative_to_run(run_root, input_path),
@@ -364,16 +378,54 @@ def publish_current_manifest(
             "authority_policy_hash": resolution.policy_hash,
             "switched_at": now_value,
         }
-        current_payload["current_manifest_hash"] = canonical_sha256(current_payload)
-        current_path = (
-            portfolio_scope_state_dir(base_path, scope_id)
-            / "account_decision_current.v2.json"
-        )
-        atomic_write_json(current_path, current_payload, sort_keys=True)
-        readback = _read_json_object(current_path)
-        if readback != current_payload:
-            raise PositionAdviceInputError("current manifest readback mismatch")
-        return {"manifest": current_payload, "path": current_path}
+        markets = requested_markets
+        if not markets:
+            raise PositionAdviceInputError(
+                "current manifest included_markets is empty"
+            )
+        published: dict[str, Path] = {}
+        manifests: dict[str, dict[str, Any]] = {}
+        for market in markets:
+            market_payload = {
+                **current_payload,
+                "current_market": market,
+            }
+            market_payload["current_manifest_hash"] = canonical_sha256(
+                market_payload
+            )
+            current_path = (
+                portfolio_scope_state_dir(base_path, scope_id)
+                / f"account_decision_current.{market}.v2.json"
+            )
+            if current_path.exists():
+                previous = _read_json_object(current_path)
+                validate_current_manifest_hash(previous)
+                if previous == market_payload:
+                    published[market] = current_path
+                    manifests[market] = market_payload
+                    continue
+                if (
+                    str(market_payload["source_observed_at_max"])
+                    <= str(previous.get("source_observed_at_max") or "")
+                ):
+                    raise PositionAdviceInputError(
+                        "current manifest source generation is not newer"
+                    )
+            atomic_write_json(current_path, market_payload, sort_keys=True)
+            readback = _read_json_object(current_path)
+            if readback != market_payload:
+                raise PositionAdviceInputError(
+                    "current manifest readback mismatch"
+                )
+            published[market] = current_path
+            manifests[market] = market_payload
+        primary_market = markets[0]
+        return {
+            "manifest": manifests[primary_market],
+            "path": published[primary_market],
+            "manifests": manifests,
+            "paths": published,
+        }
 
 
 def validate_current_manifest_hash(manifest: Mapping[str, Any]) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from domain.domain.ledger.identity import ContractKey
@@ -120,6 +121,65 @@ def validate_trade_event(event: TradeEvent) -> list[LedgerDiagnostic]:
                 code="unsupported_event_type",
                 message="event_type is not supported",
                 details={"event_type": event.event_type},
+            )
+        )
+    if event.event_time_ms <= 0:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_time_must_be_positive",
+                message="event_time_ms must be > 0",
+                details={"event_time_ms": event.event_time_ms},
+            )
+        )
+    if not event.source:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_source_required",
+                message="source is required",
+            )
+        )
+    if event.currency not in {"CNY", "HKD", "USD"}:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_currency_invalid",
+                message="currency must be one of CNY, HKD, USD",
+                details={"currency": event.currency},
+            )
+        )
+    if not math.isfinite(event.multiplier) or event.multiplier <= 0:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_multiplier_invalid",
+                message="multiplier must be finite and > 0",
+                details={"multiplier": event.multiplier},
+            )
+        )
+    if not math.isfinite(event.price) or event.price < 0:
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_price_invalid",
+                message="price must be finite and >= 0",
+                details={"price": event.price},
+            )
+        )
+    if not math.isfinite(event.fees):
+        diagnostics.append(
+            LedgerDiagnostic(
+                event_id=event.event_id,
+                severity="error",
+                code="event_fees_invalid",
+                message="fees must be finite",
+                details={"fees": event.fees},
             )
         )
     if event.event_type in OPEN_EVENT_TYPES | CLOSE_EVENT_TYPES and event.contracts <= 0:
