@@ -2395,7 +2395,11 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
     assert "SERVICE_UPGRADE_REMEDIATED" in data["summary"]["warning_codes"]
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in data["summary"]["warning_codes"]
     assert "Service upgrade previously failed but current release and restart services look remediated." in warnings
-    assert "Service drift detected: required maintenance units are missing: options-monitor-projection-verify.timer." in warnings
+    assert (
+        "Service drift detected: required maintenance units are missing: "
+        "options-monitor-position-advice-promotion.timer, "
+        "options-monitor-projection-verify.timer."
+    ) in warnings
 
 
 def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_path: Path) -> None:
@@ -2447,7 +2451,11 @@ def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypat
     assert "SERVICE_UPGRADE_FAILED" in data["summary"]["warning_codes"]
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in data["summary"]["warning_codes"]
     assert "Service upgrade status still indicates an unrecovered runtime failure." in warnings
-    assert "Service drift detected: required maintenance units are missing: options-monitor-projection-verify.timer." in warnings
+    assert (
+        "Service drift detected: required maintenance units are missing: "
+        "options-monitor-position-advice-promotion.timer, "
+        "options-monitor-projection-verify.timer."
+    ) in warnings
 
 
 def test_runtime_status_treats_older_failed_upgrade_as_historical(tmp_path: Path) -> None:
@@ -2461,7 +2469,11 @@ def test_runtime_status_treats_older_failed_upgrade_as_historical(tmp_path: Path
     assert "SERVICE_UPGRADE_HISTORICAL_FAILED" in data["summary"]["warning_codes"]
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in data["summary"]["warning_codes"]
     assert "Service upgrade status file contains a historical failure for a non-current target version." in warnings
-    assert "Service drift detected: required maintenance units are missing: options-monitor-projection-verify.timer." in warnings
+    assert (
+        "Service drift detected: required maintenance units are missing: "
+        "options-monitor-position-advice-promotion.timer, "
+        "options-monitor-projection-verify.timer."
+    ) in warnings
 
 
 def test_runtime_status_keeps_newer_failed_upgrade_as_runtime_failure(tmp_path: Path) -> None:

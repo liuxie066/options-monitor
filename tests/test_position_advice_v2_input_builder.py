@@ -395,7 +395,10 @@ def test_cleanup_protects_valid_current_and_fails_closed_for_malformed_current(
         Path(item["path"]).name: item["reason"]
         for item in cleanup["output_runs_cleanup"]["protected_runs"]
     }
-    assert protected_reasons["run-1"] == "position_advice_current_manifest"
+    assert (
+        protected_reasons["run-1"]
+        == "position_advice_current"
+    )
 
     Path(prepared["advice_path"]).write_text("{}")
     blocked = service_cleanup(

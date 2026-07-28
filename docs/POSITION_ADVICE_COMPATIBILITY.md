@@ -36,12 +36,19 @@ Run, Daily Brief, and notification consumers support
 3. Confirm a v1 policy only after reviewing its identity binding and paths.
 4. Verify US/HK readers and scheduled notification still select v1.
 5. CAS the account to `v2_shadow`.
-6. Accumulate immutable shadow evidence. v2 rows remain non-authoritative and
-   v1 continues to notify. Only canonical plans beneath the same runtime
-   `output_runs` tree may enter the persisted promotion evidence.
-7. Review the fixed promotion gate, safety counters, reason distribution,
-   modeled economics, covered families, and unknown-delivery state.
-8. CAS to v2 with the passing promotion evidence.
+6. The mandatory daily promotion timer accumulates immutable shadow evidence.
+   v2 rows remain non-authoritative and v1 continues to notify. Only canonical
+   plans beneath the same runtime `output_runs` tree and bound to the exact
+   current shadow generation may enter persisted promotion evidence. The timer
+   copies the exact plan/input pairs into a content-addressed gzip archive;
+   ordinary output-run cleanup continues without discarding replay evidence.
+7. Use `om position-advice ... promotion status --account <account>` to review
+   the fixed gate, computed safety counters, deterministic replay results,
+   reason distribution, modeled economics, covered families, and
+   unknown-delivery state.
+8. Only when status reports `ready_for_final_cas=true`, manually dry-run and
+   then confirm the v2 CAS with the reported evidence path and expected policy
+   hash. Evidence refresh never performs this CAS.
 9. Wait for the next successful Account Run under the new generation. The old
    shadow artifact is not promoted in place.
 10. Verify the current manifest and Daily Brief select only v2.

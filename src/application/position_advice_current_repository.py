@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from domain.domain.position_advice_authority import validate_authority_policy
 from src.application.position_advice_input_builder import (
     PositionAdviceInputError,
     validate_current_manifest_hash,
@@ -132,7 +133,7 @@ def validate_current_artifacts_under_lock(
 
 
 def collect_protected_current_runs_under_global_lock(*, base: Path) -> set[Path]:
-    """Resolve every current run or fail the whole output-run cleanup closed."""
+    """Protect only runs referenced by a validated current manifest."""
 
     root = position_advice_state_root(base)
     if not root.exists():
@@ -148,14 +149,26 @@ def collect_protected_current_runs_under_global_lock(*, base: Path) -> set[Path]
         if not child.is_dir():
             raise PositionAdviceCurrentError("unexpected position advice control-plane file")
         current_path = child / "account_decision_current.v2.json"
-        if not current_path.exists():
+        if current_path.exists():
+            validated = validate_current_artifacts_under_lock(
+                base=base,
+                portfolio_scope_id=child.name,
+                require_fresh=False,
+            )
+            protected.add(Path(validated["run_root"]).resolve())
+        policy_path = child / "authority_policy.v1.json"
+        if not policy_path.exists():
             continue
-        validated = validate_current_artifacts_under_lock(
-            base=base,
-            portfolio_scope_id=child.name,
-            require_fresh=False,
+        policy = _read_json_object(policy_path)
+        policy_reasons = validate_authority_policy(
+            policy,
+            expected_scope_id=child.name,
         )
-        protected.add(Path(validated["run_root"]).resolve())
+        if policy_reasons:
+            raise PositionAdviceCurrentError(
+                "authority policy is invalid during cleanup: "
+                + ",".join(policy_reasons)
+            )
     return protected
 
 

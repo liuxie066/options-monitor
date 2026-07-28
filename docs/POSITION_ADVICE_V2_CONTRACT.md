@@ -234,7 +234,23 @@ canonical, non-symlinked plans at
 runtime root. Republished producer receipts do not create a new opportunity
 when their stable source facts are unchanged.
 
-The v1 gate requires:
+The mandatory maintenance timer refreshes promotion evidence once per day at
+05:15 Beijing time. It discovers every canonical plan bound to the current
+account `v2_shadow` generation, copies each exact plan and immutable input into
+a content-addressed gzip archive under the promotion control plane, calculates
+the six safety counters from those archived sources, runs the seven bounded
+deterministic replay fixtures through production domain functions, evaluates
+the fixed gate, and publishes immutable evidence and gate artifacts. Repeating
+the refresh for an unchanged plan set is idempotent. Dry-run does not create the
+archive. The timer never changes authority, sends a notification, writes the
+ledger, or trades.
+
+The gate accepts safety and replay results only when their independently hashed
+automatic reports bind the exact same source-plan hash set and match the
+top-level counters. Caller-supplied zero counters or `true` fixture flags
+without those reports remain `insufficient_evidence`.
+
+The fixed promotion gate (`position_advice_promotion_gate.v1`) requires:
 
 - all safety counters equal zero;
 - at least 10 distinct market sessions spanning at least 14 elapsed days;
@@ -285,6 +301,13 @@ Later shadow, promotion, and rollback use the current policy hash:
   --expected-policy-hash <current-policy-hash> \
   --dry-run
 
+./om position-advice --runtime-root <runtime-root> promotion refresh \
+  --accounts lx sy \
+  --dry-run
+
+./om position-advice --runtime-root <runtime-root> promotion status \
+  --account lx
+
 ./om position-advice --runtime-root <runtime-root> authority set \
   --account lx \
   --mode v2 \
@@ -310,23 +333,35 @@ Resolve an ambiguous delivery only from external evidence:
   --dry-run
 ```
 
-Replace `--dry-run` with `--confirm` only after review. These commands mutate
-the local shared control plane; they do not trade, publish a release, deploy, or
-change production services.
+`promotion refresh` is also dry-run by default; `--confirm` publishes only the
+immutable evidence and gate. `promotion status` reports the latest valid
+artifact bound to the current policy and, only after a passing gate, prints the
+exact evidence path and expected policy hash for the final CAS. It does not
+perform that CAS.
+
+Replace `--dry-run` with `--confirm` only after review. These commands do not
+trade, publish a release, deploy, or change production services. Authority
+changes and notification resolution mutate the shared control plane;
+promotion refresh only appends immutable source, evidence, and gate artifacts.
 
 ## Persistence and operating boundary
 
 Current manifests, authority policies, successful first-use identity bindings,
-change receipts, promotion evidence, promotion gates, notification receipts,
-and human notification resolutions live under:
+change receipts, compressed promotion sources, promotion evidence, promotion
+gates, notification receipts, and human notification resolutions live under:
 
 ```text
 output_shared/state/position_advice/<portfolio_scope_id>/
 ```
 
 They are persistent control-plane state and are never output-run cleanup
-candidates. Cleanup protects every run referenced by a validated current
-manifest and fails closed on malformed or escaping references.
+candidates. The content-addressed gzip archive stores each exact plan/input pair
+needed to replay the full observation window without retaining its
+multi-megabyte account run. Cleanup therefore continues ordinary output-run
+retention and separately protects every run referenced by a validated current
+manifest. It fails closed on malformed or escaping current references. After an
+authority change leaves `v2_shadow`, the immutable source archive and promotion
+evidence remain authoritative.
 
 v2 assumes US/HK runners share one `output_shared` filesystem and POSIX locks.
 Multi-host active-active authority requires a separate distributed-coordination

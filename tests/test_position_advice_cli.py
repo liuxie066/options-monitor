@@ -237,3 +237,47 @@ def test_first_use_cli_failure_returns_hash_intent_without_state_write(
     assert len(bindings["US"]["source_receipt_hashes"]) == 1
     assert not policy_path.exists()
     assert not policy_path.parent.exists()
+
+
+def test_position_advice_promotion_cli_is_safe_without_authority(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    result = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "promotion",
+            "refresh",
+            "--accounts",
+            "lx",
+            "sy",
+            "--confirm",
+        ]
+    )
+    refresh = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert refresh["status"] == "completed"
+    assert [item["status"] for item in refresh["results"]] == [
+        "not_applicable",
+        "not_applicable",
+    ]
+    assert not (tmp_path / "output_shared").exists()
+
+    assert (
+        main(
+            [
+                "--runtime-root",
+                str(tmp_path),
+                "promotion",
+                "status",
+                "--account",
+                "lx",
+            ]
+        )
+        == 0
+    )
+    status = json.loads(capsys.readouterr().out)
+    assert status["status"] == "not_applicable"
+    assert status["ready_for_final_cas"] is False
