@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 1.6.3 - 2026-07-28
+
 ### Improvements
 - Replaced compact recommendation comparison tables in Feishu Daily Brief cards with mobile-friendly per-candidate summaries that keep the contract and key metrics together.
+
+### Bug Fixes
+- Allowed a first-use Position Advice authority policy to formalize only verified implicit v1 notification history while preserving immutable delivery receipts and requiring an explicit v1 bootstrap before v2 shadow mode.
 
 ## 1.6.2 - 2026-07-28
 
