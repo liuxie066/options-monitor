@@ -21,6 +21,7 @@ from src.application.position_advice_authority_service import (
 )
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
+    safe_existing_relative_path,
     sha256_bytes,
     validate_source_receipt,
 )
@@ -352,19 +353,38 @@ def _latest_fresh_source_summary(
                 if isinstance(item, Mapping)
                 and item.get("source_kind") == "portfolio"
             )
-            receipt_path = Path(str(portfolio.get("receipt_path") or "")).resolve()
-            producer_root = Path(
+            receipt_input = Path(
+                str(portfolio.get("receipt_path") or "")
+            )
+            producer_root_input = Path(
                 str(portfolio.get("producer_root") or "")
-            ).resolve()
+            )
             expected_producer_root = path.parent.resolve()
             if (
-                producer_root != expected_producer_root
-                or receipt_path.parent != producer_root
-                or receipt_path.is_symlink()
+                not receipt_input.is_absolute()
+                or not producer_root_input.is_absolute()
+                or producer_root_input.is_symlink()
             ):
                 raise PositionAdviceIdentityBindingError(
                     "portfolio source receipt escapes its account run"
                 )
+            producer_root = producer_root_input.resolve()
+            if producer_root != expected_producer_root:
+                raise PositionAdviceIdentityBindingError(
+                    "portfolio source receipt escapes its account run"
+                )
+            try:
+                receipt_relpath = receipt_input.relative_to(
+                    producer_root_input
+                ).as_posix()
+                receipt_path = safe_existing_relative_path(
+                    producer_root,
+                    receipt_relpath,
+                )
+            except (ValueError, PositionAdviceSourceError) as exc:
+                raise PositionAdviceIdentityBindingError(
+                    "portfolio source receipt escapes its account run"
+                ) from exc
             receipt = _read_json_object(receipt_path, "portfolio source receipt")
             validated = validate_source_receipt(
                 receipt,

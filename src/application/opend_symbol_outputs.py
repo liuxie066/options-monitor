@@ -17,6 +17,7 @@ from src.application.position_advice_source_receipts import (
     publish_source_receipt,
     safe_existing_relative_path,
     sha256_bytes,
+    source_snapshot_id,
     validate_source_receipt,
 )
 from src.infrastructure.io_utils import atomic_write_text
@@ -207,8 +208,16 @@ def publish_required_data_quote_snapshot(
     bundle_hash = canonical_sha256(bundle)
     run_key = canonical_sha256({"producer_run_id": run_id})
     symbol_key = canonical_sha256({"symbol": symbol_norm})
+    source_native_id = f"opend-required-data:{symbol_norm}:{bundle_hash}"
+    snapshot_key = source_snapshot_id(
+        source_kind="quotes",
+        source_native_id=source_native_id,
+        source_observed_at=source_observed_at,
+        payload_sha256=sha256_bytes(bundle_bytes),
+        producer_policy_hash=policy_hash,
+    )
     prefix = (
-        f"position_advice_sources/quotes/{run_key}/{symbol_key}/{bundle_hash}"
+        f"position_advice_sources/quotes/{run_key}/{symbol_key}/{snapshot_key}"
     )
     receipt = publish_source_receipt(
         producer_root=root,
@@ -224,7 +233,7 @@ def publish_required_data_quote_snapshot(
         account=None,
         portfolio_account_identity_hash=None,
         included_markets=[market],
-        source_native_id=f"opend-required-data:{symbol_norm}:{bundle_hash}",
+        source_native_id=source_native_id,
         source_observed_at=source_observed_at,
         completed_at=completed_at or datetime.now(timezone.utc),
         producer_policy_hash=policy_hash,

@@ -68,11 +68,16 @@ def _runtime_fixture(
             / "lx"
             / "state"
         )
-        receipt_path = state_dir / "portfolio.source_receipt.json"
+        receipt_relpath = (
+            f"position_advice_producers/portfolio/{market}/receipt.json"
+        )
+        receipt_path = state_dir / receipt_relpath
         receipt = publish_source_receipt(
             producer_root=state_dir,
-            receipt_relpath=receipt_path.name,
-            payload_relpath="portfolio.source.json",
+            receipt_relpath=receipt_relpath,
+            payload_relpath=(
+                f"position_advice_producers/portfolio/{market}/payload.json"
+            ),
             payload_bytes=json.dumps(
                 {
                     "portfolio_source_name": "futu",
