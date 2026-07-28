@@ -125,6 +125,49 @@ def test_cache_discovery_reuses_receipt_observation_after_shared_files_change(
     assert persisted["source_observed_at"] == receipt["source_observed_at"]
 
 
+def test_same_run_can_publish_identical_quote_bytes_as_distinct_observations(
+    tmp_path: Path,
+) -> None:
+    raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        _required_payload(),
+        output_root=tmp_path,
+    )
+    first_path, first = publish_required_data_quote_snapshot(
+        producer_root=tmp_path,
+        producer_run_id="run-1",
+        symbol="NVDA",
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan={"symbol": "NVDA"},
+        fetch_policy={"source": "opend"},
+        source_observed_at=NOW,
+        completed_at=NOW + timedelta(seconds=1),
+    )
+    second_path, second = publish_required_data_quote_snapshot(
+        producer_root=tmp_path,
+        producer_run_id="run-1",
+        symbol="NVDA",
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan={"symbol": "NVDA"},
+        fetch_policy={"source": "opend"},
+        source_observed_at=NOW + timedelta(seconds=2),
+        completed_at=NOW + timedelta(seconds=3),
+    )
+
+    assert first_path != second_path
+    assert first["snapshot_id"] != second["snapshot_id"]
+    exact = resolve_exact_fresh_required_data_quote_receipt(
+        producer_root=tmp_path,
+        symbol="NVDA",
+        now=NOW + timedelta(seconds=4),
+    )
+    assert exact is not None
+    assert exact["snapshot_id"] == second["snapshot_id"]
+
+
 def test_exact_receipt_resolution_rejects_mutated_scan_bytes(
     tmp_path: Path,
 ) -> None:
