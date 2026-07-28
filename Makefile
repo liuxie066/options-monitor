@@ -26,7 +26,7 @@ agent-smoke:
 
 release-check:
 	chmod +x ./om-agent
-	$(PYTHON) scripts/release_check.py
+	$(PYTHON) scripts/release_check.py --require-current-taxonomy --require-delta-coverage
 
 release-preflight:
 	bash scripts/release_preflight.sh $(ARGS)
