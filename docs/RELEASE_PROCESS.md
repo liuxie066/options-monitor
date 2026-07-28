@@ -98,10 +98,38 @@ Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产�
 1. 确认当前 `VERSION` 与远端最新稳定 tag 一致；
 2. 检查从最新 tag 到 `main` 的所有提交，确认 `Unreleased` 没有遗漏、重复或错误分类；
 3. 运行只读自动版本建议并由维护者确认 major、minor 或 patch；
-4. 将 `Unreleased` 移入日期化的目标版本段落，并更新 `VERSION`；
-5. 渲染最终 Release Notes，确认只包含目标版本且分类顺序正确；
-6. 运行发布前检查；
-7. 把 `VERSION` 和 `CHANGELOG.md` 作为独立的 `chore: release <version>` 提交推送到 `main`。
+4. 生成 `release/coverage/v<version>.json`，逐项完成 commit 与 Release Notes 的映射；
+5. 将 `Unreleased` 移入日期化的目标版本段落，并更新 `VERSION`；
+6. 渲染最终 Release Notes，确认只包含目标版本且分类顺序正确；
+7. 运行发布前检查；
+8. 把 `VERSION`、`CHANGELOG.md` 和 coverage manifest 作为唯一的
+   `chore: release <version>` 提交推送到 `main`。
+
+Delta coverage manifest 不是从 commit message 猜 Release Notes。它先确定上一稳定 tag 和
+当前 `HEAD`，生成完整 commit inventory，并复制已经人工维护的 `Unreleased` 条目。维护者必须：
+
+- 为每条 `release_notes[]` 填入一个或多个对应的完整 commit SHA；
+- 对确实没有用户、配置、runtime 或运营影响的 commit，在 `no_release_note[]` 中写完整 SHA
+  和非空理由；
+- 不得把有对外影响的 commit 归入 `no_release_note`；
+- 如果审阅后 `HEAD` 或 Changelog 又变化，使用 `--refresh` 重新生成 inventory 并复核。
+
+准备 manifest：
+
+```bash
+TARGET_VERSION="1.6.1"
+./.venv/bin/python scripts/release_delta.py --target-version "${TARGET_VERSION}"
+
+# HEAD 或 Changelog 变化后刷新；仍然有效的映射会保留
+./.venv/bin/python scripts/release_delta.py \
+  --target-version "${TARGET_VERSION}" \
+  --refresh
+```
+
+发布门禁会双向核对：上一稳定 tag 到审阅 `HEAD` 的每个 commit 都必须有处置，目标
+Changelog 的每条 Release Note 也必须映射到 commit。审阅后最多只能再有一个严格命名为
+`chore: release <version>` 的直接子提交，而且它只能修改 `VERSION`、`CHANGELOG.md` 和对应
+coverage manifest；这可以阻止审阅完成后夹带代码。
 
 Release Notes 预览：
 
@@ -110,6 +138,7 @@ VERSION="$(cat VERSION)"
 ./.venv/bin/python scripts/release_check.py \
   --tag "v${VERSION}" \
   --require-current-taxonomy \
+  --require-delta-coverage \
   --render-notes-out /tmp/options-monitor-release-notes.md
 ```
 
@@ -138,6 +167,7 @@ make release-preflight ARGS="--full"
 
 - 当前 Python 解释器和 git 工作区状态
 - `VERSION` / `CHANGELOG.md` / tag metadata
+- 上一稳定 tag 到当前版本的 commit-to-release-note coverage
 - `docs/DEPENDENCY_GRAPH.md` 是否过期
 - agent plugin focused tests
 - 完整 pytest（传 `--full` 时）
@@ -152,7 +182,10 @@ make release-preflight ARGS="--full --require-clean"
 
 ```bash
 VERSION="$(cat VERSION)"
-./.venv/bin/python scripts/release_check.py --tag "v${VERSION}" --require-current-taxonomy
+./.venv/bin/python scripts/release_check.py \
+  --tag "v${VERSION}" \
+  --require-current-taxonomy \
+  --require-delta-coverage
 ./.venv/bin/python scripts/generate_dependency_graph.py --check
 ./.venv/bin/python tests/run_smoke.py
 ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
@@ -169,6 +202,8 @@ VERSION="$(cat VERSION)"
 
 - `VERSION` 正确
 - `CHANGELOG.md` 中存在对应版本段落
+- `release/coverage/v<version>.json` 完整覆盖上一稳定 tag 以来的所有 commit 和目标版本所有
+  Changelog 条目
 - README 与 Agent / Tool Gateway 文档没有明显过期命令
 - 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
 
@@ -180,6 +215,7 @@ VERSION="$(cat VERSION)"
 
 - 读取 `VERSION` 生成 `v<version>` tag
 - 精确匹配对应的日期化版本段落并严格校验新分类
+- 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
 - 运行 smoke / agent plugin 测试
 - 发布对应 GitHub Release

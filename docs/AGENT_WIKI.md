@@ -476,13 +476,22 @@ When the user explicitly asks to publish a release, execute the full publication
 
 1. Confirm intended file set with `git status --short`.
 2. Review all commits since the latest release tag against `CHANGELOG.md / Unreleased`.
-3. Preview the automatic version recommendation and rendered release notes.
-4. Move `Unreleased` items into the dated target-version section and update `VERSION`.
-5. Run focused tests and strict release checks.
-6. Commit the version metadata as `chore: release <version>`.
-7. Push `main`.
-8. Watch the `Release from VERSION` workflow.
-9. Verify the GitHub Release, remote tag, target commit, and assets.
+3. Preview the automatic version recommendation.
+4. Generate `release/coverage/v<version>.json` with `scripts/release_delta.py`; map every release
+   note to commit SHA(s), and give every truly non-user-visible commit an explicit reason.
+5. Move `Unreleased` items into the dated target-version section and update `VERSION`.
+6. Preview rendered release notes and run focused tests plus strict release checks with
+   `--require-delta-coverage`.
+7. Commit only `VERSION`, `CHANGELOG.md`, and the coverage manifest as
+   `chore: release <version>`.
+8. Push `main`.
+9. Watch the `Release from VERSION` workflow.
+10. Verify the GitHub Release, remote tag, target commit, and assets.
+
+The coverage gate uses the previous stable tag as the baseline. It requires every commit in the
+delta to map to an exact Changelog item or an explicit `no_release_note` reason, and rejects code
+commits added after the reviewed head. It records review disposition; it does not infer public
+semantics from commit messages.
 
 Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, `publishedAt`, `targetCommitish`, `isDraft`, and `isPrerelease`.
 
