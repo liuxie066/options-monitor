@@ -54,6 +54,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refresh-multiplier-cache", action="store_true", help="Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).")
     parser.add_argument("--no-context", action="store_true", help="Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.")
     parser.add_argument("--shared-required-data", default=None, help="Path to shared required_data directory (contains raw/ and parsed/). If set, it is authoritative and fetch is skipped when artifacts exist.")
+    parser.add_argument(
+        "--required-data-snapshot-manifest",
+        default=None,
+        help="Internal: terminal run-scoped required-data snapshot manifest.",
+    )
+    parser.add_argument(
+        "--prepared-portfolio-context-manifest",
+        default=None,
+        help="Internal: prepared account portfolio-context manifest.",
+    )
     parser.add_argument("--report-dir", default=None, help="Directory to write reports (symbols_summary/alerts/notification). Default: output_shared/reports")
     parser.add_argument("--state-dir", default=None, help="Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output_shared/state")
     parser.add_argument("--shared-context-dir", default=None, help="Optional shared context cache directory for cross-account reuse within one tick")
@@ -208,6 +218,16 @@ def main(argv: list[str] | None = None) -> int:
                 args,
                 "position_advice_account_run_id",
                 None,
+            ),
+            required_data_snapshot_manifest=(
+                Path(args.required_data_snapshot_manifest).resolve()
+                if getattr(args, "required_data_snapshot_manifest", None)
+                else None
+            ),
+            prepared_portfolio_context_manifest=(
+                Path(args.prepared_portfolio_context_manifest).resolve()
+                if getattr(args, "prepared_portfolio_context_manifest", None)
+                else None
             ),
         )
 

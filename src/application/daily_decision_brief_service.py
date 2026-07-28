@@ -375,6 +375,36 @@ def assemble_daily_decision_brief(
         required=False,
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
+    strategy_status_index = _load_json_artifact(
+        path=run_account_dir / "strategy_scan_status_index.v1.json",
+        run_account_dir=run_account_dir,
+        source_kind="strategy_scan_status_index",
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        required=False,
+    )
+    indexed_strategy_statuses = _append_strategy_status_gaps(
+        strategy_status_index,
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        data_gaps=data_gaps,
+    )
+    indexed_expected_families = {
+        str(item.get("strategy_family") or "").strip().lower()
+        for item in indexed_strategy_statuses
+    }
+    indexed_completed_families = {
+        str(item.get("strategy_family") or "").strip().lower()
+        for item in indexed_strategy_statuses
+        if str(item.get("status") or "").strip().lower() == "completed"
+    }
+    if "sell_put" in indexed_expected_families:
+        put_available = "sell_put" in indexed_completed_families
+    if "covered_call" in indexed_expected_families:
+        call_available = "covered_call" in indexed_completed_families
+    if "combo_yield" in indexed_expected_families:
+        combo_available = "combo_yield" in indexed_completed_families
 
     reject_logs = sorted(run_account_dir.glob("*_reject_log.csv"))
     rejections = _build_market_rejection_summary(
@@ -425,7 +455,14 @@ def assemble_daily_decision_brief(
         blockers.append(result_view["decision_reason"] or "account_scan_not_run")
     if all_decision_sources_unavailable:
         blockers.append("all_structured_decision_sources_unavailable")
-    if strategy_failures and not (put_rows or call_rows or combo_rows):
+    indexed_candidate_sources_failed = bool(
+        indexed_expected_families and not indexed_completed_families
+    )
+    if indexed_candidate_sources_failed or (
+        not indexed_expected_families
+        and strategy_failures
+        and not (put_rows or call_rows or combo_rows)
+    ):
         blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
         blockers.append("all_required_account_capacity_sources_unavailable")
@@ -1964,30 +2001,122 @@ def _append_prefetch_gaps(prefetch: Mapping[str, Any], *, market: str, data_gaps
     if not prefetch:
         return
     symbols = prefetch.get("symbols")
+    results = prefetch.get("results")
+    result_map = results if isinstance(results, Mapping) else {}
+    failed_symbols: set[str] = set()
     if isinstance(symbols, Mapping):
-        for symbol, item in symbols.items():
-            if symbol_market(symbol) != market or not isinstance(item, Mapping):
-                continue
-            status = _text(item.get("status") or item.get("source_status")).lower()
-            if status and status not in {"ok", "ready", "success", "available"}:
-                data_gaps.append(
-                    {
-                        "scope": "symbol",
-                        "symbol": _text(symbol).upper(),
-                        "reason": _text(item.get("reason") or status),
-                        "source": "required_data_prefetch_summary",
-                    }
-                )
+        symbol_items = [
+            {"symbol": symbol, **dict(item)}
+            for symbol, item in symbols.items()
+            if isinstance(item, Mapping)
+        ]
+    elif isinstance(symbols, list):
+        symbol_items = [
+            dict(item)
+            for item in symbols
+            if isinstance(item, Mapping)
+        ]
+    else:
+        symbol_items = []
+    for item in symbol_items:
+        symbol = _text(item.get("symbol")).upper()
+        if symbol_market(symbol) != market:
+            continue
+        status = _text(
+            item.get("status") or item.get("source_status")
+        ).lower()
+        if status and status not in {
+            "ok",
+            "ready",
+            "success",
+            "available",
+            "completed",
+            "cached",
+        }:
+            failed_symbols.add(symbol)
+            data_gaps.append(
+                {
+                    "scope": "symbol",
+                    "market": market,
+                    "symbol": symbol,
+                    "reason": _text(
+                        item.get("reason")
+                        or item.get("message")
+                        or result_map.get(symbol)
+                        or status
+                    ),
+                    "source": "required_data_prefetch_summary",
+                }
+            )
+    errors = int(_number(prefetch.get("errors")) or 0)
     summary = prefetch.get("summary")
-    if isinstance(summary, Mapping) and int(_number(summary.get("errors")) or 0) > 0:
+    if errors <= 0 and isinstance(summary, Mapping):
+        errors = int(_number(summary.get("errors")) or 0)
+    if errors > 0 and not failed_symbols:
         data_gaps.append(
             {
                 "scope": "prefetch",
                 "market": market,
                 "reason": "required_data_prefetch_errors",
-                "count": int(_number(summary.get("errors")) or 0),
+                "count": errors,
             }
         )
+
+
+def _append_strategy_status_gaps(
+    index: Mapping[str, Any],
+    *,
+    run_id: str,
+    account: str,
+    market: str,
+    data_gaps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not index:
+        return []
+    if (
+        index.get("schema_version") != "strategy_scan_status_index.v1"
+        or _text(index.get("run_id")) != run_id
+        or _text(index.get("account")).lower() != account
+        or not isinstance(index.get("items"), list)
+    ):
+        data_gaps.append(
+            {
+                "scope": "source",
+                "kind": "strategy_scan_status_index",
+                "reason": "strategy_scan_status_index_invalid",
+            }
+        )
+        return []
+    relevant: list[dict[str, Any]] = []
+    for raw in index.get("items") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        if _text(item.get("market")).upper() != market:
+            continue
+        symbol = _text(item.get("symbol")).upper()
+        family = _text(item.get("strategy_family")).lower()
+        status = _text(item.get("status")).lower()
+        if not symbol or not family:
+            continue
+        relevant.append(item)
+        if status == "completed":
+            continue
+        data_gaps.append(
+            {
+                "scope": "strategy",
+                "market": market,
+                "symbol": symbol,
+                "strategy_family": family,
+                "reason": _text(
+                    item.get("reason") or "strategy_scan_status_invalid"
+                ),
+                "source_status_path": _text(
+                    item.get("source_status_path")
+                ),
+            }
+        )
+    return relevant
 
 
 def _account_result_view(result: AccountResult | Mapping[str, Any]) -> dict[str, Any]:
@@ -2062,7 +2191,17 @@ def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in items:
         safe = _json_safe(item)
-        key = repr(sorted(safe.items(), key=lambda pair: pair[0]))
+        correlation = (
+            _text(safe.get("market")).upper(),
+            _text(safe.get("symbol")).upper(),
+            _text(safe.get("strategy_family")).lower(),
+            _text(safe.get("reason")).lower(),
+        )
+        key = (
+            repr(correlation)
+            if correlation[1] and correlation[3]
+            else repr(sorted(safe.items(), key=lambda pair: pair[0]))
+        )
         if key in seen:
             continue
         seen.add(key)

@@ -26,14 +26,18 @@ from src.application.config_sections import (
 from domain.domain.candidate_defaults import resolve_event_risk_config
 from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
+from domain.domain.symbol_identity import symbol_market
 from domain.domain import normalize_processor_row, normalize_processor_rows
 from src.application.yield_enhancement_config import (
     COMBO_YIELD_CONFIG_KEY,
+    derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_separate,
 )
 from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
+from src.application.prefilters import apply_prefilters
+from src.application.strategy_scan_status import publish_strategy_scan_status_index
 from src.infrastructure.io_utils import atomic_write_json
 
 LIQUIDITY_COMMON_FIELDS = (
@@ -204,6 +208,8 @@ def run_watchlist_pipeline(
     position_advice_candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
+    required_data_snapshot_manifest: Path | None = None,
+    prepared_portfolio_context_manifest: Path | None = None,
 ) -> list[dict]:
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
@@ -211,17 +217,27 @@ def run_watchlist_pipeline(
     event_snapshot_path = str(runtime.get("event_snapshot_path") or "").strip()
     profiles = resolve_templates_config(cfg)
 
+    context_kwargs: dict[str, Any] = {
+        "py": py,
+        "base": base,
+        "cfg": cfg,
+        "report_dir": report_dir,
+        "portfolio_timeout_sec": portfolio_timeout_sec,
+        "runtime": runtime,
+        "is_scheduled": is_scheduled,
+        "log": log,
+        "no_context": no_context,
+        "want_scan": want_fn('scan'),
+    }
+    if prepared_portfolio_context_manifest is not None:
+        context_kwargs["prepared_portfolio_context_manifest"] = (
+            prepared_portfolio_context_manifest
+        )
+        context_kwargs["prepared_portfolio_context_run_id"] = (
+            position_advice_producer_run_id
+        )
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
-        py=py,
-        base=base,
-        cfg=cfg,
-        report_dir=report_dir,
-        portfolio_timeout_sec=portfolio_timeout_sec,
-        runtime=runtime,
-        is_scheduled=is_scheduled,
-        log=log,
-        no_context=no_context,
-        want_scan=want_fn('scan'),
+        **context_kwargs,
     )
 
     watchlist_items = []
@@ -231,6 +247,58 @@ def run_watchlist_pipeline(
             if s0 and s0 not in sym_whitelist:
                 continue
         watchlist_items.append(item0)
+
+    expected_strategy_statuses: list[dict[str, str]] = []
+    if (
+        required_data_snapshot_manifest is not None
+        and str(position_advice_producer_run_id or "").strip()
+    ):
+        for item0 in watchlist_items:
+            resolved = resolve_watchlist_item_runtime_config(
+                item=item0,
+                profiles=profiles,
+                apply_profiles_fn=apply_profiles_fn,
+            )
+            symbol = normalize_symbol_read(resolved.get("symbol"))
+            sp = dict(resolved.get("sell_put") or {})
+            cc = dict(resolved.get("sell_call") or {})
+            filtered = apply_prefilters(
+                symbol=symbol,
+                sp=sp,
+                cc=cc,
+                want_put=bool(sp.get("enabled", False)),
+                want_call=bool(cc.get("enabled", False)),
+                portfolio_ctx=portfolio_ctx,
+            )
+            market = str(
+                symbol_market(symbol) or resolved.get("broker") or ""
+            ).strip().upper()
+            if filtered.want_put:
+                expected_strategy_statuses.append(
+                    {
+                        "market": market,
+                        "symbol": symbol,
+                        "strategy_family": "sell_put",
+                    }
+                )
+            if derive_yield_enhancement_policy(
+                resolve_yield_enhancement_cfg(resolved)
+            ).enabled:
+                expected_strategy_statuses.append(
+                    {
+                        "market": market,
+                        "symbol": symbol,
+                        "strategy_family": "combo_yield",
+                    }
+                )
+            if filtered.want_call:
+                expected_strategy_statuses.append(
+                    {
+                        "market": market,
+                        "symbol": symbol,
+                        "strategy_family": "covered_call",
+                    }
+                )
 
     if portfolio_ctx is not None and option_ctx is not None:
         portfolio_ctx = dict(portfolio_ctx)
@@ -302,6 +370,17 @@ def run_watchlist_pipeline(
                 }
                 if quote_snapshot_id:
                     advice_scan_kwargs["quote_snapshot_id"] = quote_snapshot_id
+            if required_data_snapshot_manifest is not None:
+                advice_scan_kwargs.update(
+                    {
+                        "required_data_snapshot_manifest": (
+                            required_data_snapshot_manifest
+                        ),
+                        "required_data_snapshot_run_id": (
+                            position_advice_producer_run_id
+                        ),
+                    }
+                )
 
             if not want_scan:
                 process_symbol_fn(
@@ -357,6 +436,21 @@ def run_watchlist_pipeline(
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)
         build_symbols_digest_fn(summary_rows, int(top_n))
+        if (
+            required_data_snapshot_manifest is not None
+            and str(position_advice_producer_run_id or "").strip()
+        ):
+            portfolio_cfg = (
+                cfg.get("portfolio")
+                if isinstance(cfg.get("portfolio"), dict)
+                else {}
+            )
+            publish_strategy_scan_status_index(
+                report_dir=report_dir,
+                run_id=str(position_advice_producer_run_id),
+                account=str(portfolio_cfg.get("account") or ""),
+                expected=expected_strategy_statuses,
+            )
 
     return summary_rows
 
@@ -380,6 +474,8 @@ def run_watchlist_pipeline_default(
     log: Callable[[str], None],
     want_fn: Callable[[str], bool],
     position_advice_account_run_id: str | None = None,
+    required_data_snapshot_manifest: Path | None = None,
+    prepared_portfolio_context_manifest: Path | None = None,
 ) -> list[dict]:
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
@@ -454,6 +550,8 @@ def run_watchlist_pipeline_default(
         position_advice_candidate_capture_status_sink_fn=(
             _capture_status if candidate_capture_enabled else None
         ),
+        required_data_snapshot_manifest=required_data_snapshot_manifest,
+        prepared_portfolio_context_manifest=prepared_portfolio_context_manifest,
     )
     if not candidate_capture_enabled:
         return result

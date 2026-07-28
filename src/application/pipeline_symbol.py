@@ -59,6 +59,8 @@ def process_symbol(
     quote_snapshot_id: str | None = None,
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     position_advice_producer_run_id: str | None = None,
+    required_data_snapshot_manifest: Path | None = None,
+    required_data_snapshot_run_id: str | None = None,
     candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
@@ -88,6 +90,8 @@ def process_symbol(
             quote_snapshot_id=quote_snapshot_id,
             all_decisions_sink_fn=all_decisions_sink_fn,
             position_advice_producer_run_id=position_advice_producer_run_id,
+            required_data_snapshot_manifest=required_data_snapshot_manifest,
+            required_data_snapshot_run_id=required_data_snapshot_run_id,
             candidate_capture_status_sink_fn=(
                 candidate_capture_status_sink_fn
             ),

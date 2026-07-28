@@ -34,6 +34,10 @@ from src.application.portfolio_context_service import (
     load_holdings_portfolio_shared_context,
     with_context_source,
 )
+from src.application.prepared_portfolio_context import (
+    PreparedPortfolioContextError,
+    load_prepared_portfolio_context,
+)
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
@@ -390,6 +394,8 @@ def build_pipeline_context(
     log,
     no_context: bool,
     want_scan: bool,
+    prepared_portfolio_context_manifest: Path | None = None,
+    prepared_portfolio_context_run_id: str | None = None,
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
     """Load portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate."""
     if (not want_scan) or bool(no_context):
@@ -408,18 +414,31 @@ def build_pipeline_context(
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
     ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if is_scheduled else 60) or 0)
 
-    portfolio_ctx = load_portfolio_context(
-        base=base,
-        data_config=str(data_config),
-        market=str(broker),
-        account=(str(account) if account else None),
-        ttl_sec=ttl_port_ctx,
-        state_dir=state_dir,
-        shared_state_dir=shared_state_dir,
-        log=log,
-        runtime_config=cfg,
-        portfolio_source=str(portfolio_source),
-    )
+    if prepared_portfolio_context_manifest is not None:
+        try:
+            portfolio_ctx = load_prepared_portfolio_context(
+                manifest_path=prepared_portfolio_context_manifest,
+                expected_run_id=str(prepared_portfolio_context_run_id or ""),
+                expected_account=str(account or ""),
+            )
+            source = "prepared" if portfolio_ctx is not None else "prepared_unavailable"
+            log(f"[CTX] portfolio_context source={source} account={account or '-'}")
+        except PreparedPortfolioContextError as exc:
+            log(f"[WARN] prepared portfolio context not available: {exc}")
+            portfolio_ctx = None
+    else:
+        portfolio_ctx = load_portfolio_context(
+            base=base,
+            data_config=str(data_config),
+            market=str(broker),
+            account=(str(account) if account else None),
+            ttl_sec=ttl_port_ctx,
+            state_dir=state_dir,
+            shared_state_dir=shared_state_dir,
+            log=log,
+            runtime_config=cfg,
+            portfolio_source=str(portfolio_source),
+        )
 
     option_ctx, _ = load_option_positions_context(
         base=base,
@@ -434,16 +453,17 @@ def build_pipeline_context(
 
     if portfolio_ctx is not None and _wants_global_path_risk_context(cfg):
         portfolio_ctx = dict(portfolio_ctx)
-        global_portfolio_ctx = load_global_holdings_risk_context(
-            base=base,
-            data_config=str(data_config),
-            ttl_sec=ttl_port_ctx,
-            shared_state_dir=shared_state_dir,
-            state_dir=state_dir,
-            log=log,
-        )
-        if global_portfolio_ctx is not None:
-            portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
+        if prepared_portfolio_context_manifest is None:
+            global_portfolio_ctx = load_global_holdings_risk_context(
+                base=base,
+                data_config=str(data_config),
+                ttl_sec=ttl_port_ctx,
+                shared_state_dir=shared_state_dir,
+                state_dir=state_dir,
+                log=log,
+            )
+            if global_portfolio_ctx is not None:
+                portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
         global_option_ctx = load_global_option_positions_risk_context(
             base=base,
             data_config=str(data_config),

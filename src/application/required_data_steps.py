@@ -31,6 +31,7 @@ from src.application.required_data_fetching import (
 )
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.required_data_planning import RequiredDataFetchPlanBundle
+from src.application.required_data_snapshot import resolve_frozen_required_data
 
 
 def ensure_required_data(
@@ -55,12 +56,21 @@ def ensure_required_data(
     report_dir: Path | None = None,
     opend_fetch_config: dict[str, float | int] | None = None,
     position_advice_producer_run_id: str | None = None,
+    required_data_snapshot_manifest: Path | None = None,
+    required_data_snapshot_run_id: str | None = None,
 ) -> dict[str, Any] | None:
     sym = symbol
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
 
     if not (want_put or want_call):
         return None
+    if required_data_snapshot_manifest is not None:
+        return resolve_frozen_required_data(
+            manifest_path=required_data_snapshot_manifest,
+            expected_run_id=str(required_data_snapshot_run_id or ""),
+            symbol=sym,
+            required_data_root=required_data_dir,
+        )
 
     src = 'opend'
 

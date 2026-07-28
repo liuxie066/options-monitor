@@ -40,7 +40,6 @@ from src.application.multi_tick.misc import (
     _safe_runlog_data,
     ensure_account_output_dir,
 )
-from src.application.multi_tick.required_data_prefetch import prefetch_required_data
 from src.application.events.prefetch import prefetch_event_data
 
 from domain.storage.repositories import run_repo, state_repo
@@ -72,6 +71,10 @@ class AccountRunRequest:
     scan_decision_by_account: dict[str, dict[str, Any]] | None = None
     repo_root: Path | None = None
     symbols_arg: str | None = None
+    required_data_snapshot_manifest: Path | None = None
+    prepared_portfolio_context_manifest: Path | None = None
+    required_data_snapshot_status: str | None = None
+    required_data_snapshot_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,42 @@ def _position_advice_markets(
     return inferred or ["HK", "US"]
 
 
+def build_account_runtime_config(
+    *,
+    base_cfg: dict[str, Any],
+    cfg_path: Path,
+    account: str,
+    markets_to_run: list[str],
+    symbols_arg: str | None = None,
+) -> dict[str, Any]:
+    """Build the exact account-scoped config shared by barrier and pipeline."""
+
+    cfg = json.loads(json.dumps(base_cfg))
+    cfg["config_source_path"] = str(Path(cfg_path).resolve())
+    cfg.setdefault("portfolio", {})
+    cfg["portfolio"]["account"] = str(account).strip().lower()
+    try:
+        symbols = resolve_watchlist_config(cfg)
+        if markets_to_run:
+            symbols = [
+                item
+                for item in symbols
+                if isinstance(item, dict) and item.get("broker") in markets_to_run
+            ]
+        whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
+        if whitelist is not None:
+            symbols = [
+                item
+                for item in symbols
+                if isinstance(item, dict)
+                and normalize_symbol_read(item.get("symbol"), config=cfg) in whitelist
+            ]
+        set_watchlist_config(cfg, symbols)
+    except Exception:
+        pass
+    return cfg
+
+
 def run_one_account(
     *,
     request: AccountRunRequest,
@@ -209,30 +248,20 @@ def run_one_account(
         "scheduler_ms": request.scheduler_ms,
         "pipeline_ms": None,
         "ran_scan": False,
+        "ran_pipeline": False,
         "should_notify": False,
         "meaningful": False,
         "reason": "",
     }
     ensure_account_output_dir(acct_out)
 
-    cfg = json.loads(json.dumps(request.base_cfg))
-    cfg["config_source_path"] = str(request.cfg_path.resolve())
-    cfg.setdefault("portfolio", {})
-    cfg["portfolio"]["account"] = acct
-
-    try:
-        syms = resolve_watchlist_config(cfg)
-        if request.markets_to_run:
-            syms = [it for it in syms if isinstance(it, dict) and (it.get("broker") in request.markets_to_run)]
-        whitelist = _symbol_whitelist(request.symbols_arg, cfg=cfg)
-        if whitelist is not None:
-            syms = [
-                it for it in syms
-                if isinstance(it, dict) and normalize_symbol_read(it.get("symbol"), config=cfg) in whitelist
-            ]
-        set_watchlist_config(cfg, syms)
-    except Exception:
-        pass
+    cfg = build_account_runtime_config(
+        base_cfg=request.base_cfg,
+        cfg_path=request.cfg_path,
+        account=acct,
+        markets_to_run=request.markets_to_run,
+        symbols_arg=request.symbols_arg,
+    )
 
     acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
     acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
@@ -274,16 +303,23 @@ def run_one_account(
     def _write_account_metrics_state() -> None:
         payload = {
             "as_of_utc": utc_now(),
+            "run_id": request.run_id,
             "account": acct,
             "markets_to_run": request.markets_to_run,
             "scheduler_ms": acct_metrics.get("scheduler_ms"),
             "pipeline_ms": acct_metrics.get("pipeline_ms"),
+            "pipeline_started_at_utc": acct_metrics.get(
+                "pipeline_started_at_utc"
+            ),
             "ran_scan": acct_metrics.get("ran_scan"),
+            "ran_pipeline": acct_metrics.get("ran_pipeline"),
             "should_notify": acct_metrics.get("should_notify"),
             "meaningful": acct_metrics.get("meaningful"),
             "reason": acct_metrics.get("reason"),
             "notification_type": acct_metrics.get("notification_type"),
             "run_dir": str(request.run_dir),
+            "snapshot_status": request.required_data_snapshot_status,
+            "snapshot_manifest_sha256": request.required_data_snapshot_sha256,
         }
         _write_acct_run_state("account_metrics.json", payload)
 
@@ -352,21 +388,6 @@ def run_one_account(
             ran_pipeline=False,
         )
 
-    def _shared_prefetch_done() -> bool:
-        state = request.prefetch_state
-        if not isinstance(state, dict):
-            return False
-        if bool(request.force_mode):
-            return bool(state.get("force_done"))
-        return bool(state.get("done"))
-
-    def _mark_shared_prefetch_done(done: bool) -> None:
-        state = request.prefetch_state
-        if done and isinstance(state, dict):
-            state["done"] = True
-            if bool(request.force_mode):
-                state["force_done"] = True
-
     def _shared_event_prefetch_done() -> bool:
         state = request.prefetch_state
         if not isinstance(state, dict):
@@ -381,69 +402,6 @@ def run_one_account(
             state["event_done"] = True
             if bool(request.force_mode):
                 state["event_force_done"] = True
-
-    def _run_required_data_prefetch() -> bool:
-        runlog.safe_event(
-            "fetch_chain_cache",
-            "start",
-            data=_safe_runlog_data({"account": acct, "symbols_count": len(resolve_watchlist_config(cfg))}),
-        )
-        prefetch_stats = prefetch_required_data(
-            vpy=request.vpy,
-            base=request.base,
-            repo_root=repo_root,
-            cfg=cfg,
-            shared_required=request.shared_required,
-            force_refresh=bool(request.force_mode),
-            producer_run_id=request.run_id,
-        )
-        audit_fn(
-            "tool_call",
-            "required_data_prefetch",
-            run_id=request.run_id,
-            account=acct,
-            status=("ok" if int(prefetch_stats.get("errors") or 0) == 0 else "error"),
-            tool_name="required_data_prefetch",
-            extra={"stats": {k: v for k, v in prefetch_stats.items() if k != "audit"}},
-        )
-        try:
-            state_repo.write_account_run_state(
-                request.base,
-                request.run_id,
-                acct,
-                "required_data_prefetch_summary.json",
-                prefetch_stats,
-            )
-            for item in (prefetch_stats.get("audit") or []):
-                if isinstance(item, dict):
-                    state_repo.append_run_audit_jsonl(
-                        request.base,
-                        request.run_id,
-                        "tool_execution_audit.jsonl",
-                        item,
-                    )
-                    audit_fn(
-                        "tool_call",
-                        "required_data_prefetch_item",
-                        run_id=request.run_id,
-                        account=acct,
-                        status=("ok" if bool(item.get("ok")) else "error"),
-                        tool_name=str(item.get("tool_name") or "required_data_prefetch"),
-                        extra={"symbol": item.get("symbol"), "message": item.get("message")},
-                    )
-        except Exception as exc:
-            _record_account_run_degraded(
-                runlog=runlog,
-                audit_fn=audit_fn,
-                run_id=request.run_id,
-                account=acct,
-                action="write_required_data_prefetch_summary",
-                exc=exc,
-            )
-        runlog.safe_event("fetch_chain_cache", "ok", data=_safe_runlog_data(prefetch_stats))
-        done = int(prefetch_stats.get("errors") or 0) == 0
-        _mark_shared_prefetch_done(done)
-        return done
 
     def _run_event_prefetch() -> bool:
         run_state_dir = run_repo.get_run_state_dir(request.base, request.run_id)
@@ -504,21 +462,14 @@ def run_one_account(
             )
             return False
 
-    prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
+    prefetch_done = bool(request.prefetch_done)
     event_prefetch_done = bool(_shared_event_prefetch_done())
-    should_prefetch = (not prefetch_done) or (not event_prefetch_done)
-    if should_prefetch:
+    if not event_prefetch_done:
         if request.prefetch_lock is None:
-            if not prefetch_done:
-                prefetch_done = _run_required_data_prefetch()
-            if not event_prefetch_done:
-                event_prefetch_done = _run_event_prefetch()
+            event_prefetch_done = _run_event_prefetch()
         else:
             with request.prefetch_lock:
-                prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
                 event_prefetch_done = bool(_shared_event_prefetch_done())
-                if not prefetch_done:
-                    prefetch_done = _run_required_data_prefetch()
                 if not event_prefetch_done:
                     event_prefetch_done = _run_event_prefetch()
 
@@ -531,6 +482,7 @@ def run_one_account(
     )
 
     t_pipe0 = monotonic()
+    acct_metrics["pipeline_started_at_utc"] = utc_now()
     pipe = run_pipeline_script(
         vpy=request.vpy,
         base=repo_root,
@@ -541,6 +493,10 @@ def run_one_account(
         shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id),
         symbols_arg=request.symbols_arg,
         position_advice_account_run_id=request.run_id,
+        required_data_snapshot_manifest=request.required_data_snapshot_manifest,
+        prepared_portfolio_context_manifest=(
+            request.prepared_portfolio_context_manifest
+        ),
         capture_output=True,
         text=True,
         env=dict(os.environ, PYTHONPATH=str(repo_root)),
@@ -973,6 +929,7 @@ def run_one_account(
         )
 
     acct_metrics["ran_scan"] = True
+    acct_metrics["ran_pipeline"] = True
     acct_metrics["should_notify"] = bool(should_notify)
     acct_metrics["reason"] = str(reason)
     _write_account_metrics_state()

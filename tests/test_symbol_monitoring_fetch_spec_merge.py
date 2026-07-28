@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -153,6 +154,209 @@ def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkey
     assert out == []
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True
+
+
+def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.symbol_monitoring as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("frozen consumer must not plan market fetches")
+        ),
+    )
+
+    def _multiplier_writer(**_kwargs):
+        raise AssertionError("frozen consumer must not rewrite required data")
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **_kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=_multiplier_writer,
+        ensure_required_data_fn=lambda **kwargs: (
+            captured.update(kwargs)
+            or {"snapshot_id": "snapshot-1", "receipt_relpath": "receipt.json"}
+        ),
+        run_sell_put_scan_fn=lambda **_kwargs: {
+            "strategy": "sell_put",
+            "candidate_count": 0,
+        },
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "sell_put",
+        },
+        run_sell_call_scan_fn=lambda **_kwargs: {},
+        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "sell_call",
+        },
+        run_combo_yield_scan_fn=lambda **_kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "combo_yield",
+        },
+        materialize_empty_sell_put_artifacts_fn=lambda **_kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
+    )
+
+    out = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=True,
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            required_data_snapshot_run_id="run-1",
+        ),
+        deps=deps,
+    )
+
+    assert out[0]["candidate_count"] == 0
+    assert captured["fetch_plan"] is None
+    assert captured["required_data_snapshot_run_id"] == "run-1"
+
+
+def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.symbol_monitoring as mod
+    from src.application.required_data_snapshot import (
+        FrozenRequiredDataUnavailable,
+    )
+
+    report_dir = tmp_path / "reports"
+    capture_statuses: list[dict] = []
+
+    def _materialize_sell_put(**_kwargs):
+        report_dir.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "nvda_sell_put_candidates.csv",
+            "nvda_sell_put_candidates_labeled.csv",
+        ):
+            (report_dir / name).write_text("symbol\n", encoding="utf-8")
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **_kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("frozen consumer must not rewrite required data")
+        ),
+        ensure_required_data_fn=lambda **_kwargs: (_ for _ in ()).throw(
+            FrozenRequiredDataUnavailable(
+                symbol="NVDA",
+                reason="empty_chain",
+                snapshot_id="snapshot-failed",
+                receipt_relpath="quotes/receipt.json",
+            )
+        ),
+        run_sell_put_scan_fn=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unavailable frozen symbol must not scan")
+        ),
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "sell_put",
+        },
+        run_sell_call_scan_fn=lambda **_kwargs: {},
+        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
+        run_combo_yield_scan_fn=lambda **_kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {},
+        materialize_empty_sell_put_artifacts_fn=_materialize_sell_put,
+        materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
+    )
+
+    rows = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=report_dir,
+            state_dir=tmp_path / "state",
+            is_scheduled=True,
+            runtime_config={"portfolio": {"account": "lx"}},
+            position_advice_producer_run_id="run-1",
+            candidate_capture_status_sink_fn=capture_statuses.append,
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            required_data_snapshot_run_id="run-1",
+        ),
+        deps=deps,
+    )
+
+    assert rows == [
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 0,
+            "note": "行情快照不可用",
+        }
+    ]
+    assert capture_statuses == [
+        {
+            "symbol": "NVDA",
+            "strategy_mode": "put",
+            "status": "failed",
+            "reason": "required_data_snapshot_unavailable",
+            "quote_snapshot_id": "snapshot-failed",
+            "quote_receipt_relpath": "quotes/receipt.json",
+        }
+    ]
+    status = json.loads(
+        (report_dir / "nvda_sell_put_scan_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert status["status"] == "unavailable"
+    assert status["snapshot_id"] == "snapshot-failed"
+    assert status["receipt_relpath"] == "quotes/receipt.json"
 
 
 def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:

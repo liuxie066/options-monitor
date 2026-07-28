@@ -89,6 +89,8 @@ def run_pipeline_script(
     shared_context_dir: Path | None = None,
     symbols_arg: str | None = None,
     position_advice_account_run_id: str | None = None,
+    required_data_snapshot_manifest: Path | None = None,
+    prepared_portfolio_context_manifest: Path | None = None,
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
@@ -118,6 +120,20 @@ def run_pipeline_script(
             [
                 "--position-advice-account-run-id",
                 str(position_advice_account_run_id).strip(),
+            ]
+        )
+    if required_data_snapshot_manifest is not None:
+        cmd.extend(
+            [
+                "--required-data-snapshot-manifest",
+                str(Path(required_data_snapshot_manifest).resolve()),
+            ]
+        )
+    if prepared_portfolio_context_manifest is not None:
+        cmd.extend(
+            [
+                "--prepared-portfolio-context-manifest",
+                str(Path(prepared_portfolio_context_manifest).resolve()),
             ]
         )
     return run_command(

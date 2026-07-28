@@ -230,6 +230,76 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
     return out
 
 
+def reconcile_daily_decision_brief_evidence(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Carry candidate identity across a run with typed family-level data gaps."""
+
+    prev = normalize_daily_decision_brief(previous)
+    cur = normalize_daily_decision_brief(current)
+    _ensure_same_brief_identity(prev, cur)
+    gaps = {
+        (
+            _upper(item.get("symbol")),
+            _lower(item.get("strategy_family")),
+        ): dict(item)
+        for item in cur.get("data_gaps") or []
+        if isinstance(item, Mapping)
+        and _upper(item.get("symbol"))
+        and _lower(item.get("strategy_family"))
+    }
+    current_actions = {
+        str(action.get("action_id") or ""): action
+        for action in cur.get("actions") or []
+        if isinstance(action, Mapping)
+    }
+    additions: list[dict[str, Any]] = []
+    for prior in prev.get("actions") or []:
+        if not isinstance(prior, Mapping) or not _is_opening_candidate_action(prior):
+            continue
+        action_id = str(prior.get("action_id") or "")
+        if not action_id or action_id in current_actions:
+            continue
+        active_candidate = (
+            prior.get("state") == "active"
+            and prior.get("priority") in {"P0", "P1"}
+        )
+        evidence_hold = (
+            prior.get("state") == "observe"
+            and _lower(prior.get("evidence_state")) == "unavailable"
+        )
+        if not (active_candidate or evidence_hold):
+            continue
+        key = (
+            _upper(prior.get("symbol")),
+            _lower(prior.get("strategy_family")),
+        )
+        gap = gaps.get(key)
+        if gap is None:
+            continue
+        held = dict(prior)
+        held.update(
+            {
+                "state": "observe",
+                "evidence_state": "unavailable",
+                "evidence_gap_key": (
+                    f"{cur['market']}:{key[0]}:{key[1]}:"
+                    f"{str(gap.get('reason') or 'source_unavailable').strip()}"
+                ),
+                "evidence_reason": str(
+                    gap.get("reason") or "source_unavailable"
+                ).strip(),
+            }
+        )
+        additions.append(held)
+    if not additions:
+        return cur
+    candidate = dict(cur)
+    candidate["actions"] = [*cur["actions"], *additions]
+    return normalize_daily_decision_brief(candidate)
+
+
 def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
     if value is None:
         return {
@@ -525,7 +595,35 @@ def diff_daily_decision_briefs(
         priority_rank = {"P0": 0, "P1": 1, "P2": 2}
 
         if opening_candidate:
-            if current_is_active_high_priority and not prior_was_active_high_priority:
+            prior_evidence_unavailable = (
+                prior["state"] == "observe"
+                and _lower(prior.get("evidence_state")) == "unavailable"
+            )
+            current_evidence_unavailable = (
+                action["state"] == "observe"
+                and _lower(action.get("evidence_state")) == "unavailable"
+            )
+            if prior_evidence_unavailable and current_is_active_high_priority:
+                changes.append(
+                    _change(
+                        "candidate_evidence_recovered",
+                        priority=action["priority"],
+                        material=True,
+                        action=_action_change_view(action),
+                    )
+                )
+            elif prior_was_active_high_priority and current_evidence_unavailable:
+                changes.append(
+                    _change(
+                        "candidate_evidence_unavailable",
+                        priority=prior["priority"],
+                        material=True,
+                        action=_action_change_view(action),
+                    )
+                )
+            elif prior_evidence_unavailable and current_evidence_unavailable:
+                continue
+            elif current_is_active_high_priority and not prior_was_active_high_priority:
                 changes.append(
                     _change(
                         "candidate_added",
@@ -674,7 +772,15 @@ def diff_daily_decision_briefs(
     for action_id, action in sorted(prev_actions.items()):
         if action_id in cur_actions:
             continue
-        if action["priority"] in {"P0", "P1"} and action["state"] == "active":
+        evidence_hold = (
+            action["priority"] in {"P0", "P1"}
+            and action["state"] == "observe"
+            and _lower(action.get("evidence_state")) == "unavailable"
+        )
+        if (
+            action["priority"] in {"P0", "P1"}
+            and action["state"] == "active"
+        ) or evidence_hold:
             changes.append(
                 _change(
                     "candidate_invalidated"
@@ -682,7 +788,7 @@ def diff_daily_decision_briefs(
                     else "action_invalidated",
                     priority=action["priority"],
                     material=True,
-                    before="active",
+                    before=("evidence_unavailable" if evidence_hold else "active"),
                     after="missing",
                     action=_action_change_view(action),
                 )
@@ -947,4 +1053,5 @@ __all__ = [
     "effective_daily_brief_actionability",
     "normalize_daily_brief_action",
     "normalize_daily_decision_brief",
+    "reconcile_daily_decision_brief_evidence",
 ]
