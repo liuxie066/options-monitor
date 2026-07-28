@@ -57,7 +57,19 @@ def candidate_filter_explain_tool(
     for path in trace_paths:
         rows = read_candidate_filter_trace(path)
         if rows:
-            source_files.append({"path": mask_path(path), "rows": len(rows)})
+            source_files.append(
+                {
+                    "path": mask_path(path),
+                    "rows": len(rows),
+                    "run_ids": sorted(
+                        {
+                            str(row.get("run_id"))
+                            for row in rows
+                            if str(row.get("run_id") or "").strip()
+                        }
+                    ),
+                }
+            )
             loaded_rows.extend(rows)
 
     matching = [
@@ -89,6 +101,13 @@ def candidate_filter_explain_tool(
             "evidence_status": evidence_status,
             "conclusion_status": "supported" if matching else "indeterminate",
             "trace_count": len(matching),
+            "run_ids": sorted(
+                {
+                    str(row.get("run_id"))
+                    for row in matching
+                    if str(row.get("run_id") or "").strip()
+                }
+            ),
             "status_counts": dict(status_counts),
             "function_counts": dict(function_counts),
             "functions": summaries,
@@ -162,6 +181,8 @@ def _summarize_function(function_name: str, rows: list[dict[str, Any]]) -> dict[
 def _event_summary(row: dict[str, Any]) -> dict[str, Any]:
     rule = str(row.get("rule") or "").strip()
     return {
+        "run_id": row.get("run_id"),
+        "account": row.get("account"),
         "status": row.get("status"),
         "stage": row.get("stage"),
         "rule": row.get("rule"),

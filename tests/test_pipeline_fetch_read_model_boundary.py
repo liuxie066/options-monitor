@@ -261,6 +261,51 @@ def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp
     assert "snapshot rate limited" in current["reason"]
 
 
+def test_ensure_required_data_rejects_partial_payload_with_usable_rows(
+    tmp_path: Path,
+) -> None:
+    import src.application.required_data_steps as mod
+
+    required, state_dir = _make_dirs(tmp_path)
+    symbol = "NVDA"
+    old_execute = mod.execute_required_data_opend
+    try:
+        mod.execute_required_data_opend = lambda **_kwargs: {  # type: ignore[assignment]
+            "symbol": symbol,
+            "rows": [
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-06-19",
+                    "dte": 44,
+                    "contract_symbol": "US.NVDA.2026-06-19.P100",
+                    "strike": 100,
+                    "spot": 120,
+                }
+            ],
+            "expiration_count": 2,
+            "meta": {
+                "status": "partial",
+                "error": "one expiration unavailable",
+            },
+        }
+        with pytest.raises(RuntimeError, match="one expiration unavailable"):
+            mod.ensure_required_data(
+                py="python3",
+                base=BASE,
+                symbol=symbol,
+                required_data_dir=required,
+                limit_expirations=2,
+                want_put=True,
+                want_call=False,
+                timeout_sec=5,
+                is_scheduled=False,
+                state_dir=state_dir,
+            )
+    finally:
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
+
+
 def test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(tmp_path: Path) -> None:
     from src.application.required_data_fetching import RequiredDataFetchRequest
     import src.application.required_data_fetching as mod
@@ -432,7 +477,7 @@ def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests
     old_save = mod.save_outputs
     called: list[object] = []
     try:
-        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
@@ -542,7 +587,7 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
     old_save = mod.save_outputs
     called: list[object] = []
     try:
-        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
@@ -650,7 +695,7 @@ def test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cac
     old_save = mod.save_outputs
     called: list[object] = []
     try:
-        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
@@ -746,7 +791,7 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
     old_save = mod.save_outputs
     called: list[object] = []
     try:
-        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",

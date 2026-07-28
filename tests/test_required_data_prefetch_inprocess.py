@@ -906,8 +906,8 @@ def test_inprocess_prefetch_summary_records_partial_expiration_rate_limit_class(
         shared_required=tmp_path / "shared_required",
     )
 
-    assert result["fetched_ok"] == 1
-    assert result["errors"] == 0
+    assert result["fetched_ok"] == 0
+    assert result["errors"] == 1
     assert result["opend_rate_limit_classes"] == ["HK"]
     assert result["opend_rate_limit_items"] == [
         {

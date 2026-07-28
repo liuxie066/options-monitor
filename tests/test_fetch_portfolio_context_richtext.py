@@ -166,3 +166,39 @@ def test_build_context_aggregates_duplicate_stock_rows_for_same_account() -> Non
     stock = ctx["stocks_by_symbol"]["AAPL"]
     assert stock["shares"] == 200
     assert stock["avg_cost"] == 115.0
+    assert stock["cost_basis_complete"] is True
+    assert stock["cost_known_shares"] == 200
+    assert stock["cost_unknown_shares"] == 0
+
+
+def test_build_context_does_not_apply_partial_cost_basis_to_all_shares() -> None:
+    records = [
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "AAPL",
+                "quantity": "50",
+                "avg_cost": "100",
+            }
+        },
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "AAPL",
+                "quantity": "50",
+                "avg_cost": None,
+            }
+        },
+    ]
+
+    stock = build_context(records, broker="富途", account="lx")["stocks_by_symbol"]["AAPL"]
+
+    assert stock["shares"] == 100
+    assert stock["avg_cost"] is None
+    assert stock["cost_basis_complete"] is False
+    assert stock["cost_known_shares"] == 50
+    assert stock["cost_unknown_shares"] == 50

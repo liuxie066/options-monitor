@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 from domain.domain.engine import (
     YieldEnhancementFundingDecision,
@@ -36,6 +38,7 @@ from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_staggered_expiry_gap_days,
 )
+from src.infrastructure.io_utils import atomic_write_text
 
 
 def _safe_float(value: Any) -> float | None:
@@ -89,9 +92,27 @@ def _call_leg_from_required_data(row: pd.Series) -> YieldEnhancementLeg | None:
     ask = contract.ask
     mid = contract.mid
     multiplier = contract.multiplier
-    if None in (dte, strike, spot, bid, ask, mid, multiplier):
+    if (
+        contract.option_type != "call"
+        or not contract.symbol
+        or not contract.expiration
+        or not contract.contract_symbol
+        or not contract.currency
+        or None in (dte, strike, spot, bid, ask, mid, multiplier)
+    ):
         return None
-    if dte <= 0 or strike <= 0 or spot <= 0 or bid <= 0 or ask <= 0 or mid <= 0 or multiplier <= 0:
+    numeric_values = (strike, spot, bid, ask, mid, multiplier)
+    if (
+        not all(math.isfinite(float(value)) for value in numeric_values)
+        or dte <= 0
+        or strike <= 0
+        or spot <= 0
+        or bid <= 0
+        or ask <= 0
+        or mid <= 0
+        or multiplier <= 0
+        or ask < bid
+    ):
         return None
     spread, spread_ratio = _spread_values(contract)
     return YieldEnhancementLeg(
@@ -512,10 +533,14 @@ def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
     path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
     try:
         df = pd.read_csv(path)
-    except Exception:
+    except EmptyDataError:
         return pd.DataFrame()
-    if df.empty or "option_type" not in df.columns:
+    except Exception as exc:
+        raise RuntimeError(f"failed to read Combo Yield required-data calls: {path}") from exc
+    if df.empty:
         return pd.DataFrame()
+    if "option_type" not in df.columns:
+        raise RuntimeError(f"Combo Yield required-data is missing option_type: {path}")
     mask = df["option_type"].astype(str).str.strip().str.lower() == "call"
     return df.loc[mask].copy()
 
@@ -524,9 +549,9 @@ def _write_pairs_df(pairs_df: pd.DataFrame, output_path: Path | None) -> None:
     if output_path is None:
         return
     try:
-        pairs_df.to_csv(output_path, index=False)
-    except Exception:
-        pass
+        atomic_write_text(output_path, pairs_df.to_csv(index=False))
+    except Exception as exc:
+        raise RuntimeError(f"failed to persist Combo Yield pairs: {output_path}") from exc
 
 
 _PAIR_DIAGNOSTIC_COLUMNS = (
@@ -1160,9 +1185,9 @@ def attach_best_linked_calls(
     if df.empty or pairs_df.empty:
         if out_path is not None:
             try:
-                df.to_csv(out_path, index=False)
-            except Exception:
-                pass
+                atomic_write_text(out_path, df.to_csv(index=False))
+            except Exception as exc:
+                raise RuntimeError(f"failed to persist linked-call candidates: {out_path}") from exc
         return df
 
     selected_pairs = _ensure_selected_yield_enhancement_pairs(pairs_df)
@@ -1174,7 +1199,7 @@ def attach_best_linked_calls(
         best_by_put.append(
             {
                 "contract_symbol": put_contract_symbol,
-                "linked_call_contract": _format_contract(str(top["expiration"]), call_strike, "C"),
+                "linked_call_contract": _format_contract(str(top["call_expiration"]), call_strike, "C"),
                 "linked_call_contract_symbol": top["call_contract_symbol"],
                 "linked_call_strike": call_strike,
                 "linked_call_ask": _safe_float(top.get("call_ask")),
@@ -1211,7 +1236,7 @@ def attach_best_linked_calls(
     merged = df.merge(pd.DataFrame(best_by_put), on="contract_symbol", how="left")
     if out_path is not None:
         try:
-            merged.to_csv(out_path, index=False)
-        except Exception:
-            pass
+            atomic_write_text(out_path, merged.to_csv(index=False))
+        except Exception as exc:
+            raise RuntimeError(f"failed to persist linked-call candidates: {out_path}") from exc
     return merged

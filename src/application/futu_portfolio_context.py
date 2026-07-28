@@ -369,6 +369,7 @@ def build_futu_portfolio_context(
     cash_power_by_currency: dict[str, float] = {}
     cash_source_kinds: set[str] = set()
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
+    stock_cost_basis: dict[str, dict[str, float | int]] = {}
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
     for row in _dedup_balance_rows(balance_rows):
@@ -409,26 +410,45 @@ def build_futu_portfolio_context(
 
         existing = stocks_by_symbol.get(symbol)
         if existing is None:
+            known_shares = shares if avg_cost is not None else 0
+            unknown_shares = 0 if avg_cost is not None else shares
             stocks_by_symbol[symbol] = {
                 "symbol": symbol,
                 "name": name,
                 "shares": shares,
-                "avg_cost": avg_cost,
+                "avg_cost": avg_cost if unknown_shares == 0 else None,
+                "cost_basis_complete": unknown_shares == 0,
+                "cost_known_shares": known_shares,
+                "cost_unknown_shares": unknown_shares,
                 "currency": currency,
                 "broker": str(market),
                 "account": (normalize_account(account) if account else ""),
             }
+            stock_cost_basis[symbol] = {
+                "known_shares": known_shares,
+                "unknown_shares": unknown_shares,
+                "known_cost_total": float(avg_cost or 0.0) * known_shares,
+            }
             continue
 
-        prev_shares = int(existing.get("shares") or 0)
-        new_shares = prev_shares + shares
-        prev_cost = _to_float(existing.get("avg_cost"))
-        if prev_cost is not None and avg_cost is not None and new_shares > 0:
-            weighted = ((prev_cost * prev_shares) + (avg_cost * shares)) / float(new_shares)
-            existing["avg_cost"] = weighted
-        elif existing.get("avg_cost") in (None, "") and avg_cost is not None:
-            existing["avg_cost"] = avg_cost
+        new_shares = int(existing.get("shares") or 0) + shares
+        basis = stock_cost_basis[symbol]
+        if avg_cost is None:
+            basis["unknown_shares"] = int(basis["unknown_shares"]) + shares
+        else:
+            basis["known_shares"] = int(basis["known_shares"]) + shares
+            basis["known_cost_total"] = float(basis["known_cost_total"]) + (float(avg_cost) * shares)
         existing["shares"] = new_shares
+        known_shares = int(basis["known_shares"])
+        unknown_shares = int(basis["unknown_shares"])
+        existing["cost_known_shares"] = known_shares
+        existing["cost_unknown_shares"] = unknown_shares
+        existing["cost_basis_complete"] = unknown_shares == 0
+        existing["avg_cost"] = (
+            float(basis["known_cost_total"]) / float(known_shares)
+            if unknown_shares == 0 and known_shares > 0
+            else None
+        )
         if not existing.get("name") and name:
             existing["name"] = name
 

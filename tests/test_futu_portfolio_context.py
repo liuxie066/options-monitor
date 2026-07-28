@@ -142,6 +142,28 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
     assert out["stocks_by_symbol"]["9992.HK"]["currency"] == "HKD"
 
 
+def test_build_futu_portfolio_context_does_not_apply_partial_cost_basis_to_all_shares() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {"code": "US.NVDA", "qty": 50, "cost_price": 100, "currency": "USD"},
+            {"code": "US.NVDA", "qty": 50, "cost_price": None, "currency": "USD"},
+        ],
+        account="lx",
+        market="富途",
+        base_currency="CNY",
+    )
+
+    stock = out["stocks_by_symbol"]["NVDA"]
+    assert stock["shares"] == 100
+    assert stock["avg_cost"] is None
+    assert stock["cost_basis_complete"] is False
+    assert stock["cost_known_shares"] == 50
+    assert stock["cost_unknown_shares"] == 50
+
+
 def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> None:
     import src.application.futu_portfolio_context as fc
 

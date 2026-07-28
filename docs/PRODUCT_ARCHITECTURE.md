@@ -84,6 +84,7 @@
 - Ledger / Position Lots
 - Position Lifecycle
 - Close Advice
+- Position Advice
 - Position / Income Reports
 
 核心事实模型：
@@ -92,7 +93,7 @@
 trade_events
   -> projection
   -> position_lots
-  -> position context / close advice / reports
+  -> position context / close advice / position advice / reports
 ```
 
 边界：
@@ -100,6 +101,7 @@ trade_events
 - Ledger / projection 是持仓事实来源。
 - Feishu `option_positions` 不是 source of truth。
 - Close Advice 是持仓管理能力，不是开仓策略；其中 `short_vol` thesis 是持仓/平仓语义，本轮不重命名。
+- Position Advice v2 是独立的 portfolio-level advisory contract，比较 hold、roll、replace、reallocate 和 manual-review 方案；它不替代 Close Advice v1，也不构成交易执行授权。
 
 主要实现位置：
 
@@ -109,6 +111,11 @@ trade_events
 - `src/application/trades/`
 - `src/application/close_advice_runner.py`
 - `domain/domain/close_advice.py`
+- `src/application/position_advice_runner.py`
+- `src/application/position_advice_plan_builder.py`
+- `src/application/position_advice_reader.py`
+- `domain/domain/position_advice.py`
+- `domain/domain/position_advice_allocator.py`
 
 ### 3. 运行与通知
 

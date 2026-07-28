@@ -90,7 +90,7 @@ def compute_metrics(contract: CandidateContractInput | pd.Series) -> dict[str, f
         return None
     if mid <= 0 or strike <= 0 or spot <= 0:
         return None
-    if strike >= spot:
+    if strike > spot:
         return None
 
     multiplier = contract.multiplier
@@ -147,8 +147,8 @@ def explain_metrics_rejection(contract: CandidateContractInput | pd.Series) -> d
         return {"rule": "metrics_strike_non_positive", "metric_value": strike, "threshold": 0, "message": "strike must be positive"}
     if spot <= 0:
         return {"rule": "metrics_spot_non_positive", "metric_value": spot, "threshold": 0, "message": "spot must be positive"}
-    if strike >= spot:
-        return {"rule": "metrics_put_strike_not_below_spot", "metric_value": strike, "threshold": spot, "message": "put strike must be below spot"}
+    if strike > spot:
+        return {"rule": "metrics_put_strike_above_spot", "metric_value": strike, "threshold": spot, "message": "put strike must not exceed spot"}
 
     multiplier = contract.multiplier
     m = int(multiplier) if multiplier and multiplier > 0 else None

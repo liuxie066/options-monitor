@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 
@@ -57,6 +58,62 @@ def test_watchlist_whitelist_filters_symbols() -> None:
 
     assert calls == ['0700.HK']
     assert len(out) == 1
+
+
+def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
+
+    calls: list[str] = []
+
+    def _process_symbol(*args, **kwargs):
+        symbol = str(args[2]["symbol"])
+        calls.append(symbol)
+        if symbol == "AAPL":
+            time.sleep(5)
+        return [
+            {
+                "symbol": symbol,
+                "strategy": "sell_put",
+                "candidate_count": 0,
+            }
+        ]
+
+    started = time.monotonic()
+    out = run_watchlist_pipeline(
+        py="python",
+        base=Path("."),
+        cfg={
+            "symbols": [
+                {"symbol": "AAPL", "sell_put": {"enabled": True}},
+                {"symbol": "MSFT", "sell_put": {"enabled": True}},
+            ],
+            "templates": {},
+            "runtime": {"pipeline_symbol_max_workers": 4},
+        },
+        report_dir=Path("."),
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=True,
+        symbols_arg=None,
+        log=lambda _: None,
+        want_fn=lambda _: True,
+        apply_profiles_fn=lambda item, _profiles: dict(item),
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=lambda **_kwargs: ({}, None, None, None),
+        build_symbols_summary_fn=lambda *_args, **_kwargs: None,
+        build_symbols_digest_fn=lambda *_args, **_kwargs: None,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5
+    assert calls == ["AAPL", "MSFT"]
+    aapl = [row for row in out if row["symbol"] == "AAPL"]
+    assert {row["strategy"] for row in aapl} == {"sell_put", "sell_call"}
+    assert all("deadline" in row["note"] for row in aapl)
+    assert any(row["symbol"] == "MSFT" for row in out)
 
 
 def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
@@ -322,7 +379,7 @@ def test_watchlist_pipeline_processes_symbols_in_parallel_when_configured() -> N
         report_dir=Path("."),
         is_scheduled=True,
         top_n=3,
-        symbol_timeout_sec=1,
+        symbol_timeout_sec=0,
         portfolio_timeout_sec=1,
         want_scan=True,
         no_context=True,

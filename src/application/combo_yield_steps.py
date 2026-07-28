@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
@@ -46,11 +46,10 @@ from src.application.yield_enhancement_config import (
     wants_yield_enhancement_separate,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.infrastructure.io_utils import safe_read_csv
+from src.infrastructure.io_utils import atomic_write_text, safe_read_csv
 
 
 COMBO_YIELD_FAMILY = "combo_yield"
-log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,6 +58,10 @@ class ComboYieldResult:
     separate_enabled: bool
     candidates_path: Path
     alerts_path: Path
+
+
+def _atomic_write_dataframe(path: Path, df: pd.DataFrame) -> None:
+    atomic_write_text(path, df.to_csv(index=False))
 
 
 def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
@@ -132,7 +135,7 @@ def _filter_combo_yield_event_risk(
 
     filtered = df.loc[keep_mask].copy()
     try:
-        filtered.to_csv(out_path, index=False)
+        _atomic_write_dataframe(out_path, filtered)
     except Exception as exc:
         raise RuntimeError(f"failed to persist combo yield event-filtered put universe: {out_path}") from exc
     append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), trace_rows)
@@ -260,16 +263,16 @@ def run_combo_yield_scan_and_summarize(
         pair_diagnostics = get_yield_enhancement_pair_diagnostics(raw_yield_pairs_df)
         pair_diagnostics["run_id"] = scope.get("run_id")
         pair_diagnostics["account"] = scope.get("account")
-        pair_diagnostics.to_csv(pair_diagnostics_path, index=False)
+        _atomic_write_dataframe(pair_diagnostics_path, pair_diagnostics)
     except Exception as exc:
-        log.warning("combo_yield_steps: failed to write pair diagnostics for %s: %s", symbol, exc)
+        raise RuntimeError(f"failed to persist Combo Yield pair diagnostics: {pair_diagnostics_path}") from exc
 
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
     rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
     try:
-        build_yield_enhancement_rank_shadow(raw_yield_pairs_df).to_csv(rank_shadow_path, index=False)
+        _atomic_write_dataframe(rank_shadow_path, build_yield_enhancement_rank_shadow(raw_yield_pairs_df))
     except Exception as exc:
-        log.warning("combo_yield_steps: failed to write shadow rank artifact for %s: %s", symbol, exc)
+        raise RuntimeError(f"failed to persist Combo Yield rank shadow: {rank_shadow_path}") from exc
 
     trace_rows = [
         build_candidate_filter_trace_row(
@@ -346,15 +349,9 @@ def run_combo_yield_scan_and_summarize(
     inline_enabled = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_inline(yield_enhancement_cfg)
     if separate_enabled:
         try:
-            recommended_yield_pairs_df.to_csv(result.candidates_path, index=False)
-        except Exception:
-            pass
-    if inline_enabled:
-        attach_calls_fn(
-            df_candidates=df_sell_put_labeled,
-            pairs_df=recommended_yield_pairs_df,
-            out_path=sell_put_labeled_path,
-        )
+            _atomic_write_dataframe(result.candidates_path, recommended_yield_pairs_df)
+        except Exception as exc:
+            raise RuntimeError(f"failed to persist Combo Yield candidates: {result.candidates_path}") from exc
 
     final_result = ComboYieldResult(
         recommended_pairs=recommended_yield_pairs_df,
@@ -375,6 +372,12 @@ def run_combo_yield_scan_and_summarize(
     summary = None
     if final_result.separate_enabled:
         summary = summarize_yield_enhancement(final_result.recommended_pairs, symbol, symbol_cfg=symbol_cfg)
+    if inline_enabled:
+        attach_calls_fn(
+            df_candidates=df_sell_put_labeled,
+            pairs_df=recommended_yield_pairs_df,
+            out_path=sell_put_labeled_path,
+        )
     return final_result, summary
 
 
@@ -383,8 +386,28 @@ def materialize_empty_combo_yield_artifacts(*, report_dir: Path, symbol_lower: s
 
     result = _empty_result(report_dir=report_dir, symbol_lower=symbol_lower)
     report_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame().to_csv(result.candidates_path, index=False)
-    result.alerts_path.write_text("", encoding="utf-8")
+    sell_put_labeled_path = (report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv").resolve()
+    if sell_put_labeled_path.exists() and sell_put_labeled_path.stat().st_size > 0:
+        try:
+            sell_put_labeled = pd.read_csv(sell_put_labeled_path)
+        except EmptyDataError:
+            sell_put_labeled = pd.DataFrame()
+        except Exception as exc:
+            raise RuntimeError(f"failed to read inline Combo Yield artifact: {sell_put_labeled_path}") from exc
+        linked_columns = [
+            column for column in sell_put_labeled.columns if str(column).startswith("linked_call_")
+        ]
+        if linked_columns:
+            try:
+                _atomic_write_dataframe(
+                    sell_put_labeled_path,
+                    sell_put_labeled.drop(columns=linked_columns),
+                )
+            except Exception as exc:
+                raise RuntimeError(f"failed to clear inline Combo Yield artifact: {sell_put_labeled_path}") from exc
+
+    _atomic_write_dataframe(result.candidates_path, pd.DataFrame())
+    atomic_write_text(result.alerts_path, "")
     for suffix in (
         "combo_yield_pair_diagnostics.csv",
         "combo_yield_rank_shadow.csv",
@@ -393,7 +416,7 @@ def materialize_empty_combo_yield_artifacts(*, report_dir: Path, symbol_lower: s
         "combo_yield_put_universe_cash_filtered.csv",
         "combo_yield_put_universe_underwritten.csv",
     ):
-        pd.DataFrame().to_csv((report_dir / f"{symbol_lower}_{suffix}").resolve(), index=False)
+        _atomic_write_dataframe((report_dir / f"{symbol_lower}_{suffix}").resolve(), pd.DataFrame())
     return result
 
 

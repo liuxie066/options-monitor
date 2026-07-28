@@ -586,6 +586,8 @@ def run_symbol_monitoring(
                 stock=stock,
                 portfolio_ctx=inputs.portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
+                locked_shares_status=option_ctx.get("locked_shares_status"),
+                locked_shares_unavailable_reason=option_ctx.get("locked_shares_unavailable_reason"),
                 locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
                 locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
                 global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
@@ -594,13 +596,20 @@ def run_symbol_monitoring(
                 quote_snapshot_id=resolved_quote_snapshot_id or None,
                 all_decisions_sink_fn=call_capture_sink,
             )
+            call_status = "completed"
+            call_reason = None
+            if isinstance(call_result, dict):
+                call_result = dict(call_result)
+                call_status = str(call_result.pop("_strategy_status", "completed"))
+                call_reason = call_result.pop("_strategy_reason", None)
             _append_summary_result(
                 summary_rows,
                 call_result,
             )
             _publish_status(
                 family="covered_call",
-                status="completed",
+                status=call_status,
+                reason=(str(call_reason) if call_reason else None),
                 candidate_count=_summary_candidate_count(call_result),
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
@@ -609,14 +618,22 @@ def run_symbol_monitoring(
                 _report_capture(
                     strategy_mode="call",
                     status=(
-                        "completed"
-                        if call_capture_state["called"]
-                        else "incomplete"
+                        call_status
+                        if call_status != "completed"
+                        else (
+                            "completed"
+                            if call_capture_state["called"]
+                            else "incomplete"
+                        )
                     ),
                     reason=(
-                        "all_decisions_captured"
-                        if call_capture_state["called"]
-                        else "all_decisions_not_captured"
+                        str(call_reason)
+                        if call_status != "completed" and call_reason
+                        else (
+                            "all_decisions_captured"
+                            if call_capture_state["called"]
+                            else "all_decisions_not_captured"
+                        )
                     ),
                 )
         except Exception as exc:
@@ -649,6 +666,10 @@ def run_symbol_monitoring(
                     reason="covered_call_scan_failed",
                 )
     else:
+        deps.materialize_empty_sell_call_artifacts_fn(
+            report_dir=inputs.report_dir,
+            symbol_lower=symbol_lower,
+        )
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
         if configured_call:
             _report_capture(

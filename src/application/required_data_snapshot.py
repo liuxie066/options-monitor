@@ -291,6 +291,7 @@ def _ready_manifest_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise RequiredDataSnapshotError(f"{symbol} quote bundle is invalid")
+    _validate_complete_required_data_bundle(bundle)
     fetch_policy_hash = str(
         bundle.get("fetch_policy_hash")
         or receipt.get("producer_policy_hash")
@@ -359,6 +360,7 @@ def _validate_ready_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise PositionAdviceSourceError("required-data quote bundle mismatch")
+    _validate_complete_required_data_bundle(bundle)
     raw_relpath = _required_text(entry.get("raw_json_relpath"), "raw_json_relpath")
     csv_relpath = _required_text(
         entry.get("required_data_csv_relpath"),
@@ -394,6 +396,29 @@ def _validate_ready_entry(
         "source_observed_at": str(validated["source_observed_at"]),
         "expires_at": str(validated["expires_at"]),
     }
+
+
+def _validate_complete_required_data_bundle(bundle: Mapping[str, Any]) -> None:
+    try:
+        raw_bytes = base64.b64decode(
+            _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
+            validate=True,
+        )
+        raw_payload = json.loads(raw_bytes.decode("utf-8"))
+    except (
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        raise PositionAdviceSourceError(
+            "required-data bundle raw JSON is unreadable"
+        ) from exc
+    meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
+    if str((meta or {}).get("status") or "").strip().lower() != "ok":
+        raise PositionAdviceSourceError(
+            "required-data bundle is not complete"
+        )
 
 
 def _prefetch_result_index(summary: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

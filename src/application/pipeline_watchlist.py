@@ -12,9 +12,12 @@ Design:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+import signal
+from threading import Lock, current_thread, main_thread
+import time
 from typing import Any, Callable, Iterable
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -50,6 +53,58 @@ POSITION_ADVICE_CANDIDATE_CAPTURE_SCHEMA = (
     "position_advice_candidate_all_decisions_capture.v1"
 )
 POSITION_ADVICE_CANDIDATE_RISK_POLICY_VERSION = "candidate_pipeline_policy.v2"
+
+
+class SymbolProcessingTimeout(TimeoutError):
+    pass
+
+
+@contextmanager
+def _enforce_symbol_timeout(
+    *,
+    symbol: str,
+    timeout_sec: int | float | None,
+):
+    timeout = float(timeout_sec or 0)
+    if timeout <= 0:
+        yield
+        return
+
+    message = f"{symbol} symbol processing exceeded {timeout:g}s deadline"
+    can_interrupt = (
+        current_thread() is main_thread()
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and hasattr(signal, "ITIMER_REAL")
+    )
+    started = time.monotonic()
+    if not can_interrupt:
+        yield
+        if time.monotonic() - started > timeout:
+            raise SymbolProcessingTimeout(message)
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def _raise_timeout(_signum, _frame) -> None:
+        raise SymbolProcessingTimeout(message)
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        previous_remaining, previous_interval = previous_timer
+        if previous_remaining > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.001, previous_remaining - elapsed),
+                previous_interval,
+            )
 
 
 def _to_positive_int(value, default: int) -> int:
@@ -300,9 +355,18 @@ def run_watchlist_pipeline(
                     }
                 )
 
-    if portfolio_ctx is not None and option_ctx is not None:
+    if portfolio_ctx is not None:
         portfolio_ctx = dict(portfolio_ctx)
-        portfolio_ctx['option_ctx'] = option_ctx
+        portfolio_ctx['option_ctx'] = (
+            option_ctx
+            if option_ctx is not None
+            else {
+                "locked_shares_status": "unavailable",
+                "locked_shares_unavailable_reason": "option_positions_context_unavailable",
+                "locked_shares_by_symbol": {},
+                "locked_shares_unavailable_by_symbol": {},
+            }
+        )
 
     def _failure_rows(item0: dict, exc: Exception) -> list[dict]:
         symbol = item0.get('symbol', 'UNKNOWN')
@@ -416,16 +480,31 @@ def run_watchlist_pipeline(
         except Exception as e:
             return _failure_rows(item0, e)
 
+    def _process_item_with_timeout(item0: dict) -> list[dict]:
+        symbol = str(item0.get("symbol") or "UNKNOWN")
+        try:
+            with _enforce_symbol_timeout(
+                symbol=symbol,
+                timeout_sec=symbol_timeout_sec,
+            ):
+                return _process_item(item0)
+        except Exception as exc:
+            return _failure_rows(item0, exc)
+
     summary_rows: list[dict] = []
     max_workers = _resolve_pipeline_symbol_max_workers(cfg, len(watchlist_items))
+    if symbol_timeout_sec > 0:
+        # A hard POSIX timer is process-main-thread scoped. Keep symbol work
+        # sequential so the configured deadline covers fetch, scan, and writes.
+        max_workers = 1
     if max_workers <= 1:
         for item0 in watchlist_items:
-            summary_rows.extend(_process_item(item0))
+            summary_rows.extend(_process_item_with_timeout(item0))
     else:
         rows_by_index: dict[int, list[dict]] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_by_index = {
-                executor.submit(_process_item, item0): idx
+                executor.submit(_process_item_with_timeout, item0): idx
                 for idx, item0 in enumerate(watchlist_items)
             }
             for future in as_completed(future_by_index):

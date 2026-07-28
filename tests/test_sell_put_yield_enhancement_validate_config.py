@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -459,3 +461,76 @@ def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> No
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
         assert "NVDA.combo_yield has removed target-price fields" in str(exc)
+
+
+@pytest.mark.parametrize(
+    ("side_payload", "expected_path", "typo"),
+    [
+        (
+            {"sell_put": {"enabled": False, "min_annualized_net_retur": 0.99}},
+            "NVDA.sell_put",
+            "min_annualized_net_retur",
+        ),
+        (
+            {"sell_call": {"enabled": False, "min_strike_cost_multipler": 1.1}},
+            "NVDA.sell_call",
+            "min_strike_cost_multipler",
+        ),
+        (
+            {"combo_yield": {"enabled": False, "min_net_credit_retentin": 0.9}},
+            "NVDA.combo_yield",
+            "min_net_credit_retentin",
+        ),
+        (
+            {"combo_yield": {"enabled": False, "call": {"max_dleta": 0.2}}},
+            "NVDA.combo_yield.call",
+            "max_dleta",
+        ),
+        (
+            {"sell_put": {"enabled": False, "event_risk": {"enabeld": True}}},
+            "NVDA.sell_put.event_risk",
+            "enabeld",
+        ),
+    ],
+)
+def test_validate_config_rejects_unknown_opening_strategy_keys(
+    side_payload: dict,
+    expected_path: str,
+    typo: str,
+) -> None:
+    from src.application.config_validator import validate_config
+
+    item = {
+        "symbol": "NVDA",
+        "sell_put": {"enabled": False},
+        "sell_call": {"enabled": False},
+        **side_payload,
+    }
+
+    with pytest.raises(SystemExit) as exc_info:
+        validate_config({"templates": {}, "symbols": [item]})
+
+    message = str(exc_info.value)
+    assert expected_path in message
+    assert typo in message
+    assert "did you mean" in message
+
+
+def test_validate_config_accepts_independent_combo_yield_without_false_warning(capsys) -> None:
+    from src.application.config_validator import validate_config
+
+    validate_config(
+        {
+            "templates": {},
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "sell_put": {"enabled": False},
+                    "combo_yield": {"enabled": True},
+                    "sell_call": {"enabled": False},
+                }
+            ],
+        }
+    )
+
+    assert "combo_yield is enabled but sell_put is disabled" not in capsys.readouterr().err

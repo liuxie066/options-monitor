@@ -88,6 +88,34 @@ inbound:
 """
 
 
+def test_yaml_config_rejects_opening_threshold_typo_before_runtime_build(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        sell_put:
+          min_annualized_net_retur: 0.99
+""",
+    )
+
+    with pytest.raises(AgentToolError) as exc_info:
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+    message = str(exc_info.value)
+    assert "markets.us.overrides.NVDA.sell_put" in message
+    assert "min_annualized_net_retur" in message
+    assert "min_annualized_net_return" in message
+
+
 def _write_migration_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
     common_path = tmp_path / "user.common.json"
     common_path.write_text(
