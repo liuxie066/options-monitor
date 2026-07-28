@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 from copy import deepcopy
 from datetime import datetime, timezone
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,14 @@ from src.application.config_primitives import (
     path_for_metadata as _path_for_metadata,
     resolve_config_path as _resolve_path,
 )
-from src.application.config_validator import validate_assistant_config, validate_config
+from src.application.config_validator import (
+    OPENING_EVENT_RISK_ALLOWED_FIELDS,
+    OPENING_STRATEGY_ALLOWED_FIELDS,
+    YIELD_ENHANCEMENT_ALLOWED_FIELDS,
+    YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS,
+    validate_assistant_config,
+    validate_config,
+)
 from src.application.config_defaults import (
     DEFAULT_CONFIG_REF,
     default_config,
@@ -66,6 +74,10 @@ COVERED_CALL_AUTHORING_KEY = "covered_call"
 SELL_CALL_LEGACY_AUTHORING_KEY = STRATEGY_COVERED_CALL
 COMBO_YIELD_AUTHORING_KEY = "combo_yield"
 YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY = "yield_enhancement"
+OPENING_STRATEGY_AUTHORING_FIELDS = OPENING_STRATEGY_ALLOWED_FIELDS | {"dte", "strike"}
+YIELD_ENHANCEMENT_AUTHORING_FIELDS = {
+    key for key in YIELD_ENHANCEMENT_ALLOWED_FIELDS if not key.startswith("_")
+}
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -252,14 +264,46 @@ def _apply_range_shorthand(item: dict[str, Any], *, key: str, min_key: str, max_
     item[max_key] = raw[1]
 
 
-def _normalize_strategy(raw: Any, *, path: str, allow_ranges: bool = True) -> dict[str, Any]:
+def _reject_unknown_authoring_keys(raw: dict[str, Any], *, allowed: set[str], path: str) -> None:
+    unknown = sorted(str(key) for key in raw if str(key) not in allowed)
+    if not unknown:
+        return
+    suggestions: list[str] = []
+    choices = sorted(allowed)
+    for key in unknown:
+        match = get_close_matches(key, choices, n=1, cutoff=0.6)
+        if match:
+            suggestions.append(f"{key}->{match[0]}")
+    hint = f"; did you mean: {', '.join(suggestions)}" if suggestions else ""
+    raise AgentToolError(
+        code="CONFIG_ERROR",
+        message=f"{path} contains unsupported keys: {', '.join(unknown)}{hint}",
+    )
+
+
+def _normalize_strategy(
+    raw: Any,
+    *,
+    path: str,
+    allow_ranges: bool = True,
+    allowed_keys: set[str] | None = None,
+) -> dict[str, Any]:
     if isinstance(raw, bool):
         return {"enabled": raw}
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object or boolean")
+    if allowed_keys is not None:
+        _reject_unknown_authoring_keys(raw, allowed=allowed_keys, path=path)
     out = deepcopy(raw)
+    event_risk = out.get("event_risk")
+    if allowed_keys is not None and isinstance(event_risk, dict):
+        _reject_unknown_authoring_keys(
+            event_risk,
+            allowed=OPENING_EVENT_RISK_ALLOWED_FIELDS,
+            path=f"{path}.event_risk",
+        )
     if allow_ranges:
         _apply_range_shorthand(out, key="dte", min_key="min_dte", max_key="max_dte", path=path)
         _apply_range_shorthand(out, key="strike", min_key="min_strike", max_key="max_strike", path=path)
@@ -267,10 +311,20 @@ def _normalize_strategy(raw: Any, *, path: str, allow_ranges: bool = True) -> di
 
 
 def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
-    out = _normalize_strategy(raw, path=path, allow_ranges=False)
+    out = _normalize_strategy(
+        raw,
+        path=path,
+        allow_ranges=False,
+        allowed_keys=YIELD_ENHANCEMENT_AUTHORING_FIELDS,
+    )
     out["_explicit_fields"] = [key for key in out if not str(key).startswith("_")]
     call_cfg = out.get("call")
     if isinstance(call_cfg, dict):
+        _reject_unknown_authoring_keys(
+            call_cfg,
+            allowed=YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS,
+            path=f"{path}.call",
+        )
         out["_explicit_call_fields"] = [key for key in call_cfg if not str(key).startswith("_")]
     return out
 
@@ -312,7 +366,12 @@ def _normalize_strategy_authoring_container(
                 hint="Use combo_yield in config.yaml.",
             )
         if normalize_strategy_values and canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
-            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=allow_ranges)
+            out[canonical_key] = _normalize_strategy(
+                raw_value,
+                path=f"{path}.{key}",
+                allow_ranges=allow_ranges,
+                allowed_keys=OPENING_STRATEGY_AUTHORING_FIELDS,
+            )
         elif normalize_strategy_values and canonical_key == COMBO_YIELD_AUTHORING_KEY:
             out[canonical_key] = _normalize_combo_yield(raw_value, path=f"{path}.{key}")
         else:
@@ -338,7 +397,12 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
                 hint="Use covered_call in config.yaml; sell_call is kept as the generated runtime/internal key.",
             )
         if canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
-            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=True)
+            out[canonical_key] = _normalize_strategy(
+                raw_value,
+                path=f"{path}.{key}",
+                allow_ranges=True,
+                allowed_keys=OPENING_STRATEGY_AUTHORING_FIELDS,
+            )
         elif canonical_key == COMBO_YIELD_AUTHORING_KEY:
             if canonical_key in out:
                 raise AgentToolError(

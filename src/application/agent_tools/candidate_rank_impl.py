@@ -138,31 +138,42 @@ def _run_dir_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None
 
 def _candidate_paths_for_mode(report_dir: Path, *, mode: str) -> list[Path]:
     if mode == "put":
-        exact = [
-            report_dir / "sell_put_candidates_labeled.csv",
-            report_dir / "sell_put_candidates.csv",
+        exact_labeled = report_dir / "sell_put_candidates_labeled.csv"
+        exact_raw = report_dir / "sell_put_candidates.csv"
+        if exact_labeled.exists():
+            return [exact_labeled]
+        if exact_raw.exists():
+            return [exact_raw]
+
+        labeled_paths = sorted(
+            path for path in report_dir.glob("*_sell_put_candidates_labeled.csv") if path.exists()
+        )
+        raw_paths = sorted(
+            path for path in report_dir.glob("*_sell_put_candidates.csv") if path.exists()
+        )
+        labeled_symbols = {
+            path.name.removesuffix("_sell_put_candidates_labeled.csv")
+            for path in labeled_paths
+        }
+        return [
+            *labeled_paths,
+            *[
+                path
+                for path in raw_paths
+                if path.name.removesuffix("_sell_put_candidates.csv") not in labeled_symbols
+            ],
         ]
-        patterns = ["*_sell_put_candidates_labeled.csv", "*_sell_put_candidates.csv"]
-    else:
-        exact = [report_dir / "sell_call_candidates.csv"]
-        patterns = ["*_sell_call_candidates.csv"]
-    existing_exact = [path for path in exact if path.exists()]
-    if any(_has_csv_rows(path) for path in existing_exact):
-        return existing_exact
-    out: list[Path] = list(existing_exact)
-    for pattern in patterns:
-        for path in sorted(path for path in report_dir.glob(pattern) if path.exists()):
-            if path not in out:
-                out.append(path)
-    return out
+
+    exact = report_dir / "sell_call_candidates.csv"
+    if exact.exists():
+        return [exact]
+    return sorted(path for path in report_dir.glob("*_sell_call_candidates.csv") if path.exists())
 
 
-def _has_csv_rows(path: Path) -> bool:
-    try:
-        with path.open("r", encoding="utf-8", newline="") as fh:
-            return any(True for _row in csv.DictReader(fh))
-    except Exception:
-        return False
+def _candidate_source_authority(path: Path, *, mode: str) -> str:
+    if mode == "put":
+        return "final_labeled" if path.name.endswith("_sell_put_candidates_labeled.csv") or path.name == "sell_put_candidates_labeled.csv" else "raw_fallback"
+    return "canonical_candidates"
 
 
 def _source_paths(
@@ -486,7 +497,14 @@ def candidate_rank_explain_tool(
     for path, mode in source_paths:
         rows = _read_rows(path, mode=mode)
         rows_by_mode.setdefault(mode, []).extend(rows)
-        source_files.append({"mode": mode, "path": mask_path(path), "row_count": len(rows)})
+        source_files.append(
+            {
+                "mode": mode,
+                "path": mask_path(path),
+                "row_count": len(rows),
+                "authority": _candidate_source_authority(path, mode=mode),
+            }
+        )
 
     modes = ["put", "call"] if mode_filter == "all" else [mode_filter]
     groups = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import get_close_matches
 import math
 import sys
 from zoneinfo import ZoneInfo
@@ -107,6 +108,84 @@ RETIRED_FEISHU_CALLBACK_KEYS = {
     'verification_token',
     'verification_token_env',
 }
+OPENING_EVENT_RISK_ALLOWED_FIELDS = {
+    'enabled',
+    'mode',
+}
+OPENING_STRATEGY_ALLOWED_FIELDS = {
+    'enabled',
+    'strategy',
+    'min_dte',
+    'max_dte',
+    'min_strike',
+    'max_strike',
+    'min_open_interest',
+    'min_volume',
+    'max_spread_ratio',
+    'min_net_income',
+    'min_annualized_net_return',
+    'min_annualized_net_premium_return',
+    'min_iv_rv_ratio',
+    'min_iv_minus_rv',
+    'reject_event_risk',
+    'event_source_fail_closed',
+    'event_risk',
+    'min_strike_cost_multiplier',
+    # Retired fields stay recognized so their targeted migration errors remain
+    # more useful than a generic unknown-key error.
+    'strategy_profile',
+    'pricing',
+    'premium_score_cap',
+    'score_weights',
+    'short_vol',
+    'concentration',
+    'combo_yield',
+    'yield_enhancement',
+    *REMOVED_STRATEGY_FILTER_FIELDS,
+    *LEGACY_SELL_CALL_FETCH_FIELDS,
+    *LEGACY_SELL_PUT_OTM_FIELDS,
+}
+YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS = {
+    'min_delta',
+    'max_delta',
+    'min_strike',
+    'max_strike',
+    'min_dte',
+    'max_dte',
+    *YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
+}
+YIELD_ENHANCEMENT_ALLOWED_FIELDS = {
+    'enabled',
+    'structure_mode',
+    'objective',
+    'output_mode',
+    'funding_mode',
+    'min_combo_net_credit',
+    'min_net_credit_annualized',
+    'max_call_cost_to_put_credit',
+    'min_net_credit_retention',
+    'min_open_interest',
+    'min_volume',
+    'max_spread_ratio',
+    'max_combo_spread_ratio',
+    'min_expiry_gap_days',
+    'max_expiry_gap_days',
+    'max_debit',
+    'max_debit_native',
+    'min_dte',
+    'max_dte',
+    'call',
+    '_explicit_fields',
+    '_explicit_call_fields',
+    'strategy',
+    'strategy_profile',
+    *REMOVED_STRATEGY_FILTER_FIELDS,
+    *YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS,
+    *YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
+    *YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
+    *YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
+    *YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS,
+}
 
 
 def die(msg: str):
@@ -115,6 +194,20 @@ def die(msg: str):
 
 def warn(msg: str):
     print(f"[CONFIG_WARN] {msg}", file=sys.stderr)
+
+
+def _reject_unknown_keys(cfg: dict, allowed: set[str], path: str) -> None:
+    unknown = sorted(str(key) for key in cfg if str(key) not in allowed)
+    if not unknown:
+        return
+    suggestions: list[str] = []
+    choices = sorted(allowed)
+    for key in unknown:
+        match = get_close_matches(key, choices, n=1, cutoff=0.6)
+        if match:
+            suggestions.append(f'{key}->{match[0]}')
+    hint = f"; did you mean: {', '.join(suggestions)}" if suggestions else ''
+    die(f"{path} contains unsupported keys: {', '.join(unknown)}{hint}")
 
 
 def _finite_number(value, path: str, *, expected: str = "a number") -> float:
@@ -323,6 +416,7 @@ def validate_assistant_config(cfg: dict) -> None:
 
 
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
+    _reject_unknown_keys(cfg, OPENING_STRATEGY_ALLOWED_FIELDS, path)
     _validate_optional_bool(cfg, 'enabled', path)
     if 'strategy_profile' in cfg:
         die(f'{path}.strategy_profile has been removed; use {path}.strategy')
@@ -354,6 +448,7 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     if event_risk is not None:
         if not isinstance(event_risk, dict):
             die(f'{path}.event_risk must be an object')
+        _reject_unknown_keys(event_risk, OPENING_EVENT_RISK_ALLOWED_FIELDS, f'{path}.event_risk')
         _validate_optional_bool(event_risk, 'enabled', f'{path}.event_risk')
         if 'mode' in event_risk and event_risk.get('mode') is not None:
             mode = str(event_risk.get('mode') or '').strip().lower()
@@ -478,6 +573,7 @@ def _validate_optional_dte_window(cfg: dict, path: str):
 def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
+    _reject_unknown_keys(cfg, YIELD_ENHANCEMENT_ALLOWED_FIELDS, path)
     if 'strategy' in cfg or 'strategy_profile' in cfg:
         die(f'{path}.strategy is not supported; combo_yield is isolated from sell_put.strategy')
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
@@ -568,6 +664,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if call_leg is not None and not isinstance(call_leg, dict):
         die(f'{path}.call must be an object')
     if isinstance(call_leg, dict):
+        _reject_unknown_keys(call_leg, YIELD_ENHANCEMENT_CALL_ALLOWED_FIELDS, f'{path}.call')
         redundant_call_dte_keys = [
             key for key in ('min_dte', 'max_dte') if call_leg.get(key) is not None
         ]
@@ -1161,9 +1258,6 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_put min_strike > max_strike")
             if ('min_strike' in sp) and (sp.get('max_strike') is None):
                 warn(f"{sym}.sell_put only sets min_strike; near-bound max_strike is recommended")
-        elif isinstance(item.get('combo_yield'), dict) and item['combo_yield'].get('enabled'):
-            warn(f"{sym}.combo_yield is enabled but sell_put is disabled; it will be ignored")
-
         sc = item.get('sell_call') or {}
         if sc and not isinstance(sc, dict):
             die(f"{sym}.sell_call must be an object")

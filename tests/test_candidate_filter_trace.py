@@ -493,6 +493,69 @@ def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Pat
     assert meta["source_files"][0]["path"] == str(trace_path.resolve())
 
 
+def test_candidate_filter_explain_default_does_not_mix_historical_rejection_into_pointer_run(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    runtime = tmp_path / "runtime"
+    old_trace = runtime / "output_runs" / "old-run" / "accounts" / "lx" / "candidate_filter_trace.jsonl"
+    new_run = runtime / "output_runs" / "new-run"
+    new_trace = new_run / "accounts" / "lx" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        old_trace,
+        [
+            build_candidate_filter_trace_row(
+                run_id="old-run",
+                account="lx",
+                symbol="NVDA",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_spread",
+            )
+        ],
+    )
+    append_candidate_filter_trace_rows(
+        new_trace,
+        [
+            build_candidate_filter_trace_row(
+                run_id="new-run",
+                account="lx",
+                symbol="NVDA",
+                function="sell_put",
+                mode="put",
+                status="accepted",
+                stage="post_filter",
+                rule="candidate_accepted",
+            )
+        ],
+    )
+    pointer_dir = runtime / "output_shared" / "state"
+    pointer_dir.mkdir(parents=True)
+    (pointer_dir / "last_run_dir.txt").write_text(str(new_run), encoding="utf-8")
+
+    data, warnings, meta = candidate_filter_explain_tool(
+        {"runtime_root": str(runtime), "account": "lx", "symbol": "NVDA"},
+        repo_base=lambda: tmp_path / "repo",
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    assert warnings == []
+    assert data["run_ids"] == ["new-run"]
+    assert data["status_counts"] == {"accepted": 1}
+    sell_put = next(item for item in data["functions"] if item["function"] == "sell_put")
+    assert sell_put["status"] == "accepted"
+    assert sell_put["events"][0]["run_id"] == "new-run"
+    assert meta["trace_discovery"]["run_dir_count"] == 1
+    assert meta["source_files"][0]["run_ids"] == ["new-run"]
+
+
 def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
 
@@ -677,6 +740,49 @@ def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> 
     assert data["source_files"][0]["path"] == ".../nvda_sell_put_candidates_labeled.csv"
     assert data["groups"][0]["baseline"]["name"] == "return_then_income"
     assert meta["source_files"][0]["row_count"] == 1
+
+
+def test_candidate_rank_explain_prefers_final_labeled_put_artifact_over_raw(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    header = (
+        "symbol,option_type,contract_symbol,expiration,strike,spot,"
+        "annualized_net_return_on_cash_basis,net_income,spread_ratio,open_interest,volume,dte\n"
+    )
+    (report_dir / "nvda_sell_put_candidates.csv").write_text(
+        header
+        + "NVDA,put,NVDA_ACCEPTED,2026-06-19,100,110,0.12,120,0.1,500,20,30\n"
+        + "NVDA,put,NVDA_RAW_ONLY_REJECTED,2026-06-19,105,110,0.99,999,0.1,500,20,30\n",
+        encoding="utf-8",
+    )
+    (report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        header + "NVDA,put,NVDA_ACCEPTED,2026-06-19,100,110,0.12,120,0.1,500,20,30\n",
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = candidate_rank_explain_tool(
+        {"report_dir": str(report_dir), "mode": "put", "top_n": 5},
+        repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path / "output_shared" / "agent_tools",
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+    )
+
+    assert warnings == []
+    assert data["row_count"] == 1
+    assert [row["contract_symbol"] for row in data["ranked"]] == ["NVDA_ACCEPTED"]
+    assert data["source_files"] == [
+        {
+            "mode": "put",
+            "path": ".../nvda_sell_put_candidates_labeled.csv",
+            "row_count": 1,
+            "authority": "final_labeled",
+        }
+    ]
+    assert meta["source_files"] == data["source_files"]
 
 
 def test_candidate_rank_explain_uses_annualized_return_for_underwriting_put(tmp_path: Path) -> None:

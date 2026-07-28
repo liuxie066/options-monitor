@@ -85,6 +85,37 @@ def test_quote_receipt_binds_exact_json_csv_and_fetch_policy(
     assert receipt_path.is_file()
 
 
+def test_quote_receipt_rejects_partial_required_data_payload(
+    tmp_path: Path,
+) -> None:
+    payload = _required_payload()
+    payload["meta"] = {
+        "status": "partial",
+        "errors": [{"expiration": "2026-09-18", "error_code": "RATE_LIMIT"}],
+    }
+    raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        payload,
+        output_root=tmp_path,
+    )
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match="incomplete required-data payload",
+    ):
+        publish_required_data_quote_snapshot(
+            producer_root=tmp_path,
+            producer_run_id="run-1",
+            symbol="NVDA",
+            raw_path=raw_path,
+            csv_path=csv_path,
+            fetch_plan={"symbol": "NVDA"},
+            fetch_policy={"source": "opend"},
+            source_observed_at=NOW,
+        )
+
+
 def test_cache_discovery_reuses_receipt_observation_after_shared_files_change(
     tmp_path: Path,
 ) -> None:

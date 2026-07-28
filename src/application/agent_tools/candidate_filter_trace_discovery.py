@@ -41,17 +41,25 @@ def discover_candidate_filter_trace_paths(
 
     roots = _trace_roots(payload, base=base)
     account = str(payload.get("account") or "").strip().lower()
+    if payload.get("report_dir"):
+        report_trace = _resolve_path(payload.get("report_dir"), base=base) / CANDIDATE_FILTER_TRACE_NAME
+        return CandidateFilterTraceDiscovery(
+            paths=tuple(_existing_unique([report_trace])),
+            roots=tuple(roots),
+            run_dirs=(),
+            considered_paths=(report_trace.resolve(),),
+            explicit_paths=False,
+        )
+
     candidates: list[Path] = []
-    run_dirs = _trace_run_dirs(payload, roots=roots, base=base)
+    run_dirs = _trace_run_dirs(payload, roots=roots, base=base, account=account)
     for run_dir in run_dirs:
         candidates.extend(_trace_candidates_for_run(run_dir, account=account))
 
-    if payload.get("report_dir"):
-        candidates.append(_resolve_path(payload.get("report_dir"), base=base) / CANDIDATE_FILTER_TRACE_NAME)
-
-    for root in roots:
-        candidates.append(root / "output_shared" / "reports" / CANDIDATE_FILTER_TRACE_NAME)
-        candidates.append(root / "output_shared" / "agent_tools" / "reports" / CANDIDATE_FILTER_TRACE_NAME)
+    if not run_dirs:
+        for root in roots:
+            candidates.append(root / "output_shared" / "reports" / CANDIDATE_FILTER_TRACE_NAME)
+            candidates.append(root / "output_shared" / "agent_tools" / "reports" / CANDIDATE_FILTER_TRACE_NAME)
 
     return CandidateFilterTraceDiscovery(
         paths=tuple(_existing_unique(candidates)),
@@ -121,7 +129,13 @@ def _service_profile_roots(root: Path, *, base: Path) -> list[Path]:
     return roots
 
 
-def _trace_run_dirs(payload: dict[str, Any], *, roots: list[Path], base: Path) -> list[Path]:
+def _trace_run_dirs(
+    payload: dict[str, Any],
+    *,
+    roots: list[Path],
+    base: Path,
+    account: str,
+) -> list[Path]:
     raw_run_dir = payload.get("run_dir")
     if str(raw_run_dir or "").strip():
         return _unique_paths([_resolve_path(raw_run_dir, base=base)])
@@ -132,8 +146,13 @@ def _trace_run_dirs(payload: dict[str, Any], *, roots: list[Path], base: Path) -
 
     run_dirs: list[Path] = []
     for root in roots:
-        run_dirs.extend(_pointer_run_dirs(root))
-        run_dirs.extend(_recent_run_dirs(root))
+        pointer_dirs = _pointer_run_dirs(root)
+        if pointer_dirs:
+            run_dirs.extend(pointer_dirs)
+            continue
+        latest = _latest_trace_run_dir(root, account=account)
+        if latest is not None:
+            run_dirs.append(latest)
     return _unique_paths(run_dirs)
 
 
@@ -160,6 +179,13 @@ def _recent_run_dirs(root: Path) -> list[Path]:
         return []
     dirs.sort(key=_mtime_ns, reverse=True)
     return dirs[:MAX_RECENT_TRACE_RUN_DIRS]
+
+
+def _latest_trace_run_dir(root: Path, *, account: str) -> Path | None:
+    for run_dir in _recent_run_dirs(root):
+        if any(path.exists() and path.is_file() for path in _trace_candidates_for_run(run_dir, account=account)):
+            return run_dir
+    return None
 
 
 def _trace_candidates_for_run(run_dir: Path, *, account: str) -> list[Path]:

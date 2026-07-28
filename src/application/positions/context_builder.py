@@ -50,6 +50,8 @@ def _empty_context(
     out = {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
+        "locked_shares_status": "unavailable",
+        "locked_shares_unavailable_reason": "option_position_ledger_unavailable",
         "locked_shares_by_symbol": {},
         "locked_shares_unavailable_by_symbol": {},
         "cash_secured_by_symbol_by_ccy": {},
@@ -239,6 +241,8 @@ def build_context(
     out = {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
+        "locked_shares_status": "available",
+        "locked_shares_unavailable_reason": None,
         "locked_shares_by_symbol": locked_shares_by_symbol,
         "locked_shares_unavailable_by_symbol": locked_shares_unavailable_by_symbol,
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,

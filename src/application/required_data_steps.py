@@ -297,13 +297,13 @@ def _payload_fetch_error_message(*, symbol: str, payload: dict[str, object] | ob
 
 
 def _raise_if_fetch_payload_error(*, symbol: str, payload: dict[str, object] | object) -> None:
-    if _payload_fetch_status(payload) in {"error", "fail", "failed"}:
+    if _payload_fetch_status(payload) != "ok":
         raise RuntimeError(_payload_fetch_error_message(symbol=symbol, payload=payload))
 
 
 def _first_fetch_payload_error_message(*, symbol: str, payloads: list[dict[str, object]]) -> str | None:
     for payload in payloads:
-        if _payload_fetch_status(payload) in {"error", "fail", "failed"}:
+        if _payload_fetch_status(payload) != "ok":
             return _payload_fetch_error_message(symbol=symbol, payload=payload)
     return None
 

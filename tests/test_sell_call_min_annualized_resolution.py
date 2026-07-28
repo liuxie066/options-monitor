@@ -192,7 +192,7 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
     assert kwargs['min_strike_cost_multiplier'] == 1.02
 
 
-def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
+def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: Path) -> None:
     _add_repo_to_syspath()
 
     import src.application.sell_call_steps as steps
@@ -214,8 +214,8 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
             symbol_cfg={'symbol': '0700.HK', 'sell_call': {}},
             cc={'enabled': True, 'min_net_income': 100},
             top_n=3,
-            required_data_dir=BASE / 'output',
-            report_dir=BASE / 'output' / 'reports',
+            required_data_dir=tmp_path / 'required_data',
+            report_dir=tmp_path / 'reports',
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 500, 'avg_cost': 400},
@@ -228,4 +228,44 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
 
     assert out['strategy'] == 'sell_call'
     assert out['candidate_count'] == 0
+    assert out["_strategy_status"] == "unavailable"
     assert calls == []
+
+
+def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
+    tmp_path: Path,
+) -> None:
+    _add_repo_to_syspath()
+
+    import src.application.sell_call_steps as steps
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    stale_path = tmp_path / "reports" / "aapl_sell_call_candidates.csv"
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_text("stale\n1\n", encoding="utf-8")
+
+    out = steps.run_sell_call_scan_and_summarize(
+        py="python",
+        base=BASE,
+        symbol="AAPL",
+        symbol_lower="aapl",
+        symbol_cfg={"symbol": "AAPL", "sell_call": {}},
+        cc={"enabled": True},
+        top_n=3,
+        required_data_dir=tmp_path / "required_data",
+        report_dir=tmp_path / "reports",
+        timeout_sec=10,
+        is_scheduled=True,
+        stock={"shares": 100, "avg_cost": 100},
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+        ),
+        locked_shares_status="unavailable",
+        locked_shares_unavailable_reason="option_positions_context_unavailable",
+        locked_shares_by_symbol={},
+        locked_shares_unavailable_by_symbol={},
+    )
+
+    assert out["_strategy_status"] == "unavailable"
+    assert out["_strategy_reason"] == "option_positions_context_unavailable"
+    assert stale_path.read_text(encoding="utf-8") == "\n"

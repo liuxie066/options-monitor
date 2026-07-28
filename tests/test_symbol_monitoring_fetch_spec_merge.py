@@ -965,3 +965,25 @@ def test_sell_call_failure_is_traced_and_stale_call_artifacts_are_cleared(
     assert '"strategy_family": "covered_call"' in trace
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
     assert out[-1]["count"] == 0
+
+
+def test_sell_call_not_applicable_clears_stale_call_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    stale_path = report_dir / "nvda_sell_call_candidates.csv"
+    stale_path.write_text("stale\n1\n", encoding="utf-8")
+
+    out, _required = _run_strategy_decoupling_case(
+        monkeypatch,
+        tmp_path,
+        sell_put_enabled=False,
+        sell_put_runner=lambda **kwargs: {"strategy": "sell_put", "count": 0},
+        combo_runner=lambda **kwargs: {"strategy": "combo_yield", "count": 0},
+        sell_call_enabled=False,
+    )
+
+    assert stale_path.read_text(encoding="utf-8") == "\n"
+    assert out[-1]["strategy"] == "sell_call"

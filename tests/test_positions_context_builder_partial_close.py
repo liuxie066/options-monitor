@@ -219,6 +219,8 @@ def test_build_context_fail_closed_on_ledger_identity_conflict() -> None:
     assert ctx["ledger"]["status"] == "blocked"
     assert ctx["ledger"]["fail_closed"] is True
     assert ctx["open_positions_min"] == []
+    assert ctx["locked_shares_status"] == "unavailable"
+    assert ctx["locked_shares_unavailable_reason"] == "option_position_ledger_unavailable"
 
 
 def test_build_context_requires_broker_on_persisted_rows() -> None:
@@ -369,6 +371,7 @@ def test_build_context_marks_short_call_lock_unavailable_without_real_multiplier
 
     assert "0700.HK" not in ctx["locked_shares_by_symbol"]
     assert ctx["locked_shares_unavailable_by_symbol"]["0700.HK"] == "short_call_locked_shares_basis_missing"
+    assert ctx["locked_shares_status"] == "available"
 
 
 def test_build_context_derives_missing_cash_secured_from_strike_multiplier() -> None:

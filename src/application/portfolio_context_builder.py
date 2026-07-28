@@ -123,6 +123,7 @@ def build_context(
         selected.append(fields)
 
     stocks_by_symbol: dict[str, dict] = {}
+    stock_cost_basis: dict[str, dict[str, float | int]] = {}
     cash_by_currency: dict[str, float] = {}
 
     for f in selected:
@@ -162,25 +163,45 @@ def build_context(
         shares = int(qty)
         existing = stocks_by_symbol.get(sym)
         if existing is None:
+            known_shares = shares if avg_cost is not None else 0
+            unknown_shares = 0 if avg_cost is not None else shares
             stocks_by_symbol[sym] = {
                 "symbol": sym,
                 "name": asset_name or None,
                 "shares": shares,
-                "avg_cost": avg_cost,
+                "avg_cost": avg_cost if unknown_shares == 0 else None,
+                "cost_basis_complete": unknown_shares == 0,
+                "cost_known_shares": known_shares,
+                "cost_unknown_shares": unknown_shares,
                 "currency": currency,
                 "broker": _record_broker_text(f),
                 "account": normalize_account(_as_text(f.get("account"))),
             }
+            stock_cost_basis[sym] = {
+                "known_shares": known_shares,
+                "unknown_shares": unknown_shares,
+                "known_cost_total": float(avg_cost or 0.0) * known_shares,
+            }
             continue
 
-        prev_shares = int(existing.get("shares") or 0)
-        new_shares = prev_shares + shares
-        prev_cost = safe_float(existing.get("avg_cost"))
-        if prev_cost is not None and avg_cost is not None and new_shares > 0:
-            existing["avg_cost"] = ((prev_cost * prev_shares) + (avg_cost * shares)) / float(new_shares)
-        elif existing.get("avg_cost") in (None, "") and avg_cost is not None:
-            existing["avg_cost"] = avg_cost
+        new_shares = int(existing.get("shares") or 0) + shares
+        basis = stock_cost_basis[sym]
+        if avg_cost is None:
+            basis["unknown_shares"] = int(basis["unknown_shares"]) + shares
+        else:
+            basis["known_shares"] = int(basis["known_shares"]) + shares
+            basis["known_cost_total"] = float(basis["known_cost_total"]) + (float(avg_cost) * shares)
         existing["shares"] = new_shares
+        known_shares = int(basis["known_shares"])
+        unknown_shares = int(basis["unknown_shares"])
+        existing["cost_known_shares"] = known_shares
+        existing["cost_unknown_shares"] = unknown_shares
+        existing["cost_basis_complete"] = unknown_shares == 0
+        existing["avg_cost"] = (
+            float(basis["known_cost_total"]) / float(known_shares)
+            if unknown_shares == 0 and known_shares > 0
+            else None
+        )
         if not existing.get("name") and asset_name:
             existing["name"] = asset_name
         if not existing.get("currency") and currency:

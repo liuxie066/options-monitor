@@ -21,7 +21,13 @@ from domain.domain.candidate_defaults import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import canonical_symbol
 from src.infrastructure.io_utils import safe_read_csv
-from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
+from src.application.candidate_underwriting_decisions import (
+    apply_insurance_underwriting_to_all_decisions,
+)
+from src.application.covered_call_strategy_risk import (
+    enrich_and_filter_covered_call_underwriting,
+    resolve_covered_call_underwriting_config,
+)
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
@@ -86,6 +92,25 @@ def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
     return float(value)
 
 
+def _empty_sell_call_result(
+    *,
+    report_dir: Path,
+    symbol_lower: str,
+    symbol: str,
+    symbol_cfg: dict[str, Any],
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    materialize_empty_sell_call_artifacts(
+        report_dir=report_dir,
+        symbol_lower=symbol_lower,
+    )
+    result = summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+    result["_strategy_status"] = status
+    result["_strategy_reason"] = reason
+    return result
+
+
 def run_sell_call_scan_and_summarize(
     *,
     py: str,
@@ -102,6 +127,8 @@ def run_sell_call_scan_and_summarize(
     stock: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None = None,
+    locked_shares_status: str | None = None,
+    locked_shares_unavailable_reason: str | None = None,
     locked_shares_by_symbol: dict[str, int] | None = None,
     locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict[str, Any] | None = None,
@@ -128,7 +155,14 @@ def run_sell_call_scan_and_summarize(
             strategy_family=sell_call_semantics.strategy_family,
             strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
-        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="not_applicable",
+            reason="stock_context_missing",
+        )
 
     try:
         shares_raw = stock.get('shares')
@@ -147,7 +181,14 @@ def run_sell_call_scan_and_summarize(
             strategy_family=sell_call_semantics.strategy_family,
             strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
-        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="not_applicable",
+            reason="stock_context_invalid",
+        )
 
     if shares_total <= 0 or avg_cost <= 0:
         _append_share_coverage_trace(
@@ -162,22 +203,59 @@ def run_sell_call_scan_and_summarize(
             strategy_profile=sell_call_semantics.scan_strategy_profile,
             config_values={"avg_cost": avg_cost},
         )
-        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="not_applicable",
+            reason="stock_context_non_positive",
+        )
 
     locked = 0
     try:
         symbol_key = canonical_symbol(symbol) or str(symbol).upper()
-        if locked_shares_unavailable_by_symbol and symbol_key in locked_shares_unavailable_by_symbol:
+        if str(locked_shares_status or "available").strip().lower() != "available":
+            reason = str(
+                locked_shares_unavailable_reason
+                or "option_positions_context_unavailable"
+            )
             _append_share_coverage_trace(
                 output_path=symbol_cc,
                 symbol=symbol,
-                status="post_filtered",
-                rule="locked_shares_unavailable",
-                message=str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable"),
+                status="unavailable",
+                rule="locked_shares_context_unavailable",
+                message=reason,
                 strategy_family=sell_call_semantics.strategy_family,
                 strategy_profile=sell_call_semantics.scan_strategy_profile,
             )
-            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+            return _empty_sell_call_result(
+                report_dir=report_dir,
+                symbol_lower=symbol_lower,
+                symbol=symbol,
+                symbol_cfg=symbol_cfg,
+                status="unavailable",
+                reason=reason,
+            )
+        if locked_shares_unavailable_by_symbol and symbol_key in locked_shares_unavailable_by_symbol:
+            reason = str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable")
+            _append_share_coverage_trace(
+                output_path=symbol_cc,
+                symbol=symbol,
+                status="unavailable",
+                rule="locked_shares_unavailable",
+                message=reason,
+                strategy_family=sell_call_semantics.strategy_family,
+                strategy_profile=sell_call_semantics.scan_strategy_profile,
+            )
+            return _empty_sell_call_result(
+                report_dir=report_dir,
+                symbol_lower=symbol_lower,
+                symbol=symbol,
+                symbol_cfg=symbol_cfg,
+                status="unavailable",
+                reason=reason,
+            )
         if locked_shares_by_symbol and symbol:
             locked = int(locked_shares_by_symbol.get(symbol_key, 0) or 0)
     except Exception:
@@ -190,12 +268,34 @@ def run_sell_call_scan_and_summarize(
             strategy_family=sell_call_semantics.strategy_family,
             strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
-        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="unavailable",
+            reason="share_coverage_calc_failed",
+        )
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
     event_risk = resolve_event_risk_config(global_sell_call_event_risk)
     window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
+    underwriting_cfg = resolve_covered_call_underwriting_config(cc)
+    scan_decisions_sink = all_decisions_sink_fn
+    if all_decisions_sink_fn is not None and underwriting_cfg.enabled:
+
+        def _underwritten_sink(rows: list[dict[str, Any]]) -> None:
+            all_decisions_sink_fn(
+                apply_insurance_underwriting_to_all_decisions(
+                    rows,
+                    mode="call",
+                    cfg=underwriting_cfg,
+                    exchange_rate_converter=exchange_rate_converter,
+                )
+            )
+
+        scan_decisions_sink = _underwritten_sink
 
     run_sell_call_scan(
         symbols=[symbol],
@@ -227,7 +327,7 @@ def run_sell_call_scan_and_summarize(
         quiet=bool(is_scheduled),
         risk_policy_version=risk_policy_version,
         quote_snapshot_id=quote_snapshot_id,
-        all_decisions_sink_fn=all_decisions_sink_fn,
+        all_decisions_sink_fn=scan_decisions_sink,
     )
 
     df_cc = safe_read_csv(symbol_cc)
