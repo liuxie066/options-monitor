@@ -395,6 +395,7 @@ def _trade_event_to_lifecycle_payload(event: TradeEvent) -> dict[str, Any]:
         "strike": event.contract_key.strike,
         "expiration_ymd": event.contract_key.expiration_ymd,
         "currency": event.currency,
+        "source": event.source,
         "multiplier": event.multiplier,
         "fees": event.fees,
         "target_lot_id": event.target_lot_id,

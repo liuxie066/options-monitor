@@ -1358,6 +1358,23 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
     assert partially_sold_rows["data"]["row_count"] == 1
     assert closed_rows["ok"] is True
     assert closed_rows["data"]["row_count"] == 0
+    assert closed_rows["data"]["assigned_stock_sale_rows"] == []
+    assert closed_rows["data"]["assigned_stock_review_rows"] == []
+
+    other_symbol = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "MSFT",
+            "refresh_quotes": False,
+            "quote_snapshots": quote_snapshots,
+        },
+    )
+    assert other_symbol["data"]["assigned_stock_lots"] == []
+    assert other_symbol["data"]["assigned_stock_sale_rows"] == []
+    assert other_symbol["data"]["assigned_stock_review_rows"] == []
 
 
 def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
@@ -3013,7 +3030,7 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     report_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
     report_dir.mkdir(parents=True)
     (report_dir / "config.override.json").write_text(
-        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     pd.DataFrame(
@@ -3065,7 +3082,7 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     )
 
     assert out["ok"] is True
-    assert out["data"]["row_count"] == 2
+    assert out["data"]["row_count"] == 1
     assert out["data"]["matched_count"] == 1
     assert out["data"]["source"]["run_id"] == "run-1"
     row = out["data"]["rows"][0]
@@ -3338,6 +3355,9 @@ def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path:
 
 def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
+    from src.application.close_advice_report_manifest import (
+        publish_close_advice_report_manifest,
+    )
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -3351,23 +3371,48 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
     ):
         report_dir = root / "output_shared" / "agent_tools" / "reports"
         report_dir.mkdir(parents=True)
-        pd.DataFrame(
-            [
+        rows = [
+            {
+                "account": "lx",
+                "symbol": symbol,
+                "option_type": "call",
+                "position_side": "long",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "evaluation_status": "priced",
+                "close_action": "hold_call",
+                "tier": "none",
+                "tier_label": "继续持有",
+                "realized_if_close": realized,
+            }
+        ]
+        csv_path = report_dir / "close_advice.csv"
+        text_path = report_dir / "close_advice.txt"
+        context_path = report_dir / "option_positions_context.json"
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        text_path.write_text("", encoding="utf-8")
+        context_path.write_text(
+            json.dumps(
                 {
-                    "account": "lx",
-                    "symbol": symbol,
-                    "option_type": "call",
-                    "position_side": "long",
-                    "expiration": "2026-08-21",
-                    "strike": 100,
-                    "evaluation_status": "priced",
-                    "close_action": "hold_call",
-                    "tier": "none",
-                    "tier_label": "继续持有",
-                    "realized_if_close": realized,
+                    "context_status": "available",
+                    "filters": {"account": "lx"},
+                    "open_positions_min": [],
                 }
-            ]
-        ).to_csv(report_dir / "close_advice.csv", index=False)
+            ),
+            encoding="utf-8",
+        )
+        publish_close_advice_report_manifest(
+            csv_path=csv_path,
+            text_path=text_path,
+            context_path=context_path,
+            context={
+                "context_status": "available",
+                "filters": {"account": "lx"},
+                "open_positions_min": [],
+            },
+            rows=rows,
+            markets_to_run=["US"],
+        )
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
 
@@ -3385,6 +3430,56 @@ def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch
     assert data["source"]["type"] == "agent_tool"
     assert data["rows"][0]["symbol"] == "NVDA"
     assert data["rows"][0]["realized_if_close"] == 100
+
+
+def test_close_advice_read_rejects_agent_report_from_another_market(
+    tmp_path: Path,
+) -> None:
+    from src.application.close_advice_report_manifest import (
+        publish_close_advice_report_manifest,
+    )
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(
+        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "output_shared" / "agent_tools"
+    report_dir = output_root / "reports"
+    report_dir.mkdir(parents=True)
+    rows = [{"account": "lx", "symbol": "NVDA", "tier": "none"}]
+    csv_path = report_dir / "close_advice.csv"
+    text_path = report_dir / "close_advice.txt"
+    context_path = report_dir / "option_positions_context.json"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    text_path.write_text("", encoding="utf-8")
+    context = {
+        "context_status": "available",
+        "filters": {"account": "lx"},
+        "open_positions_min": [],
+    }
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=context,
+        rows=rows,
+        markets_to_run=["US"],
+    )
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "output_dir": str(output_root),
+            "account": "lx",
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_MISSING"
 
 
 def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
@@ -3499,6 +3594,9 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
 
 def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_is_complete(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
+    from src.application.close_advice_quote_cache import (
+        publish_quote_cache_metadata,
+    )
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3518,6 +3616,12 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
         "NVDA,put,2026-06-19,100\n"
         "NVDA,call,2026-07-17,120\n",
         encoding="utf-8",
+    )
+    publish_quote_cache_metadata(
+        csv_path=required_root / "NVDA_required_data.csv",
+        symbol="NVDA",
+        source="opend",
+        source_run_id="cached-test-run",
     )
 
     def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
@@ -3781,7 +3885,7 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
     assert out["data"]["symbols"][0]["position_coverage_ok"] is True
 
 
-def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_positions(tmp_path: Path) -> None:
+def test_prepare_close_advice_inputs_fails_when_data_config_is_missing(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -3791,9 +3895,8 @@ def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_po
 
     out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path)})
 
-    assert out["ok"] is True
-    assert out["data"]["context_rows"] == 0
-    assert out["data"]["symbol_count"] == 0
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_MISSING"
 
 
 def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) -> None:
@@ -3849,6 +3952,55 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
     assert out["data"]["top_rows"][0]["symbol"] == "NVDA"
     assert "平仓建议" in out["data"]["notification_preview"]
     assert out["warnings"] == ["prepare_warn", "close_warn"]
+
+
+def test_get_close_advice_uses_distinct_request_scope_for_concurrent_calls() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Lock
+
+    from src.application.agent_tools.materialization_impl import (
+        get_close_advice_tool,
+    )
+
+    barrier = Barrier(2)
+    lock = Lock()
+    prepared_scopes: set[str] = set()
+
+    def prepare(payload):  # type: ignore[no-untyped-def]
+        scope = str(payload["_close_advice_scope_id"])
+        with lock:
+            prepared_scopes.add(scope)
+        barrier.wait()
+        return (
+            {"symbol_count": 0, "context_rows": 0},
+            [],
+            {"context_path": f".../{scope}/context.json"},
+        )
+
+    def close(payload):  # type: ignore[no-untyped-def]
+        scope = str(payload["_close_advice_scope_id"])
+        assert scope in prepared_scopes
+        return (
+            {"rows": 0, "notify_rows": 0, "summary": {"row_count": 0}},
+            [],
+            {"output_dir": f".../{scope}/reports"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda account: get_close_advice_tool(
+                    {"account": account},
+                    prepare_close_advice_inputs_tool_fn=prepare,
+                    close_advice_tool_fn=close,
+                ),
+                ("lx", "sy"),
+            )
+        )
+
+    request_ids = {result[2]["request_id"] for result in results}
+    assert len(request_ids) == 2
+    assert request_ids == prepared_scopes
 
 
 def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) -> None:

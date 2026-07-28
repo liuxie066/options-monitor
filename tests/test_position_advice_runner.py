@@ -208,7 +208,7 @@ def test_runner_materializes_immutable_artifacts_and_switches_shadow_current(
     assert Path(result["paths"]["text"]).is_file()
     current_files = list(
         (tmp_path / "output_shared" / "state" / "position_advice").glob(
-            "*/account_decision_current.v2.json"
+            "*/account_decision_current.US.v2.json"
         )
     )
     assert len(current_files) == 1

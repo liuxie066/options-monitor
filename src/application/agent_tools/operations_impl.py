@@ -503,13 +503,23 @@ def _assigned_stock_action(
     rows: list[dict[str, Any]] = []
     for row in selected_report_rows:
         rows.append(row)
+    sale_rows = _assigned_stock_related_rows(
+        report.get("assigned_stock_sale_rows"),
+        selected_lot_rows=selected_report_rows,
+        stock_lot_id=stock_lot_id,
+    )
+    review_rows = _assigned_stock_related_rows(
+        report.get("assigned_stock_review_rows"),
+        selected_lot_rows=selected_report_rows,
+        stock_lot_id=stock_lot_id,
+    )
     return {
         "action": "assigned-stock",
         "rows": rows,
         "row_count": len(rows),
         "assigned_stock_lots": rows,
-        "assigned_stock_sale_rows": report.get("assigned_stock_sale_rows") or [],
-        "assigned_stock_review_rows": report.get("assigned_stock_review_rows") or [],
+        "assigned_stock_sale_rows": sale_rows,
+        "assigned_stock_review_rows": review_rows,
         "filters": {
             "broker": broker,
             "account": account,
@@ -525,6 +535,53 @@ def _assigned_stock_action(
             *quote_refresh_warnings,
         ],
     }
+
+
+def _assigned_stock_related_rows(
+    raw_rows: Any,
+    *,
+    selected_lot_rows: list[dict[str, Any]],
+    stock_lot_id: str | None,
+) -> list[dict[str, Any]]:
+    if not selected_lot_rows:
+        return []
+    selected_lot_ids = {
+        str(row.get("stock_lot_id") or "").strip()
+        for row in selected_lot_rows
+        if str(row.get("stock_lot_id") or "").strip()
+    }
+    selected_scope_keys = {
+        (
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("broker") or "").strip(),
+            str(row.get("symbol") or "").strip().upper(),
+        )
+        for row in selected_lot_rows
+    }
+    out: list[dict[str, Any]] = []
+    for raw in raw_rows or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        row_lot_id = str(
+            row.get("stock_lot_id")
+            or row.get("target_stock_lot_id")
+            or ""
+        ).strip()
+        if row_lot_id:
+            if row_lot_id in selected_lot_ids:
+                out.append(row)
+            continue
+        if stock_lot_id:
+            continue
+        scope_key = (
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("broker") or "").strip(),
+            str(row.get("symbol") or "").strip().upper(),
+        )
+        if scope_key in selected_scope_keys:
+            out.append(row)
+    return out
 
 
 def option_positions_read_tool(

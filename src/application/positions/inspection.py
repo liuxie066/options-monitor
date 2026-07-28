@@ -165,24 +165,31 @@ def _event_matches_lot(event: dict[str, object], *, record_id: str, fields: dict
 
 def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[str, object]]:
     _ = base
+    requested_record_id = str(record_id or "").strip()
+    if not requested_record_id:
+        raise ValueError("record_id is required")
     current = next(
         (
             item
             for item in list_position_lot_snapshots(repo)
-            if str(item.get("record_id") or "").strip() == str(record_id).strip()
+            if str(item.get("record_id") or "").strip() == requested_record_id
         ),
         None,
     )
-    if current is None:
-        raise ValueError(f"position lot not found: {record_id}")
-    fields = current.get("fields") or {}
+    fields = current.get("fields") or {} if current is not None else {}
     if not isinstance(fields, dict):
         fields = {}
     history = [
         _event_to_history_row(event, fallback_record_id=record_id)
         for event in trade_event_log(repo)
-        if _event_matches_lot(event, record_id=record_id, fields=fields)
+        if (
+            _event_matches_lot(event, record_id=requested_record_id, fields=fields)
+            if current is not None
+            else requested_record_id in _event_record_refs(event)
+        )
     ]
+    if not history:
+        raise ValueError(f"position lot or event history not found: {record_id}")
     history.sort(key=lambda row: (_safe_int(row.get("trade_time_ms")), str(row.get("event_id") or "")))
     return history
 

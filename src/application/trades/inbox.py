@@ -14,13 +14,18 @@ def enqueue_trade_payload(
     *,
     payload: dict[str, Any],
     source: str,
+    broker_deal_key: str | None = None,
 ) -> str:
     inbox_path = Path(path)
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     deal_id = _payload_deal_id(payload)
     source_text = str(source or "unknown").strip().lower() or "unknown"
-    identity = deal_id or f"{source_text}|{hashlib.sha256(payload_json.encode('utf-8')).hexdigest()}"
+    identity = (
+        str(broker_deal_key or "").strip()
+        or deal_id
+        or f"{source_text}|{hashlib.sha256(payload_json.encode('utf-8')).hexdigest()}"
+    )
     inbox_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     now_ms = int(time.time() * 1000)
     with closing(_connect(inbox_path)) as conn:

@@ -792,6 +792,88 @@ def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pen
     assert case["status"] == "ledger_written"
     assert case["decision_type"] == "expire_close"
     assert case["target_lot_ids"] == ["lot_tigr_put_6_20260522"]
+    allocations = repo.list_trade_lifecycle_allocations(case_id="lc_tigr_expire")
+    assert len(allocations) == 1
+    assert allocations[0]["evidence_id"] == "ev_tigr_zero_close"
+    assert allocations[0]["target_lot_id"] == "lot_tigr_put_6_20260522"
+    assert allocations[0]["canonical_terminal_event_id"] == events[0]["event_id"]
+
+
+def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_write_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingCaseRepo(ledger_repository.SQLiteOptionPositionsRepository):
+        def upsert_trade_lifecycle_case(self, case, *, conn=None):  # type: ignore[no-untyped-def]
+            if str(case.get("status") or "") == "ledger_written":
+                raise RuntimeError("injected lifecycle case write failure")
+            return super().upsert_trade_lifecycle_case(case, conn=conn)
+
+    repo = FailingCaseRepo(tmp_path / "option_positions.sqlite3")
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_tigr_put_6_20260522",
+        account="lx",
+        symbol="TIGR",
+        option_type="put",
+        side="short",
+        contracts=10,
+        currency="USD",
+        strike=6,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_expire",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "contracts": 10,
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_tigr_zero_close",
+            "case_id": "lc_tigr_expire",
+            "source_type": "opend_deal",
+            "source_event_id": "deal-zero-close",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "TIGR",
+        }
+    )
+    as_of_ms = parse_exp_to_ms("2026-05-25")
+    assert as_of_ms is not None
+    positions = [
+        dict(item["fields"], record_id=item["record_id"])
+        for item in repo.list_position_lots()
+    ]
+    positions[0]["_auto_close_underlying_spot"] = 7
+
+    _decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert applied == []
+    assert errors and "injected lifecycle case write failure" in errors[0]
+    assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
+    assert [row for row in repo.list_trade_events() if row["event_type"] == "expire_close"] == []
+    assert repo.list_trade_lifecycle_allocations(case_id="lc_tigr_expire") == []
+    case = repo.get_trade_lifecycle_case("lc_tigr_expire")
+    assert case is not None
+    assert case["status"] == "waiting_settlement_evidence"
 
 
 def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tmp_path: Path) -> None:

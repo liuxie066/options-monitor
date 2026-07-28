@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.trades.deal_identity import completed_ledger_deal_ids
+from src.application.trades.deal_identity import (
+    broker_deal_key_from_payload,
+    completed_ledger_deal_keys,
+)
 from src.application.trades.history_backfill import fetch_opend_history_deals
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.inbox import (
@@ -149,6 +152,10 @@ def run_history_backfill(
         if not isinstance(payload, dict):
             continue
         deal_id = payload_deal_id(payload)
+        deal_key = broker_deal_key_from_payload(
+            payload,
+            account_mapping=account_mapping,
+        )
         inbox_id: str | None = None
         if apply_changes:
             try:
@@ -157,6 +164,7 @@ def run_history_backfill(
                     or state_path.with_name("trade_intake_inbox.sqlite3"),
                     payload=payload,
                     source="backfill",
+                    broker_deal_key=deal_key,
                 )
             except Exception as exc:
                 durable_queue_complete = False
@@ -182,14 +190,14 @@ def run_history_backfill(
         )
         with lock_context:
             state = load_trade_intake_state(state_path)
-            duplicate_reason = _state_duplicate_reason(state, deal_id)
+            duplicate_reason = _state_duplicate_reason(state, deal_key)
             ledger_ids = _ledger_recorded_deal_ids(repo)
-            if duplicate_reason is None and deal_id and deal_id in ledger_ids:
+            if duplicate_reason is None and deal_key and deal_key in ledger_ids:
                 duplicate_reason = "ledger_event_already_recorded"
                 state = _record_ledger_duplicate_state(
                     state=state,
                     state_path=state_path,
-                    deal_id=deal_id,
+                    deal_id=deal_key,
                     apply_changes=apply_changes,
                 )
             if duplicate_reason is not None:
@@ -501,7 +509,7 @@ def _ledger_recorded_deal_ids(repo: Any) -> set[str]:
     list_trade_events = getattr(repo, "list_trade_events", None)
     if not callable(list_trade_events):
         return set()
-    return completed_ledger_deal_ids(
+    return completed_ledger_deal_keys(
         item for item in list_trade_events() if isinstance(item, dict)
     )
 

@@ -9,6 +9,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any, Callable, Mapping
 
 DEFAULT_SERVICE_URL = "http://127.0.0.1:8765"
@@ -16,6 +17,18 @@ SERVICE_URL_ENV = "PORTFOLIO_SERVICE_URL"
 API_VERSION = "portfolio.api.v1"
 DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 VALUATION_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+VALUATION_EVIDENCE_SCHEMA = "portfolio.valuation_evidence.v1"
+_FRESHNESS_STATUSES = frozenset(
+    {"fresh", "stale", "unknown", "unavailable"}
+)
+_TRUST_STATUSES = frozenset(
+    {"trusted", "partial", "untrusted", "unavailable"}
+)
+_HOLDINGS_SYNC_STAGES = (
+    "positions",
+    "securities_cash",
+    "fund_mmf",
+)
 
 _VIEW_PATHS = {
     "health": "/health",
@@ -155,16 +168,21 @@ class PortfolioManagementClient:
         supplemental_codes: list[str],
         price_timeout: int,
     ) -> dict[str, Any]:
-        return self._request(
+        normalized_accounts = _normalized_accounts(accounts)
+        result = self._request(
             "POST",
             VALUATION_EVIDENCE_PATH,
             payload={
-                "accounts": accounts,
+                "accounts": normalized_accounts,
                 "supplemental_codes": supplemental_codes,
                 "price_timeout": int(price_timeout),
             },
             timeout=float(min(max(int(price_timeout) + 10, 15), 180)),
             max_response_bytes=VALUATION_MAX_RESPONSE_BYTES,
+        )
+        return _validate_valuation_evidence_response(
+            result,
+            requested_accounts=normalized_accounts,
         )
 
     def sync_holdings(
@@ -184,11 +202,10 @@ class PortfolioManagementClient:
             },
             timeout=timeout,
         )
-        if result.get("success") is not True:
-            raise PortfolioManagementProtocolError(
-                "portfolio holdings sync did not confirm success=true"
-            )
-        return result
+        return validate_holdings_sync_response(
+            result,
+            requested_account=account,
+        )
 
     def _request(
         self,
@@ -285,3 +302,275 @@ def _decode_optional_object(body: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _normalized_accounts(accounts: list[str]) -> list[str]:
+    normalized = list(
+        dict.fromkeys(
+            str(account or "").strip().lower()
+            for account in accounts
+            if str(account or "").strip()
+        )
+    )
+    if not normalized:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation request accounts are missing"
+        )
+    return normalized
+
+
+def _validate_valuation_evidence_response(
+    result: Mapping[str, Any],
+    *,
+    requested_accounts: list[str],
+) -> dict[str, Any]:
+    item = dict(result)
+    required = {
+        "success",
+        "freshness",
+        "retrieved_at_utc",
+        "schema_version",
+        "status",
+        "scope",
+        "snapshot",
+        "holdings",
+        "quotes",
+        "account_status",
+        "warnings",
+    }
+    missing = sorted(required - set(item))
+    if missing:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation response missing required fields: "
+            + ",".join(missing)
+        )
+    if item.get("success") is not True:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation response did not confirm success=true"
+        )
+    if item.get("schema_version") != VALUATION_EVIDENCE_SCHEMA:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation schema version mismatch"
+        )
+    _require_timestamp(
+        item.get("retrieved_at_utc"),
+        "portfolio valuation retrieved_at_utc",
+    )
+    freshness = _validate_freshness(item.get("freshness"))
+    scope = item.get("scope")
+    snapshot = item.get("snapshot")
+    holdings = item.get("holdings")
+    quotes = item.get("quotes")
+    account_status = item.get("account_status")
+    warnings = item.get("warnings")
+    if not isinstance(scope, Mapping):
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation scope must be an object"
+        )
+    response_accounts = _normalized_accounts(
+        list(scope.get("accounts") or [])
+        if isinstance(scope.get("accounts"), list)
+        else []
+    )
+    if response_accounts != requested_accounts:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation account scope mismatch"
+        )
+    if not isinstance(snapshot, Mapping):
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation snapshot must be an object"
+        )
+    snapshot_id = str(snapshot.get("snapshot_id") or "").strip()
+    if not snapshot_id:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation snapshot id is missing"
+        )
+    snapshot_observed_at = (
+        snapshot.get("observed_at")
+        or snapshot.get("observed_at_utc")
+    )
+    _require_timestamp(
+        snapshot_observed_at,
+        "portfolio valuation snapshot observed_at",
+    )
+    if freshness["status"] == "fresh":
+        _require_timestamp(
+            freshness.get("observed_at_utc"),
+            "portfolio valuation freshness observed_at_utc",
+        )
+        if not freshness["dataset_ids"]:
+            raise PortfolioManagementProtocolError(
+                "fresh portfolio valuation has no dataset ids"
+            )
+    for field, value in (
+        ("holdings", holdings),
+        ("quotes", quotes),
+        ("account_status", account_status),
+        ("warnings", warnings),
+    ):
+        if not isinstance(value, list):
+            raise PortfolioManagementProtocolError(
+                f"portfolio valuation {field} must be an array"
+            )
+    requested = set(requested_accounts)
+    for index, holding in enumerate(holdings):
+        if not isinstance(holding, Mapping):
+            raise PortfolioManagementProtocolError(
+                f"portfolio valuation holding[{index}] must be an object"
+            )
+        account = str(holding.get("account") or "").strip().lower()
+        if account not in requested:
+            raise PortfolioManagementProtocolError(
+                f"portfolio valuation holding[{index}] account mismatch"
+            )
+    status_accounts: set[str] = set()
+    for index, account_item in enumerate(account_status):
+        if not isinstance(account_item, Mapping):
+            raise PortfolioManagementProtocolError(
+                f"portfolio valuation account_status[{index}] must be an object"
+            )
+        account = str(account_item.get("account") or "").strip().lower()
+        if account not in requested or account in status_accounts:
+            raise PortfolioManagementProtocolError(
+                "portfolio valuation account status scope mismatch"
+            )
+        status_accounts.add(account)
+    if status_accounts != requested:
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation account status is incomplete"
+        )
+    if not str(item.get("status") or "").strip():
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation status is missing"
+        )
+    if any(not isinstance(value, str) for value in warnings):
+        raise PortfolioManagementProtocolError(
+            "portfolio valuation warnings must be strings"
+        )
+    return item
+
+
+def _validate_freshness(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PortfolioManagementProtocolError(
+            "portfolio freshness evidence is missing"
+        )
+    item = dict(value)
+    status = str(item.get("status") or "").strip().lower()
+    trust = str(item.get("trust_status") or "").strip().lower()
+    dataset_ids = item.get("dataset_ids")
+    reason_codes = item.get("reason_codes")
+    if (
+        status not in _FRESHNESS_STATUSES
+        or trust not in _TRUST_STATUSES
+        or not isinstance(dataset_ids, list)
+        or not isinstance(reason_codes, list)
+        or any(not isinstance(value, str) for value in dataset_ids)
+        or any(not isinstance(value, str) for value in reason_codes)
+    ):
+        raise PortfolioManagementProtocolError(
+            "portfolio freshness evidence is invalid"
+        )
+    return item
+
+
+def validate_holdings_sync_response(
+    result: Mapping[str, Any],
+    *,
+    requested_account: str,
+) -> dict[str, Any]:
+    item = dict(result)
+    account = str(requested_account or "").strip().lower()
+    required = {
+        "success",
+        "account",
+        "broker",
+        "dry_run",
+        "source",
+        "source_snapshot_id",
+        "sync_run_id",
+        "stages",
+        "positions",
+    }
+    missing = sorted(required - set(item))
+    if missing:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync response missing required fields: "
+            + ",".join(missing)
+        )
+    if item.get("success") is not True:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync did not confirm success=true"
+        )
+    if str(item.get("account") or "").strip().lower() != account:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync account mismatch"
+        )
+    if item.get("dry_run") is not False:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync did not confirm a real write"
+        )
+    for field in ("broker", "source_snapshot_id", "sync_run_id"):
+        if not str(item.get(field) or "").strip():
+            raise PortfolioManagementProtocolError(
+                f"portfolio holdings sync {field} is missing"
+            )
+    if str(item.get("source") or "").strip() != "futu-openapi":
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync source mismatch"
+        )
+    if item.get("status") not in {None, "written"}:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync write status mismatch"
+        )
+    if item.get("partial_write_possible") is True:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync reports a partial write"
+        )
+    if item.get("receipt_persisted") is not True:
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync durable receipt is unconfirmed"
+        )
+    stages = item.get("stages")
+    if not isinstance(stages, Mapping):
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync stages must be an object"
+        )
+    if set(stages) != set(_HOLDINGS_SYNC_STAGES):
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync stages are incomplete"
+        )
+    for stage_name in _HOLDINGS_SYNC_STAGES:
+        stage = stages.get(stage_name)
+        if (
+            not isinstance(stage, Mapping)
+            or stage.get("status") != "succeeded"
+            or stage.get("partial_write_possible") is True
+        ):
+            raise PortfolioManagementProtocolError(
+                f"portfolio holdings sync stage {stage_name} is not complete"
+            )
+    if not isinstance(item.get("positions"), list):
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings sync positions must be an array"
+        )
+    return item
+
+
+def _require_timestamp(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise PortfolioManagementProtocolError(f"{field} is missing")
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except ValueError as exc:
+        raise PortfolioManagementProtocolError(
+            f"{field} is invalid"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PortfolioManagementProtocolError(
+            f"{field} must be timezone aware"
+        )
+    return text

@@ -200,6 +200,61 @@ def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(
     assert state["processed_deal_ids"]["deal-1"]["reason"] == "ledger_event_already_recorded"
 
 
+def test_backfill_does_not_dedupe_same_deal_id_across_accounts(
+    tmp_path: Path,
+) -> None:
+    processed: list[dict[str, Any]] = []
+
+    def _history_deals_fn(**_kwargs):
+        return (
+            [{"deal_id": "same-id", "futu_account_id": "REAL_2"}],
+            {},
+        )
+
+    def _process_payload_fn(payload: dict[str, Any], **_kwargs):
+        processed.append(dict(payload))
+        return {
+            "status": "applied",
+            "action": "open",
+            "reason": "applied_open",
+            "deal_id": payload["deal_id"],
+            "account": "sy",
+        }
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["account_mapping"] = {"REAL_1": "lx", "REAL_2": "sy"}
+    kwargs["futu_account_ids"] = ["REAL_1", "REAL_2"]
+    kwargs["repo"] = _FakeRepo(
+        [
+            {
+                "event_id": "futu:lx:REAL_1:same-id",
+                "event_type": "open",
+                "account": "lx",
+                "raw_payload": {
+                    "external_event_key": "futu:lx:REAL_1:same-id",
+                    "source_deal_id": "same-id",
+                    "futu_account_id": "REAL_1",
+                    "broker_deal_completion": {
+                        "split_count": 1,
+                        "split_index": 1,
+                        "expected_contracts": 1,
+                        "allocated_contracts": 1,
+                    },
+                },
+            }
+        ]
+    )
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=_process_payload_fn,
+    )
+
+    assert out["applied_count"] == 1
+    assert out["skipped_duplicate_count"] == 0
+    assert processed == [{"deal_id": "same-id", "futu_account_id": "REAL_2"}]
+
+
 def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
     tmp_path: Path,
 ) -> None:

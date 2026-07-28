@@ -878,6 +878,7 @@ def render_service_bundle(
             "verify-projection",
             "--mode",
             "auto",
+            "--publish-evidence",
         ]
         add(
             f"systemd/{verify_service}",
@@ -1537,6 +1538,7 @@ def render_service_bundle(
             "verify-projection",
             "--mode",
             "auto",
+            "--publish-evidence",
         ]
         add(
             f"launchd/{verify_label}.plist",

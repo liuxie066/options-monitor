@@ -2,10 +2,39 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from src.application.ledger.api import valid_void_target_event_id
+from src.application.ledger.api import (
+    broker_external_event_key,
+    valid_void_target_event_id,
+)
+from src.application.trades.account_mapping import resolve_internal_account
+from domain.domain.trade_account_identity import extract_primary_account_id
 
 
 DEAL_ID_FIELDS = ("source_deal_id", "deal_id", "futu_deal_id")
+
+
+def broker_deal_key(deal: Any) -> str:
+    """Return the account-scoped durable identity for a normalized broker deal."""
+
+    return broker_external_event_key(deal)
+
+
+def broker_deal_key_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    account_mapping: dict[str, str] | None,
+) -> str:
+    raw = payload if isinstance(payload, dict) else {}
+    deal_id = ""
+    for key in ("deal_id", "dealID", "dealId", "id"):
+        deal_id = str(raw.get(key) or "").strip()
+        if deal_id:
+            break
+    futu_account_id = str(extract_primary_account_id(raw) or "").strip()
+    account = str(resolve_internal_account(futu_account_id, account_mapping) or "").strip()
+    if deal_id and account and futu_account_id:
+        return f"futu:{account}:{futu_account_id}:{deal_id}"
+    return deal_id
 
 
 def structured_deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
@@ -18,6 +47,30 @@ def structured_deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
     if isinstance(stock_settlement, dict):
         out.update(_normalized_values([stock_settlement.get("source_event_id")]))
     return out
+
+
+def structured_deal_keys_from_ledger_event(event: dict[str, Any]) -> set[str]:
+    """Return account-scoped broker identities, falling back only for legacy rows."""
+
+    raw = event.get("raw_payload")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    external_key = str(raw_payload.get("external_event_key") or "").strip()
+    if external_key:
+        return {external_key}
+    deal_ids = structured_deal_ids_from_ledger_event(event)
+    account = str(
+        event.get("account")
+        or raw_payload.get("internal_account")
+        or raw_payload.get("account")
+        or ""
+    ).strip().lower()
+    futu_account_id = str(raw_payload.get("futu_account_id") or "").strip()
+    if account and futu_account_id:
+        return {
+            f"futu:{account}:{futu_account_id}:{deal_id}"
+            for deal_id in deal_ids
+        }
+    return deal_ids
 
 
 def structured_deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> set[str]:
@@ -43,9 +96,29 @@ def active_ledger_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
 def completed_ledger_deal_ids(events: Iterable[dict[str, Any]]) -> set[str]:
     """Return deal IDs whose declared split set is complete."""
 
+    return _completed_ledger_identities(
+        events,
+        identity_fn=structured_deal_ids_from_ledger_event,
+    )
+
+
+def completed_ledger_deal_keys(events: Iterable[dict[str, Any]]) -> set[str]:
+    """Return complete broker deal identities scoped by account when available."""
+
+    return _completed_ledger_identities(
+        events,
+        identity_fn=structured_deal_keys_from_ledger_event,
+    )
+
+
+def _completed_ledger_identities(
+    events: Iterable[dict[str, Any]],
+    *,
+    identity_fn: Any,
+) -> set[str]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for event in active_ledger_events(events):
-        for deal_id in structured_deal_ids_from_ledger_event(event):
+        for deal_id in identity_fn(event):
             grouped.setdefault(deal_id, []).append(event)
 
     out: set[str] = set()

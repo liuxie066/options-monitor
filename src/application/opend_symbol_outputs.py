@@ -21,6 +21,7 @@ from src.application.position_advice_source_receipts import (
     validate_source_receipt,
 )
 from src.infrastructure.io_utils import atomic_write_text
+from src.application.close_advice_quote_cache import publish_quote_cache_metadata
 
 
 REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v1"
@@ -127,6 +128,20 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     buf = io.StringIO()
     df_out.to_csv(buf, index=False)
     atomic_write_text(csv_path, buf.getvalue(), encoding="utf-8")
+    observed_at = datetime.now(timezone.utc)
+    source_run_id = str(
+        (meta or {}).get("producer_run_id")
+        or (meta or {}).get("run_id")
+        or f"opend-save-{observed_at.strftime('%Y%m%dT%H%M%S%fZ')}"
+    )
+    if not is_error_payload:
+        publish_quote_cache_metadata(
+            csv_path=csv_path,
+            symbol=symbol,
+            source="opend",
+            source_run_id=source_run_id,
+            observed_at=observed_at,
+        )
     return raw_path, csv_path
 
 

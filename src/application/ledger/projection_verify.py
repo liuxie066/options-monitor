@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.publisher import (
+    PROJECTION_CONTRACT_VERSION,
+    project_stored_trade_events_to_position_lots,
+)
 
 
 SCHEMA_KIND = "option_positions_projection_verify"
@@ -18,21 +21,15 @@ def utc_now_iso() -> str:
 
 
 def _state_dir(base: Path) -> Path:
-    out = Path(base).resolve() / "output_shared" / "state" / "option_positions"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
+    return Path(base).resolve() / "output_shared" / "state" / "option_positions"
 
 
 def _current_dir(base: Path) -> Path:
-    out = _state_dir(base) / "current"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
+    return _state_dir(base) / "current"
 
 
 def _reports_dir(base: Path) -> Path:
-    out = _state_dir(base) / "projection_verify"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
+    return _state_dir(base) / "projection_verify"
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -176,6 +173,7 @@ def _build_checkpoint(*, report: dict[str, Any], events: list[dict[str, Any]], c
     return {
         "schema_kind": CHECKPOINT_SCHEMA_KIND,
         "schema_version": "1.0",
+        "projection_contract_version": PROJECTION_CONTRACT_VERSION,
         "checkpoint_id": report["report_id"],
         "created_at_utc": utc_now_iso(),
         "event_count": len(events),
@@ -195,7 +193,13 @@ def _persist_report(*, base: Path, report: dict[str, Any], checkpoint: dict[str,
         _write_json(current / "projection_verify.checkpoint.json", checkpoint)
 
 
-def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> dict[str, Any]:
+def verify_position_projection(
+    *,
+    base: Path,
+    repo: Any,
+    mode: str = "auto",
+    publish_evidence: bool = False,
+) -> dict[str, Any]:
     mode_key = str(mode or "auto").strip().lower()
     if mode_key not in {"auto", "full"}:
         raise ValueError("mode must be auto or full")
@@ -210,6 +214,7 @@ def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> 
     if (
         mode_key == "auto"
         and isinstance(checkpoint, dict)
+        and checkpoint.get("projection_contract_version") == PROJECTION_CONTRACT_VERSION
         and checkpoint.get("event_fingerprint") == event_fingerprint
         and checkpoint.get("position_lots_fingerprint") == current_fingerprint
     ):
@@ -224,6 +229,8 @@ def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> 
             "mode_used": "checkpoint_reuse",
             "checkpoint_reused": True,
             "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "evidence_published": bool(publish_evidence),
+            "projection_contract_version": PROJECTION_CONTRACT_VERSION,
             "source_of_truth": "trade_events",
             "projection": "position_lots",
             "event_count": len(events),
@@ -234,7 +241,8 @@ def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> 
             "summary": {"matched": len(items)},
             "items": items,
         }
-        _persist_report(base=base, report=report, checkpoint=None)
+        if publish_evidence:
+            _persist_report(base=base, report=report, checkpoint=None)
         return report
 
     projection = project_stored_trade_events_to_position_lots(events)
@@ -255,6 +263,8 @@ def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> 
         "mode_requested": mode_key,
         "mode_used": "full_replay",
         "checkpoint_reused": False,
+        "evidence_published": bool(publish_evidence),
+        "projection_contract_version": PROJECTION_CONTRACT_VERSION,
         "source_of_truth": "trade_events",
         "projection": "position_lots",
         "event_count": len(events),
@@ -268,8 +278,13 @@ def verify_position_projection(*, base: Path, repo: Any, mode: str = "auto") -> 
         **comparison,
     }
     next_checkpoint = _build_checkpoint(report=report, events=events, current_lots=current_lots) if report["ok"] else None
-    _persist_report(base=base, report=report, checkpoint=next_checkpoint)
-    return report | ({"checkpoint_id": next_checkpoint["checkpoint_id"]} if next_checkpoint else {})
+    if publish_evidence:
+        _persist_report(base=base, report=report, checkpoint=next_checkpoint)
+    return report | (
+        {"checkpoint_id": next_checkpoint["checkpoint_id"]}
+        if publish_evidence and next_checkpoint
+        else {}
+    )
 
 
 __all__ = [

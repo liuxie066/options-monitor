@@ -198,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
     p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for covered call locking shares')
     p_add.add_argument('--note', default=None)
+    p_add.add_argument(
+        '--request-id',
+        required=True,
+        help='stable idempotency key reused for preview, apply, and retry',
+    )
     p_add.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_add, high_risk=True)
 
@@ -231,6 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     p_assign.add_argument('--stock-side', required=True, choices=['buy', 'sell'], help='stock settlement side; short put => buy, short call => sell')
     p_assign.add_argument('--stock-qty', type=int, required=True, help='settled stock shares')
     p_assign.add_argument('--stock-price', type=float, required=True, help='settlement stock price; should be close to strike')
+    p_assign.add_argument(
+        '--request-id',
+        required=True,
+        help='stable idempotency key reused for preview, apply, and retry',
+    )
     p_assign.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_assign, high_risk=True)
 
@@ -248,6 +258,11 @@ def main(argv: list[str] | None = None) -> int:
     p_exercise.add_argument('--stock-side', required=True, choices=['buy', 'sell'], help='stock settlement side; long call => buy, long put => sell')
     p_exercise.add_argument('--stock-qty', type=int, required=True, help='settled stock shares')
     p_exercise.add_argument('--stock-price', type=float, required=True, help='settlement stock price; should be close to strike')
+    p_exercise.add_argument(
+        '--request-id',
+        required=True,
+        help='stable idempotency key reused for preview, apply, and retry',
+    )
     p_exercise.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_exercise, high_risk=True)
 
@@ -351,6 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
     _add_runtime_root_arg(p_verify)
     p_verify.add_argument('--mode', default='auto', choices=['auto', 'full'], help='auto may reuse a trusted checkpoint when events and lots are unchanged')
+    p_verify.add_argument(
+        '--publish-evidence',
+        action='store_true',
+        help='persist the verification report and a successful replay checkpoint; omitted by default for a pure read-only verification',
+    )
     p_verify.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_void_event = sub.add_parser('void-event', help='append a void event for a canonical trade event')
@@ -553,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
                 underlying_share_locked=args.underlying_share_locked,
                 note=args.note,
                 dry_run=dry_run,
+                request_id=args.request_id,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -646,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
                 stock_qty=int(args.stock_qty),
                 stock_price=float(args.stock_price),
                 dry_run=dry_run,
+                request_id=args.request_id,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -692,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
                 stock_qty=int(args.stock_qty),
                 stock_price=float(args.stock_price),
                 dry_run=dry_run,
+                request_id=args.request_id,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -1086,6 +1109,7 @@ def main(argv: list[str] | None = None) -> int:
                 base=state_base,
                 repo=repo,
                 mode=args.mode,
+                publish_evidence=args.publish_evidence,
             )
         except ValueError as e:
             raise SystemExit(str(e))

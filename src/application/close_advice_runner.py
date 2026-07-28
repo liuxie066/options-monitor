@@ -57,6 +57,13 @@ from domain.domain.trade_contract_identity import (
 )
 from domain.domain.symbol_identity import symbol_market
 from src.application.expiration_normalization import find_unique_near_miss_expiration
+from src.application.close_advice_quote_cache import (
+    DEFAULT_QUOTE_MAX_AGE_SEC,
+    validate_quote_cache_metadata,
+)
+from src.application.close_advice_report_manifest import (
+    publish_close_advice_report_manifest,
+)
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
 from src.infrastructure.opend_retcodes import classify_opend_error
@@ -2509,8 +2516,16 @@ def _append_close_advice_filter_trace(
 
 
 def _load_context(context_path: Path) -> dict[str, Any]:
-    obj = read_json(context_path, default={})
-    return obj if isinstance(obj, dict) else {}
+    obj = read_json(context_path, default=None)
+    if not isinstance(obj, dict):
+        raise ValueError("close_advice position context is missing or malformed")
+    status = str(obj.get("context_status") or "").strip().lower()
+    ledger = obj.get("ledger") if isinstance(obj.get("ledger"), dict) else {}
+    if status == "unavailable" or bool(ledger.get("fail_closed")):
+        raise ValueError("close_advice position context is unavailable")
+    if not isinstance(obj.get("open_positions_min"), list):
+        raise ValueError("close_advice position context has no valid open_positions_min list")
+    return obj
 
 
 def run_close_advice(
@@ -2568,6 +2583,42 @@ def run_close_advice(
     }
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
     covered_keys, expirations_by_symbol = load_required_data_coverage(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
+    provenance_enforced = (
+        str(ctx.get("context_status") or "").strip().lower() == "available"
+    )
+    quote_max_age_sec = int(
+        advice_cfg.get("quote_max_age_sec")
+        or DEFAULT_QUOTE_MAX_AGE_SEC
+    )
+    quote_freshness_by_symbol: dict[str, dict[str, Any]] = {}
+    freshness_reasons: dict[tuple[str, str, str, str], str] = {}
+    if provenance_enforced:
+        for symbol in sorted(symbols):
+            quote_csv_path = (
+                Path(required_data_root)
+                / "parsed"
+                / f"{symbol}_required_data.csv"
+            )
+            freshness = validate_quote_cache_metadata(
+                csv_path=quote_csv_path,
+                symbol=symbol,
+                max_age_sec=quote_max_age_sec,
+            )
+            quote_freshness_by_symbol[symbol] = freshness
+            if freshness.get("ok"):
+                continue
+            reason = str(freshness.get("reason") or "quote_provenance_invalid")
+            for pos in quote_positions:
+                if _norm_symbol(pos.get("symbol"), base_dir=Path(base_dir)) != symbol:
+                    continue
+                key = _quote_key(
+                    pos.get("symbol"),
+                    pos.get("option_type"),
+                    _position_expiration(pos),
+                    pos.get("strike"),
+                    base_dir=Path(base_dir),
+                )
+                freshness_reasons[key] = reason
     coverage_reasons, coverage_details = _classify_required_data_coverage(
         coverage_positions,
         covered_keys,
@@ -2589,7 +2640,12 @@ def run_close_advice(
         output_dir=output_dir,
         business_date=business_date,
     )
-    issue_reasons = {**coverage_reasons, **coverage_fetch_reasons, **attempted_fetch_reasons}
+    issue_reasons = {
+        **freshness_reasons,
+        **coverage_reasons,
+        **coverage_fetch_reasons,
+        **attempted_fetch_reasons,
+    }
     issue_details = {**coverage_details, **coverage_fetch_details, **attempted_fetch_details}
 
     cfg = CloseAdviceConfig.from_mapping(advice_cfg)
@@ -2715,6 +2771,14 @@ def run_close_advice(
     except Exception:
         pass
     atomic_write_text(text_path, text, encoding="utf-8")
+    report_manifest = publish_close_advice_report_manifest(
+        csv_path=csv_path,
+        text_path=text_path,
+        context_path=context_path,
+        context=ctx,
+        rows=rows,
+        markets_to_run=markets_to_run,
+    )
     quote_issue_samples = _build_quote_issue_samples(
         coverage_positions,
         issue_reasons,
@@ -2751,6 +2815,12 @@ def run_close_advice(
             "coverage_missing": len(coverage_reasons),
             "coverage_fetch_attempted_symbols": int(coverage_fetch_summary.get("attempted_symbols") or 0),
         },
+        "quote_freshness": {
+            "enforced": provenance_enforced,
+            "max_age_sec": quote_max_age_sec,
+            "symbols": quote_freshness_by_symbol,
+        },
+        "report_manifest": report_manifest,
         "csv": str(csv_path),
         "text": str(text_path),
     }

@@ -29,6 +29,7 @@ from src.application.trades.state import (
     write_trade_intake_state,
 )
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
+from src.application.trades.deal_identity import broker_deal_key_from_payload
 from src.application.trades.history_backfill import OpenDHistoryDealClient
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
 from src.application.trades.push_listener import (
@@ -365,6 +366,9 @@ def main(argv: list[str] | None = None) -> int:
         manual_port = int(args.port or manual_source.get("port") or 11111)
         manual_account_mapping = dict(manual_source.get("account_mapping") or intake_cfg["account_mapping"])
         manual_futu_account_ids = list(manual_source.get("futu_account_ids") or intake_cfg["futu_account_ids"])
+        manual_state_path = Path(manual_source.get("state_path") or state_path)
+        manual_audit_path = Path(manual_source.get("audit_path") or audit_path)
+        manual_status_path = Path(manual_source.get("status_path") or status_path)
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 if apply_changes:
@@ -374,8 +378,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = _process_payload(
                     payload,
                     repo=repo,
-                    state_path=state_path,
-                    audit_path=audit_path,
+                    state_path=manual_state_path,
+                    audit_path=manual_audit_path,
                     account_mapping=manual_account_mapping,
                     futu_account_ids=manual_futu_account_ids,
                     apply_changes=apply_changes,
@@ -395,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
                 holdings_sync_dispatcher.close()
         if apply_changes:
             _write_listener_status(
-                status_path,
+                manual_status_path,
                 status_base,
                 status="once",
                 stage="deal_json_processed",
@@ -851,6 +855,10 @@ def _run_listener_source_loop(
             inbox_path,
             payload=payload,
             source="push",
+            broker_deal_key=broker_deal_key_from_payload(
+                payload,
+                account_mapping=account_mapping,
+            ),
         )
         try:
             result = _process_inbox_payload(

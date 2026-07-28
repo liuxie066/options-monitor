@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.position_advice_source_producers import (
     publish_candidate_decisions_snapshot,
@@ -91,6 +93,29 @@ def test_portfolio_and_ledger_producers_preserve_native_observation(
     assert ledger_path.is_file()
     assert portfolio["source_observed_at"] == "2026-07-27T10:00:00Z"
     assert ledger["source_observed_at"] == "2026-07-27T10:00:02Z"
+
+
+def test_portfolio_producer_rejects_unknown_business_observation(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="observation is not trusted"):
+        publish_portfolio_source_snapshot(
+            producer_root=tmp_path,
+            account_run_id="run-unknown",
+            account="lx",
+            broker="futu",
+            normalized_portfolio_source="holdings",
+            portfolio_account_identity_hash=IDENTITY,
+            included_markets=["US"],
+            portfolio_context={
+                "retrieved_at_utc": NOW.isoformat(),
+                "source_observed_at": None,
+                "source_observation_status": "unknown",
+                "source_account_identifiers": ["lx"],
+                "cash_by_currency": {"USD": 1000},
+            },
+            completed_at=NOW + timedelta(seconds=1),
+        )
 
 
 def test_candidate_and_capacity_dependencies_are_closed(

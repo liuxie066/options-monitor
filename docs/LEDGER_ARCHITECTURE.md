@@ -65,6 +65,7 @@ trade_events -> deterministic projection -> position_lots
 
 ```bash
 ./om option-positions add \
+  --request-id manual-open-<stable-id> \
   --account lx \
   --symbol NVDA \
   --option-type put \
@@ -77,7 +78,9 @@ trade_events -> deterministic projection -> position_lots
   --dry-run
 ```
 
-确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
+`add`、`assign`、`exercise` 的 preview、apply 和响应丢失后的重试必须复用同一个
+`--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
+会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
 
 ## 读取语义
 
@@ -115,6 +118,17 @@ trade_events -> deterministic projection -> position_lots
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
 
 ## Projection 验证与恢复
+
+`verify-projection` 默认是纯只读诊断：它可以读取已有 checkpoint 加速比较，但不会创建目录、
+覆盖 latest report 或发布新 checkpoint。只有明确需要留下运维证据时才使用
+`--publish-evidence`：
+
+```bash
+./om option-positions verify-projection --mode auto
+./om option-positions verify-projection --mode auto --publish-evidence
+```
+
+生产定时验证显式使用 `--publish-evidence`；临时排查保持默认只读。
 
 发现 read model、report 或 lot 状态异常时，按顺序处理：
 
