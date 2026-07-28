@@ -61,8 +61,6 @@ def publish_account_run_sources(
     markets = _markets(included_markets)
     state_root = _existing_directory(account_state_dir, "account_state_dir")
     quote_root = _existing_directory(required_data_root, "required_data_root")
-    completed = completed_at or datetime.now(timezone.utc)
-
     portfolio_context = _read_json_object(
         state_root / "portfolio_context.json",
         "portfolio context",
@@ -82,6 +80,8 @@ def publish_account_run_sources(
         broker_account_identifiers=account_identifiers,
         cash_scope_semantics_version=CASH_SCOPE_SEMANTICS_VERSION,
     )
+    decision_snapshot = dict(decision_snapshot_reader() or {})
+    completed = completed_at or datetime.now(timezone.utc)
 
     receipt_records: list[dict[str, Any]] = []
     portfolio_path, portfolio_receipt = publish_portfolio_source_snapshot(
@@ -104,7 +104,6 @@ def publish_account_run_sources(
         )
     )
 
-    decision_snapshot = dict(decision_snapshot_reader() or {})
     ledger_path, ledger_receipt = publish_ledger_source_snapshot(
         producer_root=state_root,
         account_run_id=run_id,
