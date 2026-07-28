@@ -106,9 +106,12 @@ TEST_RULES: tuple[TestRule, ...] = (
         name="service_release",
         patterns=(
             ".github/workflows/**",
+            "release/coverage/**",
             "scripts/install*",
             "scripts/release_check.py",
+            "scripts/release_delta.py",
             "scripts/release_test_plan.py",
+            "src/application/release_delta_coverage.py",
             "src/application/release_notes.py",
             "src/application/release_test_plan.py",
             "src/application/release_version_recommendation.py",
@@ -123,10 +126,12 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_version_check.py",
             "tests/test_install_script.py",
             "tests/test_release_check.py",
+            "tests/test_release_delta_coverage.py",
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
             "./.venv/bin/python -m pytest tests/test_service_deploy.py tests/test_release_check.py "
+            "tests/test_release_delta_coverage.py "
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
         ),
@@ -181,8 +186,17 @@ def build_release_test_plan(
 ) -> dict[str, Any]:
     selected_mode = _normalize_mode(mode)
     files = _normalize_changed_files(changed_files)
+    release_metadata_changed = (
+        "VERSION" in files
+        or "CHANGELOG.md" in files
+        or any(path.startswith("release/coverage/") for path in files)
+    )
     commands = [
-        _release_check_command(version, require_current_taxonomy="VERSION" in files),
+        _release_check_command(
+            version,
+            require_current_taxonomy="VERSION" in files,
+            require_delta_coverage=release_metadata_changed,
+        ),
         "git diff --check",
     ]
     reasons: list[str] = []
@@ -251,13 +265,19 @@ def _normalize_mode(mode: str) -> str:
     return selected
 
 
-def _release_check_command(version: str | None, *, require_current_taxonomy: bool) -> str:
+def _release_check_command(
+    version: str | None,
+    *,
+    require_current_taxonomy: bool,
+    require_delta_coverage: bool,
+) -> str:
     text = str(version or "").strip()
     taxonomy_flag = " --require-current-taxonomy" if require_current_taxonomy else ""
+    coverage_flag = " --require-delta-coverage" if require_delta_coverage else ""
     if not text:
-        return f"./.venv/bin/python scripts/release_check.py{taxonomy_flag}"
+        return f"./.venv/bin/python scripts/release_check.py{taxonomy_flag}{coverage_flag}"
     tag = text if text.startswith("v") else f"v{text}"
-    return f"./.venv/bin/python scripts/release_check.py --tag {tag}{taxonomy_flag}"
+    return f"./.venv/bin/python scripts/release_check.py --tag {tag}{taxonomy_flag}{coverage_flag}"
 
 
 def _normalize_changed_files(changed_files: Sequence[str]) -> list[str]:

@@ -43,5 +43,6 @@ jobs:
             tests/test_quality_document_ownership.py \
             tests/test_portfolio_management_contract_vendor.py \
             tests/test_release_check.py \
+            tests/test_release_delta_coverage.py \
             tests/test_release_version_recommendation.py \
             tests/test_version_check.py

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 844 (`src`: 459, `domain`: 72, `scripts`: 7, `tests`: 306)
-- Internal import edges: 4824 total, 2162 production/script edges excluding tests
+- Python files scanned: 847 (`src`: 460, `domain`: 72, `scripts`: 8, `tests`: 307)
+- Internal import edges: 4833 total, 2166 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -41,15 +41,15 @@ flowchart LR
   infrastructure -->|3| domain
   interfaces -->|133| application
   interfaces -->|3| domain
-  scripts -->|10| application
+  scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1853| application
+  tests -->|1856| application
   tests -->|438| domain
   tests -->|2| domain_services
   tests -->|121| infrastructure
   tests -->|192| interfaces
-  tests -->|11| scripts
+  tests -->|13| scripts
   tests -->|16| storage
 ```
 
@@ -61,7 +61,7 @@ flowchart LR
 | interfaces | application | 133 |
 | application | infrastructure | 124 |
 | application | storage | 36 |
-| scripts | application | 10 |
+| scripts | application | 12 |
 | domain_services | domain | 5 |
 | infrastructure | domain | 3 |
 | infrastructure | application | 3 |
@@ -75,12 +75,12 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1853 |
+| tests | application | 1856 |
 | tests | domain | 438 |
 | tests | interfaces | 192 |
 | tests | infrastructure | 121 |
 | tests | storage | 16 |
-| tests | scripts | 11 |
+| tests | scripts | 13 |
 | tests | domain_services | 2 |
 
 ## Compressed Production Package Graph
@@ -108,8 +108,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.positions | 14 |
 | src.application.trades | src.application | 13 |
 | domain.domain | domain.domain.ledger | 11 |
+| scripts | src.application | 11 |
 | src.application.trades | src.infrastructure | 9 |
-| scripts | src.application | 9 |
 | src.application | domain.domain.ledger | 8 |
 | src.application.positions | domain.domain.ledger | 8 |
 | src.application.trades | src.application.ledger | 8 |

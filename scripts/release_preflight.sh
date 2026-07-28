@@ -89,7 +89,7 @@ fi
 
 VERSION="$(tr -d '\n' < "${ROOT}/VERSION")"
 run_step "release metadata" \
-  "${PYTHON_BIN}" scripts/release_check.py --tag "v${VERSION}" --require-current-taxonomy
+  "${PYTHON_BIN}" scripts/release_check.py --tag "v${VERSION}" --require-current-taxonomy --require-delta-coverage
 
 if [[ "${CHECK_DEPS}" -eq 1 ]]; then
   run_step "dependency graph check" "${PYTHON_BIN}" scripts/generate_dependency_graph.py --check
