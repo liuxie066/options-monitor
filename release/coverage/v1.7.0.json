@@ -5,7 +5,7 @@
     "tag": "v1.6.5",
     "commit": "afa8d92a072306b4623860b28913d4bc69cde9e0"
   },
-  "reviewed_head": "00e13a518743bf7805926efbf95e6edffa5695da",
+  "reviewed_head": "83e8bcdf29be3faaab34606edf7547aa5e925dd0",
   "commits": [
     {
       "sha": "66d75fcbda6f6b1321fe8afb0fb2d24c34f745d7",
@@ -30,6 +30,14 @@
     {
       "sha": "00e13a518743bf7805926efbf95e6edffa5695da",
       "subject": "fix: freeze Close Advice required data"
+    },
+    {
+      "sha": "cc30beeec27bcc9ba6adb28676d7ff9701260a27",
+      "subject": "chore: release 1.7.0"
+    },
+    {
+      "sha": "83e8bcdf29be3faaab34606edf7547aa5e925dd0",
+      "subject": "fix: isolate staged systemd drift checks"
     }
   ],
   "release_notes": [
@@ -69,6 +77,13 @@
       ]
     },
     {
+      "category": "Improvements",
+      "text": "Made failed VERSION-driven releases recoverable through a guarded manual retry that reruns the same current-main metadata, coverage, test, archive, and publication gates.",
+      "commits": [
+        "83e8bcdf29be3faaab34606edf7547aa5e925dd0"
+      ]
+    },
+    {
       "category": "Bug Fixes",
       "text": "Bound Close Advice evaluation to an immutable per-run required-data plan and verified manifest integrity through report publication, preventing cross-account or mid-run snapshot drift.",
       "commits": [
@@ -81,7 +96,19 @@
       "commits": [
         "00e13a518743bf7805926efbf95e6edffa5695da"
       ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented staged or custom systemd unit roots from querying the host systemctl, eliminating Linux-only false timer activation drift while preserving live-root checks and explicitly injected runners.",
+      "commits": [
+        "83e8bcdf29be3faaab34606edf7547aa5e925dd0"
+      ]
     }
   ],
-  "no_release_note": []
+  "no_release_note": [
+    {
+      "commit": "cc30beeec27bcc9ba6adb28676d7ff9701260a27",
+      "reason": "Failed release metadata attempt; no tag, GitHub Release, or production upgrade was published from this commit."
+    }
+  ]
 }
