@@ -68,6 +68,11 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
             and str(event.target_event_id or "").strip()
         )
     }
+    effective_import_diagnostics = [
+        item
+        for item in import_diagnostics
+        if str(item.event_id or "").strip() not in voided_event_ids
+    ]
     applied_adjust_event_ids = {
         event.event_id
         for event in ledger_events
@@ -88,7 +93,10 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     ]
     return PublishedPositionLotProjection(
         lots=lots,
-        diagnostics=[*import_diagnostics, *ledger_projection.diagnostics],
+        diagnostics=[
+            *effective_import_diagnostics,
+            *ledger_projection.diagnostics,
+        ],
         ledger_projection=ledger_projection,
     )
 
