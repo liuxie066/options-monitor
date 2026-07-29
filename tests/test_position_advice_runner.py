@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.position_advice_authority import (
+    AuthorityResolution,
+    scope_for,
+)
+import src.application.position_advice_reader as position_advice_reader
 from src.application.opend_symbol_outputs import (
     publish_required_data_quote_snapshot,
     save_outputs,
@@ -321,3 +327,103 @@ def test_reader_marks_requested_old_plan_superseded(
     assert read_result["portfolio_plan_id"] == current_plan_id
     assert read_result["freshness"]["status"] == "superseded_portfolio_plan"
     assert read_result["actionable_count"] == 0
+
+
+def test_reader_validates_full_artifact_before_market_filter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    scope_id = scope_for("lx")
+    resolution = AuthorityResolution(
+        portfolio_scope_id=scope_id,
+        mode="v2_shadow",
+        generation=1,
+        policy_hash="f" * 64,
+        resolution_status="resolved",
+    )
+    current = {
+        "account": "lx",
+        "portfolio_scope_id": scope_id,
+        "normalized_portfolio_source": "futu",
+        "portfolio_account_identity_hash": "a" * 64,
+        "authority_mode": "v2_shadow",
+        "authority_generation": 1,
+        "authority_policy_hash": "f" * 64,
+        "source_manifest_hash": "b" * 64,
+        "account_run_id": "run-1",
+        "decision_state_fingerprint": "d" * 64,
+        "included_markets": ["HK", "US"],
+        "current_market": "US",
+        "current_manifest_hash": "c" * 64,
+    }
+    advice = {
+        "account": "lx",
+        "portfolio_scope_id": scope_id,
+        "portfolio_plan_id": "e" * 64,
+        "account_run_id": "run-1",
+        "normalized_portfolio_source": "futu",
+        "included_markets": ["HK", "US"],
+        "rows": [
+            {"symbol": "NVDA", "actionable": True},
+            {"symbol": "0700.HK", "actionable": True},
+        ],
+    }
+    source_manifest = {
+        "source_manifest_hash": "b" * 64,
+        "account_run_id": "run-1",
+        "source_manifest": [],
+    }
+    validated_full_artifact = False
+
+    def _validate_full_artifact(**kwargs) -> None:
+        nonlocal validated_full_artifact
+        assert [row["symbol"] for row in kwargs["advice"]["rows"]] == [
+            "NVDA",
+            "0700.HK",
+        ]
+        validated_full_artifact = True
+
+    monkeypatch.setattr(
+        position_advice_reader,
+        "position_advice_manifest_locks",
+        lambda **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        position_advice_reader,
+        "read_authority_resolution_under_lock",
+        lambda **_kwargs: resolution,
+    )
+    monkeypatch.setattr(
+        position_advice_reader,
+        "validate_current_artifacts_under_lock",
+        lambda **_kwargs: {
+            "current": current,
+            "advice": advice,
+            "immutable_input": {
+                "normalized_portfolio_source": "futu",
+                "included_markets": ["HK", "US"],
+            },
+            "source_manifest": source_manifest,
+        },
+    )
+    monkeypatch.setattr(
+        position_advice_reader,
+        "_validate_current_binding",
+        _validate_full_artifact,
+    )
+
+    result = position_advice_reader.read_position_advice_v2(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash="a" * 64,
+        decision_snapshot_reader=lambda: _snapshot(),
+        requested_market="US",
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert validated_full_artifact is True
+    assert result["availability_status"] == "available"
+    assert result["freshness"]["status"] == "fresh"
+    assert result["authority_mode"] == "v2_shadow"
+    assert [row["symbol"] for row in result["rows"]] == ["NVDA"]
