@@ -27,6 +27,9 @@ from src.application.config_sections import (
 )
 from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 from src.application.prefilters import apply_prefilters
+from src.application.close_advice_required_data import (
+    finalize_close_advice_required_data_plan,
+)
 from src.application.required_data_plan_identity import required_data_plan_id
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
@@ -119,6 +122,245 @@ def build_cross_account_prefetch_config(
     out = deepcopy(base_config)
     set_watchlist_config(out, source_items)
     return out
+
+
+def merge_close_advice_requirements_into_prefetch_config(
+    *,
+    candidate_config: dict[str, Any],
+    requirements_plan: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Merge ready position requirements without weakening candidate demand."""
+
+    source_items = [
+        deepcopy(item)
+        for item in resolve_watchlist_config(candidate_config)
+        if isinstance(item, dict)
+    ]
+    plan = deepcopy(requirements_plan)
+    accounts = (
+        plan.get("accounts")
+        if isinstance(plan.get("accounts"), dict)
+        else {}
+    )
+    requirements_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    owner_by_requirement_id: dict[str, dict[str, Any]] = {}
+    for account in sorted(accounts):
+        account_payload = accounts.get(account)
+        if not isinstance(account_payload, dict):
+            continue
+        for requirement in list(account_payload.get("requirements") or []):
+            if not isinstance(requirement, dict):
+                continue
+            requirement_id = str(requirement.get("requirement_id") or "").strip()
+            symbol = _symbol_key(str(requirement.get("symbol") or ""))
+            if not (requirement_id and symbol):
+                continue
+            owner_by_requirement_id[requirement_id] = account_payload
+            requirements_by_symbol.setdefault(symbol, []).append(requirement)
+
+    candidate_indexes_by_symbol: dict[str, list[int]] = {}
+    candidate_routes_by_symbol: dict[str, set[tuple[str, str, int]]] = {}
+    for index, item in enumerate(source_items):
+        symbol = _symbol_key(str(item.get("symbol") or ""))
+        if not symbol:
+            continue
+        candidate_indexes_by_symbol.setdefault(symbol, []).append(index)
+        candidate_routes_by_symbol.setdefault(symbol, set()).add(
+            _candidate_binding_tuple(item)
+        )
+
+    diagnostics: list[dict[str, Any]] = []
+    for symbol in sorted(requirements_by_symbol):
+        requirements = sorted(
+            requirements_by_symbol[symbol],
+            key=lambda value: str(value.get("requirement_id") or ""),
+        )
+        ready_requirements = [
+            item
+            for item in requirements
+            if str(item.get("planning_status") or "") == "ready"
+            and isinstance(item.get("fetch_binding"), dict)
+        ]
+        candidate_routes = candidate_routes_by_symbol.get(symbol, set())
+        indexes = candidate_indexes_by_symbol.get(symbol, [])
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        preserved_binding: tuple[str, str, int] | None = None
+        position_only_conflict = False
+        candidate_route_ambiguous = len(candidate_routes) > 1
+
+        if len(candidate_routes) == 1:
+            preserved_binding = next(iter(candidate_routes))
+            for requirement in ready_requirements:
+                if _requirement_binding_tuple(requirement) == preserved_binding:
+                    accepted.append(requirement)
+                else:
+                    rejected.append(requirement)
+            if accepted and indexes:
+                _append_position_requirements(
+                    source_items[indexes[0]],
+                    accepted,
+                )
+        elif not candidate_routes:
+            position_routes = {
+                _requirement_binding_tuple(requirement)
+                for requirement in ready_requirements
+            }
+            if len(position_routes) == 1 and ready_requirements:
+                binding = dict(ready_requirements[0]["fetch_binding"])
+                position_only = {
+                    "symbol": symbol,
+                    "fetch": {
+                        "source": binding["source"],
+                        "host": binding["host"],
+                        "port": int(binding["port"]),
+                    },
+                    "sell_put": {"enabled": False},
+                    "sell_call": {"enabled": False},
+                    "yield_enhancement": {"enabled": False},
+                }
+                _append_position_requirements(
+                    position_only,
+                    ready_requirements,
+                )
+                source_items.append(position_only)
+                accepted.extend(ready_requirements)
+            elif len(position_routes) > 1:
+                position_only_conflict = True
+                rejected.extend(ready_requirements)
+        else:
+            rejected.extend(ready_requirements)
+
+        for requirement in rejected:
+            _reject_position_requirement(
+                requirement=requirement,
+                owner=owner_by_requirement_id.get(
+                    str(requirement.get("requirement_id") or "")
+                ),
+                reason="required_data_route_conflict",
+            )
+        diagnostics.append(
+            {
+                "symbol": symbol,
+                "preserved_candidate_binding": (
+                    {
+                        "source": preserved_binding[0],
+                        "host": preserved_binding[1],
+                        "port": preserved_binding[2],
+                    }
+                    if preserved_binding is not None
+                    else None
+                ),
+                "accepted_requirement_ids": sorted(
+                    str(item.get("requirement_id") or "")
+                    for item in accepted
+                ),
+                "rejected_requirement_ids": sorted(
+                    str(item.get("requirement_id") or "")
+                    for item in rejected
+                ),
+                "position_only_conflict": position_only_conflict,
+                "candidate_route_ambiguous": candidate_route_ambiguous,
+            }
+        )
+
+    plan = finalize_close_advice_required_data_plan(plan)
+    plan_hash = str(plan["content_sha256"])
+    for item in source_items:
+        if list(item.get("_close_advice_position_requirements") or []):
+            item["_close_advice_requirement_plan_hash"] = plan_hash
+    source_items.sort(key=_stable_symbol_config_key)
+    out = deepcopy(candidate_config)
+    set_watchlist_config(out, source_items)
+    out["_close_advice_required_data_diagnostics"] = diagnostics
+    out["_close_advice_requirement_plan_hash"] = plan_hash
+    return out, plan
+
+
+def _candidate_binding_tuple(
+    symbol_cfg: dict[str, Any],
+) -> tuple[str, str, int]:
+    fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+    source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    return (
+        source,
+        str(fetch_cfg.get("host") or "127.0.0.1").strip(),
+        _to_int(fetch_cfg.get("port") or 11111, 11111),
+    )
+
+
+def _requirement_binding_tuple(
+    requirement: dict[str, Any],
+) -> tuple[str, str, int]:
+    binding = _as_dict(requirement.get("fetch_binding"))
+    return (
+        str(binding.get("source") or "").strip(),
+        str(binding.get("host") or "").strip(),
+        _to_int(binding.get("port"), 0),
+    )
+
+
+def _append_position_requirements(
+    symbol_cfg: dict[str, Any],
+    requirements: list[dict[str, Any]],
+) -> None:
+    current = [
+        deepcopy(item)
+        for item in list(
+            symbol_cfg.get("_close_advice_position_requirements") or []
+        )
+        if isinstance(item, dict)
+    ]
+    by_id = {
+        str(item.get("requirement_id") or ""): item
+        for item in current
+        if str(item.get("requirement_id") or "")
+    }
+    for requirement in requirements:
+        requirement_id = str(requirement.get("requirement_id") or "").strip()
+        if requirement_id:
+            by_id[requirement_id] = deepcopy(requirement)
+    symbol_cfg["_close_advice_position_requirements"] = [
+        by_id[key] for key in sorted(by_id)
+    ]
+
+
+def _reject_position_requirement(
+    *,
+    requirement: dict[str, Any],
+    owner: dict[str, Any] | None,
+    reason: str,
+) -> None:
+    requirement["planning_status"] = "unavailable"
+    requirement["planning_reason"] = reason
+    if owner is None:
+        return
+    errors = owner.setdefault("planning_errors", [])
+    if not isinstance(errors, list):
+        errors = []
+        owner["planning_errors"] = errors
+    payload = {
+        "reason": reason,
+        "position_lot_id": requirement.get("position_lot_id"),
+        "quote_key": requirement.get("quote_key"),
+        "requirement_id": requirement.get("requirement_id"),
+    }
+    identity = (
+        str(payload["reason"] or ""),
+        str(payload["position_lot_id"] or ""),
+        str(payload["quote_key"] or ""),
+    )
+    if not any(
+        (
+            str(item.get("reason") or ""),
+            str(item.get("position_lot_id") or ""),
+            str(item.get("quote_key") or ""),
+        )
+        == identity
+        for item in errors
+        if isinstance(item, dict)
+    ):
+        errors.append(payload)
 
 
 def _has_non_account_market_demand(symbol_cfg: dict[str, Any]) -> bool:

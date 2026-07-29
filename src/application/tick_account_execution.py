@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, TypeVar
 
 from domain.domain.engine import decide_account_scan_gate
 from domain.domain.multi_tick import decide_should_notify
+from domain.domain.expiration_dates import expiration_business_today
 from domain.storage.repositories import run_repo, state_repo
 from src.application.account_run import (
     AccountRunOutcome,
@@ -28,6 +30,19 @@ from src.application.prepared_portfolio_context import (
 )
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
+    merge_close_advice_requirements_into_prefetch_config,
+)
+from src.application.close_advice_required_data import (
+    CloseAdviceRequiredDataPlanError,
+    PLAN_FILE_NAME,
+    build_close_advice_required_data_plan,
+    publish_close_advice_required_data_plan,
+    resolve_bound_close_advice_required_data_plan,
+)
+from src.application.ledger.api import (
+    list_position_lot_snapshots,
+    open_position_ledger_from_data_config,
+    resolve_position_data_config_path,
 )
 from src.application.required_data_snapshot import (
     RequiredDataSnapshotError,
@@ -146,6 +161,71 @@ class TickAccountExecutionOutcome:
     prepared_context_metrics: tuple[dict[str, Any], ...] = ()
 
 
+def _build_close_advice_barrier_plan(
+    *,
+    request: TickAccountExecutionRequest,
+    scanning_configs: dict[str, dict[str, Any]],
+    candidate_config: dict[str, Any],
+    run_state_dir: Path,
+    run_started_at_utc: datetime,
+) -> tuple[dict[str, Any], Path]:
+    records_by_path: dict[Path, list[dict[str, Any]]] = {}
+    records_by_account: dict[str, list[dict[str, Any]]] = {}
+    unavailable_by_account: dict[str, str] = {}
+    for account in sorted(scanning_configs):
+        config = scanning_configs[account]
+        close_cfg = (
+            config.get("close_advice")
+            if isinstance(config.get("close_advice"), Mapping)
+            else {}
+        )
+        if not bool(close_cfg.get("enabled", False)):
+            continue
+        try:
+            data_config_path = resolve_position_data_config_path(
+                base=request.base,
+                cfg=config,
+                config_path=request.cfg_path,
+            ).resolve()
+            if data_config_path not in records_by_path:
+                _resolved_path, repo = open_position_ledger_from_data_config(
+                    base=request.base,
+                    data_config=data_config_path,
+                )
+                records_by_path[data_config_path] = list(
+                    list_position_lot_snapshots(
+                        repo,
+                        base=request.base,
+                    )
+                )
+            records_by_account[account] = records_by_path[data_config_path]
+        except Exception as exc:
+            unavailable_by_account[account] = (
+                f"position_ledger_unavailable:{type(exc).__name__}"
+            )
+
+    plan = build_close_advice_required_data_plan(
+        run_id=request.run_id,
+        run_started_at_utc=run_started_at_utc,
+        business_date=expiration_business_today(run_started_at_utc),
+        account_configs=scanning_configs,
+        base_config=request.base_cfg,
+        markets_to_run=request.markets_to_run,
+        position_records_by_account=records_by_account,
+        unavailable_by_account=unavailable_by_account,
+    )
+    merged_config, plan = merge_close_advice_requirements_into_prefetch_config(
+        candidate_config=candidate_config,
+        requirements_plan=plan,
+    )
+    plan_path = (Path(run_state_dir) / PLAN_FILE_NAME).resolve()
+    publish_close_advice_required_data_plan(
+        path=plan_path,
+        payload=plan,
+    )
+    return merged_config, plan_path
+
+
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
     account_count = len(request.account_ids)
     shared_event_prefetch_state: dict[str, object] = {}
@@ -182,9 +262,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     prefetch_done = bool(request.prefetch_done)
     prefetch_invocation_count = 0
     snapshot_manifest_sha256: str | None = None
+    close_advice_required_data_plan_path: Path | None = None
     prepared_context_metrics: list[dict[str, Any]] = []
 
     if scanning_accounts and not request.prefetch_done:
+        run_started_at_utc = datetime.now(timezone.utc)
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
         scanning_configs = {
             str(account).strip().lower(): account_configs[
@@ -261,6 +343,32 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             account_configs=scanning_configs,
             prepared_portfolio_contexts=prepared_contexts,
         )
+        try:
+            (
+                union_cfg,
+                close_advice_required_data_plan_path,
+            ) = _build_close_advice_barrier_plan(
+                request=request,
+                scanning_configs=scanning_configs,
+                candidate_config=union_cfg,
+                run_state_dir=run_state_dir,
+                run_started_at_utc=run_started_at_utc,
+            )
+        except Exception as exc:
+            request.audit_helper.audit(
+                "plan",
+                "close_advice_required_data_plan",
+                run_id=request.run_id,
+                status="error",
+                message=str(exc),
+                extra={"error_type": type(exc).__name__},
+            )
+            request.runlog.safe_event(
+                "close_advice_required_data_plan",
+                "degraded",
+                message=str(exc),
+                data={"error_type": type(exc).__name__},
+            )
         request.runlog.safe_event(
             "fetch_chain_cache",
             "start",
@@ -285,6 +393,9 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 required_data_root=request.shared_required,
                 run_id=request.run_id,
                 prefetch_summary=prefetch_summary,
+                close_advice_required_data_plan_path=(
+                    close_advice_required_data_plan_path
+                ),
             )
             manifest_hash = sha256_bytes(snapshot_manifest_path.read_bytes())
             snapshot_manifest_sha256 = manifest_hash
@@ -365,6 +476,27 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             snapshot_manifest_path = candidate
             snapshot_status = str(manifest["status"])
             snapshot_manifest_sha256 = sha256_bytes(candidate.read_bytes())
+            try:
+                resolved_plan = (
+                    resolve_bound_close_advice_required_data_plan(
+                        manifest_path=candidate,
+                        manifest=manifest,
+                        expected_run_id=request.run_id,
+                    )
+                )
+                if resolved_plan is not None:
+                    _plan, close_advice_required_data_plan_path = (
+                        resolved_plan
+                    )
+            except CloseAdviceRequiredDataPlanError as exc:
+                request.audit_helper.audit(
+                    "plan",
+                    "close_advice_required_data_plan_recovery",
+                    run_id=request.run_id,
+                    status="error",
+                    message=str(exc),
+                    extra={"error_type": type(exc).__name__},
+                )
             if snapshot_status == "failed":
                 barrier_reason = "required_data_snapshot_failed"
             for account in scanning_accounts:
@@ -423,6 +555,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     ),
                     required_data_snapshot_status=snapshot_status,
                     required_data_snapshot_sha256=snapshot_manifest_sha256,
+                    close_advice_required_data_plan=(
+                        close_advice_required_data_plan_path
+                        if acct in scanning_accounts
+                        else None
+                    ),
                 ),
                 runlog=request.runlog,
                 audit_fn=request.audit_helper.audit,

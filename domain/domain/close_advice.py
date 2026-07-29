@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from domain.domain.option_position_identity import normalize_account
 from domain.domain.short_vol_assessment import (
     EVENT_SOURCE_OK_STATUSES,
     ShortVolAssessmentConfig,
@@ -1561,3 +1562,33 @@ def sort_advice_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(r.get("symbol") or ""),
         ),
     )
+
+
+def select_close_advice_notification_rows(
+    rows: list[dict[str, Any]],
+    *,
+    notify_levels: set[str],
+    max_items_per_account: int,
+) -> list[dict[str, Any]]:
+    """Select priced Close Advice rows using the canonical delivery policy."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in sort_advice_rows(rows):
+        if (
+            str(row.get("evaluation_status") or "priced").strip().lower()
+            != "priced"
+        ):
+            continue
+        tier = str(row.get("tier") or "").strip().lower()
+        if tier not in notify_levels:
+            continue
+        account = normalize_account(row.get("account")) or "当前账户"
+        grouped.setdefault(account, []).append(row)
+
+    selected: list[dict[str, Any]] = []
+    for account_rows in grouped.values():
+        selected.extend(
+            account_rows[:max_items_per_account]
+            if max_items_per_account > 0
+            else account_rows
+        )
+    return selected

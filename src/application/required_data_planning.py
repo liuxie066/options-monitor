@@ -538,6 +538,58 @@ def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[Option
     return merged
 
 
+def _position_requirement_side_plans(
+    requirements: list[dict[str, Any]] | None,
+) -> list[OptionSideFetchPlan]:
+    grouped: dict[OptionSide, list[dict[str, Any]]] = {
+        "put": [],
+        "call": [],
+    }
+    for requirement in requirements or []:
+        if not isinstance(requirement, dict):
+            continue
+        option_type = str(requirement.get("option_type") or "").strip().lower()
+        if option_type not in {"put", "call"}:
+            continue
+        if str(requirement.get("planning_status") or "ready") != "ready":
+            continue
+        grouped[option_type].append(requirement)
+
+    plans: list[OptionSideFetchPlan] = []
+    for option_type in ("put", "call"):
+        items = grouped[option_type]
+        if not items:
+            continue
+        expirations = sorted(
+            {
+                str(item.get("expiration") or "").strip()
+                for item in items
+                if str(item.get("expiration") or "").strip()
+            }
+        )
+        strikes = [
+            value
+            for item in items
+            if (value := _safe_float(item.get("strike"))) is not None
+        ]
+        plans.append(
+            OptionSideFetchPlan(
+                option_type=option_type,
+                min_dte=None,
+                max_dte=None,
+                explicit_expirations=expirations,
+                strike_window=StrikeWindowPlan(
+                    min_strike=(min(strikes) if strikes else None),
+                    max_strike=(max(strikes) if strikes else None),
+                    source="close_advice.position_requirements",
+                ),
+                planning_reason="cover active Close Advice position contracts",
+                source_fields=["close_advice.position_requirements"],
+            )
+        )
+    return plans
+
+
 def _merge_side_plans(
     *,
     symbol: str,
@@ -591,6 +643,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg: dict | None = None,
     sell_call_cfg: dict | None = None,
     yield_enhancement_cfg: dict | None = None,
+    position_requirements: list[dict[str, Any]] | None = None,
     symbol_cfg: dict[str, Any] | None = None,
     fetch_host: str = "127.0.0.1",
     fetch_port: int = 11111,
@@ -668,6 +721,9 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
+    side_plans.extend(
+        _position_requirement_side_plans(position_requirements)
+    )
     side_plans = _merge_same_side_plans(side_plans)
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
@@ -683,6 +739,12 @@ def build_required_data_fetch_plan(
                 (want_put and sell_put_semantics.scan_requires_rv)
                 or (want_call and sell_call_semantics.scan_requires_rv)
                 or (combo_yield_enabled and yield_enhancement_policy.requires_realized_volatility)
+                or any(
+                    bool(item.get("requires_realized_volatility"))
+                    for item in (position_requirements or [])
+                    if isinstance(item, dict)
+                    and str(item.get("planning_status") or "ready") == "ready"
+                )
             ),
         ),
         expiration_discovery_complete=expiration_discovery_complete,
