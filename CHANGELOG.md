@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.3 - 2026-07-29
+
+### Bug Fixes
+- Aligned ledger preflight with canonical projection handling for historical events superseded by a valid void, allowing new broker fills to be recorded while active invalid events continue to fail closed.
+
 ## 1.7.2 - 2026-07-29
 
 ### Bug Fixes

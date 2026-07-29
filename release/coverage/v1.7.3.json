@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.3",
+  "base": {
+    "tag": "v1.7.2",
+    "commit": "84dd074a692d5f86df594ef35eb32128fe8c24ca"
+  },
+  "reviewed_head": "77dfe44c86c1feb2877d73e5f2004d43c350152b",
+  "commits": [
+    {
+      "sha": "77dfe44c86c1feb2877d73e5f2004d43c350152b",
+      "subject": "fix: align ledger preflight with voided events"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Aligned ledger preflight with canonical projection handling for historical events superseded by a valid void, allowing new broker fills to be recorded while active invalid events continue to fail closed.",
+      "commits": [
+        "77dfe44c86c1feb2877d73e5f2004d43c350152b"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
