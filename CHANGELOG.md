@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.2 - 2026-07-29
+
+### Bug Fixes
+- Validated the complete immutable Position Advice artifact before filtering its returned rows by market, preventing valid multi-market advice from being rejected as an authority conflict.
+
 ## 1.7.1 - 2026-07-29
 
 ### Bug Fixes
