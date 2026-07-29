@@ -12,10 +12,12 @@
 - Hardened opening-opportunity monitoring by unifying candidate eligibility, ranking, trace evidence, and strategy-aligned required-data planning across Sell Put, Covered Call, and Combo Yield.
 - Hardened holdings management with exact ledger identity and economics, atomic lifecycle and trade handling, broker snapshot receipts, and authority-safe Position Advice inputs.
 - Made runtime notifications fail closed and recover safely through durable Daily Brief revisions and envelopes, exact scheduler target identity, notification perception, and authority-safe Position Advice delivery.
+- Made failed VERSION-driven releases recoverable through a guarded manual retry that reruns the same current-main metadata, coverage, test, archive, and publication gates.
 
 ### Bug Fixes
 - Bound Close Advice evaluation to an immutable per-run required-data plan and verified manifest integrity through report publication, preventing cross-account or mid-run snapshot drift.
 - Made Daily Brief reuse the canonical Close Advice notification selector for pricing status, tier, ranking, and per-account limits, preventing optional or truncated buy-to-close rows from appearing as recommendations.
+- Prevented staged or custom systemd unit roots from querying the host systemctl, eliminating Linux-only false timer activation drift while preserving live-root checks and explicitly injected runners.
 
 ## 1.6.5 - 2026-07-28
 
