@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.7.0 - 2026-07-29
+
+### New Features
+- Added deterministic Combo Yield shadow-replay experiments with variant evaluation, funding and settlement analysis, and archived redacted evidence for Strategy Lab research.
+- Added a transactional, schema-aware configuration control plane for account, symbol, and settings changes, with runtime readiness checks and safer upgrade and service-drift operations.
+
+### Improvements
+- Hardened opening-opportunity monitoring by unifying candidate eligibility, ranking, trace evidence, and strategy-aligned required-data planning across Sell Put, Covered Call, and Combo Yield.
+- Hardened holdings management with exact ledger identity and economics, atomic lifecycle and trade handling, broker snapshot receipts, and authority-safe Position Advice inputs.
+- Made runtime notifications fail closed and recover safely through durable Daily Brief revisions and envelopes, exact scheduler target identity, notification perception, and authority-safe Position Advice delivery.
+
+### Bug Fixes
+- Bound Close Advice evaluation to an immutable per-run required-data plan and verified manifest integrity through report publication, preventing cross-account or mid-run snapshot drift.
+- Made Daily Brief reuse the canonical Close Advice notification selector for pricing status, tier, ranking, and per-account limits, preventing optional or truncated buy-to-close rows from appearing as recommendations.
+
 ## 1.6.5 - 2026-07-28
 
 ### Improvements
