@@ -16,6 +16,7 @@ from domain.domain.close_advice import (
     apply_fee_economic_safety,
     current_policy_decision_fields,
     evaluate_close_advice,
+    select_close_advice_notification_rows,
 )
 
 
@@ -246,3 +247,87 @@ def test_fee_safety_uses_net_proceeds_for_long_salvage() -> None:
     assert blocked["tier"] == "none"
     assert blocked["exit_state"] == EXIT_STATE_HOLD
     assert "non_positive_net_close_proceeds" in blocked["data_quality_flags"]
+
+
+def test_notification_selection_applies_pricing_ranking_and_account_limit() -> None:
+    rows = [
+        {
+            "account": "lx",
+            "symbol": "LX_MEDIUM",
+            "tier": "medium",
+            "capture_ratio": 0.90,
+            "evaluation_status": "priced",
+        },
+        {
+            "account": "lx",
+            "symbol": "LX_SECOND",
+            "tier": "strong",
+            "capture_ratio": 0.80,
+            "evaluation_status": "priced",
+        },
+        {
+            "account": "LX",
+            "symbol": "LX_FIRST",
+            "tier": "strong",
+            "capture_ratio": 0.95,
+            "evaluation_status": "priced",
+        },
+        {
+            "account": "sy",
+            "symbol": "SY_FIRST",
+            "tier": "strong",
+            "capture_ratio": 0.70,
+            "evaluation_status": "priced",
+        },
+        {
+            "account": "sy",
+            "symbol": "SY_UNPRICED",
+            "tier": "strong",
+            "capture_ratio": 0.99,
+            "evaluation_status": "not_evaluable",
+        },
+        {
+            "account": "sy",
+            "symbol": "SY_OPTIONAL",
+            "tier": "optional",
+            "capture_ratio": 0.99,
+            "evaluation_status": "priced",
+        },
+    ]
+
+    selected = select_close_advice_notification_rows(
+        rows,
+        notify_levels={"strong", "medium"},
+        max_items_per_account=1,
+    )
+
+    assert [row["symbol"] for row in selected] == ["LX_FIRST", "SY_FIRST"]
+
+
+def test_notification_selection_zero_limit_means_unlimited() -> None:
+    rows = [
+        {
+            "account": "lx",
+            "symbol": symbol,
+            "tier": tier,
+            "capture_ratio": capture_ratio,
+            "evaluation_status": "priced",
+        }
+        for symbol, tier, capture_ratio in (
+            ("MEDIUM", "medium", 0.90),
+            ("SECOND", "strong", 0.80),
+            ("FIRST", "strong", 0.95),
+        )
+    ]
+
+    selected = select_close_advice_notification_rows(
+        rows,
+        notify_levels={"strong", "medium"},
+        max_items_per_account=0,
+    )
+
+    assert [row["symbol"] for row in selected] == [
+        "FIRST",
+        "SECOND",
+        "MEDIUM",
+    ]

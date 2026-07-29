@@ -75,6 +75,7 @@ class AccountRunRequest:
     prepared_portfolio_context_manifest: Path | None = None
     required_data_snapshot_status: str | None = None
     required_data_snapshot_sha256: str | None = None
+    close_advice_required_data_plan: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,13 @@ class AccountRunOutcome:
 
 def _close_advice_issue_breakdown(flag_counts: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
     system_issue_keys = {
+        "close_advice_plan_unavailable",
+        "required_data_position_not_planned",
+        "required_data_symbol_config_missing",
+        "required_data_symbol_source_unsupported",
+        "required_data_route_conflict",
+        "required_data_symbol_not_planned",
+        "required_data_snapshot_unavailable",
         "required_data_missing_expiration",
         "required_data_missing_contract",
         "required_data_fetch_error",
@@ -795,16 +803,34 @@ def run_one_account(
                 output_dir=acct_report_dir,
                 base_dir=request.base,
                 markets_to_run=request.markets_to_run,
+                required_data_snapshot_manifest=(
+                    request.required_data_snapshot_manifest
+                ),
+                required_data_snapshot_run_id=request.run_id,
+                close_advice_required_data_plan=(
+                    request.close_advice_required_data_plan
+                ),
+                account=acct,
             )
             close_result: dict[str, Any] = raw_close_result if isinstance(raw_close_result, dict) else {}
+            snapshot_authority_invalid = (
+                str(close_result.get("snapshot_authority") or "")
+                .strip()
+                .lower()
+                == "invalid"
+            )
             audit_fn(
                 "tool_call",
                 "close_advice",
                 run_id=request.run_id,
                 account=acct,
-                status="ok",
+                status=("error" if snapshot_authority_invalid else "ok"),
                 tool_name="close_advice",
                 extra={
+                    "result_status": close_result.get("status"),
+                    "snapshot_authority": close_result.get(
+                        "snapshot_authority"
+                    ),
                     "rows": close_result.get("rows"),
                     "notify_rows": close_result.get("notify_rows"),
                     "quote_issue_rows": close_result.get("quote_issue_rows"),
@@ -812,6 +838,48 @@ def run_one_account(
                     "flag_counts": close_result.get("flag_counts"),
                 },
             )
+            if snapshot_authority_invalid:
+                failure_reason = (
+                    "required_data_snapshot_integrity_failed"
+                )
+                acct_metrics["ran_scan"] = True
+                acct_metrics["ran_pipeline"] = False
+                acct_metrics["should_notify"] = False
+                acct_metrics["meaningful"] = False
+                acct_metrics["reason"] = failure_reason
+                acct_metrics["close_advice_status"] = close_result.get(
+                    "status"
+                )
+                _write_account_metrics_state()
+                runlog.safe_event(
+                    "close_advice",
+                    "error",
+                    error_code="REQUIRED_DATA_SNAPSHOT_INTEGRITY_FAILED",
+                    message=(
+                        f"frozen required-data authority failed for {acct}"
+                    ),
+                    data=_safe_runlog_data(
+                        {
+                            "account": acct,
+                            "reason": failure_reason,
+                            "integrity_failure": close_result.get(
+                                "integrity_failure"
+                            ),
+                        }
+                    ),
+                )
+                return AccountRunOutcome(
+                    result=AccountResult(
+                        acct,
+                        True,
+                        False,
+                        failure_reason,
+                        "",
+                    ),
+                    acct_metrics=acct_metrics,
+                    prefetch_done=prefetch_done,
+                    ran_pipeline=False,
+                )
             try:
                 reallocation_shadow = write_close_advice_reallocation_shadow(
                     report_dir=acct_report_dir,

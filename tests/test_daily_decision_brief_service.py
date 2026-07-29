@@ -524,6 +524,163 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
     }
 
 
+def test_close_advice_daily_brief_honors_notify_levels(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "position_lot_id": f"lot-{tier}",
+                "symbol": symbol,
+                "strategy_family": "sell_put",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "strike": strike,
+                "tier": tier,
+                "tier_label": tier,
+                "reason": "test",
+                "close_action": "close",
+                "evaluation_status": "priced",
+                "quote_status": "priced",
+            }
+            for tier, symbol, strike in (
+                ("strong", "STRONG", 100),
+                ("medium", "MEDIUM", 101),
+                ("optional", "OPTIONAL", 102),
+                ("weak", "WEAK", 103),
+            )
+        ]
+    ).to_csv(account_dir / "close_advice.csv", index=False)
+    config = _config()
+    config["close_advice"] = {
+        "enabled": True,
+        "notify_levels": ["strong", "medium"],
+    }
+
+    brief = _assemble(tmp_path, config=config)
+    close_actions = [
+        item
+        for item in brief["actions"]
+        if item["action_type"] == "close_position"
+    ]
+    eligibility = {
+        item["symbol"]: item["notification_eligible"]
+        for item in brief["positions"]
+    }
+    message = render_full_brief(
+        brief,
+        limits={"max_actions_per_priority": 10},
+    )
+
+    assert {item["symbol"] for item in close_actions} == {"STRONG", "MEDIUM"}
+    assert eligibility == {
+        "STRONG": True,
+        "MEDIUM": True,
+        "OPTIONAL": False,
+        "WEAK": False,
+    }
+    assert "STRONG｜Sell Put｜08-21 $100 Put｜强烈建议平仓" in message
+    assert "MEDIUM｜Sell Put｜08-21 $101 Put｜建议平仓" in message
+    assert "OPTIONAL" not in message
+    assert "WEAK" not in message
+    assert "汇总｜共 4 条，需处理 2 条。" in message
+
+    config["close_advice"]["notify_levels"] = ["optional"]
+    optional_brief = _assemble(tmp_path, config=config)
+    optional_actions = [
+        item
+        for item in optional_brief["actions"]
+        if item["action_type"] == "close_position"
+    ]
+    optional_message = render_full_brief(
+        optional_brief,
+        limits={"max_actions_per_priority": 10},
+    )
+
+    assert {item["symbol"] for item in optional_actions} == {"OPTIONAL"}
+    assert "OPTIONAL｜Sell Put｜08-21 $102 Put｜低价买回可选" in optional_message
+    assert "STRONG" not in optional_message
+    assert "MEDIUM" not in optional_message
+    assert "WEAK" not in optional_message
+    assert "汇总｜共 4 条，需处理 1 条。" in optional_message
+
+
+def test_close_advice_daily_brief_honors_ranked_account_limit(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
+    account_dir = _account_dir(tmp_path)
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "position_lot_id": f"lot-{symbol.lower()}",
+                "symbol": symbol,
+                "strategy_family": "sell_put",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "strike": strike,
+                "tier": "strong",
+                "tier_label": "strong",
+                "reason": "test",
+                "close_action": "close",
+                "evaluation_status": "priced",
+                "quote_status": "priced",
+                "capture_ratio": capture_ratio,
+                "remaining_premium": remaining_premium,
+            }
+            for symbol, strike, capture_ratio, remaining_premium in (
+                ("SECOND", 101, 0.80, 10),
+                ("FIRST", 100, 0.95, 5),
+                ("THIRD", 102, 0.70, 20),
+            )
+        ]
+    ).to_csv(account_dir / "close_advice.csv", index=False)
+    config = _config()
+    config["close_advice"] = {
+        "enabled": True,
+        "notify_levels": ["strong", "medium"],
+        "max_items_per_account": 1,
+    }
+
+    brief = _assemble(tmp_path, config=config)
+    close_actions = [
+        item
+        for item in brief["actions"]
+        if item["action_type"] == "close_position"
+    ]
+    eligibility = {
+        item["symbol"]: item["notification_eligible"]
+        for item in brief["positions"]
+    }
+    message = render_full_brief(
+        brief,
+        limits={"max_actions_per_priority": 10},
+    )
+
+    assert [item["symbol"] for item in close_actions] == ["FIRST"]
+    assert eligibility == {
+        "SECOND": False,
+        "FIRST": True,
+        "THIRD": False,
+    }
+    assert "FIRST｜Sell Put｜08-21 $100 Put｜强烈建议平仓" in message
+    assert "SECOND" not in message
+    assert "THIRD" not in message
+    assert "汇总｜共 3 条，需处理 1 条。" in message
+
+
 def test_daily_brief_uses_only_v2_position_authority_when_promoted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

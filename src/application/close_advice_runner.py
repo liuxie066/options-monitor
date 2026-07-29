@@ -3,11 +3,14 @@ from __future__ import annotations
 import csv
 from collections import OrderedDict
 from dataclasses import dataclass
+from io import BytesIO
 import json
 import math
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, TypedDict
+from uuid import uuid4
 
 import pandas as pd
 
@@ -32,6 +35,7 @@ from domain.domain.close_advice import (
     evaluate_short_vol_close_advice,
     safe_float,
     safe_int,
+    select_close_advice_notification_rows,
     sort_advice_rows,
     synthesize_combo_yield_group_close_advice,
 )
@@ -63,6 +67,19 @@ from src.application.close_advice_quote_cache import (
 )
 from src.application.close_advice_report_manifest import (
     publish_close_advice_report_manifest,
+    publish_close_advice_report_status,
+)
+from src.application.close_advice_required_data import (
+    CloseAdviceRequiredDataPlanError,
+    account_requirement_index,
+    resolve_bound_close_advice_required_data_plan,
+)
+from src.application.position_advice_source_receipts import sha256_bytes
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable,
+    RequiredDataSnapshotError,
+    load_required_data_snapshot_manifest,
+    resolve_frozen_required_data_csv_bytes,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
@@ -90,6 +107,17 @@ from src.application.strategy_policy import (
 OUTPUT_COLUMNS = [
     "account",
     "position_lot_id",
+    "quote_mode",
+    "required_data_snapshot_plan_id",
+    "required_data_snapshot_manifest_sha256",
+    "close_advice_required_data_plan_sha256",
+    "required_data_requirement_id",
+    "required_data_binding_id",
+    "required_data_snapshot_id",
+    "required_data_receipt_hash",
+    "required_data_payload_sha256",
+    "required_data_source_observed_at",
+    "required_data_expires_at",
     "symbol",
     "option_type",
     "expiration",
@@ -216,6 +244,13 @@ QUOTE_ISSUE_FLAGS = {
     "required_data_fetch_error",
     "required_data_fetch_error_rate_limit",
     "required_data_fetch_skipped_non_futu_source",
+    "close_advice_plan_unavailable",
+    "required_data_position_not_planned",
+    "required_data_symbol_config_missing",
+    "required_data_symbol_source_unsupported",
+    "required_data_route_conflict",
+    "required_data_symbol_not_planned",
+    "required_data_snapshot_unavailable",
     "opend_fetch_error",
     "opend_fetch_no_usable_quote",
     "spread_too_wide",
@@ -923,6 +958,16 @@ def _quote_observability_flags(
     reason = attempted_fetch_reasons.get(key)
     if not reason:
         return []
+    if reason in {
+        "close_advice_plan_unavailable",
+        "required_data_position_not_planned",
+        "required_data_symbol_config_missing",
+        "required_data_symbol_source_unsupported",
+        "required_data_route_conflict",
+        "required_data_symbol_not_planned",
+        "required_data_snapshot_unavailable",
+    }:
+        return [reason]
     if _quote_has_usable_price(quote):
         return []
     if reason == "required_data_fetch_error_rate_limit":
@@ -1912,25 +1957,6 @@ def _num(value: Any) -> str:
     return f"{v:.2f}"
 
 
-def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> list[dict[str, Any]]:
-    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for row in sort_advice_rows(rows):
-        if str(row.get("evaluation_status") or "priced").strip().lower() != "priced":
-            continue
-        tier = str(row.get("tier") or "").strip().lower()
-        if tier not in notify_levels:
-            continue
-        acct = _row_account(row.get("account"))
-        grouped.setdefault(acct, []).append(row)
-    selected: list[dict[str, Any]] = []
-    for acct_rows in grouped.values():
-        if max_items > 0:
-            selected.extend(acct_rows[:max_items])
-        else:
-            selected.extend(acct_rows)
-    return selected
-
-
 def _selected_evaluation_gap_rows(rows: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in sort_advice_rows(rows):
@@ -2047,7 +2073,11 @@ def _close_tier_label_display(row: dict[str, Any]) -> str:
 
 
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
-    selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
+    selected = select_close_advice_notification_rows(
+        rows,
+        notify_levels=notify_levels,
+        max_items_per_account=max_items,
+    )
     gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
     if not selected and not gap_rows:
         return ""
@@ -2367,7 +2397,11 @@ def _long_call_price_line(row: dict[str, Any], currency: Any) -> str:
 def render_markdown_compact(
     rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int
 ) -> str:
-    selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
+    selected = select_close_advice_notification_rows(
+        rows,
+        notify_levels=notify_levels,
+        max_items_per_account=max_items,
+    )
     gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
     if not selected and not gap_rows:
         return ""
@@ -2528,6 +2562,262 @@ def _load_context(context_path: Path) -> dict[str, Any]:
     return obj
 
 
+def _snapshot_integrity_failure_result(
+    *,
+    output_dir: Path,
+    run_id: str | None,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest = publish_close_advice_report_status(
+        output_dir=output_dir,
+        status="failed",
+        run_id=run_id,
+        quote_mode="frozen_snapshot",
+        reason=reason,
+        evidence=evidence,
+    )
+    return {
+        "enabled": True,
+        "status": "snapshot_integrity_failed",
+        "snapshot_authority": "invalid",
+        "rows": 0,
+        "evaluable_rows": 0,
+        "evaluation_gap_rows": 0,
+        "notify_rows": 0,
+        "tier_counts": {},
+        "evaluation_status_counts": {},
+        "flag_counts": {"required_data_snapshot_integrity_failed": 1},
+        "quote_issue_rows": 0,
+        "quote_issue_samples": [],
+        "coverage_summary": {},
+        "quote_fetch_diagnostics": {
+            "attempted": 0,
+            "coverage_missing": 0,
+            "coverage_fetch_attempted_symbols": 0,
+            "network_fetch_attempts": 0,
+            "required_data_write_attempts": 0,
+            "position_requirements_total": 0,
+            "position_requirements_planned": 0,
+            "position_requirements_validated": 0,
+            "position_requirements_missing": 0,
+            "binding_ids": [],
+        },
+        "quote_freshness": {
+            "enforced": True,
+            "authority": "required_data_snapshot_manifest",
+            "symbols": {},
+        },
+        "report_manifest": manifest,
+        "integrity_failure": {
+            "reason": reason,
+            "evidence": dict(evidence or {}),
+        },
+        "csv": str(Path(output_dir).resolve() / "close_advice.csv"),
+        "text": str(Path(output_dir).resolve() / "close_advice.txt"),
+    }
+
+
+def _frozen_position_plan_reasons(
+    *,
+    positions: list[dict[str, Any]],
+    plan: dict[str, Any] | None,
+    account: str,
+    base_dir: Path,
+) -> tuple[
+    dict[tuple[str, str, str, str], str],
+    set[str],
+]:
+    reasons: dict[tuple[str, str, str, str], str] = {}
+    symbols_to_validate: set[str] = set()
+    requirements: dict[str, dict[str, Any]] = {}
+    requirement_reasons: dict[str, str] = {}
+    account_status = "unavailable"
+    if plan is not None:
+        (
+            requirements,
+            requirement_reasons,
+            account_status,
+        ) = account_requirement_index(
+            payload=plan,
+            account=account,
+        )
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        key = _quote_key(
+            position.get("symbol"),
+            position.get("option_type"),
+            _position_expiration(position),
+            position.get("strike"),
+            base_dir=base_dir,
+        )
+        if not all(key):
+            continue
+        lot_id = str(position.get("record_id") or "").strip()
+        if plan is None or account_status == "unavailable":
+            reasons[key] = "close_advice_plan_unavailable"
+            continue
+        requirement = requirements.get(lot_id)
+        if requirement is None:
+            reasons[key] = "required_data_position_not_planned"
+            continue
+        if str(requirement.get("quote_key") or "") != "|".join(key):
+            reasons[key] = "required_data_position_not_planned"
+            continue
+        planning_reason = (
+            requirement_reasons.get(lot_id)
+            or str(requirement.get("planning_reason") or "").strip()
+        )
+        if (
+            str(requirement.get("planning_status") or "ready") != "ready"
+            or planning_reason
+        ):
+            reasons[key] = (
+                planning_reason or "required_data_position_not_planned"
+            )
+            continue
+        symbols_to_validate.add(key[0])
+    return reasons, symbols_to_validate
+
+
+def _validate_frozen_symbols(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    required_data_root: Path,
+    symbols: set[str],
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, str],
+    dict[str, bytes],
+]:
+    provenance: dict[str, dict[str, Any]] = {}
+    unavailable: dict[str, str] = {}
+    csv_bytes_by_symbol: dict[str, bytes] = {}
+    for symbol in sorted(symbols):
+        try:
+            (
+                provenance[symbol],
+                csv_bytes_by_symbol[symbol],
+            ) = resolve_frozen_required_data_csv_bytes(
+                manifest_path=manifest_path,
+                expected_run_id=expected_run_id,
+                symbol=symbol,
+                required_data_root=required_data_root,
+            )
+        except FrozenRequiredDataUnavailable as exc:
+            if exc.reason in {
+                "manifest_invalid",
+                "receipt_or_payload_mismatch",
+            }:
+                raise RequiredDataSnapshotError(str(exc)) from exc
+            unavailable[symbol] = (
+                "required_data_symbol_not_planned"
+                if exc.reason == "symbol_entry_missing"
+                else "required_data_snapshot_unavailable"
+            )
+    return provenance, unavailable, csv_bytes_by_symbol
+
+
+def _load_frozen_required_data_quotes(
+    *,
+    csv_bytes_by_symbol: dict[str, bytes],
+    base_dir: Path,
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    quotes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for symbol in sorted(csv_bytes_by_symbol):
+        try:
+            frame = pd.read_csv(BytesIO(csv_bytes_by_symbol[symbol]))
+        except (
+            UnicodeDecodeError,
+            ValueError,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+        ) as exc:
+            raise RequiredDataSnapshotError(
+                f"{symbol} sealed required-data CSV is unreadable"
+            ) from exc
+        for _, row0 in frame.iterrows():
+            row = row0.to_dict()
+            key = _quote_key(
+                row.get("symbol") or symbol,
+                row.get("option_type"),
+                row.get("expiration"),
+                row.get("strike"),
+                base_dir=base_dir,
+            )
+            if all(key):
+                quotes[key] = row
+    return quotes
+
+
+def _apply_required_data_row_provenance(
+    row: dict[str, Any],
+    *,
+    position: dict[str, Any],
+    quote_key: tuple[str, str, str, str] | None,
+    frozen_mode: bool,
+    frozen_manifest: dict[str, Any] | None,
+    frozen_manifest_sha256: str | None,
+    frozen_plan_sha256: str | None,
+    requirements_by_lot: dict[str, dict[str, Any]],
+    provenance_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    row["quote_mode"] = (
+        "frozen_snapshot" if frozen_mode else "legacy_mutable"
+    )
+    if not frozen_mode:
+        return row
+    row["required_data_snapshot_plan_id"] = str(
+        (frozen_manifest or {}).get("plan_id") or ""
+    ) or None
+    row["required_data_snapshot_manifest_sha256"] = (
+        frozen_manifest_sha256
+    )
+    row["close_advice_required_data_plan_sha256"] = frozen_plan_sha256
+    lot_id = str(position.get("record_id") or "").strip()
+    requirement = requirements_by_lot.get(lot_id) or {}
+    binding = (
+        requirement.get("fetch_binding")
+        if isinstance(requirement.get("fetch_binding"), dict)
+        else {}
+    )
+    row["required_data_requirement_id"] = str(
+        requirement.get("requirement_id") or ""
+    ) or None
+    row["required_data_binding_id"] = str(
+        binding.get("binding_id") or ""
+    ) or None
+    symbol = quote_key[0] if quote_key and all(quote_key) else ""
+    provenance = provenance_by_symbol.get(symbol) or {}
+    row["required_data_snapshot_id"] = str(
+        provenance.get("snapshot_id") or ""
+    ) or None
+    row["required_data_receipt_hash"] = str(
+        provenance.get("receipt_hash") or ""
+    ) or None
+    row["required_data_payload_sha256"] = str(
+        provenance.get("payload_sha256") or ""
+    ) or None
+    row["required_data_source_observed_at"] = str(
+        provenance.get("source_observed_at") or ""
+    ) or None
+    row["required_data_expires_at"] = str(
+        provenance.get("expires_at") or ""
+    ) or None
+    return row
+
+
+def _unlink_if_present(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def run_close_advice(
     *,
     config: dict[str, Any],
@@ -2537,6 +2827,10 @@ def run_close_advice(
     base_dir: Path,
     markets_to_run: list[str] | None = None,
     gateway: Any = None,
+    required_data_snapshot_manifest: Path | None = None,
+    required_data_snapshot_run_id: str | None = None,
+    close_advice_required_data_plan: Path | None = None,
+    account: str | None = None,
 ) -> dict[str, Any]:
     advice_cfg_raw = config.get("close_advice") if isinstance(config, dict) else {}
     advice_cfg = advice_cfg_raw if isinstance(advice_cfg_raw, dict) else {}
@@ -2549,8 +2843,83 @@ def run_close_advice(
         atomic_write_text(text_path, "", encoding="utf-8")
         return {"enabled": False, "rows": 0, "notify_rows": 0, "csv": str(csv_path), "text": str(text_path)}
 
-    business_date = expiration_business_today()
+    frozen_mode = required_data_snapshot_manifest is not None
+    frozen_manifest_path = (
+        Path(required_data_snapshot_manifest).resolve()
+        if required_data_snapshot_manifest is not None
+        else None
+    )
+    frozen_plan: dict[str, Any] | None = None
+    frozen_plan_path: Path | None = None
+    frozen_manifest_payload: dict[str, Any] | None = None
+    frozen_manifest_sha256: str | None = None
+    frozen_plan_sha256: str | None = None
+    if frozen_mode:
+        publish_close_advice_report_status(
+            output_dir=output_dir,
+            status="pending",
+            run_id=required_data_snapshot_run_id,
+            quote_mode="frozen_snapshot",
+        )
+        try:
+            run_id = str(required_data_snapshot_run_id or "").strip()
+            if not run_id or frozen_manifest_path is None:
+                raise RequiredDataSnapshotError(
+                    "frozen Close Advice run identity is unavailable"
+                )
+            frozen_manifest_payload, _frozen_root = (
+                load_required_data_snapshot_manifest(
+                    manifest_path=frozen_manifest_path,
+                    expected_run_id=run_id,
+                    expected_required_data_root=Path(required_data_root),
+                )
+            )
+            frozen_manifest_sha256 = sha256_bytes(
+                frozen_manifest_path.read_bytes()
+            )
+            bound_plan = resolve_bound_close_advice_required_data_plan(
+                manifest_path=frozen_manifest_path,
+                manifest=frozen_manifest_payload,
+                expected_run_id=run_id,
+                expected_plan_path=close_advice_required_data_plan,
+            )
+            if bound_plan is not None:
+                frozen_plan, frozen_plan_path = bound_plan
+                frozen_plan_sha256 = sha256_bytes(
+                    frozen_plan_path.read_bytes()
+                )
+                business_date = datetime.strptime(
+                    str(frozen_plan["business_date"]),
+                    "%Y-%m-%d",
+                ).date()
+            else:
+                business_date = expiration_business_today()
+        except (
+            OSError,
+            ValueError,
+            RequiredDataSnapshotError,
+            CloseAdviceRequiredDataPlanError,
+        ) as exc:
+            return _snapshot_integrity_failure_result(
+                output_dir=output_dir,
+                run_id=required_data_snapshot_run_id,
+                reason="required_data_snapshot_integrity_failed",
+                evidence={
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+    else:
+        business_date = expiration_business_today()
     ctx = _load_context(context_path)
+    account_norm = (
+        normalize_account(account)
+        or normalize_account(
+            ((ctx.get("filters") or {}) if isinstance(ctx, dict) else {}).get(
+                "account"
+            )
+        )
+    )
     positions = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     positions = positions if isinstance(positions, list) else []
     positions = _filter_positions_by_markets(positions, markets_to_run)
@@ -2569,20 +2938,118 @@ def run_close_advice(
         for pos, lifecycle_state, _dte in position_entries
         if lifecycle_state == "active"
     ]
-    coverage_fetch_reasons, coverage_fetch_details, coverage_fetch_summary = _ensure_required_data_coverage_for_positions(
-        config=config,
-        positions=quote_positions,
-        required_data_root=Path(required_data_root),
-        base_dir=Path(base_dir),
-        gateway=gateway,
-    )
     symbols = {
         _norm_symbol(p.get("symbol"), base_dir=Path(base_dir))
         for p in quote_positions
         if p.get("symbol")
     }
-    quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
-    covered_keys, expirations_by_symbol = load_required_data_coverage(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
+    frozen_plan_reasons: dict[
+        tuple[str, str, str, str],
+        str,
+    ] = {}
+    frozen_provenance: dict[str, dict[str, Any]] = {}
+    frozen_requirements_by_lot: dict[str, dict[str, Any]] = {}
+    if frozen_mode:
+        if frozen_plan is not None:
+            frozen_requirements_by_lot, _requirement_reasons, _account_status = (
+                account_requirement_index(
+                    payload=frozen_plan,
+                    account=account_norm or "",
+                )
+            )
+        frozen_plan_reasons, symbols_to_validate = (
+            _frozen_position_plan_reasons(
+                positions=quote_positions,
+                plan=frozen_plan,
+                account=account_norm or "",
+                base_dir=Path(base_dir),
+            )
+        )
+        try:
+            assert frozen_manifest_path is not None
+            (
+                frozen_provenance,
+                frozen_symbol_unavailable,
+                frozen_csv_bytes_by_symbol,
+            ) = _validate_frozen_symbols(
+                manifest_path=frozen_manifest_path,
+                expected_run_id=str(
+                    required_data_snapshot_run_id or ""
+                ),
+                required_data_root=Path(required_data_root),
+                symbols=symbols_to_validate,
+            )
+            quotes = _load_frozen_required_data_quotes(
+                csv_bytes_by_symbol=frozen_csv_bytes_by_symbol,
+                base_dir=Path(base_dir),
+            )
+        except RequiredDataSnapshotError as exc:
+            return _snapshot_integrity_failure_result(
+                output_dir=output_dir,
+                run_id=required_data_snapshot_run_id,
+                reason="required_data_snapshot_integrity_failed",
+                evidence={
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+        for position in quote_positions:
+            key = _quote_key(
+                position.get("symbol"),
+                position.get("option_type"),
+                _position_expiration(position),
+                position.get("strike"),
+                base_dir=Path(base_dir),
+            )
+            if (
+                all(key)
+                and key not in frozen_plan_reasons
+                and key[0] in frozen_symbol_unavailable
+            ):
+                frozen_plan_reasons[key] = frozen_symbol_unavailable[key[0]]
+        coverage_fetch_reasons: dict[
+            tuple[str, str, str, str],
+            str,
+        ] = {}
+        coverage_fetch_details: dict[
+            tuple[str, str, str, str],
+            dict[str, Any],
+        ] = {}
+        coverage_fetch_summary = {
+            "attempted_symbols": 0,
+            "fetched_symbols": 0,
+            "errors": 0,
+        }
+    else:
+        (
+            coverage_fetch_reasons,
+            coverage_fetch_details,
+            coverage_fetch_summary,
+        ) = _ensure_required_data_coverage_for_positions(
+            config=config,
+            positions=quote_positions,
+            required_data_root=Path(required_data_root),
+            base_dir=Path(base_dir),
+            gateway=gateway,
+        )
+    if frozen_mode:
+        covered_keys = set(quotes)
+        expirations_by_symbol: dict[str, set[str]] = {}
+        for symbol, _option_type, expiration, _strike in covered_keys:
+            expirations_by_symbol.setdefault(symbol, set()).add(
+                expiration
+            )
+    else:
+        quotes = load_required_data_quotes(
+            Path(required_data_root),
+            symbols=symbols,
+            base_dir=Path(base_dir),
+        )
+        covered_keys, expirations_by_symbol = load_required_data_coverage(
+            Path(required_data_root),
+            symbols=symbols,
+            base_dir=Path(base_dir),
+        )
     provenance_enforced = (
         str(ctx.get("context_status") or "").strip().lower() == "available"
     )
@@ -2592,7 +3059,16 @@ def run_close_advice(
     )
     quote_freshness_by_symbol: dict[str, dict[str, Any]] = {}
     freshness_reasons: dict[tuple[str, str, str, str], str] = {}
-    if provenance_enforced:
+    if frozen_mode:
+        quote_freshness_by_symbol = {
+            symbol: {
+                "ok": True,
+                "authority": "required_data_snapshot_manifest",
+                **dict(provenance),
+            }
+            for symbol, provenance in frozen_provenance.items()
+        }
+    elif provenance_enforced:
         for symbol in sorted(symbols):
             quote_csv_path = (
                 Path(required_data_root)
@@ -2625,13 +3101,26 @@ def run_close_advice(
         expirations_by_symbol,
         base_dir=Path(base_dir),
     )
-    attempted_fetch_reasons, attempted_fetch_details = _fetch_missing_quotes_via_opend(
-        config=config,
-        positions=quote_positions,
-        quotes=quotes,
-        covered_keys=covered_keys,
-        base_dir=Path(base_dir),
-    )
+    if frozen_mode:
+        attempted_fetch_reasons: dict[
+            tuple[str, str, str, str],
+            str,
+        ] = {}
+        attempted_fetch_details: dict[
+            tuple[str, str, str, str],
+            dict[str, Any],
+        ] = {}
+    else:
+        (
+            attempted_fetch_reasons,
+            attempted_fetch_details,
+        ) = _fetch_missing_quotes_via_opend(
+            config=config,
+            positions=quote_positions,
+            quotes=quotes,
+            covered_keys=covered_keys,
+            base_dir=Path(base_dir),
+        )
     _merge_event_snapshot_for_short_vol_positions(
         config=config,
         positions=quote_positions,
@@ -2645,6 +3134,7 @@ def run_close_advice(
         **coverage_reasons,
         **coverage_fetch_reasons,
         **attempted_fetch_reasons,
+        **frozen_plan_reasons,
     }
     issue_details = {**coverage_details, **coverage_fetch_details, **attempted_fetch_details}
 
@@ -2666,6 +3156,23 @@ def run_close_advice(
                 lifecycle_state=lifecycle_state,
             )
             row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
+            row = _apply_required_data_row_provenance(
+                row,
+                position=pos0,
+                quote_key=_quote_key(
+                    pos0.get("symbol"),
+                    pos0.get("option_type"),
+                    exp,
+                    pos0.get("strike"),
+                    base_dir=Path(base_dir),
+                ),
+                frozen_mode=frozen_mode,
+                frozen_manifest=frozen_manifest_payload,
+                frozen_manifest_sha256=frozen_manifest_sha256,
+                frozen_plan_sha256=frozen_plan_sha256,
+                requirements_by_lot=frozen_requirements_by_lot,
+                provenance_by_symbol=frozen_provenance,
+            )
             row = _apply_close_calibration_context(row, pos0)
             status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
             evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
@@ -2688,10 +3195,24 @@ def run_close_advice(
         )
         row["position_lifecycle_state"] = lifecycle_state
         row["position_lot_id"] = str(pos0.get("record_id") or "").strip() or None
+        row = _apply_required_data_row_provenance(
+            row,
+            position=pos0,
+            quote_key=key,
+            frozen_mode=frozen_mode,
+            frozen_manifest=frozen_manifest_payload,
+            frozen_manifest_sha256=frozen_manifest_sha256,
+            frozen_plan_sha256=frozen_plan_sha256,
+            requirements_by_lot=frozen_requirements_by_lot,
+            provenance_by_symbol=frozen_provenance,
+        )
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
         issue_reason = str(issue_reasons.get(key) or "").strip()
-        if issue_reason.startswith("required_data_"):
+        if (
+            issue_reason.startswith("required_data_")
+            or issue_reason == "close_advice_plan_unavailable"
+        ):
             row = _mark_not_evaluable(
                 row,
                 evaluation_status="coverage_missing",
@@ -2743,7 +3264,11 @@ def run_close_advice(
         text = render_markdown_compact(rows, notify_levels=notify_level_set, max_items=max_items)
     else:
         text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
-    selected_notify_rows = _selected_notify_rows(rows, notify_levels=notify_level_set, max_items=max_items)
+    selected_notify_rows = select_close_advice_notification_rows(
+        rows,
+        notify_levels=notify_level_set,
+        max_items_per_account=max_items,
+    )
     flag_counts: dict[str, int] = {}
     tier_counts: dict[str, int] = {}
     quote_issue_rows = 0
@@ -2760,7 +3285,91 @@ def run_close_advice(
         for flag in flags:
             flag_counts[flag] = flag_counts.get(flag, 0) + 1
 
-    _write_csv(csv_path, rows)
+    attempt_csv_path: Path | None = None
+    attempt_text_path: Path | None = None
+    write_csv_path = csv_path
+    write_text_path = text_path
+    if frozen_mode:
+        attempt_id = uuid4().hex
+        attempt_csv_path = output_dir / f".close_advice.{attempt_id}.csv.tmp"
+        attempt_text_path = output_dir / f".close_advice.{attempt_id}.txt.tmp"
+        write_csv_path = attempt_csv_path
+        write_text_path = attempt_text_path
+
+    _write_csv(write_csv_path, rows)
+    atomic_write_text(write_text_path, text, encoding="utf-8")
+    if frozen_mode:
+        try:
+            assert frozen_manifest_path is not None
+            manifest_now, _root_now = load_required_data_snapshot_manifest(
+                manifest_path=frozen_manifest_path,
+                expected_run_id=str(required_data_snapshot_run_id or ""),
+                expected_required_data_root=Path(required_data_root),
+            )
+            manifest_hash_now = sha256_bytes(
+                frozen_manifest_path.read_bytes()
+            )
+            if manifest_hash_now != frozen_manifest_sha256:
+                raise RequiredDataSnapshotError(
+                    "required-data snapshot manifest changed during Close Advice"
+                )
+            plan_now = resolve_bound_close_advice_required_data_plan(
+                manifest_path=frozen_manifest_path,
+                manifest=manifest_now,
+                expected_run_id=str(required_data_snapshot_run_id or ""),
+                expected_plan_path=frozen_plan_path,
+            )
+            if (plan_now is None) != (frozen_plan is None):
+                raise CloseAdviceRequiredDataPlanError(
+                    "close-advice required-data plan binding changed"
+                )
+            if plan_now is not None:
+                plan_payload_now, plan_path_now = plan_now
+                if (
+                    str(plan_payload_now.get("content_sha256") or "")
+                    != str(
+                        (frozen_plan or {}).get("content_sha256") or ""
+                    )
+                    or sha256_bytes(plan_path_now.read_bytes())
+                    != frozen_plan_sha256
+                ):
+                    raise CloseAdviceRequiredDataPlanError(
+                        "close-advice required-data plan changed during evaluation"
+                    )
+            (
+                _revalidated,
+                unavailable_now,
+                _revalidated_csv_bytes,
+            ) = _validate_frozen_symbols(
+                manifest_path=frozen_manifest_path,
+                expected_run_id=str(required_data_snapshot_run_id or ""),
+                required_data_root=Path(required_data_root),
+                symbols=symbols_to_validate,
+            )
+            if unavailable_now:
+                raise RequiredDataSnapshotError(
+                    "required-data symbol authority changed during Close Advice"
+                )
+            assert attempt_csv_path is not None
+            assert attempt_text_path is not None
+            os.replace(attempt_csv_path, csv_path)
+            os.replace(attempt_text_path, text_path)
+        except (
+            OSError,
+            RequiredDataSnapshotError,
+            CloseAdviceRequiredDataPlanError,
+        ) as exc:
+            _unlink_if_present(attempt_csv_path)
+            _unlink_if_present(attempt_text_path)
+            return _snapshot_integrity_failure_result(
+                output_dir=output_dir,
+                run_id=required_data_snapshot_run_id,
+                reason="required_data_snapshot_integrity_failed",
+                evidence={
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
     try:
         _append_close_advice_filter_trace(
             csv_path=csv_path,
@@ -2770,7 +3379,6 @@ def run_close_advice(
         )
     except Exception:
         pass
-    atomic_write_text(text_path, text, encoding="utf-8")
     report_manifest = publish_close_advice_report_manifest(
         csv_path=csv_path,
         text_path=text_path,
@@ -2778,6 +3386,16 @@ def run_close_advice(
         context=ctx,
         rows=rows,
         markets_to_run=markets_to_run,
+        run_id=required_data_snapshot_run_id,
+        quote_mode=(
+            "frozen_snapshot" if frozen_mode else "legacy_mutable"
+        ),
+        required_data_snapshot_manifest_sha256=(
+            frozen_manifest_sha256
+        ),
+        close_advice_required_data_plan_sha256=(
+            frozen_plan_sha256
+        ),
     )
     quote_issue_samples = _build_quote_issue_samples(
         coverage_positions,
@@ -2797,9 +3415,46 @@ def run_close_advice(
         "coverage_fetch_attempted_symbols": int(coverage_fetch_summary.get("attempted_symbols") or 0),
         "coverage_fetch_errors": int(coverage_fetch_summary.get("errors") or 0),
     }
+    frozen_requirements_validated = 0
+    frozen_binding_ids: set[str] = set()
+    if frozen_mode:
+        for requirement in frozen_requirements_by_lot.values():
+            binding = (
+                requirement.get("fetch_binding")
+                if isinstance(requirement.get("fetch_binding"), dict)
+                else {}
+            )
+            binding_id = str(binding.get("binding_id") or "").strip()
+            if binding_id:
+                frozen_binding_ids.add(binding_id)
+        for position in quote_positions:
+            lot_id = str(position.get("record_id") or "").strip()
+            requirement = frozen_requirements_by_lot.get(lot_id)
+            key = _quote_key(
+                position.get("symbol"),
+                position.get("option_type"),
+                _position_expiration(position),
+                position.get("strike"),
+                base_dir=Path(base_dir),
+            )
+            if (
+                requirement is not None
+                and str(requirement.get("planning_status") or "") == "ready"
+                and all(key)
+                and key in covered_keys
+                and key[0] in frozen_provenance
+            ):
+                frozen_requirements_validated += 1
 
     return {
         "enabled": True,
+        "status": (
+            "degraded" if evaluation_gap_rows > 0 else "ok"
+        ),
+        "snapshot_authority": "valid",
+        "quote_mode": (
+            "frozen_snapshot" if frozen_mode else "legacy_mutable"
+        ),
         "rows": len(rows),
         "evaluable_rows": sum(1 for row in rows if str(row.get("evaluation_status") or "").strip().lower() == "priced"),
         "evaluation_gap_rows": evaluation_gap_rows,
@@ -2814,12 +3469,54 @@ def run_close_advice(
             "attempted": len(attempted_fetch_details),
             "coverage_missing": len(coverage_reasons),
             "coverage_fetch_attempted_symbols": int(coverage_fetch_summary.get("attempted_symbols") or 0),
+            "network_fetch_attempts": (
+                0
+                if frozen_mode
+                else int(coverage_fetch_summary.get("attempted_symbols") or 0)
+                + len(attempted_fetch_details)
+            ),
+            "required_data_write_attempts": (
+                0
+                if frozen_mode
+                else int(coverage_fetch_summary.get("fetched_symbols") or 0)
+            ),
+            "position_requirements_total": (
+                len(quote_positions) if frozen_mode else 0
+            ),
+            "position_requirements_planned": (
+                len(frozen_requirements_by_lot) if frozen_mode else 0
+            ),
+            "position_requirements_validated": (
+                frozen_requirements_validated if frozen_mode else 0
+            ),
+            "position_requirements_missing": (
+                max(
+                    0,
+                    len(quote_positions)
+                    - frozen_requirements_validated,
+                )
+                if frozen_mode
+                else 0
+            ),
+            "binding_ids": (
+                sorted(frozen_binding_ids) if frozen_mode else []
+            ),
         },
         "quote_freshness": {
-            "enforced": provenance_enforced,
+            "enforced": bool(frozen_mode or provenance_enforced),
+            "authority": (
+                "required_data_snapshot_manifest"
+                if frozen_mode
+                else "quote_cache_metadata"
+            ),
             "max_age_sec": quote_max_age_sec,
             "symbols": quote_freshness_by_symbol,
         },
+        "required_data_snapshot_manifest_sha256": (
+            frozen_manifest_sha256
+        ),
+        "close_advice_required_data_plan_sha256": frozen_plan_sha256,
+        "business_date": business_date.isoformat(),
         "report_manifest": report_manifest,
         "csv": str(csv_path),
         "text": str(text_path),

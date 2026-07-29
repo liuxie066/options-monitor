@@ -16,6 +16,10 @@ from domain.domain.daily_decision_brief import (
     normalize_daily_decision_brief,
 )
 from domain.domain.daily_decision_event_risk import build_candidate_event_risk
+from domain.domain.close_advice import (
+    safe_int,
+    select_close_advice_notification_rows,
+)
 from domain.domain.engine import (
     select_best_candidate_per_symbol,
     select_best_yield_enhancement_per_symbol,
@@ -46,6 +50,8 @@ from src.infrastructure.position_advice_manifest_lock import (
 
 
 _DEFAULT_MAX_CANDIDATES = 3
+_DEFAULT_CLOSE_ADVICE_NOTIFY_LEVELS = ("strong", "medium")
+_DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
 
 
@@ -88,6 +94,8 @@ def assemble_daily_decision_brief(
         _daily_brief_config(config_map).get("max_candidates_per_strategy"),
         default=_DEFAULT_MAX_CANDIDATES,
     )
+    close_advice_notify_levels = _close_advice_notify_levels(config_map)
+    close_advice_max_items = _close_advice_max_items_per_account(config_map)
 
     put_rows, put_available = _load_sell_put_candidates(
         run_account_dir=run_account_dir,
@@ -175,6 +183,12 @@ def assemble_daily_decision_brief(
     call_rows = _dedupe_rows(call_rows, family="covered_call")
     combo_rows = _dedupe_rows(combo_rows, family="combo_yield")
     close_rows = _dedupe_close_rows(close_rows)
+    selected_close_rows = select_close_advice_notification_rows(
+        close_rows,
+        notify_levels=close_advice_notify_levels,
+        max_items_per_account=close_advice_max_items,
+    )
+    selected_close_row_ids = {id(row) for row in selected_close_rows}
     strategy_failures = _load_strategy_step_failures(
         failure_path=strategy_failure_path,
         run_account_dir=run_account_dir,
@@ -337,8 +351,21 @@ def assemble_daily_decision_brief(
                 )
     else:
         for row in close_rows:
-            positions.append(_position_view(row))
+            notification_eligible = id(row) in selected_close_row_ids
+            positions.append(
+                _position_view(
+                    row,
+                    notification_eligible=notification_eligible,
+                )
+            )
+        for row in selected_close_rows:
             actions.append(_close_action(row, account=account_norm))
+        for row in close_rows:
+            if (
+                id(row) not in selected_close_row_ids
+                and _close_advice_evaluation_unavailable(row)
+            ):
+                actions.append(_close_action(row, account=account_norm))
         for row in advice_authority.get("human_review_rows") or []:
             if not isinstance(row, Mapping):
                 continue
@@ -1671,7 +1698,11 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
     }
 
 
-def _position_view(row: Mapping[str, Any]) -> dict[str, Any]:
+def _position_view(
+    row: Mapping[str, Any],
+    *,
+    notification_eligible: bool,
+) -> dict[str, Any]:
     fields = (
         "position_lot_id",
         "strategy_group_id",
@@ -1689,6 +1720,7 @@ def _position_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "quote_status",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
+    out["notification_eligible"] = notification_eligible
     out["metrics"] = {
         key: _json_safe(row.get(key))
         for key in (
@@ -2178,6 +2210,49 @@ def _daily_brief_config(config: Mapping[str, Any]) -> dict[str, Any]:
         return {}
     brief = notifications.get("daily_brief")
     return dict(brief) if isinstance(brief, Mapping) else {}
+
+
+def _close_advice_notify_levels(config: Mapping[str, Any]) -> set[str]:
+    close_advice = config.get("close_advice")
+    close_advice_map = (
+        dict(close_advice)
+        if isinstance(close_advice, Mapping)
+        else {}
+    )
+    configured = (
+        close_advice_map.get("notify_levels")
+        or _DEFAULT_CLOSE_ADVICE_NOTIFY_LEVELS
+    )
+    return {
+        _text(item).lower()
+        for item in configured
+        if _text(item)
+    }
+
+
+def _close_advice_max_items_per_account(config: Mapping[str, Any]) -> int:
+    close_advice = config.get("close_advice")
+    close_advice_map = (
+        dict(close_advice)
+        if isinstance(close_advice, Mapping)
+        else {}
+    )
+    configured = safe_int(close_advice_map.get("max_items_per_account"))
+    return (
+        _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT
+        if configured is None
+        else configured
+    )
+
+
+def _close_advice_evaluation_unavailable(row: Mapping[str, Any]) -> bool:
+    evaluation = _text(
+        row.get("evaluation_status") or row.get("quote_status")
+    ).lower()
+    return (
+        evaluation in {"unavailable", "not_evaluable", "blocked", "error"}
+        or _text(row.get("close_action")).lower() == "not_evaluable"
+    )
 
 
 def _market_timezone(config: Mapping[str, Any], market: str) -> str:

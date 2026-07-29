@@ -993,6 +993,8 @@ _POSITION_ACTIONABLE_LABELS = frozenset(
 def _position_has_advice(row: Mapping[str, Any]) -> bool:
     # 只展示指向实际动作的持仓（平仓/止盈建议、需人工复核）；
     # “继续观察”和无法评估的持仓不需要用户做出变化，属于干扰信息
+    if row.get("notification_eligible") is False:
+        return False
     return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
 
 

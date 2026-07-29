@@ -23,6 +23,10 @@ def publish_close_advice_report_manifest(
     context: dict[str, Any],
     rows: list[dict[str, Any]],
     markets_to_run: list[str] | None,
+    run_id: str | None = None,
+    quote_mode: str | None = None,
+    required_data_snapshot_manifest_sha256: str | None = None,
+    close_advice_required_data_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     csv = Path(csv_path).resolve()
     text = Path(text_path).resolve()
@@ -62,6 +66,7 @@ def publish_close_advice_report_manifest(
     )
     payload = {
         "schema_version": CLOSE_ADVICE_REPORT_SCHEMA,
+        "status": "success",
         "generation_id": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
         "generated_at_utc": generated_at.isoformat().replace("+00:00", "Z"),
         "included_markets": sorted(markets),
@@ -71,7 +76,51 @@ def publish_close_advice_report_manifest(
         "text_sha256": _sha256(text),
         "context_sha256": _sha256(context_file),
     }
+    if str(run_id or "").strip():
+        payload["run_id"] = str(run_id).strip()
+    if str(quote_mode or "").strip():
+        payload["quote_mode"] = str(quote_mode).strip()
+    if str(required_data_snapshot_manifest_sha256 or "").strip():
+        payload["required_data_snapshot_manifest_sha256"] = str(
+            required_data_snapshot_manifest_sha256
+        ).strip()
+    if str(close_advice_required_data_plan_sha256 or "").strip():
+        payload["close_advice_required_data_plan_sha256"] = str(
+            close_advice_required_data_plan_sha256
+        ).strip()
     atomic_write_json(csv.parent / MANIFEST_NAME, payload, sort_keys=True)
+    return payload
+
+
+def publish_close_advice_report_status(
+    *,
+    output_dir: Path,
+    status: str,
+    run_id: str | None = None,
+    quote_mode: str | None = None,
+    reason: str | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status_norm = str(status or "").strip().lower()
+    if status_norm not in {"pending", "failed"}:
+        raise ValueError("close-advice report status must be pending or failed")
+    generated_at = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "schema_version": CLOSE_ADVICE_REPORT_SCHEMA,
+        "status": status_norm,
+        "generated_at_utc": generated_at.isoformat().replace("+00:00", "Z"),
+    }
+    if str(run_id or "").strip():
+        payload["run_id"] = str(run_id).strip()
+    if str(quote_mode or "").strip():
+        payload["quote_mode"] = str(quote_mode).strip()
+    if str(reason or "").strip():
+        payload["reason"] = str(reason).strip()
+    if evidence:
+        payload["evidence"] = dict(evidence)
+    target_dir = Path(output_dir).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(target_dir / MANIFEST_NAME, payload, sort_keys=True)
     return payload
 
 
@@ -95,6 +144,13 @@ def validate_close_advice_report_manifest(
         return {**base, "reason": "close_advice_manifest_malformed"}
     if payload.get("schema_version") != CLOSE_ADVICE_REPORT_SCHEMA:
         return {**base, "reason": "close_advice_manifest_schema_invalid"}
+    status = str(payload.get("status") or "success").strip().lower()
+    if status != "success":
+        return {
+            **base,
+            "reason": "close_advice_manifest_not_success",
+            "status": status,
+        }
     if not csv.is_file() or payload.get("csv_sha256") != _sha256(csv):
         return {**base, "reason": "close_advice_report_bytes_mismatch"}
     markets = {
@@ -136,5 +192,6 @@ __all__ = [
     "CLOSE_ADVICE_REPORT_SCHEMA",
     "MANIFEST_NAME",
     "publish_close_advice_report_manifest",
+    "publish_close_advice_report_status",
     "validate_close_advice_report_manifest",
 ]

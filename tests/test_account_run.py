@@ -784,6 +784,104 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
     assert close_events[-1]["extra"]["quote_issue_rows"] == 2
 
 
+def test_run_one_account_projects_frozen_close_advice_integrity_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import run_one_account
+
+    request = _make_request(tmp_path, prefetch_done=True)
+    request.base_cfg["close_advice"] = {"enabled": True}
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _run_pipeline_script(**kwargs):
+        report_dir = kwargs["report_dir"]
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "symbols_notification.txt").write_text(
+            "candidate text\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        env["mod"],
+        "run_pipeline_script",
+        _run_pipeline_script,
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {
+            "returncode": kwargs["returncode"],
+            "adapter": "pipeline",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "run_close_advice",
+        lambda **_kwargs: {
+            "enabled": True,
+            "status": "snapshot_integrity_failed",
+            "snapshot_authority": "invalid",
+            "rows": 0,
+            "notify_rows": 0,
+            "quote_issue_rows": 0,
+            "tier_counts": {},
+            "flag_counts": {
+                "required_data_snapshot_integrity_failed": 1
+            },
+            "integrity_failure": {
+                "reason": "required_data_snapshot_integrity_failed"
+            },
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **_kwargs: None,
+    )
+
+    assert outcome.ran_pipeline is False
+    assert outcome.result.ran_scan is True
+    assert outcome.result.should_notify is False
+    assert (
+        outcome.result.decision_reason
+        == "required_data_snapshot_integrity_failed"
+    )
+    assert outcome.result.notification_text == ""
+    assert outcome.acct_metrics["ran_pipeline"] is False
+    close_events = [
+        event
+        for event in env["audit_events"]
+        if event["action"] == "close_advice"
+    ]
+    assert close_events[-1]["status"] == "error"
+
+
 def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
