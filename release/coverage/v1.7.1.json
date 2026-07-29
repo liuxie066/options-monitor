@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.1",
+  "base": {
+    "tag": "v1.7.0",
+    "commit": "6086ba9e9fdc5e7e2a7b5a60fedf0ace05ce3c08"
+  },
+  "reviewed_head": "de56189c7de921283303e1725db2357a3a12becf",
+  "commits": [
+    {
+      "sha": "de56189c7de921283303e1725db2357a3a12becf",
+      "subject": "fix: ignore diagnostics from voided ledger events"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Ignored validation diagnostics from historical ledger events already superseded by a valid void, allowing Daily Brief and Position Advice to trust the repaired projection while unresolved invalid events continue to fail closed.",
+      "commits": [
+        "de56189c7de921283303e1725db2357a3a12becf"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
