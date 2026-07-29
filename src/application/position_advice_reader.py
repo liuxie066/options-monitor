@@ -160,11 +160,6 @@ def read_position_advice_v2(
                 effective_market = market or _market(
                     current.get("current_market")
                 )
-                if effective_market:
-                    advice = _advice_for_market(
-                        advice,
-                        market=effective_market,
-                    )
                 immutable_input = dict(validated["immutable_input"])
                 source_manifest = dict(validated["source_manifest"])
                 _validate_current_binding(
@@ -178,6 +173,11 @@ def read_position_advice_v2(
                     identity_hash=identity_hash,
                     scope_id=scope_id,
                 )
+                if effective_market:
+                    advice = _advice_for_market(
+                        advice,
+                        market=effective_market,
+                    )
 
                 current_plan_id = str(
                     advice.get("portfolio_plan_id") or ""
