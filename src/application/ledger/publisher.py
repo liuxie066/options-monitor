@@ -19,7 +19,11 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import normalize_trade_side
-from src.application.ledger.event_codec import import_stored_trade_events, trade_event_payload_dict
+from src.application.ledger.event_codec import (
+    effective_import_diagnostics,
+    import_stored_trade_events,
+    trade_event_payload_dict,
+)
 from src.application.ledger.position_records import PositionLotRecord
 
 
@@ -54,6 +58,11 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     }
     ledger_events, import_diagnostics = import_stored_trade_events(stored_events)
     ledger_projection = project_trade_events(ledger_events)
+    effective_diagnostics = effective_import_diagnostics(
+        ledger_events=ledger_events,
+        import_diagnostics=import_diagnostics,
+        projection_diagnostics=ledger_projection.diagnostics,
+    )
     invalid_event_ids = {
         str(item.event_id or "").strip()
         for item in ledger_projection.diagnostics
@@ -68,11 +77,6 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
             and str(event.target_event_id or "").strip()
         )
     }
-    effective_import_diagnostics = [
-        item
-        for item in import_diagnostics
-        if str(item.event_id or "").strip() not in voided_event_ids
-    ]
     applied_adjust_event_ids = {
         event.event_id
         for event in ledger_events
@@ -94,7 +98,7 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
     return PublishedPositionLotProjection(
         lots=lots,
         diagnostics=[
-            *effective_import_diagnostics,
+            *effective_diagnostics,
             *ledger_projection.diagnostics,
         ],
         ledger_projection=ledger_projection,
