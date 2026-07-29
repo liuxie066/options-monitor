@@ -854,12 +854,24 @@ def test_research_shadow_replay_build_and_analyze(capsys, monkeypatch, tmp_path:
         encoding="utf-8",
     )
     (account_dir / "mark_path_snapshots.jsonl").write_text(
-        "\n".join(
-            [
-                json.dumps({"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 10}),
-                json.dumps({"contract_symbol": "AMD260619P00080000", "unrealized_pnl": -20}),
-            ]
-        )
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "contract_symbol": "NVDA260619P00100000",
+                            "unrealized_pnl": 10,
+                            "point_in_time_status": "verified_fresh_collection",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "contract_symbol": "AMD260619P00080000",
+                            "unrealized_pnl": -20,
+                            "point_in_time_status": "verified_fresh_collection",
+                        }
+                    ),
+                ]
+            )
         + "\n",
         encoding="utf-8",
     )
@@ -1075,7 +1087,7 @@ def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp
     assert rc == 0
     assert payload["tool_name"] == "research.shadow-replay.mark"
     assert payload["data"]["summary"]["generated_mark_snapshot_count"] == 2
-    assert payload["data"]["summary"]["usable_mark_snapshot_count"] == 2
+    assert payload["data"]["summary"]["usable_mark_snapshot_count"] == 0
     assert payload["data"]["summary"]["missing_quote_count"] == 0
     assert (dataset_dir / "mark_path_snapshots.jsonl").exists()
 
@@ -1123,8 +1135,10 @@ def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp
 
     assert rc == 0
     assert payload["tool_name"] == "research.shadow-replay.run-data-plan"
-    assert payload["data"]["summary"]["executed_count"] == 1
-    assert payload["data"]["actions"][0]["action"] == "settle"
+    assert payload["data"]["summary"]["executed_count"] == 0
+    assert payload["data"]["summary"]["skipped_count"] == 1
+    assert payload["data"]["actions"][0]["action"] == "collect_marks"
+    assert payload["data"]["actions"][0]["reason"] == "action_not_enabled"
     assert receipt_path.exists()
 
     dry_run_receipt_path = tmp_path / "dry-run-receipt.json"

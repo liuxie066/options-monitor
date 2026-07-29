@@ -18,9 +18,28 @@ def _jsonl(path: Path) -> list[dict]:
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    if path.name == "mark_path_snapshots.jsonl":
+        rows = [
+            {
+                **row,
+                "point_in_time_status": row.get("point_in_time_status")
+                or "verified_fresh_collection",
+            }
+            for row in rows
+        ]
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(json.dumps(row) for row in rows)
     path.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def _seal_dataset(dataset_dir: Path) -> None:
+    from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
+
+    for name in DATASET_FILES:
+        path = dataset_dir / name
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+    refresh_dataset_manifest(dataset_dir)
 
 
 def test_shadow_replay_builds_universe_and_analyzes_outcome_incomplete(tmp_path: Path) -> None:
@@ -82,8 +101,8 @@ def test_shadow_replay_builds_universe_and_analyzes_outcome_incomplete(tmp_path:
     mark_path.write_text(
         "\n".join(
             [
-                json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-05-31", "unrealized_pnl": 12}),
-                json.dumps({"contract_symbol": "AMD260619P00080000", "mark_at": "2026-05-31", "unrealized_pnl": -35}),
+                    json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-05-31", "unrealized_pnl": 12, "point_in_time_status": "verified_fresh_collection"}),
+                    json.dumps({"contract_symbol": "AMD260619P00080000", "mark_at": "2026-05-31", "unrealized_pnl": -35, "point_in_time_status": "verified_fresh_collection"}),
             ]
         )
         + "\n",
@@ -155,7 +174,13 @@ def test_shadow_replay_evidence_level_requires_complete_closed_lifecycle() -> No
 
     candidates = [{"contract_symbol": "NVDA260619P00100000"}]
     decisions = [{"contract_symbol": "NVDA260619P00100000", "status": "accepted"}]
-    marks = [{"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 10}]
+    marks = [
+        {
+            "contract_symbol": "NVDA260619P00100000",
+            "unrealized_pnl": 10,
+            "point_in_time_status": "verified_fresh_collection",
+        }
+    ]
     incomplete = [{"contract_symbol": "NVDA260619P00100000", "outcome": "expired_worthless"}]
     complete = [
         {
@@ -530,11 +555,11 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
         ],
         filter_decisions=[{"contract_symbol": "BADREJ260619P00100000", "status": "rejected"}],
         mark_snapshots=[
-            {"contract_symbol": "BADACCEPT260619P00100000", "unrealized_pnl": 20},
-            {"contract_symbol": "GOODLOSS260619P00100000", "unrealized_pnl": -50},
-            {"contract_symbol": "EVENTREJ260619P00100000", "unrealized_pnl": 10},
-            {"contract_symbol": "RETGOOD260619P00100000", "unrealized_pnl": 15},
-            {"contract_symbol": "BADREJ260619P00100000", "unrealized_pnl": 25},
+            {"contract_symbol": "BADACCEPT260619P00100000", "unrealized_pnl": 20, "point_in_time_status": "verified_fresh_collection"},
+            {"contract_symbol": "GOODLOSS260619P00100000", "unrealized_pnl": -50, "point_in_time_status": "verified_fresh_collection"},
+            {"contract_symbol": "EVENTREJ260619P00100000", "unrealized_pnl": 10, "point_in_time_status": "verified_fresh_collection"},
+            {"contract_symbol": "RETGOOD260619P00100000", "unrealized_pnl": 15, "point_in_time_status": "verified_fresh_collection"},
+            {"contract_symbol": "BADREJ260619P00100000", "unrealized_pnl": 25, "point_in_time_status": "verified_fresh_collection"},
         ],
         outcome_facts=[
             {"contract_symbol": "BADACCEPT260619P00100000", "outcome": "expired_worthless", "realized_pnl": 100},
@@ -758,7 +783,7 @@ def test_shadow_replay_gate_separates_evidence_gap_blockers() -> None:
         ],
         filter_decisions=[],
         mark_snapshots=[
-            {"contract_symbol": "NOPROFILE260619P00100000", "unrealized_pnl": 10},
+            {"contract_symbol": "NOPROFILE260619P00100000", "unrealized_pnl": 10, "point_in_time_status": "verified_fresh_collection"},
         ],
         outcome_facts=[
             {"contract_symbol": "NOPROFILE260619P00100000", "outcome": "expired_worthless", "realized_pnl": 120},
@@ -1201,6 +1226,7 @@ def test_shadow_replay_data_plan_collects_local_marks_and_receipt(tmp_path: Path
         ),
         encoding="utf-8",
     )
+    _seal_dataset(dataset_dir)
 
     result = run_shadow_replay_data_plan(
         repo_root=tmp_path,
@@ -1216,7 +1242,7 @@ def test_shadow_replay_data_plan_collects_local_marks_and_receipt(tmp_path: Path
     assert result["actions"][0]["action"] == "collect_marks"
     assert result["actions"][0]["result_status"] == "ok"
     assert result["actions"][0]["operation"]["summary"]["generated_mark_snapshot_count"] == 2
-    assert result["status_after"]["datasets"][0]["next_suggested_action"] == "settle"
+    assert result["status_after"]["datasets"][0]["next_suggested_action"] == "collect_marks"
     assert result["safety"]["persistent_write_targets"] == ["shadow_replay_dataset", "shadow_replay_receipt"]
     assert receipt_path.exists()
     assert len(_jsonl(dataset_dir / "mark_path_snapshots.jsonl")) == 2
@@ -1244,6 +1270,7 @@ def test_shadow_replay_data_plan_settles_due_dataset(tmp_path: Path) -> None:
             {"contract_symbol": "AMD260619P00080000", "mark_at": "2026-06-01T00:00:00Z", "unrealized_pnl": -20},
         ],
     )
+    _seal_dataset(dataset_dir)
 
     result = run_shadow_replay_data_plan(
         repo_root=tmp_path,
@@ -1297,8 +1324,8 @@ def test_shadow_replay_settle_derives_outcomes_from_mark_path(tmp_path: Path) ->
     (account_dir / "mark_path_snapshots.jsonl").write_text(
         "\n".join(
             [
-                json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-05-31", "unrealized_pnl": 15}),
-                json.dumps({"contract_symbol": "AMD260619P00080000", "mark_at": "2026-05-31", "unrealized_pnl": -40}),
+                json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-05-31", "unrealized_pnl": 15, "point_in_time_status": "verified_fresh_collection"}),
+                json.dumps({"contract_symbol": "AMD260619P00080000", "mark_at": "2026-05-31", "unrealized_pnl": -40, "point_in_time_status": "verified_fresh_collection"}),
             ]
         )
         + "\n",
@@ -1343,6 +1370,7 @@ def test_shadow_replay_settlement_propagates_complete_lifecycle_quality_and_bloc
                 "fee_missing_components": [],
                 "covered_call_allocation_status": "none",
                 "lifecycle_quality": "complete_closed",
+                "point_in_time_status": "verified_fresh_collection",
             }
         ],
         existing_outcomes=[],
@@ -1357,6 +1385,7 @@ def test_shadow_replay_settlement_propagates_complete_lifecycle_quality_and_bloc
                     "dte": 0,
                 "spot": 90,
                 "mark_at": "2026-06-19",
+                "point_in_time_status": "verified_fresh_collection",
             }
         ],
         existing_outcomes=[],
@@ -1446,6 +1475,7 @@ def test_shadow_replay_settle_derives_expiration_outcomes_from_spot_marks(tmp_pa
                         "spot": 110,
                         "dte": 0,
                         "mark_at": "2026-06-19",
+                        "point_in_time_status": "verified_fresh_collection",
                     }
                 ),
                 json.dumps(
@@ -1457,6 +1487,7 @@ def test_shadow_replay_settle_derives_expiration_outcomes_from_spot_marks(tmp_pa
                         "spot": 70,
                         "dte": 0,
                         "mark_at": "2026-06-19",
+                        "point_in_time_status": "verified_fresh_collection",
                     }
                 ),
             ]
@@ -1546,15 +1577,13 @@ def test_shadow_replay_mark_generates_required_data_marks_and_settles(tmp_path: 
     marks = _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
 
     assert marking["summary"]["generated_mark_snapshot_count"] == 2
-    assert marking["summary"]["usable_mark_snapshot_count"] == 2
+    assert marking["summary"]["usable_mark_snapshot_count"] == 0
     assert marking["summary"]["missing_quote_count"] == 0
     assert {row["matched_by"] for row in marks} == {"contract_symbol"}
     assert marks[0]["quote_status"] == "matched"
     assert marks[0]["quote_flags"] == ["mid_from_bid_ask"]
-    assert settlement["summary"]["generated_outcome_fact_count"] == 2
-    assert analysis["summary"]["status"] == "needs_human_review"
-    assert analysis["outcome_stats"]["by_status"]["accepted"]["realized_pnl_total"] == 40
-    assert analysis["outcome_stats"]["by_status"]["rejected"]["realized_pnl_total"] == -70
+    assert settlement["summary"]["generated_outcome_fact_count"] == 0
+    assert analysis["summary"]["reason"] == "usable_mark_path_snapshots_missing"
 
 
 def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, tmp_path: Path) -> None:
@@ -1629,7 +1658,6 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
         required_data_root=tmp_path / "output_shared" / "required_data",
         source="opend",
         repo_root=tmp_path,
-        as_of="2026-05-31T00:00:00Z",
         write=True,
     )
     marks = _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
@@ -1654,6 +1682,106 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
     assert {row["quote_status"] for row in marks} == {"matched"}
     assert outcomes == []
     assert (tmp_path / "output_shared" / "required_data" / "parsed" / "NVDA_required_data.csv").exists()
+
+
+def test_shadow_replay_collect_marks_does_not_reuse_stale_cache_after_partial_opend_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset, collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income,multiplier\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120,100\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "net_income": 90,
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stale_parsed = tmp_path / "output_shared" / "required_data" / "parsed"
+    stale_parsed.mkdir(parents=True)
+    (stale_parsed / "AMD_required_data.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,bid,ask,last_price,dte,spot,multiplier\n"
+            "AMD,put,AMD260619P00080000,2026-06-19,80,1.4,1.8,1.6,30,95,100\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_execute_required_data_opend(*, base: Path, request):
+        if request.symbol == "AMD":
+            raise RuntimeError("OpenD partial fetch failure")
+        return {
+            "symbol": "NVDA",
+            "expiration_count": 1,
+            "expirations": ["2026-06-19"],
+            "rows": [
+                {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "contract_symbol": "NVDA260619P00100000",
+                    "expiration": "2026-06-19",
+                    "strike": 100,
+                    "bid": 0.7,
+                    "ask": 0.9,
+                    "last_price": 0.8,
+                    "dte": 30,
+                    "spot": 110,
+                    "multiplier": 100,
+                }
+            ],
+            "meta": {"source": "opend", "status": "ok"},
+        }
+
+    monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
+
+    manifest = build_shadow_replay_dataset(
+        repo_root=tmp_path,
+        run_id="run-1",
+        dataset_id="case-partial-collect",
+    )
+    dataset_dir = Path(manifest["dataset_dir"])
+    result = collect_shadow_replay_marks(
+        dataset=dataset_dir,
+        required_data_root=tmp_path / "output_shared" / "required_data",
+        source="opend",
+        repo_root=tmp_path,
+        write=True,
+    )
+    marks = {
+        row["contract_symbol"]: row
+        for row in _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
+    }
+
+    assert result["summary"]["status"] == "partial_failed"
+    assert result["summary"]["opend_fetch_ok_count"] == 1
+    assert result["summary"]["opend_fetch_error_count"] == 1
+    assert result["summary"]["usable_mark_snapshot_count"] == 1
+    assert marks["NVDA260619P00100000"]["quote_status"] == "matched"
+    assert marks["NVDA260619P00100000"]["point_in_time_status"] == "verified_fresh_collection"
+    assert marks["AMD260619P00080000"]["quote_status"] == "missing_quote"
+    assert marks["AMD260619P00080000"]["point_in_time_status"] == "missing_quote"
 
 
 def test_shadow_replay_collect_marks_opend_preview_does_not_persist(monkeypatch, tmp_path: Path) -> None:
@@ -1788,12 +1916,14 @@ def test_shadow_replay_mark_uses_expiration_spot_when_mid_is_missing(tmp_path: P
     analysis = analyze_shadow_replay_dataset(dataset=dataset_dir, min_sample=2)
     marks = _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
 
-    assert marking["summary"]["usable_mark_snapshot_count"] == 2
-    assert {row["mark_quality"] for row in marks} == {"expiration_spot"}
-    assert {row["pnl_outcome"] for row in marks} == {"expired_worthless", "assigned_at_expiry"}
-    assert settlement["summary"]["generated_outcome_fact_count"] == 2
-    assert analysis["outcome_stats"]["by_status"]["accepted"]["realized_pnl_total"] == 120
-    assert analysis["outcome_stats"]["by_status"]["rejected"]["realized_pnl_total"] == -910
+    assert marking["summary"]["usable_mark_snapshot_count"] == 0
+    assert {row["mark_quality"] for row in marks} == {"missing_mid"}
+    assert {row["point_in_time_status"] for row in marks} == {
+        "unverified_operator_as_of"
+    }
+    assert all("pnl_outcome" not in row for row in marks)
+    assert settlement["summary"]["generated_outcome_fact_count"] == 0
+    assert analysis["summary"]["reason"] == "usable_mark_path_snapshots_missing"
 
 
 def test_shadow_replay_mark_missing_quote_is_not_usable_evidence(tmp_path: Path) -> None:
@@ -1885,3 +2015,220 @@ def test_shadow_replay_pipeline_stays_split_by_stage() -> None:
     assert "trade_events" not in status
     assert "strategy_lab" not in status
     assert "strategy-lab" not in status
+
+
+def test_shadow_replay_marks_fail_closed_without_verified_collection_receipt() -> None:
+    from src.application.shadow_replay.settlement import is_usable_mark
+
+    economic_mark = {
+        "contract_symbol": "NVDA260619P00100000",
+        "unrealized_pnl": 10,
+    }
+
+    assert is_usable_mark(economic_mark) is False
+    assert is_usable_mark(
+        {
+            **economic_mark,
+            "point_in_time_status": "unverified_operator_as_of",
+        }
+    ) is False
+    assert is_usable_mark(
+        {
+            **economic_mark,
+            "point_in_time_status": "verified_fresh_collection",
+        }
+    ) is True
+
+
+def test_shadow_replay_decision_evidence_is_account_scoped_and_terminal_is_monotonic() -> None:
+    from src.application.shadow_replay.settlement import derive_outcome_facts
+
+    candidate = {
+        "run_id": "run-1",
+        "account": "lx",
+        "contract_symbol": "NVDA260619P00100000",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-06-19",
+        "strike": 100,
+        "multiplier": 100,
+        "net_income": 120,
+        "status": "accepted",
+    }
+    cross_account_mark = {
+        "run_id": "run-1",
+        "account": "sy",
+        "contract_symbol": "NVDA260619P00100000",
+        "mark_at": "2026-06-01T00:00:00Z",
+        "unrealized_pnl": 10,
+        "point_in_time_status": "verified_fresh_collection",
+    }
+    assert derive_outcome_facts(
+        [candidate],
+        [cross_account_mark],
+        existing_outcomes=[],
+    ) == []
+
+    provisional_mark = {
+        **cross_account_mark,
+        "account": "lx",
+        "mark_at": "2026-06-01T00:00:00Z",
+    }
+    provisional = derive_outcome_facts(
+        [candidate],
+        [provisional_mark],
+        existing_outcomes=[],
+    )[0]
+    assert provisional["outcome"] == "counterfactual_mark_to_market"
+    assert provisional["revision"] == 1
+
+    expiry_mark = {
+        **provisional_mark,
+        "mark_at": "2026-06-19T08:00:00Z",
+        "spot": 110,
+        "dte": 0,
+    }
+    upgraded = derive_outcome_facts(
+        [candidate],
+        [provisional_mark, expiry_mark],
+        existing_outcomes=[provisional],
+    )[0]
+    assert upgraded["outcome"] == "expired_worthless"
+    assert upgraded["revision"] == 2
+    assert upgraded["supersedes"]["outcome"] == "counterfactual_mark_to_market"
+
+
+def test_shadow_replay_group_occurrence_ignores_leg_status_but_scopes_account() -> None:
+    from src.application.shadow_replay.common import group_occurrence_key
+
+    accepted = {
+        "run_id": "run-1",
+        "account": "lx",
+        "strategy_group_id": "combo-1",
+        "status": "accepted",
+    }
+    rejected = {**accepted, "status": "rejected"}
+    other_account = {**accepted, "account": "sy"}
+
+    assert group_occurrence_key(accepted) == group_occurrence_key(rejected)
+    assert group_occurrence_key(accepted) != group_occurrence_key(other_account)
+
+
+def test_shadow_replay_integrity_and_output_paths_fail_closed(tmp_path: Path) -> None:
+    from src.application.shadow_replay.common import (
+        DATASET_FILES,
+        read_jsonl,
+        refresh_dataset_manifest,
+        resolve_output_path,
+    )
+
+    malformed = tmp_path / "malformed.jsonl"
+    malformed.write_text('{"ok": true}\nnot-json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid JSONL"):
+        read_jsonl(malformed)
+
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    for name in DATASET_FILES:
+        (dataset / name).write_text("", encoding="utf-8")
+    (dataset / "candidate_snapshots.jsonl").write_text(
+        '{"schema_version":"shadow_replay_candidate_snapshot.v0"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="dataset schema mismatch"):
+        refresh_dataset_manifest(dataset)
+
+    for protected in (
+        tmp_path / "config.us.json",
+        tmp_path / "state" / "receipt.json",
+        tmp_path / "ledger.sqlite3",
+        tmp_path / "research-recorder.service",
+    ):
+        with pytest.raises(ValueError, match="protected"):
+            resolve_output_path(protected)
+
+
+def test_shadow_replay_build_refuses_existing_dataset_without_erasing_evidence(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset
+    from src.application.shadow_replay.common import refresh_dataset_manifest
+
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,strike\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,100\n"
+        ),
+        encoding="utf-8",
+    )
+    first = build_shadow_replay_dataset(
+        repo_root=tmp_path,
+        run_id="run-1",
+        dataset_id="stable-dataset",
+    )
+    dataset = Path(first["dataset_dir"])
+    accumulated = {
+        "schema_version": "shadow_replay_mark_path_snapshot.v1",
+        "contract_symbol": "NVDA260619P00100000",
+        "point_in_time_status": "verified_fresh_collection",
+        "unrealized_pnl": 10,
+    }
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [accumulated])
+    refresh_dataset_manifest(dataset)
+
+    with pytest.raises(ValueError, match="already exists"):
+        build_shadow_replay_dataset(
+            repo_root=tmp_path,
+            run_id="run-1",
+            dataset_id="stable-dataset",
+        )
+
+    assert _jsonl(dataset / "mark_path_snapshots.jsonl") == [accumulated]
+
+
+def test_shadow_replay_data_plan_tracks_close_facet_independently(tmp_path: Path) -> None:
+    from src.application.shadow_replay import shadow_replay_dataset_status
+
+    dataset = (
+        tmp_path
+        / "output_shared"
+        / "research"
+        / "shadow_replay"
+        / "datasets"
+        / "close-only"
+    )
+    _write_jsonl(dataset / "candidate_snapshots.jsonl", [])
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "rank_snapshots.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+    _write_jsonl(
+        dataset / "close_decision_episodes.jsonl",
+        [
+            {
+                "schema_version": "shadow_replay_close_episode.v1",
+                "episode_id": "episode-1",
+                "account": "lx",
+                "position_lot_id": "lot-1",
+                "observed_at_utc": "2026-07-23T14:00:00Z",
+            }
+        ],
+    )
+    _write_jsonl(dataset / "close_decision_marks.jsonl", [])
+    _write_jsonl(dataset / "close_decision_outcomes.jsonl", [])
+    _seal_dataset(dataset)
+
+    status = shadow_replay_dataset_status(
+        repo_root=tmp_path,
+        min_sample=1,
+        now_utc="2026-07-24T14:00:00Z",
+    )
+
+    assert len(status["data_plan"]) == 1
+    row = status["data_plan"][0]
+    assert row["facet"] == "close"
+    assert row["facets"] == ["close"]
+    assert row["action"] == "collect_marks"
+    assert row["state"] == "collect_fresh_opend_marks"

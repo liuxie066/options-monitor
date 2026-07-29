@@ -11,12 +11,15 @@ from src.application.shadow_replay.candidate_impact import (
     run_shadow_replay_candidate_impact,
 )
 from src.application.shadow_replay.common import (
+    attach_artifact_provenance,
+    dataset_dir_from_arg,
     first_float,
     normal_status,
     resolve_output_path,
     safety_payload,
     text,
     utc_now,
+    validate_dataset_integrity,
     write_json,
 )
 from src.application.shadow_replay.parameter_sets import load_parameter_set
@@ -66,6 +69,12 @@ def run_strategy_lab_experiment(
     ):
         raise ValueError("strategy-lab experiment requires --dataset or a run-window selector")
     sample_floor = max(1, int(min_sample))
+    dataset_dir = dataset_dir_from_arg(dataset) if dataset is not None else None
+    source_integrity_before = (
+        validate_dataset_integrity(dataset_dir)
+        if dataset_dir is not None
+        else None
+    )
     readiness = analyze_strategy_lab_readiness(
         repo_root=repo_root,
         dataset=dataset,
@@ -186,6 +195,24 @@ def run_strategy_lab_experiment(
             "production_recommendation_allowed": False,
         },
     }
+    source_integrity_after = (
+        validate_dataset_integrity(dataset_dir)
+        if dataset_dir is not None
+        else None
+    )
+    if source_integrity_before != source_integrity_after:
+        raise ValueError("strategy lab source dataset generation changed during experiment")
+    integrity = source_integrity_after or {}
+    attach_artifact_provenance(
+        result,
+        artifact_kind="strategy_lab_experiment",
+        source_generation={
+            "generation_id": integrity.get("generation_id"),
+            "revision": integrity.get("revision"),
+            "dataset_dir": readiness.get("dataset_dir"),
+            "repo_root": str(Path(repo_root).expanduser().resolve()),
+        },
+    )
     if output:
         write_json(resolve_output_path(output), result)
     return result
@@ -263,6 +290,8 @@ def _scorecard(*, evaluation: dict[str, Any] | None, hypotheses: dict[str, Any])
         }
     baseline = evaluation.get("baseline") or {}
     production_gate = (evaluation.get("gates") or {}).get("production_recommendation") or {}
+    ready_variants = set(production_gate.get("ready_variants") or [])
+    eligibility = production_gate.get("variant_eligibility") or {}
     min_sample = max(1, int(((evaluation.get("gates") or {}).get("sample_size") or {}).get("min_sample") or 1))
     rows = []
     for variant in evaluation.get("variants") or []:
@@ -300,17 +329,81 @@ def _scorecard(*, evaluation: dict[str, Any] | None, hypotheses: dict[str, Any])
                 ),
                 "score_basis": outcome_comparison.get("basis"),
                 "outcome_comparison": outcome_comparison,
+                "production_eligibility": (
+                    eligibility.get(variant.get("name"))
+                    if isinstance(eligibility, dict)
+                    else None
+                ),
+                "production_eligible": str(variant.get("name") or "") in ready_variants,
             }
         )
     rows.sort(key=lambda row: str(row["variant"]))
-    dominant = [row for row in rows if row["status"] == "strictly_dominates_baseline"]
-    best = dominant[0] if bool(production_gate.get("allowed")) and len(dominant) == 1 else None
+    family_scorecards = {
+        family: _family_scorecard(
+            [row for row in rows if row.get("strategy_family") == family],
+            production_gate_allowed=bool(production_gate.get("allowed")),
+        )
+        for family in sorted(
+            {
+                text(row.get("strategy_family"))
+                for row in rows
+                if text(row.get("strategy_family"))
+            }
+        )
+    }
+    family_bests = [
+        item["best_variant"]
+        for item in family_scorecards.values()
+        if isinstance(item.get("best_variant"), dict)
+    ]
+    best = family_bests[0] if len(family_bests) == 1 else None
     if not rows:
         status, reason = "not_evaluable", "variant_evaluation_missing"
     elif not bool(production_gate.get("allowed")):
         status, reason = "not_evaluable", text(production_gate.get("reason")) or "outcome_review_not_ready"
+    elif len(family_bests) > 1:
+        status, reason = "family_advisories_ready", "multiple_family_specific_dominant_variants"
+    elif best:
+        status, reason = "ready", "strict_outcome_dominance"
+    elif any(row["status"] == "does_not_strictly_dominate_baseline" for row in rows):
+        status, reason = "evaluated_no_change", "no_variant_strictly_dominates_baseline"
+    else:
+        status, reason = "not_evaluable", "outcome_metrics_not_comparable"
+    return {
+        "status": status,
+        "reason": reason,
+        "rows": rows,
+        "by_strategy_family": family_scorecards,
+        "best_variant": best,
+        "best_variant_basis": "strict_outcome_dominance" if best else None,
+        "optimization_claim": "strict_outcome_dominance" if best else "none",
+        "limitations": [
+            "candidate_impact_reuses_observed_run_universe_only",
+            "candidate_counts_are_review_context_not_selection_score",
+            "assignment_and_callaway_rates_are_descriptive_not_failure_penalties",
+            "combo_yield_group_experiment_reported_separately",
+        ],
+    }
+
+
+def _family_scorecard(
+    rows: list[dict[str, Any]],
+    *,
+    production_gate_allowed: bool,
+) -> dict[str, Any]:
+    dominant = [
+        row
+        for row in rows
+        if row["status"] == "strictly_dominates_baseline"
+        and bool(row.get("production_eligible"))
+    ]
+    best = dominant[0] if production_gate_allowed and len(dominant) == 1 else None
+    if not rows:
+        status, reason = "not_evaluable", "variant_evaluation_missing"
+    elif not production_gate_allowed:
+        status, reason = "not_evaluable", "production_gate_blocked"
     elif len(dominant) > 1:
-        status, reason = "ambiguous", "multiple_variants_strictly_dominate_baseline"
+        status, reason = "ambiguous", "multiple_family_variants_strictly_dominate_baseline"
     elif best:
         status, reason = "ready", "strict_outcome_dominance"
     elif any(row["status"] == "does_not_strictly_dominate_baseline" for row in rows):
@@ -323,13 +416,6 @@ def _scorecard(*, evaluation: dict[str, Any] | None, hypotheses: dict[str, Any])
         "rows": rows,
         "best_variant": best,
         "best_variant_basis": "strict_outcome_dominance" if best else None,
-        "optimization_claim": "strict_outcome_dominance" if best else "none",
-        "limitations": [
-            "candidate_impact_reuses_observed_run_universe_only",
-            "candidate_counts_are_review_context_not_selection_score",
-            "assignment_and_callaway_rates_are_descriptive_not_failure_penalties",
-            "combo_yield_group_experiment_reported_separately",
-        ],
     }
 
 

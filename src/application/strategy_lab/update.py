@@ -217,7 +217,7 @@ def _build_latest_dataset(
             }
         selected_dataset_id = run_dir.name
     target = _dataset_target_dir(repo_root=base, dataset_root=dataset_root, dataset_id=selected_dataset_id)
-    if explicit_dataset_id is None and target.exists():
+    if target.exists():
         return {
             "requested": True,
             "executed": False,

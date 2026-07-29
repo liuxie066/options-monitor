@@ -3,7 +3,13 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
-from src.application.shadow_replay.common import first_float, instrument_key, normal_status, text
+from src.application.shadow_replay.common import (
+    decision_instance_key,
+    first_float,
+    group_occurrence_key,
+    normal_status,
+    text,
+)
 
 
 DECISION_INSTANCE_SCHEMA_VERSION = "strategy_lab_decision_instance.v1"
@@ -69,7 +75,7 @@ def summarize_decision_instances(decisions: list[dict[str, Any]]) -> dict[str, A
 
 
 def _single_leg_decision(row: dict[str, Any], *, source_index: int, strategy_family: str) -> dict[str, Any]:
-    key = instrument_key(row)
+    key = decision_instance_key(row, source_index=source_index)
     blockers: list[str] = []
     if not key:
         blockers.append("instrument_identity_missing")
@@ -77,7 +83,7 @@ def _single_leg_decision(row: dict[str, Any], *, source_index: int, strategy_fam
         blockers.extend(_covered_call_context_blockers(row))
     return {
         "schema_version": DECISION_INSTANCE_SCHEMA_VERSION,
-        "decision_id": f"{strategy_family}:{key or source_index}",
+        "decision_id": key or f"{strategy_family}:missing:{source_index}",
         "strategy_family": strategy_family,
         "strategy_profile": text(row.get("strategy_profile") or row.get("profile") or row.get("strategy_mode")) or None,
         "strategy_group_id": None,
@@ -136,14 +142,15 @@ def _combo_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     missing_group: list[dict[str, Any]] = []
     for row in rows:
-        group_id = text(row.get("strategy_group_id"))
-        if group_id:
-            grouped[group_id].append(row)
+        occurrence_id = group_occurrence_key(row)
+        if occurrence_id:
+            grouped[occurrence_id].append(row)
         else:
             missing_group.append(row)
 
     out: list[dict[str, Any]] = []
-    for group_id, legs in sorted(grouped.items()):
+    for occurrence_id, legs in sorted(grouped.items()):
+        group_id = _first_text(leg.get("strategy_group_id") for leg in legs)
         blockers: list[str] = []
         leg_roles = {text(leg.get("leg_role")) for leg in legs if text(leg.get("leg_role"))}
         if not leg_roles:
@@ -154,10 +161,11 @@ def _combo_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out.append(
             {
                 "schema_version": DECISION_INSTANCE_SCHEMA_VERSION,
-                "decision_id": f"combo_yield:{group_id}",
+                "decision_id": occurrence_id,
                 "strategy_family": "combo_yield",
                 "strategy_profile": _first_text(leg.get("strategy_profile") for leg in legs),
                 "strategy_group_id": group_id,
+                "group_occurrence_id": occurrence_id,
                 "decision_status": _group_status(legs),
                 "candidate_ids": candidate_ids,
                 "legs": legs,
@@ -187,10 +195,13 @@ def _combo_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _candidate_ref(row: dict[str, Any], *, source_index: int, strategy_family: str) -> dict[str, Any]:
-    key = instrument_key(row)
+    key = decision_instance_key(row, source_index=source_index)
     return {
         "source_candidate_index": source_index,
         "instrument_key": key or None,
+        "decision_instance_id": key or None,
+        "group_occurrence_id": group_occurrence_key(row) or None,
+        "run_id": text(row.get("run_id")) or None,
         "strategy_family": strategy_family,
         "strategy_profile": text(row.get("strategy_profile") or row.get("profile") or row.get("strategy_mode")) or None,
         "strategy_group_id": text(row.get("strategy_group_id")) or None,

@@ -8,8 +8,111 @@ import pytest
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    if path.name == "mark_path_snapshots.jsonl":
+        rows = [
+            {
+                **row,
+                "point_in_time_status": row.get("point_in_time_status")
+                or "verified_fresh_collection",
+            }
+            for row in rows
+        ]
+    if path.name == "candidate_snapshots.jsonl":
+        normalized = []
+        for source in rows:
+            row = dict(source)
+            row.setdefault("run_id", "fixture-run")
+            row.setdefault("account", "lx")
+            row.setdefault(
+                "parameter_snapshot",
+                {
+                    "min_annualized_return": 0.10,
+                    "min_iv_rv_ratio": 1.10,
+                    "min_iv_minus_rv": 0.05,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+            )
+            row.setdefault("parameter_snapshot_sha256", "fixture-parameter-snapshot")
+            row.setdefault("parameter_snapshot_source", "fixture")
+            normalized.append(row)
+        rows = normalized
+    if path.name == "outcome_facts.jsonl":
+        rows = [
+            {
+                **row,
+                "lifecycle_quality": row.get("lifecycle_quality") or "complete_closed",
+                "evidence_status": row.get("evidence_status") or "usable",
+                "terminal_event": row.get("terminal_event") or "expiry",
+                "lifecycle_pnl_net": (
+                    row.get("lifecycle_pnl_net")
+                    if row.get("lifecycle_pnl_net") is not None
+                    else row.get("realized_pnl", 0)
+                ),
+                "capital_days": row.get("capital_days") or 100,
+                "fee_basis": row.get("fee_basis") or "actual",
+                "fee_missing_components": row.get("fee_missing_components") or [],
+                "covered_call_allocation_status": (
+                    row.get("covered_call_allocation_status") or "none"
+                ),
+            }
+            for row in rows
+        ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    if path.name == "outcome_facts.jsonl":
+        from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
+
+        for name in DATASET_FILES:
+            candidate = path.parent / name
+            if not candidate.exists():
+                candidate.write_text("", encoding="utf-8")
+        refresh_dataset_manifest(path.parent)
+
+
+def _trusted_experiment_path(
+    tmp_path: Path,
+    experiment: dict,
+    *,
+    name: str = "experiment",
+) -> Path:
+    from src.application.shadow_replay.common import (
+        DATASET_FILES,
+        attach_artifact_provenance,
+        refresh_dataset_manifest,
+        write_json,
+    )
+
+    payload = json.loads(json.dumps(experiment))
+    source = ((payload.get("artifact_provenance") or {}).get("source_generation") or {})
+    source_dataset_value = str(source.get("dataset_dir") or "")
+    source_dataset = Path(source_dataset_value) if source_dataset_value else None
+    if source_dataset is None or not source_dataset.is_dir():
+        source_dataset = tmp_path / f"{name}-source-dataset"
+        source_dataset.mkdir(parents=True, exist_ok=True)
+        for filename in DATASET_FILES:
+            (source_dataset / filename).write_text("", encoding="utf-8")
+        integrity = refresh_dataset_manifest(source_dataset)["integrity"]
+        payload.setdefault("schema_version", "strategy_lab_experiment.v1")
+        attach_artifact_provenance(
+            payload,
+            artifact_kind="strategy_lab_experiment",
+            source_generation={
+                "generation_id": integrity["generation_id"],
+                "revision": integrity["revision"],
+                "dataset_dir": str(source_dataset),
+                "repo_root": str(tmp_path),
+            },
+        )
+    output = (
+        tmp_path
+        / "output_shared"
+        / "research"
+        / "strategy_lab"
+        / f"{name}.json"
+    )
+    write_json(output, payload)
+    return output
 
 
 def _write_readiness_dataset(dataset: Path) -> None:
@@ -754,14 +857,14 @@ def test_combo_yield_group_evaluator_rejects_invalid_leg_structures() -> None:
     blockers = result["group_universe"]["blockers"]
 
     assert result["summary"]["ready_group_count"] == 0
-    assert blockers["combo_yield_group_leg_count_invalid"] == 2
-    assert blockers["combo_yield_funding_put_leg_invalid"] == 1
-    assert blockers["combo_yield_participation_call_leg_invalid"] == 1
+    assert blockers["combo_yield_group_leg_count_invalid"] == 4
+    assert blockers["combo_yield_funding_put_leg_invalid"] == 2
+    assert blockers["combo_yield_participation_call_leg_invalid"] == 2
     assert blockers["combo_yield_contract_duplicate"] == 1
     assert blockers["combo_yield_participation_call_side_invalid"] == 1
-    assert blockers["combo_yield_account_mismatch"] == 1
-    assert blockers["combo_yield_expiration_mismatch"] == 1
-    assert blockers["combo_yield_multiplier_mismatch"] == 1
+    assert "combo_yield_account_mismatch" not in blockers
+    assert "combo_yield_expiration_mismatch" not in blockers
+    assert "combo_yield_multiplier_mismatch" not in blockers
 
 
 def test_combo_yield_invalid_structure_makes_complete_outcome_not_evaluable() -> None:
@@ -1059,7 +1162,13 @@ def test_strategy_lab_proposal_does_not_patch_candidate_count_only_experiment(tm
     _write_readiness_dataset(dataset)
     experiment = run_strategy_lab_experiment(repo_root=tmp_path, dataset=dataset, min_sample=1)
 
-    proposal = build_strategy_lab_proposal(experiment=experiment)
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="candidate-count-only",
+        )
+    )
 
     assert proposal["schema_version"] == "strategy_lab_proposal.v1"
     assert proposal["status"] == "needs_more_evidence"
@@ -1070,9 +1179,13 @@ def test_strategy_lab_proposal_does_not_patch_candidate_count_only_experiment(tm
     assert "strict_outcome_dominance_required_for_patch" in proposal["limitations"]
 
 
-def test_strategy_lab_proposal_requires_strict_outcome_dominance() -> None:
+def test_strategy_lab_proposal_requires_strict_outcome_dominance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from src.application.strategy_lab import build_strategy_lab_proposal
     from src.application.strategy_lab.experiment import _scorecard
+    import src.application.strategy_lab.proposal as proposal_module
 
     def accepted_metrics(
         *,
@@ -1104,6 +1217,7 @@ def test_strategy_lab_proposal_requires_strict_outcome_dominance() -> None:
         "safety_violation_count": 0,
         "safety_rejected_count": 0,
         "comparison_eligible": True,
+        "production_closed_replay_eligible": True,
         "analysis_summary": {"manual_strategy_review_ready": True},
         "insurance_metrics": {
             "by_mode_status": {
@@ -1140,7 +1254,16 @@ def test_strategy_lab_proposal_requires_strict_outcome_dominance() -> None:
         "variants": [variant],
         "gates": {
             "sample_size": {"min_sample": 30},
-            "production_recommendation": {"allowed": True},
+            "production_recommendation": {
+                "allowed": True,
+                "ready_variants": ["sell_put_strictly_better"],
+                "variant_eligibility": {
+                    "sell_put_strictly_better": {
+                        "allowed": True,
+                        "strategy_family": "sell_put",
+                    }
+                },
+            },
         },
     }
     hypotheses = {
@@ -1154,13 +1277,23 @@ def test_strategy_lab_proposal_requires_strict_outcome_dominance() -> None:
     }
     scorecard = _scorecard(evaluation=evaluation, hypotheses=hypotheses)
 
-    proposal = build_strategy_lab_proposal(
-        experiment={
+    experiment_payload = {
             "summary": {"status": "ready_for_scorecard_review"},
             "scorecard": scorecard,
             "evaluation": evaluation,
             "hypotheses": hypotheses,
         }
+    monkeypatch.setattr(
+        proposal_module,
+        "run_strategy_lab_experiment",
+        lambda **_kwargs: experiment_payload,
+    )
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment_payload,
+            name="strict-dominance",
+        )
     )
 
     assert scorecard["best_variant"]["variant"] == "sell_put_strictly_better"
@@ -1176,12 +1309,11 @@ def test_strategy_lab_proposal_requires_strict_outcome_dominance() -> None:
     assert proposal["dry_run_patch"] == {"sell_put.insurance_underwriting.min_iv_rv_ratio": 1.0}
 
 
-def test_strategy_lab_proposal_does_not_patch_offline_history_parameters() -> None:
+def test_strategy_lab_proposal_does_not_patch_offline_history_parameters(tmp_path: Path) -> None:
     from src.application.strategy_lab import build_strategy_lab_proposal
 
     variant_name = "sell_put_historical_iv_rv_percentile"
-    proposal = build_strategy_lab_proposal(
-        experiment={
+    experiment = {
             "summary": {"status": "ready_for_scorecard_review"},
             "scorecard": {
                 "best_variant_basis": "strict_outcome_dominance",
@@ -1193,10 +1325,23 @@ def test_strategy_lab_proposal_does_not_patch_offline_history_parameters() -> No
             },
             "evaluation": {
                 "data_mode": "closed_replay",
-                "gates": {"production_recommendation": {"allowed": True}},
+                "gates": {
+                    "production_recommendation": {
+                        "allowed": True,
+                        "ready_variants": [variant_name],
+                        "variant_eligibility": {
+                            variant_name: {
+                                "allowed": True,
+                                "strategy_family": "sell_put",
+                            }
+                        },
+                    }
+                },
                 "variants": [
                     {
                         "name": variant_name,
+                        "strategy_family": "sell_put",
+                        "production_closed_replay_eligible": True,
                         "parameters": {
                             "insurance_underwriting": {
                                 "min_iv_rv_ratio": 1.0,
@@ -1216,6 +1361,12 @@ def test_strategy_lab_proposal_does_not_patch_offline_history_parameters() -> No
                 ]
             },
         }
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="offline-history",
+        )
     )
 
     assert proposal["status"] == "needs_more_evidence"
@@ -1234,7 +1385,13 @@ def test_strategy_lab_proposal_blocks_patch_without_closed_replay(tmp_path: Path
     _write_jsonl(dataset / "outcome_facts.jsonl", [])
     experiment = run_strategy_lab_experiment(repo_root=tmp_path, dataset=dataset, min_sample=1)
 
-    proposal = build_strategy_lab_proposal(experiment=experiment)
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="without-closed-replay",
+        )
+    )
 
     assert experiment["evaluation"]["data_mode"] == "filter_only"
     assert proposal["status"] == "needs_more_evidence"
@@ -1291,7 +1448,13 @@ def test_strategy_lab_proposal_reports_combo_yield_group_advisory(tmp_path: Path
     _write_jsonl(dataset / "outcome_facts.jsonl", [])
     experiment = run_strategy_lab_experiment(repo_root=tmp_path, dataset=dataset, min_sample=1)
 
-    proposal = build_strategy_lab_proposal(experiment=experiment)
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="combo-advisory",
+        )
+    )
 
     assert experiment["group_experiments"]["combo_yield"]["summary"]["status"] == "ready"
     assert proposal["status"] == "data_gap_only"
@@ -1317,7 +1480,13 @@ def test_strategy_lab_llm_context_redacts_and_preserves_safety_boundary(tmp_path
     dataset = tmp_path / "dataset"
     _write_readiness_dataset(dataset)
     experiment = run_strategy_lab_experiment(repo_root=tmp_path, dataset=dataset, min_sample=1)
-    proposal = build_strategy_lab_proposal(experiment=experiment)
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="llm-context",
+        )
+    )
     proposal["dry_run_patch"]["webhook_url"] = "DO_NOT_LEAK"
     proposal["impact"]["secret_note"] = "DO_NOT_LEAK"
 
@@ -1343,9 +1512,65 @@ def test_strategy_lab_llm_context_redacts_and_preserves_safety_boundary(tmp_path
         == "group_level_outcome_evaluator"
     )
     assert context["context"]["strategy_family_boundaries"]["combo_yield"]["single_leg_parameter_patch_allowed"] is False
-    assert context["context"]["proposal"]["dry_run_patch"]["webhook_url"] == "[REDACTED]"
-    assert context["context"]["proposal"]["impact"]["secret_note"] == "[REDACTED]"
+    assert context["context"]["proposal"]["dry_run_patch"]["webhook_url"] == "***REDACTED***"
+    assert context["context"]["proposal"]["impact"]["secret_note"] == "***REDACTED***"
     assert "DO_NOT_LEAK" not in serialized
+
+
+def test_strategy_lab_llm_context_recomputes_linked_proposal(
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay.common import (
+        attach_artifact_provenance,
+        write_json,
+    )
+    from src.application.strategy_lab import (
+        build_strategy_lab_llm_context,
+        build_strategy_lab_proposal,
+        run_strategy_lab_experiment,
+    )
+
+    dataset = tmp_path / "dataset"
+    _write_readiness_dataset(dataset)
+    experiment_path = tmp_path / "experiment.json"
+    proposal_path = tmp_path / "proposal.json"
+    run_strategy_lab_experiment(
+        repo_root=tmp_path,
+        dataset=dataset,
+        min_sample=1,
+        output=experiment_path,
+    )
+    forged_proposal = build_strategy_lab_proposal(
+        experiment=experiment_path,
+    )
+    forged_proposal["status"] = "shadow_rollout_candidate"
+    forged_proposal["recommended_variant"] = "forged"
+    forged_proposal["dry_run_patch"] = {
+        "sell_put.insurance_underwriting.min_iv_rv_ratio": 0.1,
+    }
+    source_generation = (
+        (forged_proposal.get("artifact_provenance") or {}).get(
+            "source_generation"
+        )
+        or {}
+    )
+    attach_artifact_provenance(
+        forged_proposal,
+        artifact_kind="strategy_lab_proposal",
+        source_generation=source_generation,
+    )
+    write_json(proposal_path, forged_proposal)
+
+    context = build_strategy_lab_llm_context(
+        experiment=experiment_path,
+        proposal=proposal_path,
+    )
+
+    assert context["trust_mode"] == "display_only_untrusted"
+    assert (
+        "proposal_recompute_mismatch"
+        in context["artifact_validation"]["linkage_errors"]
+    )
 
 
 def test_strategy_lab_scoped_evidence_filters_mark_and_outcome_facts(tmp_path: Path) -> None:
@@ -1443,6 +1668,7 @@ def test_strategy_lab_update_build_dataset_dry_run_does_not_write(tmp_path: Path
 
 
 def test_strategy_lab_update_latest_build_is_idempotent_by_run_id(tmp_path: Path) -> None:
+    from src.application.shadow_replay.common import refresh_dataset_manifest
     from src.application.strategy_lab import run_strategy_lab_update
 
     runs_root = _write_latest_scanned_run(tmp_path / "output_runs")
@@ -1464,6 +1690,7 @@ def test_strategy_lab_update_latest_build_is_idempotent_by_run_id(tmp_path: Path
         json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-06-03", "option_mid": 1.1}) + "\n",
         encoding="utf-8",
     )
+    refresh_dataset_manifest(dataset)
 
     second = run_strategy_lab_update(
         repo_root=tmp_path,
@@ -1660,6 +1887,7 @@ def test_strategy_lab_update_close_io_failure_preserves_candidate_evidence(
 
 def test_strategy_lab_update_reports_candidate_only_close_collision_without_overwrite(tmp_path: Path) -> None:
     from src.application.shadow_replay import build_shadow_replay_dataset
+    from src.application.shadow_replay.common import refresh_dataset_manifest
     from src.application.strategy_lab import run_strategy_lab_update
 
     runs_root = tmp_path / "output_runs"
@@ -1675,6 +1903,7 @@ def test_strategy_lab_update_reports_candidate_only_close_collision_without_over
     )
     mark_path = dataset_root / run_id / "mark_path_snapshots.jsonl"
     mark_path.write_text('{"preserved": true}\n', encoding="utf-8")
+    refresh_dataset_manifest(dataset_root / run_id)
 
     result = run_strategy_lab_update(
         repo_root=tmp_path,
@@ -1695,6 +1924,7 @@ def test_strategy_lab_update_reports_candidate_only_close_collision_without_over
 
 
 def test_strategy_lab_update_complete_close_dataset_is_idempotent(tmp_path: Path) -> None:
+    from src.application.shadow_replay.common import refresh_dataset_manifest
     from src.application.strategy_lab import run_strategy_lab_update
 
     runs_root = tmp_path / "output_runs"
@@ -1714,6 +1944,7 @@ def test_strategy_lab_update_complete_close_dataset_is_idempotent(tmp_path: Path
     run_strategy_lab_update(**kwargs)
     close_marks = dataset_root / run_id / "close_decision_marks.jsonl"
     close_marks.write_text('{"preserved": true}\n', encoding="utf-8")
+    refresh_dataset_manifest(dataset_root / run_id)
 
     second = run_strategy_lab_update(**kwargs)
 
@@ -1743,10 +1974,11 @@ def test_strategy_lab_update_reports_incomplete_close_dataset_without_overwrite(
     missing_path = dataset_root / run_id / "close_decision_marks.jsonl"
     missing_path.unlink()
 
-    second = run_strategy_lab_update(**kwargs)
-
-    close_build = second["shadow_replay"]["close_decision_dataset_build"]
-    assert close_build["reason"] == "dataset_exists_without_complete_close_decisions"
+    with pytest.raises(
+        ValueError,
+        match="dataset integrity references missing file.*close_decision_marks",
+    ):
+        run_strategy_lab_update(**kwargs)
     assert not missing_path.exists()
 
 
@@ -1807,11 +2039,13 @@ def test_strategy_lab_experiment_supports_run_window_scope(tmp_path: Path) -> No
     assert result["dataset_dir"] is None
     assert result["input_scope"]["readiness_scope"]["coverage"]["mode"] == "runs"
     assert result["input_scope"]["readiness_scope"]["coverage"]["selected_scanned_runs"] == 1
-    assert result["evaluation"]["coverage"]["strict_backtest_allowed"] is True
-    assert result["evaluation"]["filters"]["accounts"] == ["lx"]
-    assert result["evaluation"]["filters"]["market"] == "us"
+    assert result["summary"]["status"] == "partial_ready"
+    assert result["summary"]["hypothesis_status"] == "not_ready"
+    assert result["hypotheses"]["blockers"]["parameter_snapshot_missing"] >= 1
+    assert result["evaluation"] is None
     assert result["scorecard"]["status"] == "not_evaluable"
     assert result["scorecard"]["best_variant"] is None
+    assert result["artifact_provenance"]["source_generation"]["generation_id"] is None
     assert result["safety"]["runtime_config_write_allowed"] is False
 
 
@@ -2006,7 +2240,9 @@ def test_cli_strategy_lab_experiment_run_window(capsys, monkeypatch, tmp_path: P
     assert payload["tool_name"] == "research.strategy-lab.experiment"
     assert payload["data"]["dataset_dir"] is None
     assert payload["data"]["input_scope"]["readiness_scope"]["coverage"]["selected_scanned_runs"] == 1
-    assert payload["data"]["evaluation"]["candidate_impact"]["allowed"] is True
+    assert payload["data"]["summary"]["hypothesis_status"] == "not_ready"
+    assert payload["data"]["hypotheses"]["blockers"]["parameter_snapshot_missing"] >= 1
+    assert payload["data"]["evaluation"] is None
 
 
 def test_shadow_replay_capture_and_evaluator_preserve_staggered_combo_horizons(tmp_path: Path) -> None:
@@ -2104,3 +2340,354 @@ def test_combo_yield_group_evaluator_rejects_reversed_staggered_expirations() ->
     assert group["ready_for_group_experiment"] is False
     assert "combo_yield_expiration_order_invalid" in group["blockers"]
     assert "combo_yield_expiration_mismatch" not in group["blockers"]
+
+
+def test_strategy_lab_readiness_excludes_unrelated_marks_and_outcomes(tmp_path: Path) -> None:
+    from src.application.strategy_lab import analyze_strategy_lab_readiness
+
+    dataset = tmp_path / "dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "run_id": "run-1",
+                "account": "lx",
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_family": "sell_put",
+                "strategy_profile": "insurance_underwriting",
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(
+        dataset / "mark_path_snapshots.jsonl",
+        [
+            {
+                "run_id": "run-1",
+                "account": "lx",
+                "contract_symbol": "AAPL260619P00200000",
+                "option_mid": 1.0,
+            }
+        ],
+    )
+    _write_jsonl(
+        dataset / "outcome_facts.jsonl",
+        [
+            {
+                "run_id": "run-1",
+                "account": "lx",
+                "contract_symbol": "AAPL260619P00200000",
+                "realized_pnl": 100,
+            }
+        ],
+    )
+
+    result = analyze_strategy_lab_readiness(dataset=dataset, min_sample=1)
+
+    assert result["summary"]["status"] != "ready_for_proposal"
+    assert result["summary"]["usable_mark_path_snapshot_count"] == 0
+    assert result["summary"]["outcome_fact_count"] == 0
+    assert result["summary"]["unmatched_mark_count"] == 1
+    assert result["summary"]["unmatched_outcome_count"] == 1
+
+
+def test_strategy_lab_hypotheses_reject_mixed_parameter_snapshot_generations(
+    tmp_path: Path,
+) -> None:
+    from src.application.strategy_lab import generate_strategy_lab_hypotheses
+
+    dataset = tmp_path / "dataset"
+    base_candidate = {
+        "run_id": "run-1",
+        "account": "lx",
+        "option_type": "put",
+        "status": "accepted",
+        "strategy_family": "sell_put",
+        "strategy_profile": "insurance_underwriting",
+    }
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                **base_candidate,
+                "contract_symbol": "NVDA260619P00100000",
+                "parameter_snapshot_sha256": "generation-a",
+            },
+            {
+                **base_candidate,
+                "contract_symbol": "AMD260619P00100000",
+                "parameter_snapshot_sha256": "generation-b",
+            },
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = generate_strategy_lab_hypotheses(dataset=dataset, min_sample=1)
+    sell_put = next(
+        item
+        for item in result["domain_hypotheses"]
+        if item["strategy_family"] == "sell_put"
+    )
+
+    assert sell_put["status"] == "not_ready"
+    assert sell_put["baseline_source"] is None
+    assert "mixed_parameter_snapshot_generations" in sell_put["blockers"]
+    assert sell_put["variants"] == []
+
+
+def test_strategy_lab_proposal_cannot_borrow_another_variants_gate(tmp_path: Path) -> None:
+    from src.application.strategy_lab import build_strategy_lab_proposal
+
+    covered_variant = {
+        "name": "covered_call_multi",
+        "strategy_family": "covered_call",
+        "parameters": {
+            "insurance_underwriting": {
+                "min_dte": 20,
+                "max_dte": 60,
+            }
+        },
+        "production_closed_replay_eligible": True,
+    }
+    experiment = {
+        "schema_version": "strategy_lab_experiment.v1",
+        "summary": {"status": "ready_for_scorecard_review"},
+        "scorecard": {
+            "best_variant_basis": "strict_outcome_dominance",
+            "best_variant": {
+                "variant": "covered_call_multi",
+                "strategy_family": "covered_call",
+            },
+        },
+        "evaluation": {
+            "data_mode": "closed_replay",
+            "variants": [covered_variant],
+            "gates": {
+                "production_recommendation": {
+                    "allowed": True,
+                    "ready_variants": ["sell_put_single"],
+                    "variant_eligibility": {
+                        "sell_put_single": {
+                            "allowed": True,
+                            "strategy_family": "sell_put",
+                        }
+                    },
+                }
+            },
+        },
+        "hypotheses": {
+            "domain_hypotheses": [
+                {
+                    "strategy_family": "covered_call",
+                    "baseline_parameters": {"min_dte": 25, "max_dte": 55},
+                }
+            ]
+        },
+    }
+
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            experiment,
+            name="cross-variant-gate",
+        )
+    )
+
+    assert proposal["status"] == "needs_more_evidence"
+    assert proposal["dry_run_patch"] == {}
+    assert proposal["recommended_variant"] == "covered_call_multi"
+
+
+def test_strategy_lab_inline_experiment_is_display_only() -> None:
+    from src.application.strategy_lab import build_strategy_lab_proposal
+
+    proposal = build_strategy_lab_proposal(
+        experiment={
+            "schema_version": "strategy_lab_experiment.v1",
+            "summary": {"status": "ready_for_scorecard_review"},
+            "scorecard": {
+                "best_variant_basis": "strict_outcome_dominance",
+                "best_variant": {
+                    "variant": "forged",
+                    "strategy_family": "sell_put",
+                },
+            },
+        }
+    )
+
+    assert proposal["status"] == "display_only_untrusted"
+    assert proposal["dry_run_patch"] == {}
+    assert (
+        "inline_experiment_is_display_only"
+        in proposal["artifact_validation"]["experiment"]["errors"]
+    )
+
+
+def test_strategy_lab_self_attested_forged_file_fails_semantic_recompute(
+    tmp_path: Path,
+) -> None:
+    from src.application.strategy_lab import build_strategy_lab_proposal
+
+    variant_name = "forged_sell_put"
+    forged = {
+        "schema_version": "strategy_lab_experiment.v1",
+        "summary": {
+            "status": "ready_for_scorecard_review",
+            "min_sample": 1,
+            "auto_generated_hypotheses": True,
+        },
+        "scorecard": {
+            "best_variant_basis": "strict_outcome_dominance",
+            "best_variant": {
+                "variant": variant_name,
+                "strategy_family": "sell_put",
+            },
+        },
+        "evaluation": {
+            "data_mode": "closed_replay",
+            "variants": [
+                {
+                    "name": variant_name,
+                    "strategy_family": "sell_put",
+                    "production_closed_replay_eligible": True,
+                    "parameters": {
+                        "insurance_underwriting": {
+                            "min_iv_rv_ratio": 1.0,
+                        }
+                    },
+                }
+            ],
+            "gates": {
+                "production_recommendation": {
+                    "allowed": True,
+                    "ready_variants": [variant_name],
+                    "variant_eligibility": {
+                        variant_name: {
+                            "allowed": True,
+                            "strategy_family": "sell_put",
+                        }
+                    },
+                }
+            },
+        },
+        "hypotheses": {
+            "domain_hypotheses": [
+                {
+                    "strategy_family": "sell_put",
+                    "baseline_parameters": {
+                        "min_iv_rv_ratio": 1.1,
+                    },
+                }
+            ],
+        },
+    }
+
+    proposal = build_strategy_lab_proposal(
+        experiment=_trusted_experiment_path(
+            tmp_path,
+            forged,
+            name="self-attested-forgery",
+        )
+    )
+
+    assert proposal["status"] == "display_only_untrusted"
+    assert proposal["dry_run_patch"] == {}
+    assert (
+        "experiment_gate_recompute_mismatch"
+        in proposal["artifact_validation"]["experiment"]["errors"]
+    )
+
+
+def test_combo_yield_outcomes_require_complete_fees_and_matching_occurrence() -> None:
+    from src.application.shadow_replay.common import freeze_decision_identities
+    from src.application.strategy_lab import run_combo_yield_group_experiment
+
+    common = {
+        "run_id": "run-1",
+        "account": "lx",
+        "symbol": "TSLA",
+        "status": "accepted",
+        "strategy_family": "combo_yield",
+        "strategy_group_id": "combo-1",
+        "contracts": 1,
+        "multiplier": 100,
+        "spot": 180,
+        "expiration": "2026-06-19",
+    }
+    legs = freeze_decision_identities(
+        [
+            {
+                **common,
+                "contract_symbol": "TSLA260619P00150000",
+                "option_type": "put",
+                "leg_role": "funding_put",
+                "side": "short",
+                "strike": 150,
+                "net_income": 600,
+            },
+            {
+                **common,
+                "contract_symbol": "TSLA260619C00220000",
+                "option_type": "call",
+                "leg_role": "participation_call",
+                "side": "long",
+                "strike": 220,
+                "net_income": -400,
+            },
+        ]
+    )
+    marks = [
+        {
+            "decision_instance_id": leg["decision_instance_id"],
+            "group_occurrence_id": leg["group_occurrence_id"],
+            "contract_symbol": leg["contract_symbol"],
+            "mark_at": "2026-06-03T00:00:00Z",
+            "unrealized_pnl": -50 if leg["option_type"] == "put" else 20,
+            "point_in_time_status": "verified_fresh_collection",
+        }
+        for leg in legs
+    ]
+    outcomes = [
+        {
+            "decision_instance_id": leg["decision_instance_id"],
+            "group_occurrence_id": (
+                "wrong-occurrence"
+                if leg["option_type"] == "call"
+                else leg["group_occurrence_id"]
+            ),
+            "contract_symbol": leg["contract_symbol"],
+            "outcome": "closed",
+            "lifecycle_quality": "complete_closed",
+            "lifecycle_pnl_net": 100,
+            "capital_days": 10_000,
+            "fee_basis": "actual",
+            "fee_missing_components": (
+                ["commission"] if leg["option_type"] == "put" else []
+            ),
+            "covered_call_allocation_status": "none",
+        }
+        for leg in legs
+    ]
+
+    result = run_combo_yield_group_experiment(
+        candidate_snapshots=legs,
+        mark_snapshots=marks,
+        outcome_facts=outcomes,
+        min_sample=1,
+    )
+    blockers = result["group_universe"]["groups"][0]["outcome_evaluation"]["blockers"]
+
+    assert result["scorecard"]["status"] == "not_evaluable"
+    assert any(
+        blocker.startswith("combo_yield_complete_closed_outcome_missing:")
+        for blocker in blockers
+    )
+    assert any(
+        blocker.startswith("combo_yield_outcome_group_occurrence_mismatch:")
+        for blocker in blockers
+    )

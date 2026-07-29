@@ -9,10 +9,12 @@ from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.common import (
     DATASET_FILES,
     OPTIONAL_CLOSE_DATASET_FILES,
+    dataset_read_lock,
     read_jsonl,
     resolve_path,
     safety_payload,
     text,
+    validate_dataset_integrity,
 )
 from src.application.shadow_replay.readiness import summarize_close_decision_readiness
 from src.application.shadow_replay.settlement import is_usable_mark, outcome_gap_summary
@@ -129,6 +131,27 @@ def _dataset_status(
     mark_stale_hours: int,
     now: datetime,
 ) -> dict[str, Any]:
+    with dataset_read_lock(dataset_dir):
+        return _dataset_status_unlocked(
+            dataset_dir,
+            required_data_root=required_data_root,
+            min_sample=min_sample,
+            min_mark_points=min_mark_points,
+            mark_stale_hours=mark_stale_hours,
+            now=now,
+        )
+
+
+def _dataset_status_unlocked(
+    dataset_dir: Path,
+    *,
+    required_data_root: Path | None,
+    min_sample: int,
+    min_mark_points: int,
+    mark_stale_hours: int,
+    now: datetime,
+) -> dict[str, Any]:
+    integrity = validate_dataset_integrity(dataset_dir, require_manifest=False)
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
     filter_decisions = read_jsonl(dataset_dir / "filter_decisions.jsonl")
     mark_snapshots = read_jsonl(dataset_dir / "mark_path_snapshots.jsonl")
@@ -192,6 +215,7 @@ def _dataset_status(
             "has_outcome_facts": evidence_checks["has_outcome_facts"],
             "survivorship_bias_risk": evidence_checks["survivorship_bias_risk"],
         },
+        "dataset_integrity": integrity,
     }
     close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
     if close_episode_path.is_file():
@@ -207,6 +231,7 @@ def _dataset_status(
             required_data_root=required_data_root,
         )
         result["close_decision_readiness"] = close_readiness
+    validate_dataset_integrity(dataset_dir, require_manifest=False)
     return result
 
 
@@ -369,23 +394,74 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         sampling = dataset["sampling"]
-        if sampling["action"] not in {"collect_marks", "settle"}:
+        if sampling["action"] in {"collect_marks", "settle"}:
+            rows.append(
+                {
+                    "dataset_id": dataset["dataset_id"],
+                    "dataset_dir": dataset["dataset_dir"],
+                    "facet": "candidate",
+                    "facets": ["candidate"],
+                    "status": dataset["status"],
+                    "reason": dataset["reason"],
+                    "action": sampling["action"],
+                    "priority": sampling["priority"],
+                    "state": sampling["state"],
+                    "last_mark_at": dataset["last_mark_at"],
+                    "mark_age_hours": sampling["mark_age_hours"],
+                    "usable_mark_point_count": sampling["usable_mark_point_count"],
+                    "outcome_gaps": dataset["outcome_gaps"],
+                    "suggested_command": sampling["suggested_command"],
+                    "suggested_opend_command": sampling["suggested_opend_command"],
+                }
+            )
+        close = dataset.get("close_decision_readiness")
+        if not isinstance(close, dict):
             continue
+        close_action = {
+            "collect_fresh_opend_marks": "collect_marks",
+            "settle_close_decision_outcomes": "settle",
+        }.get(text(close.get("next_action")))
+        if close_action is None:
+            continue
+        existing = next(
+            (
+                row
+                for row in rows
+                if row["dataset_id"] == dataset["dataset_id"]
+                and row["action"] == close_action
+            ),
+            None,
+        )
+        if existing is not None:
+            existing["facets"] = sorted(set(existing["facets"]) | {"close"})
+            existing["facet"] = "candidate+close"
+            continue
+        commands = close.get("commands") if isinstance(close.get("commands"), dict) else {}
         rows.append(
             {
                 "dataset_id": dataset["dataset_id"],
                 "dataset_dir": dataset["dataset_dir"],
-                "status": dataset["status"],
-                "reason": dataset["reason"],
-                "action": sampling["action"],
-                "priority": sampling["priority"],
-                "state": sampling["state"],
-                "last_mark_at": dataset["last_mark_at"],
-                "mark_age_hours": sampling["mark_age_hours"],
-                "usable_mark_point_count": sampling["usable_mark_point_count"],
-                "outcome_gaps": dataset["outcome_gaps"],
-                "suggested_command": sampling["suggested_command"],
-                "suggested_opend_command": sampling["suggested_opend_command"],
+                "facet": "close",
+                "facets": ["close"],
+                "status": close.get("status"),
+                "reason": close.get("reason") or close.get("next_action"),
+                "action": close_action,
+                "priority": "high",
+                "state": close.get("next_action"),
+                "last_mark_at": None,
+                "mark_age_hours": None,
+                "usable_mark_point_count": (
+                    (close.get("summary") or {}).get("usable_mark_count")
+                    if isinstance(close.get("summary"), dict)
+                    else None
+                ),
+                "outcome_gaps": None,
+                "suggested_command": commands.get("suggested_command"),
+                "suggested_opend_command": (
+                    commands.get("suggested_command")
+                    if close_action == "collect_marks"
+                    else None
+                ),
             }
         )
     return sorted(rows, key=_plan_sort_key)

@@ -289,6 +289,57 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="dataset root; defaults to profile/runtime output_shared/research/shadow_replay/datasets when provided",
     )
     shadow_build.add_argument("--dataset-id", default=None)
+    shadow_capture_combo = research_shadow_sub.add_parser(
+        "capture-combo-variants",
+        help="capture an isolated required-data superset for Combo Yield Shadow variants",
+    )
+    shadow_capture_combo.add_argument("--config-key", required=True, choices=("us", "hk"))
+    shadow_capture_combo.add_argument("--account", required=True)
+    shadow_capture_combo.add_argument("--symbols", nargs="+", required=True)
+    shadow_capture_combo.add_argument("--variant-spec", required=True)
+    shadow_capture_combo.add_argument(
+        "--dataset-root",
+        default=None,
+        help="dataset root; default output_shared/research/shadow_replay/datasets",
+    )
+    shadow_capture_combo.add_argument("--dataset-id", default=None)
+    shadow_capture_combo.add_argument("--opend-host", default=None)
+    shadow_capture_combo.add_argument("--opend-port", type=int, default=None)
+    shadow_capture_combo.add_argument(
+        "--no-chain-cache",
+        action="store_true",
+        help="disable the local research option-chain rate-limit cache",
+    )
+    shadow_capture_combo.add_argument(
+        "--chain-cache-force-refresh",
+        action="store_true",
+        help="ignore reusable research chain-cache entries during capture",
+    )
+    shadow_capture_combo.add_argument(
+        "--write",
+        action="store_true",
+        help="write the isolated local Shadow dataset; otherwise only return the capture plan",
+    )
+    shadow_evaluate_combo = research_shadow_sub.add_parser(
+        "evaluate-combo-variants",
+        help="build baseline/proposed Combo pair decisions from an isolated capture",
+    )
+    shadow_evaluate_combo.add_argument("--dataset", required=True)
+    shadow_evaluate_combo.add_argument(
+        "--underwritten-put-path",
+        default=None,
+        help="Combo-owned event/cash/underwriting accepted Put CSV",
+    )
+    shadow_evaluate_combo.add_argument("--write", action="store_true")
+    shadow_prepare_combo = research_shadow_sub.add_parser(
+        "prepare-combo-funding-puts",
+        help="run canonical Combo-owned Put scan/event/cash/underwriting on a capture",
+    )
+    shadow_prepare_combo.add_argument("--dataset", required=True)
+    shadow_prepare_combo.add_argument("--portfolio-context", required=True)
+    shadow_prepare_combo.add_argument("--usd-per-cny", type=float, default=None)
+    shadow_prepare_combo.add_argument("--cny-per-hkd", type=float, default=None)
+    shadow_prepare_combo.add_argument("--write", action="store_true")
     shadow_analyze = research_shadow_sub.add_parser("analyze", help="analyze a local shadow replay dataset")
     shadow_analyze.add_argument("--dataset", required=True)
     shadow_analyze.add_argument("--min-sample", type=int, default=30)
@@ -873,7 +924,12 @@ def handle_research_command(
                 )
             except ValueError as exc:
                 raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
-            return build_response(tool_name="research.strategy-lab.update", ok=True, data=data)
+            return build_response(
+                tool_name="research.strategy-lab.update",
+                ok=str((data.get("summary") or {}).get("status") or "").lower()
+                not in {"error", "failed", "partial_failed"},
+                data=data,
+            )
         if args.strategy_lab_command == "readiness":
             if not _has_strategy_lab_input_scope(args):
                 raise AgentToolError(
@@ -952,8 +1008,11 @@ def handle_research_command(
     from src.application.shadow_replay import (
         analyze_shadow_replay_dataset,
         build_shadow_replay_dataset,
+        capture_combo_variants,
         collect_shadow_replay_marks,
+        evaluate_combo_variant_dataset,
         mark_shadow_replay_dataset,
+        prepare_combo_funding_puts,
         run_shadow_replay_candidate_impact,
         run_shadow_replay_data_plan,
         settle_shadow_replay_dataset,
@@ -963,6 +1022,72 @@ def handle_research_command(
     base = repo_base_fn()
     profile = _shadow_replay_profile(args, base=base)
     runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
+
+    if args.shadow_replay_command == "capture-combo-variants":
+        dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
+        try:
+            data = capture_combo_variants(
+                repo_root=base,
+                config_key=args.config_key,
+                account=args.account,
+                symbols=args.symbols,
+                variant_spec_path=_resolve_shadow_path(args.variant_spec, base=base),
+                dataset_root=dataset_root,
+                dataset_id=args.dataset_id,
+                write=bool(args.write),
+                opend_host=args.opend_host,
+                opend_port=args.opend_port,
+                chain_cache=not bool(args.no_chain_cache),
+                chain_cache_force_refresh=bool(args.chain_cache_force_refresh),
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(
+            tool_name="research.shadow-replay.capture-combo-variants",
+            ok=True,
+            data=data,
+        )
+
+    if args.shadow_replay_command == "evaluate-combo-variants":
+        dataset = _resolve_shadow_path(args.dataset, base=base)
+        underwritten_put_path = (
+            _resolve_shadow_path(args.underwritten_put_path, base=base)
+            if args.underwritten_put_path
+            else dataset / "combo_owned_underwritten_puts.csv"
+        )
+        try:
+            data = evaluate_combo_variant_dataset(
+                dataset=dataset,
+                underwritten_put_path=underwritten_put_path,
+                write=bool(args.write),
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(
+            tool_name="research.shadow-replay.evaluate-combo-variants",
+            ok=True,
+            data=data,
+        )
+
+    if args.shadow_replay_command == "prepare-combo-funding-puts":
+        try:
+            data = prepare_combo_funding_puts(
+                dataset=_resolve_shadow_path(args.dataset, base=base),
+                portfolio_context_path=_resolve_shadow_path(
+                    args.portfolio_context,
+                    base=base,
+                ),
+                usd_per_cny_exchange_rate=args.usd_per_cny,
+                cny_per_hkd_exchange_rate=args.cny_per_hkd,
+                write=bool(args.write),
+            )
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(
+            tool_name="research.shadow-replay.prepare-combo-funding-puts",
+            ok=True,
+            data=data,
+        )
 
     if args.shadow_replay_command == "build":
         if bool(args.latest_scanned_run) and (args.run_id or args.run_dir):
@@ -1115,7 +1240,11 @@ def handle_research_command(
             include_realized_volatility=bool(args.include_realized_volatility),
             max_symbols=args.max_symbols,
         )
-        return build_response(tool_name="research.shadow-replay.run-data-plan", ok=True, data=data)
+        return build_response(
+            tool_name="research.shadow-replay.run-data-plan",
+            ok=int((data.get("summary") or {}).get("error_count") or 0) == 0,
+            data=data,
+        )
 
     if args.shadow_replay_command == "mark":
         required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base) or (
@@ -1154,7 +1283,12 @@ def handle_research_command(
             include_realized_volatility=bool(args.include_realized_volatility),
             max_symbols=args.max_symbols,
         )
-        return build_response(tool_name="research.shadow-replay.collect-marks", ok=True, data=data)
+        return build_response(
+            tool_name="research.shadow-replay.collect-marks",
+            ok=str((data.get("summary") or {}).get("status") or "").lower()
+            not in {"error", "failed", "partial_failed"},
+            data=data,
+        )
 
     if args.shadow_replay_command == "settle":
         data = settle_shadow_replay_dataset(
