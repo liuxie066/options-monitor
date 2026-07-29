@@ -1,6 +1,7 @@
 name: Release from VERSION
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main

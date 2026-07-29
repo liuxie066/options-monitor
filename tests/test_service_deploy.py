@@ -503,6 +503,51 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     assert f"./om service drift --profile-path {runtime / 'service.profile.json'} --confirm" in out["manual_actions"]
 
 
+def test_service_drift_does_not_query_host_systemctl_for_custom_unit_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"]
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    def _unexpected_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("custom unit roots must not query host systemctl")
+
+    monkeypatch.setattr(service_drift_module.subprocess, "run", _unexpected_run)
+
+    out = service_drift_module.service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert out["activation_states"] == {}
+    assert out["active_states"] == {}
+    assert out["activation_drift_units"] == []
+
+
 def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift

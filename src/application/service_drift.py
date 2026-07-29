@@ -32,7 +32,7 @@ def service_drift(
     profile: dict[str, Any] | None = None,
     confirm: bool = False,
     systemd_unit_root: str | Path | None = None,
-    run_cmd: Callable[..., Any] = subprocess.run,
+    run_cmd: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
 
@@ -49,14 +49,16 @@ def service_drift(
         profile=profile,
         systemd_unit_root=systemd_unit_root,
     )
-    initial["run_cmd"] = run_cmd
+    command_runner = run_cmd or subprocess.run
+    initial["run_cmd"] = command_runner
+    initial["run_cmd_injected"] = run_cmd is not None
     before = _build_drift(initial)
     operations: list[dict[str, Any]] = []
     apply_errors: list[str] = []
     changed = False
 
     if confirm and before.get("supported"):
-        apply_result = _apply_service_drift(initial, before=before, operations=operations, run_cmd=run_cmd)
+        apply_result = _apply_service_drift(initial, before=before, operations=operations, run_cmd=command_runner)
         changed = bool(apply_result.get("changed"))
         apply_errors = [str(item) for item in apply_result.get("errors") or []]
         after = _build_drift(initial)
@@ -508,7 +510,7 @@ def _activation_states(
     installed_units: list[str],
     ctx: dict[str, Any],
 ) -> dict[str, str]:
-    if provider != "systemd":
+    if provider != "systemd" or not _live_systemctl_enabled(ctx):
         return {}
     installed = set(installed_units)
     states: dict[str, str] = {}
@@ -534,7 +536,7 @@ def _active_states(
     installed_units: list[str],
     ctx: dict[str, Any],
 ) -> dict[str, str]:
-    if provider != "systemd":
+    if provider != "systemd" or not _live_systemctl_enabled(ctx):
         return {}
     installed = set(installed_units)
     states: dict[str, str] = {}
@@ -585,6 +587,12 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
         key: expected.get(key) for key in keys if key in profile or key in expected
     }
+
+
+def _live_systemctl_enabled(ctx: dict[str, Any]) -> bool:
+    """Use host systemctl only for the live unit root or an injected runner."""
+
+    return bool(ctx.get("run_cmd_injected")) or Path(ctx["systemd_unit_root"]) == Path("/etc/systemd/system")
 
 
 def _required_units(provider: str, expected_services: list[str]) -> list[str]:
@@ -737,24 +745,37 @@ def _apply_service_drift(
     retired_units: list[str] = []
     activation_drift = set(before.get("activation_drift_units") or [])
     extra_installed = set(before.get("extra_installed_units") or [])
-    if written_units:
+    live_systemctl = _live_systemctl_enabled(ctx)
+    if written_units and live_systemctl:
         result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
         operations.append(result)
         if not result.get("ok"):
             errors.append(f"daemon-reload: {result.get('stderr') or result.get('stdout') or result.get('error') or result.get('returncode')}")
-    for name in sorted(item for item in activation_drift if before.get("activation_states", {}).get(item) == "masked"):
+    for name in sorted(
+        item
+        for item in activation_drift
+        if live_systemctl and before.get("activation_states", {}).get(item) == "masked"
+    ):
         result = _run_systemctl(ctx, ["unmask", name], run_cmd=run_cmd)
         operations.append(result)
         if not result.get("ok"):
             errors.append(f"unmask {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
-    for name in sorted(item for item in missing | activation_drift if item.endswith(".timer")):
+    for name in sorted(
+        item
+        for item in missing | activation_drift
+        if live_systemctl and item.endswith(".timer")
+    ):
         result = _run_systemctl(ctx, ["enable", "--now", name], run_cmd=run_cmd)
         operations.append(result)
         if result.get("ok"):
             enabled_timers.append(name)
         else:
             errors.append(f"enable {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
-    for name in sorted(item for item in mismatched if item.endswith(".timer") and item in written_units):
+    for name in sorted(
+        item
+        for item in mismatched
+        if live_systemctl and item.endswith(".timer") and item in written_units
+    ):
         result = _run_systemctl(ctx, ["restart", name], run_cmd=run_cmd)
         operations.append(result)
         if result.get("ok"):
@@ -763,11 +784,15 @@ def _apply_service_drift(
             errors.append(f"restart {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
     retired_paths_changed = False
     for name in sorted(extra_installed):
-        stop_result = _run_systemctl(ctx, ["disable", "--now", name], run_cmd=run_cmd)
-        operations.append(stop_result)
-        if not stop_result.get("ok"):
-            errors.append(f"retire {name}: {stop_result.get('stderr') or stop_result.get('stdout') or stop_result.get('returncode')}")
-            continue
+        if live_systemctl:
+            stop_result = _run_systemctl(ctx, ["disable", "--now", name], run_cmd=run_cmd)
+            operations.append(stop_result)
+            if not stop_result.get("ok"):
+                errors.append(
+                    f"retire {name}: "
+                    f"{stop_result.get('stderr') or stop_result.get('stdout') or stop_result.get('returncode')}"
+                )
+                continue
         path = Path(ctx["systemd_unit_root"]) / name
         delete_result = _delete_unit_with_sudo_fallback(path, run_cmd=run_cmd)
         operations.append({**delete_result, "unit": name})
@@ -776,7 +801,7 @@ def _apply_service_drift(
             continue
         retired_units.append(name)
         retired_paths_changed = True
-    if retired_paths_changed:
+    if retired_paths_changed and live_systemctl:
         result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
         operations.append(result)
         if not result.get("ok"):
