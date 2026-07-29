@@ -1,0 +1,87 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.0",
+  "base": {
+    "tag": "v1.6.5",
+    "commit": "afa8d92a072306b4623860b28913d4bc69cde9e0"
+  },
+  "reviewed_head": "00e13a518743bf7805926efbf95e6edffa5695da",
+  "commits": [
+    {
+      "sha": "66d75fcbda6f6b1321fe8afb0fb2d24c34f745d7",
+      "subject": "fix: harden opening opportunity monitoring"
+    },
+    {
+      "sha": "9ae6c7b1a20fc790b231c778c8cecd35cc8f2463",
+      "subject": "fix: harden runtime notification delivery"
+    },
+    {
+      "sha": "54a86cb95089b64e56a19ed250569c664e7a2a45",
+      "subject": "fix: harden holdings management domain"
+    },
+    {
+      "sha": "c6d03eee2ec7b6aac566d5cb3f6d2394a3a1a490",
+      "subject": "fix: harden configuration control plane"
+    },
+    {
+      "sha": "dcaa2b9c968e1fd967fa1d8f679f5d243649a3b1",
+      "subject": "feat: harden research replay and combo experiments"
+    },
+    {
+      "sha": "00e13a518743bf7805926efbf95e6edffa5695da",
+      "subject": "fix: freeze Close Advice required data"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added deterministic Combo Yield shadow-replay experiments with variant evaluation, funding and settlement analysis, and archived redacted evidence for Strategy Lab research.",
+      "commits": [
+        "dcaa2b9c968e1fd967fa1d8f679f5d243649a3b1"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added a transactional, schema-aware configuration control plane for account, symbol, and settings changes, with runtime readiness checks and safer upgrade and service-drift operations.",
+      "commits": [
+        "c6d03eee2ec7b6aac566d5cb3f6d2394a3a1a490"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Hardened opening-opportunity monitoring by unifying candidate eligibility, ranking, trace evidence, and strategy-aligned required-data planning across Sell Put, Covered Call, and Combo Yield.",
+      "commits": [
+        "66d75fcbda6f6b1321fe8afb0fb2d24c34f745d7"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Hardened holdings management with exact ledger identity and economics, atomic lifecycle and trade handling, broker snapshot receipts, and authority-safe Position Advice inputs.",
+      "commits": [
+        "54a86cb95089b64e56a19ed250569c664e7a2a45"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Made runtime notifications fail closed and recover safely through durable Daily Brief revisions and envelopes, exact scheduler target identity, notification perception, and authority-safe Position Advice delivery.",
+      "commits": [
+        "9ae6c7b1a20fc790b231c778c8cecd35cc8f2463"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bound Close Advice evaluation to an immutable per-run required-data plan and verified manifest integrity through report publication, preventing cross-account or mid-run snapshot drift.",
+      "commits": [
+        "00e13a518743bf7805926efbf95e6edffa5695da"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made Daily Brief reuse the canonical Close Advice notification selector for pricing status, tier, ranking, and per-account limits, preventing optional or truncated buy-to-close rows from appearing as recommendations.",
+      "commits": [
+        "00e13a518743bf7805926efbf95e6edffa5695da"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
