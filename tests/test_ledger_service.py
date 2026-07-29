@@ -72,6 +72,76 @@ def _open_event_from_fields(fields: dict[str, Any], *, event_id: str = "open-put
     ).to_dict()
 
 
+def _broker_open_deal() -> Any:
+    from src.application.trades.normalizer import NormalizedTradeDeal
+
+    return NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="futu-account-lx",
+        internal_account="lx",
+        deal_id="new-pdd-put",
+        order_id="order-new-pdd-put",
+        symbol="PDD",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=3.05,
+        strike=85.0,
+        multiplier=100,
+        multiplier_source="broker",
+        expiration_ymd="2026-08-28",
+        currency="USD",
+        trade_time_ms=3000,
+        raw_payload={"deal_id": "new-pdd-put"},
+    )
+
+
+def _history_with_invalid_close(*, voided: bool) -> list[dict[str, Any]]:
+    fields = _position_fields()
+    key = ContractKey.from_values(
+        broker=fields["broker"],
+        account=fields["account"],
+        underlying_symbol=fields["symbol"],
+        option_type=fields["option_type"],
+        position_side=fields["side"],
+        strike=fields["strike"],
+        expiration_ymd="2026-05-28",
+    )
+    invalid_close_id = "invalid-close"
+    events = [
+        _open_event_from_fields(fields),
+        TradeEvent(
+            event_id=invalid_close_id,
+            event_type="close",
+            event_time_ms=0,
+            contract_key=key,
+            contracts=1,
+            price=0.2,
+            currency="HKD",
+            source="opend_push",
+            multiplier=100,
+            target_lot_id=fields["record_id"],
+        ).to_dict(),
+    ]
+    if voided:
+        events.append(
+            TradeEvent(
+                event_id="void-invalid-close",
+                event_type="void",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=0,
+                price=0.0,
+                currency="HKD",
+                source="cli_trade_event_repair",
+                multiplier=100,
+                target_event_id=invalid_close_id,
+            ).to_dict()
+        )
+    return events
+
+
 def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import persist_manual_open_event_with_ledger
@@ -272,3 +342,39 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
     ]
     error_codes = {item["code"] for item in error_items}
     assert "duplicate_event_id" in error_codes or "duplicate_lot_id" in error_codes
+
+
+def test_broker_open_preflight_ignores_import_error_from_validly_voided_event() -> None:
+    from src.application.ledger.preflight import preflight_trade_open
+
+    events = _history_with_invalid_close(voided=True)
+
+    class Repo:
+        def list_trade_events(self) -> list[dict[str, Any]]:
+            return list(events)
+
+    result = preflight_trade_open(Repo(), deal=_broker_open_deal())
+
+    assert result.status == "ok"
+    assert result.event_type == "open"
+    assert result.source_record_count == 3
+    assert result.imported_event_count == 3
+
+
+def test_broker_open_preflight_keeps_active_import_error_fail_closed() -> None:
+    from src.application.ledger.errors import LedgerPreflightError
+    from src.application.ledger.preflight import preflight_trade_open
+
+    events = _history_with_invalid_close(voided=False)
+
+    class Repo:
+        def list_trade_events(self) -> list[dict[str, Any]]:
+            return list(events)
+
+    with pytest.raises(LedgerPreflightError) as exc_info:
+        preflight_trade_open(Repo(), deal=_broker_open_deal())
+
+    assert exc_info.value.code == "ledger_shadow_invalid"
+    assert [item["code"] for item in exc_info.value.details["import_errors"]] == [
+        "event_time_must_be_positive"
+    ]

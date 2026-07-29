@@ -23,7 +23,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.errors import LedgerPreflightError
-from src.application.ledger.event_codec import import_stored_trade_events, stored_trade_event_to_ledger_event
+from src.application.ledger.event_codec import effective_import_diagnostics, import_stored_trade_events
 from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPreflightResult
 
@@ -271,13 +271,16 @@ def _preflight_trade_event_append(
     before_projection = project_trade_events(before_imported_events)
     combined_events = [*current_events, *appended_events]
     imported_events, import_diagnostics = import_stored_trade_events(combined_events)
-    voided_by_append = _voided_target_event_ids(appended_events)
+    projection = project_trade_events(imported_events)
     import_errors = [
         item.to_dict()
-        for item in import_diagnostics
-        if item.severity == "error" and item.event_id not in voided_by_append
+        for item in effective_import_diagnostics(
+            ledger_events=imported_events,
+            import_diagnostics=import_diagnostics,
+            projection_diagnostics=projection.diagnostics,
+        )
+        if item.severity == "error"
     ]
-    projection = project_trade_events(imported_events)
     projection_errors = [item.to_dict() for item in projection.diagnostics if item.severity == "error"]
     if import_errors or projection_errors:
         raise LedgerPreflightError(
@@ -322,7 +325,15 @@ def _current_trade_event_projection(
     source_events = _list_trade_events(repo)
     imported_events, import_diagnostics = import_stored_trade_events(source_events)
     projection = project_trade_events(imported_events)
-    import_errors = [item.to_dict() for item in import_diagnostics if item.severity == "error"]
+    import_errors = [
+        item.to_dict()
+        for item in effective_import_diagnostics(
+            ledger_events=imported_events,
+            import_diagnostics=import_diagnostics,
+            projection_diagnostics=projection.diagnostics,
+        )
+        if item.severity == "error"
+    ]
     projection_errors = [item.to_dict() for item in projection.diagnostics if item.severity == "error"]
     if import_errors or projection_errors:
         raise LedgerPreflightError(
@@ -335,29 +346,6 @@ def _current_trade_event_projection(
             },
         )
     return source_events, imported_events, projection
-
-
-def _voided_target_event_ids(events: list[dict[str, Any]]) -> set[str]:
-    out: set[str] = set()
-    for event in events:
-        decoded, diagnostics = stored_trade_event_to_ledger_event(event)
-        has_decode_errors = any(item.severity == "error" for item in diagnostics)
-        if decoded is not None and not has_decode_errors:
-            if decoded.event_type != "void":
-                continue
-            target = str(decoded.target_event_id or "").strip()
-            if target:
-                out.add(target)
-            continue
-        if str(event.get("position_effect") or "").strip().lower() != "void":
-            continue
-        payload = event.get("raw_payload") or {}
-        if not isinstance(payload, dict):
-            continue
-        target = str(payload.get("void_target_event_id") or "").strip()
-        if target:
-            out.add(target)
-    return out
 
 
 def _preflight_open_event(

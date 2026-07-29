@@ -54,6 +54,33 @@ def import_stored_trade_events(events: list[Any]) -> tuple[list[TradeEvent], lis
     return imported, diagnostics
 
 
+def effective_import_diagnostics(
+    *,
+    ledger_events: list[TradeEvent],
+    import_diagnostics: list[LedgerDiagnostic],
+    projection_diagnostics: list[LedgerDiagnostic],
+) -> list[LedgerDiagnostic]:
+    invalid_event_ids = {
+        str(item.event_id or "").strip()
+        for item in projection_diagnostics
+        if item.severity == "error" and str(item.event_id or "").strip()
+    }
+    voided_event_ids = {
+        str(event.target_event_id or "").strip()
+        for event in ledger_events
+        if (
+            event.event_type == "void"
+            and event.event_id not in invalid_event_ids
+            and str(event.target_event_id or "").strip()
+        )
+    }
+    return [
+        item
+        for item in import_diagnostics
+        if str(item.event_id or "").strip() not in voided_event_ids
+    ]
+
+
 def stored_trade_event_to_ledger_event(item: Any) -> tuple[TradeEvent | None, list[LedgerDiagnostic]]:
     payload = trade_event_payload_dict(item)
     if _is_canonical_payload(payload):
@@ -227,6 +254,7 @@ def _optional_id(value: Any) -> str | None:
 
 __all__ = [
     "EncodedTradeEvent",
+    "effective_import_diagnostics",
     "encode_trade_event_for_storage",
     "import_stored_trade_events",
     "stored_trade_event_to_ledger_event",
