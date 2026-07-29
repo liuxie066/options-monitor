@@ -5,29 +5,49 @@ from pathlib import Path
 from typing import Any
 
 from src.application.shadow_replay import load_shadow_replay_observed_evidence
-from src.application.shadow_replay.common import dataset_dir_from_arg, read_jsonl
+from src.application.shadow_replay.common import (
+    bind_legacy_decision_evidence,
+    dataset_dir_from_arg,
+    dataset_read_lock,
+    freeze_decision_identities,
+    read_jsonl,
+    validate_dataset_integrity,
+)
 
 
 def load_strategy_lab_dataset(dataset: str | Path) -> dict[str, Any]:
     dataset_dir = dataset_dir_from_arg(dataset)
-    manifest_path = dataset_dir / "manifest.json"
-    manifest: dict[str, Any] = {}
-    if manifest_path.exists():
-        try:
+    with dataset_read_lock(dataset_dir):
+        integrity = validate_dataset_integrity(dataset_dir, require_manifest=False)
+        manifest_path = dataset_dir / "manifest.json"
+        manifest: dict[str, Any] = {}
+        if manifest_path.exists():
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 manifest = payload
-        except json.JSONDecodeError:
-            manifest = {"status": "invalid_json"}
-    return {
-        "dataset_dir": str(dataset_dir),
-        "manifest": manifest,
-        "candidate_snapshots": read_jsonl(dataset_dir / "candidate_snapshots.jsonl"),
-        "filter_decisions": read_jsonl(dataset_dir / "filter_decisions.jsonl"),
-        "rank_snapshots": read_jsonl(dataset_dir / "rank_snapshots.jsonl"),
-        "mark_snapshots": read_jsonl(dataset_dir / "mark_path_snapshots.jsonl"),
-        "outcome_facts": read_jsonl(dataset_dir / "outcome_facts.jsonl"),
-    }
+        candidates = freeze_decision_identities(
+            read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
+        )
+        marks = bind_legacy_decision_evidence(
+            candidates,
+            read_jsonl(dataset_dir / "mark_path_snapshots.jsonl"),
+        )
+        outcomes = bind_legacy_decision_evidence(
+            candidates,
+            read_jsonl(dataset_dir / "outcome_facts.jsonl"),
+        )
+        result = {
+            "dataset_dir": str(dataset_dir),
+            "manifest": manifest,
+            "candidate_snapshots": candidates,
+            "filter_decisions": read_jsonl(dataset_dir / "filter_decisions.jsonl"),
+            "rank_snapshots": read_jsonl(dataset_dir / "rank_snapshots.jsonl"),
+            "mark_snapshots": marks,
+            "outcome_facts": outcomes,
+            "integrity": integrity,
+        }
+        validate_dataset_integrity(dataset_dir, require_manifest=False)
+        return result
 
 
 def load_strategy_lab_evidence(
@@ -46,8 +66,17 @@ def load_strategy_lab_evidence(
         evidence["coverage"] = {
             "mode": "dataset",
             "dataset_dir": evidence["dataset_dir"],
-            "strict_backtest_allowed": bool(evidence["candidate_snapshots"]),
-            "reason": "dataset_candidate_universe_ready" if evidence["candidate_snapshots"] else "candidate_universe_missing",
+            "strict_backtest_allowed": bool(evidence["candidate_snapshots"])
+            and evidence["integrity"].get("status") == "verified",
+            "reason": (
+                "dataset_candidate_universe_ready"
+                if evidence["candidate_snapshots"]
+                and evidence["integrity"].get("status") == "verified"
+                else "dataset_integrity_unverified"
+                if evidence["candidate_snapshots"]
+                else "candidate_universe_missing"
+            ),
+            "dataset_integrity": evidence["integrity"],
         }
         evidence["filters"] = {"accounts": [], "market": None, "market_filter_applied": False}
         return evidence
@@ -73,14 +102,17 @@ def load_strategy_lab_evidence(
                     manifest = payload
             except json.JSONDecodeError:
                 manifest = {"status": "invalid_json"}
+    candidates = freeze_decision_identities(list(observed["candidate_snapshots"]))
+    marks = bind_legacy_decision_evidence(candidates, list(observed["mark_snapshots"]))
+    outcomes = bind_legacy_decision_evidence(candidates, list(observed["outcome_facts"]))
     return {
         "dataset_dir": dataset_dir,
         "manifest": manifest,
-        "candidate_snapshots": list(observed["candidate_snapshots"]),
+        "candidate_snapshots": candidates,
         "filter_decisions": list(observed["filter_decisions"]),
         "rank_snapshots": [],
-        "mark_snapshots": list(observed["mark_snapshots"]),
-        "outcome_facts": list(observed["outcome_facts"]),
+        "mark_snapshots": marks,
+        "outcome_facts": outcomes,
         "source": observed.get("source") or {},
         "coverage": observed.get("coverage") or {},
         "filters": observed.get("filters") or {},

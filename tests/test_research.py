@@ -460,8 +460,8 @@ def test_research_shadow_replay_uses_mark_and_outcome_paths(tmp_path: Path) -> N
     mark_path.write_text(
         "\n".join(
             [
-                json.dumps({"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 20}),
-                json.dumps({"contract_symbol": "AMD260619P00080000", "unrealized_pnl": -50}),
+                json.dumps({"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 20, "point_in_time_status": "verified_fresh_collection"}),
+                json.dumps({"contract_symbol": "AMD260619P00080000", "unrealized_pnl": -50, "point_in_time_status": "verified_fresh_collection"}),
             ]
         )
         + "\n",
@@ -1106,3 +1106,109 @@ def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:
     assert "## Combo Yield Pair Diagnostics" in data["handoff_markdown"]
     assert "unique_market_rows: 4" in data["handoff_markdown"]
     assert "call_filter: rows=2 accepted=0 rejected=2" in data["handoff_markdown"]
+
+
+def test_research_redaction_covers_private_keys_cookies_and_free_text_credentials() -> None:
+    from src.application.research.redaction import redact_value
+
+    source = {
+        "private_key": "PRIVATE",
+        "cookie": "session=COOKIE",
+        "nested": {
+            "message": (
+                'Authorization: Basic dXNlcjpwYXNz\n'
+                'credential="cred-value" signing_key=\'sign-value\' '
+                "sessionid=session-value "
+                "https://example.invalid/path?signature=signed-value"
+            ),
+            "pem": (
+                "-----BEGIN PRIVATE KEY-----\n"
+                "PRIVATE-MATERIAL\n"
+                "-----END PRIVATE KEY-----"
+            ),
+        },
+    }
+
+    redacted = redact_value(source)
+    serialized = json.dumps(redacted, ensure_ascii=False)
+
+    for secret in (
+        "PRIVATE",
+        "COOKIE",
+        "dXNlcjpwYXNz",
+        "cred-value",
+        "sign-value",
+        "session-value",
+        "signed-value",
+        "PRIVATE-MATERIAL",
+    ):
+        assert secret not in serialized
+
+
+def test_research_historical_attribution_disables_current_ranker_on_mismatch() -> None:
+    from src.application.research.evidence import (
+        _historical_attribution_status,
+        _ranking_row_evidence,
+    )
+
+    attribution = _historical_attribution_status(
+        {"run_id": "historical-run"},
+        producer={
+            "status": "available",
+            "git_commit": "old-commit",
+            "config_digest": "old-config",
+        },
+        collector={
+            "git_commit": "new-commit",
+            "config_digest": "new-config",
+        },
+    )
+    ranking = _ranking_row_evidence(
+        {
+            "symbol": "NVDA",
+            "annualized_return": "0.2",
+        },
+        rank=1,
+        strategy="sell_put",
+        account_hint="lx",
+        cfg={},
+        configured_attribution_allowed=attribution["configured_ranking_allowed"],
+    )
+
+    assert attribution["status"] == "unknown_or_mismatch"
+    assert attribution["configured_ranking_allowed"] is False
+    assert ranking["rank_explanation"] == {
+        "status": "unavailable",
+        "reason": "historical_producer_policy_unavailable_or_mismatched",
+    }
+
+
+def test_research_data_plan_action_errors_produce_failed_envelope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.shadow_replay as shadow_replay
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.research import handle_research_command
+
+    monkeypatch.setattr(
+        shadow_replay,
+        "run_shadow_replay_data_plan",
+        lambda **_kwargs: {
+            "schema_version": "shadow_replay_data_plan_run.v1",
+            "summary": {"status": "error", "error_count": 1},
+        },
+    )
+    args = parse_args(
+        [
+            "research",
+            "shadow-replay",
+            "run-data-plan",
+            "--write",
+        ]
+    )
+
+    response = handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+    assert response["ok"] is False
+    assert response["data"]["summary"]["error_count"] == 1

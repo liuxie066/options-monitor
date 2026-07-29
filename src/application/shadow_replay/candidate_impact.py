@@ -23,8 +23,12 @@ from src.application.shadow_replay.capture import (
 from src.application.shadow_replay.common import (
     MARK_PATH_SCHEMA_VERSION,
     OUTCOME_FACT_SCHEMA_VERSION,
+    bind_legacy_decision_evidence,
     dataset_dir_from_arg,
+    dataset_read_lock,
+    decision_instance_key,
     first_float,
+    freeze_decision_identities,
     instrument_key,
     normal_status,
     read_jsonl,
@@ -33,7 +37,9 @@ from src.application.shadow_replay.common import (
     safety_payload,
     text,
     utc_now,
+    validate_dataset_integrity,
     write_json,
+    write_text_artifact,
 )
 from src.application.shadow_replay.parameter_sets import (
     CURRENT_UNDERWRITING_PROFILE,
@@ -120,6 +126,14 @@ def load_shadow_replay_observed_evidence(
             start=start,
             end=end,
         )
+    evidence["mark_snapshots"] = bind_legacy_decision_evidence(
+        list(evidence["candidate_snapshots"]),
+        list(evidence["mark_snapshots"]),
+    )
+    evidence["outcome_facts"] = bind_legacy_decision_evidence(
+        list(evidence["candidate_snapshots"]),
+        list(evidence["outcome_facts"]),
+    )
     candidate_snapshots = _filter_candidates(
         evidence["candidate_snapshots"],
         accounts=account_filter,
@@ -292,8 +306,10 @@ def _run_shadow_replay_candidate_impact(
     if output:
         output_path = resolve_output_path(output)
         if format_norm == "markdown":
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(result.get("report_markdown") or _render_markdown(result), encoding="utf-8")
+            write_text_artifact(
+                output_path,
+                result.get("report_markdown") or _render_markdown(result),
+            )
         else:
             write_json(output_path, result)
     return result
@@ -301,21 +317,37 @@ def _run_shadow_replay_candidate_impact(
 
 def _load_dataset_evidence(dataset: str | Path, *, base: Path) -> dict[str, Any]:
     dataset_dir = dataset_dir_from_arg(dataset)
-    return {
-        "candidate_snapshots": read_jsonl(dataset_dir / "candidate_snapshots.jsonl"),
-        "filter_decisions": read_jsonl(dataset_dir / "filter_decisions.jsonl"),
-        "mark_snapshots": read_jsonl(dataset_dir / "mark_path_snapshots.jsonl"),
-        "outcome_facts": read_jsonl(dataset_dir / "outcome_facts.jsonl"),
-        "source": {
-            "mode": "dataset",
-            "dataset_dir": safe_rel(dataset_dir, base=base),
-        },
-    }
+    with dataset_read_lock(dataset_dir):
+        integrity = validate_dataset_integrity(dataset_dir, require_manifest=False)
+        candidates = freeze_decision_identities(
+            read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
+        )
+        result = {
+            "candidate_snapshots": candidates,
+            "filter_decisions": read_jsonl(dataset_dir / "filter_decisions.jsonl"),
+            "mark_snapshots": bind_legacy_decision_evidence(
+                candidates,
+                read_jsonl(dataset_dir / "mark_path_snapshots.jsonl"),
+            ),
+            "outcome_facts": bind_legacy_decision_evidence(
+                candidates,
+                read_jsonl(dataset_dir / "outcome_facts.jsonl"),
+            ),
+            "source": {
+                "mode": "dataset",
+                "dataset_dir": safe_rel(dataset_dir, base=base),
+            },
+            "integrity": integrity,
+        }
+        validate_dataset_integrity(dataset_dir, require_manifest=False)
+        return result
 
 
 def _dataset_coverage(*, evidence: dict[str, Any], dataset: str | Path) -> dict[str, Any]:
     dataset_dir = dataset_dir_from_arg(dataset)
     candidate_count = len(evidence["candidate_snapshots"])
+    integrity = evidence.get("integrity") or {}
+    integrity_verified = integrity.get("status") == "verified"
     return {
         "mode": "dataset",
         "dataset_dir": str(dataset_dir),
@@ -323,8 +355,15 @@ def _dataset_coverage(*, evidence: dict[str, Any], dataset: str | Path) -> dict[
         "requested_end_date": None,
         "available_scanned_runs": None,
         "selected_scanned_runs": None,
-        "strict_backtest_allowed": candidate_count > 0,
-        "reason": "dataset_candidate_universe_ready" if candidate_count > 0 else "candidate_universe_missing",
+        "strict_backtest_allowed": candidate_count > 0 and integrity_verified,
+        "reason": (
+            "dataset_candidate_universe_ready"
+            if candidate_count > 0 and integrity_verified
+            else "dataset_integrity_unverified"
+            if candidate_count > 0
+            else "candidate_universe_missing"
+        ),
+        "dataset_integrity": integrity,
         "missing_prefix_days": 0,
     }
 
@@ -383,11 +422,15 @@ def _run_evidence(*, base: Path, runs_root: Path, run_dir: Path) -> dict[str, An
     candidates = dedupe_snapshots(accepted + rejected)
     for row in candidates + decisions:
         row.setdefault("run_id", run_dir.name)
+    marks = read_replay_rows(mark_paths, schema_version=MARK_PATH_SCHEMA_VERSION, base=base)
+    outcomes = read_replay_rows(outcome_paths, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base)
+    for row in marks + outcomes:
+        row.setdefault("run_id", run_dir.name)
     return {
         "candidate_snapshots": candidates,
         "filter_decisions": decisions,
-        "mark_snapshots": read_replay_rows(mark_paths, schema_version=MARK_PATH_SCHEMA_VERSION, base=base),
-        "outcome_facts": read_replay_rows(outcome_paths, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base),
+        "mark_snapshots": bind_legacy_decision_evidence(candidates, marks),
+        "outcome_facts": bind_legacy_decision_evidence(candidates, outcomes),
     }
 
 
@@ -512,12 +555,15 @@ def _variant_payload(
     newly_rejected: list[dict[str, Any]] = []
     reason_counts: Counter[str] = Counter()
     safety_counts: Counter[str] = Counter()
+    safety_rejected_count = 0
     missing_field_counts: Counter[str] = Counter()
     history_mode_counts: Counter[str] = Counter()
     for row in candidate_universe:
         evaluation = _evaluate_candidate(row, variant=variant)
         reason_counts.update(evaluation["reasons"])
         safety_counts.update(evaluation["safety_reasons"])
+        if evaluation["safety_reasons"]:
+            safety_rejected_count += 1
         history_mode_counts.update([evaluation["iv_rv_history_mode"]])
         missing_field_counts.update(reason for reason in evaluation["reasons"] if reason.endswith("_missing"))
         candidate = dict(row)
@@ -573,7 +619,7 @@ def _variant_payload(
         "newly_accepted_count": len(newly_accepted),
         "newly_rejected_count": len(newly_rejected),
         "safety_violation_count": 0,
-        "safety_rejected_count": sum(safety_counts.values()),
+        "safety_rejected_count": safety_rejected_count,
         "status_counts": dict(sorted(status_counts.items())),
         "top_reasons": dict(reason_counts.most_common(20)),
         "safety_reasons": dict(safety_counts.most_common(20)),
@@ -603,7 +649,7 @@ def _closed_lifecycle_metrics(
 ) -> dict[str, Any]:
     outcomes_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for outcome in outcomes:
-        key = instrument_key(outcome)
+        key = decision_instance_key(outcome)
         if key:
             outcomes_by_key[key].append(outcome)
 
@@ -612,7 +658,7 @@ def _closed_lifecycle_metrics(
     blocker_counts: Counter[str] = Counter()
     missing_outcome_count = 0
     for candidate in accepted:
-        key = instrument_key(candidate)
+        key = decision_instance_key(candidate)
         matched = outcomes_by_key.get(key) or []
         if not matched:
             missing_outcome_count += 1
@@ -795,6 +841,8 @@ def _evaluate_candidate(row: dict[str, Any], *, variant: ParameterVariant) -> di
             "iv_rv_history_mode": "not_requested",
         }
     safety = _safety_reasons(row)
+    safety.extend(_preserved_production_gate_reasons(row, params=params))
+    safety = list(dict.fromkeys(safety))
     if safety:
         return {
             "status": "rejected",
@@ -875,7 +923,86 @@ def _safety_reasons(row: dict[str, Any]) -> list[str]:
     volume = first_float(row, "volume")
     if open_interest is not None and volume is not None and open_interest <= 0 and volume <= 0:
         reasons.append("liquidity_zero")
+    cash_required = first_float(row, "cash_required_cny", "assignment_notional_cny")
+    cash_available = first_float(
+        row,
+        "cash_free_cny",
+        "cash_free_total_cny",
+        "cash_free_usd",
+    )
+    if (
+        cash_required is not None
+        and cash_available is not None
+        and cash_required > cash_available
+    ):
+        reasons.append("cash_capacity_insufficient")
+    if _candidate_strategy_family(row) == "covered_call":
+        covered = first_float(
+            row,
+            "covered_contracts_available",
+            "covered_quantity",
+            "covered_share_quantity",
+            "shares_available_for_cover",
+        )
+        contracts = first_float(row, "contracts", "contract_count") or 1.0
+        if covered is None:
+            reasons.append("covered_call_coverage_context_missing")
+        elif (
+            first_float(row, "covered_contracts_available") is not None
+            and covered < contracts
+        ):
+            reasons.append("covered_call_capacity_insufficient")
+        elif (
+            first_float(row, "covered_contracts_available") is None
+            and covered < contracts * 100.0
+        ):
+            reasons.append("covered_call_capacity_insufficient")
+        if first_float(
+            row,
+            "cost_basis",
+            "underlying_cost_basis",
+            "avg_cost",
+            "average_cost",
+            "cost_basis_floor",
+        ) is None:
+            reasons.append("covered_call_cost_basis_context_missing")
     return reasons
+
+
+def _preserved_production_gate_reasons(
+    row: dict[str, Any],
+    *,
+    params: dict[str, float],
+) -> list[str]:
+    baseline_status = _status_group(row)
+    if baseline_status != "rejected":
+        return []
+    raw_status = normal_status(row.get("status"))
+    if raw_status == "ranked_below":
+        return ["production_rank_truncation_not_replayed"]
+    rule = text(row.get("filter_rule") or row.get("rule")).lower()
+    if not rule:
+        return ["original_rejection_gate_unmodeled"]
+    tunable_keys: set[str] = set()
+    if (
+        "iv_rv_ratio" in rule
+        or "iv-rv-ratio" in rule
+        or "vol_edge_ratio" in rule
+    ):
+        tunable_keys.update({"min_iv_rv_ratio", "min_iv_rv_percentile"})
+    if (
+        "iv_minus_rv" in rule
+        or "iv-rv-spread" in rule
+        or "vol_edge_spread" in rule
+    ):
+        tunable_keys.add("min_iv_minus_rv")
+    if "dte" in rule or "expiration" in rule:
+        tunable_keys.update({"min_dte", "max_dte"})
+    if "annualized" in rule or "return" in rule:
+        tunable_keys.add("min_annualized_return")
+    if tunable_keys and tunable_keys.intersection(params):
+        return []
+    return [f"preserved_production_gate:{rule}"]
 
 
 def _event_risk_reason(row: dict[str, Any]) -> str | None:
@@ -990,7 +1117,7 @@ def _filter_candidates(
     out: list[dict[str, Any]] = []
     for row in rows:
         account = text(row.get("account")).lower()
-        if accounts and account and account not in accounts:
+        if accounts and account not in accounts:
             continue
         if market and not _market_matches(row, market):
             continue
@@ -1007,16 +1134,20 @@ def _filter_replay_observations(
 ) -> list[dict[str, Any]]:
     if not accounts and not market:
         return list(rows)
-    scoped_keys = {instrument_key(row) for row in scoped_candidates if instrument_key(row)}
+    scoped_keys = {
+        decision_instance_key(row)
+        for row in scoped_candidates
+        if decision_instance_key(row)
+    }
     if not scoped_keys:
         return []
     out: list[dict[str, Any]] = []
     for row in rows:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         if not key or key not in scoped_keys:
             continue
         account = text(row.get("account")).lower()
-        if accounts and account and account not in accounts:
+        if accounts and account not in accounts:
             continue
         if market and not _market_matches(row, market):
             continue
@@ -1027,7 +1158,7 @@ def _filter_replay_observations(
 def _market_matches(row: dict[str, Any], market: str) -> bool:
     symbol = text(row.get("symbol") or row.get("underlying_symbol")).upper()
     if not symbol:
-        return True
+        return False
     if market == "hk":
         return symbol.endswith(".HK")
     if market == "us":
@@ -1313,12 +1444,30 @@ def _production_recommendation_gate(
         }
     baseline_ready = bool((baseline.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
     lifecycle_ready = set(lifecycle_gate.get("ready_variants") or [])
-    ready_variants = [
-        str(row.get("name") or "")
-        for row in variants
-        if str(row.get("name") or "") in lifecycle_ready
-        and bool((row.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
-    ]
+    variant_eligibility: dict[str, dict[str, Any]] = {}
+    ready_variants: list[str] = []
+    for row in variants:
+        name = str(row.get("name") or "")
+        blockers: list[str] = []
+        if name not in lifecycle_ready:
+            blockers.append("complete_closed_lifecycle_gate_failed")
+        if not bool(row.get("production_closed_replay_eligible")):
+            blockers.append(
+                str(
+                    row.get("production_closed_replay_reason")
+                    or "single_production_parameter_required"
+                )
+            )
+        if not bool((row.get("analysis_summary") or {}).get("manual_strategy_review_ready")):
+            blockers.append("variant_outcome_review_not_ready")
+        allowed = not blockers
+        variant_eligibility[name] = {
+            "allowed": allowed,
+            "blockers": blockers,
+            "strategy_family": row.get("strategy_family"),
+        }
+        if allowed:
+            ready_variants.append(name)
     if not baseline_ready:
         return {
             "allowed": False,
@@ -1327,6 +1476,7 @@ def _production_recommendation_gate(
             "next_action": "collect_complete_baseline_mark_and_lifecycle_outcomes",
             "baseline_review_ready": False,
             "ready_variants": ready_variants,
+            "variant_eligibility": variant_eligibility,
             "runtime_config_write_allowed": False,
         }
     if not ready_variants:
@@ -1337,32 +1487,7 @@ def _production_recommendation_gate(
             "next_action": "collect_complete_variant_mark_and_lifecycle_outcomes",
             "baseline_review_ready": True,
             "ready_variants": [],
-            "runtime_config_write_allowed": False,
-        }
-    baseline_ready = bool((baseline.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
-    ready_variants = [
-        str(row.get("name") or "")
-        for row in variants
-        if bool((row.get("analysis_summary") or {}).get("manual_strategy_review_ready"))
-    ]
-    if not baseline_ready:
-        return {
-            "allowed": False,
-            "status": "blocked",
-            "reason": "baseline_outcome_review_not_ready",
-            "next_action": "collect_complete_baseline_mark_and_lifecycle_outcomes",
-            "baseline_review_ready": False,
-            "ready_variants": ready_variants,
-            "runtime_config_write_allowed": False,
-        }
-    if not ready_variants:
-        return {
-            "allowed": False,
-            "status": "blocked",
-            "reason": "variant_outcome_review_not_ready",
-            "next_action": "collect_complete_variant_mark_and_lifecycle_outcomes",
-            "baseline_review_ready": True,
-            "ready_variants": [],
+            "variant_eligibility": variant_eligibility,
             "runtime_config_write_allowed": False,
         }
     return {
@@ -1372,6 +1497,7 @@ def _production_recommendation_gate(
         "next_action": "compare_variant_outcomes_then_run_live_shadow",
         "baseline_review_ready": True,
         "ready_variants": ready_variants,
+        "variant_eligibility": variant_eligibility,
         "runtime_config_write_allowed": False,
     }
 

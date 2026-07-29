@@ -115,6 +115,9 @@ def _dataset(tmp_path: Path, episodes: list[dict[str, object]]) -> Path:
     ):
         (dataset / name).write_text("", encoding="utf-8")
     _write_jsonl(dataset / "close_decision_episodes.jsonl", episodes)
+    from src.application.shadow_replay.common import refresh_dataset_manifest
+
+    refresh_dataset_manifest(dataset)
     return dataset
 
 

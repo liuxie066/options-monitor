@@ -147,24 +147,29 @@ def rank_underwriting_candidates(
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 
+    return sorted(enriched, key=lambda item: underwriting_rank_key(item, mode=mode_norm))
+
+
+def underwriting_rank_key(row: dict[str, Any], *, mode: str) -> tuple[Any, ...]:
+    """Canonical typed underwriting sort tuple used by ranking provenance."""
+
+    mode_norm = _mode(mode)
     margin_key = "net_assignment_discount_pct" if mode_norm == "put" else "strike_upside_margin_pct"
-    return sorted(
-        enriched,
-        key=lambda item: (
-            _annualized_return(item, mode=mode_norm) is None,
-            -_sort_number(_annualized_return(item, mode=mode_norm)),
-            -_sort_number(
-                item.get(margin_key)
-                if _float(item.get(margin_key)) is not None
-                else (_net_assignment_discount(item) if mode_norm == "put" else None)
-            ),
-            -_concentration_tie_break(item),
-            _sort_number(item.get("spread_ratio")),
-            -_sort_number(item.get("open_interest")),
-            -_sort_number(_first_present(item, "net_income_cny", "net_income")),
-            str(item.get("symbol") or "").strip().upper(),
-            str(item.get("contract_symbol") or item.get("option_symbol") or ""),
+    annualized_return = _annualized_return(row, mode=mode_norm)
+    return (
+        annualized_return is None,
+        -_sort_number(annualized_return),
+        -_sort_number(
+            row.get(margin_key)
+            if _float(row.get(margin_key)) is not None
+            else (_net_assignment_discount(row) if mode_norm == "put" else None)
         ),
+        -_concentration_tie_break(row),
+        _sort_number(row.get("spread_ratio")),
+        -_sort_number(row.get("open_interest")),
+        -_sort_number(_first_present(row, "net_income_cny", "net_income")),
+        str(row.get("symbol") or "").strip().upper(),
+        str(row.get("contract_symbol") or row.get("option_symbol") or ""),
     )
 
 

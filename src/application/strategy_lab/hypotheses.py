@@ -174,9 +174,11 @@ def _domain_hypothesis(
         blockers.append("decision_sample_below_min_sample")
     if len(candidates) < min_sample:
         blockers.append("candidate_sample_below_min_sample")
-    baseline = _empirical_baseline(candidates)
+    baseline, baseline_generation, baseline_blockers = _authoritative_baseline(candidates)
+    blockers.extend(baseline_blockers)
     if not baseline:
-        blockers.append("parameter_field_evidence_missing")
+        if "parameter_snapshot_missing" not in blockers:
+            blockers.append("parameter_snapshot_missing")
     variants = _variants_for_family(family=family, baseline=baseline) if baseline and not blockers else []
     status = "ready" if variants else "not_ready"
     if blockers and variants:
@@ -190,6 +192,8 @@ def _domain_hypothesis(
         "accepted_candidate_count": sum(1 for row in candidates if normal_status(row.get("status")) in ACCEPTED_STATUSES),
         "filter_pressure": filter_pressure,
         "baseline_parameters": baseline or None,
+        "baseline_parameter_snapshot_sha256": baseline_generation,
+        "baseline_source": "frozen_decision_parameter_snapshot" if baseline else None,
         "variants": [variant.to_payload() for variant in variants],
         "blockers": blockers,
         "limitations": limitations,
@@ -204,28 +208,35 @@ def _candidate_profile(row: dict[str, Any]) -> str:
     return raw
 
 
-def _empirical_baseline(candidates: list[dict[str, Any]]) -> dict[str, float]:
-    accepted = [row for row in candidates if normal_status(row.get("status")) in ACCEPTED_STATUSES]
-    source = accepted or candidates
-    params: dict[str, float] = {}
-    values = {
-        "min_iv_rv_ratio": [value for row in source if (value := first_float(row, "iv_rv_ratio")) is not None],
-        "min_iv_minus_rv": [value for row in source if (value := first_float(row, "iv_minus_rv")) is not None],
-        "min_dte": [value for row in source if (value := first_float(row, "dte")) is not None],
-        "max_dte": [value for row in source if (value := first_float(row, "dte")) is not None],
-        "min_annualized_return": [
-            value for row in source if (value := first_float(row, "annualized_return")) is not None
-        ],
-    }
-    for key, field_values in values.items():
-        if not field_values:
+def _authoritative_baseline(
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, float], str | None, list[str]]:
+    snapshots: dict[str, dict[str, float]] = {}
+    missing = 0
+    for row in candidates:
+        raw = row.get("parameter_snapshot")
+        if not isinstance(raw, dict):
+            missing += 1
             continue
-        value = max(field_values) if key.startswith("max_") else min(field_values)
-        params[key] = round(float(value), 6)
-    if params.get("min_dte") is not None and params.get("max_dte") is not None:
-        if params["min_dte"] > params["max_dte"]:
-            params["min_dte"], params["max_dte"] = params["max_dte"], params["min_dte"]
-    return params
+        snapshot = {
+            key: float(value)
+            for key in UNDERWRITING_PARAMETERS
+            if (value := first_float(raw, key)) is not None
+        }
+        digest = text(row.get("parameter_snapshot_sha256"))
+        if not snapshot or not digest:
+            missing += 1
+            continue
+        snapshots[digest] = snapshot
+    blockers: list[str] = []
+    if missing:
+        blockers.append("parameter_snapshot_missing")
+    if len(snapshots) > 1:
+        blockers.append("mixed_parameter_snapshot_generations")
+    if blockers or len(snapshots) != 1:
+        return {}, None, blockers
+    digest, snapshot = next(iter(snapshots.items()))
+    return snapshot, digest, []
 
 
 def _variants_for_family(*, family: str, baseline: dict[str, float]) -> list[ParameterVariant]:

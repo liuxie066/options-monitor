@@ -251,11 +251,19 @@ def _execute_plan_row(
             "reason": "action_exception",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    operation = _operation_payload(payload)
+    operation_summary = operation.get("summary") or {}
+    operation_failed = (
+        text(operation_summary.get("status")).lower()
+        in {"error", "failed", "partial_failed"}
+        or int(operation_summary.get("error_count") or 0) > 0
+        or int(operation_summary.get("opend_fetch_error_count") or 0) > 0
+    )
     return {
         **base,
-        "result_status": "ok",
-        "reason": "executed",
-        "operation": _operation_payload(payload),
+        "result_status": "error" if operation_failed else "ok",
+        "reason": "operation_reported_failure" if operation_failed else "executed",
+        "operation": operation,
     }
 
 
@@ -263,6 +271,8 @@ def _action_base(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "dataset_id": row.get("dataset_id"),
         "dataset_dir": row.get("dataset_dir"),
+        "facet": row.get("facet"),
+        "facets": list(row.get("facets") or []),
         "status": row.get("status"),
         "data_plan_reason": row.get("reason"),
         "action": row.get("action"),
@@ -310,13 +320,21 @@ def _summary(
 ) -> dict[str, Any]:
     rows = plan_rows if isinstance(plan_rows, list) else []
     counts = Counter(text(row.get("result_status")) for row in action_results)
+    error_count = counts.get("error", 0)
     return {
+        "status": (
+            "failed"
+            if error_count and counts.get("ok", 0) == 0
+            else "partial_failed"
+            if error_count
+            else "success"
+        ),
         "plan_action_count": len(rows),
         "write": bool(write),
         "planned_count": counts.get("planned", 0),
         "executed_count": counts.get("ok", 0),
         "skipped_count": counts.get("skipped", 0),
-        "error_count": counts.get("error", 0),
+        "error_count": error_count,
         "receipt_written": receipt_path is not None,
         "receipt_path": str(receipt_path) if receipt_path is not None else None,
     }

@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.shadow_replay.candidate_analysis import analyze_rows
 from src.application.shadow_replay.common import (
+    decision_instance_key,
     normal_status,
     resolve_output_path,
     safety_payload,
@@ -13,7 +14,7 @@ from src.application.shadow_replay.common import (
     utc_now,
     write_json,
 )
-from src.application.shadow_replay.settlement import is_usable_mark
+from src.application.shadow_replay.settlement import is_complete_closed_outcome, is_usable_mark
 from src.application.strategy_lab.decisions import build_decision_instances, summarize_decision_instances
 from src.application.strategy_lab.evidence import load_strategy_lab_evidence
 
@@ -60,6 +61,7 @@ def analyze_strategy_lab_readiness(
         outcome_facts=list(evidence["outcome_facts"]),
         min_sample=sample_floor,
         decision_summary=decision_summary,
+        coverage=evidence.get("coverage") or {},
     )
     result = {
         "schema_version": READINESS_SCHEMA_VERSION,
@@ -99,16 +101,46 @@ def _readiness_payload(
     outcome_facts: list[dict[str, Any]],
     min_sample: int,
     decision_summary: dict[str, Any],
+    coverage: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_count = len(candidate_snapshots)
     decision_count = len(decisions)
     status_counts = Counter(normal_status(row.get("status")) for row in candidate_snapshots)
     rejected_count = sum(status_counts.get(status, 0) for status in ("rejected", "post_filtered", "ranked_below"))
     usable_mark_count = sum(1 for row in mark_snapshots if is_usable_mark(row))
-    outcome_count = len(outcome_facts)
-    data_mode = _data_mode(mark_snapshots, outcome_facts)
+    candidate_keys = {
+        decision_instance_key(row)
+        for row in candidate_snapshots
+        if decision_instance_key(row)
+    }
+    matched_marks = [
+        row
+        for row in mark_snapshots
+        if decision_instance_key(row) in candidate_keys
+    ]
+    matched_outcomes = [
+        row
+        for row in outcome_facts
+        if decision_instance_key(row) in candidate_keys
+    ]
+    usable_mark_count = sum(1 for row in matched_marks if is_usable_mark(row))
+    complete_closed_outcome_count = sum(
+        1 for row in matched_outcomes if is_complete_closed_outcome(row)
+    )
+    outcome_count = len(matched_outcomes)
+    data_mode = _data_mode(
+        matched_marks,
+        matched_outcomes,
+        complete_closed_outcome_count=complete_closed_outcome_count,
+        min_sample=min_sample,
+    )
     blockers: list[str] = []
     limitations: list[str] = []
+    if coverage and not bool(coverage.get("strict_backtest_allowed")):
+        coverage_reason = text(coverage.get("reason"))
+        blockers.append("evidence_coverage_unverified")
+        if coverage_reason:
+            limitations.append(coverage_reason)
     if candidate_count <= 0:
         blockers.append("candidate_universe_missing")
     if decision_count <= 0:
@@ -121,6 +153,12 @@ def _readiness_payload(
         limitations.append("mark_path_and_outcome_missing")
     elif data_mode == "path_only":
         limitations.append("outcome_fact_missing")
+    if len(mark_snapshots) > len(matched_marks):
+        limitations.append("unmatched_mark_evidence_excluded")
+    if len(outcome_facts) > len(matched_outcomes):
+        limitations.append("unmatched_outcome_evidence_excluded")
+    if matched_outcomes and complete_closed_outcome_count < min_sample:
+        limitations.append("complete_closed_outcome_sample_below_minimum")
     blocker_counts = decision_summary.get("blocker_counts") if isinstance(decision_summary, dict) else {}
     for blocker in blocker_counts or {}:
         blocker_text = text(blocker)
@@ -150,6 +188,9 @@ def _readiness_payload(
             "rejected_count": rejected_count,
             "usable_mark_path_snapshot_count": usable_mark_count,
             "outcome_fact_count": outcome_count,
+            "complete_closed_outcome_count": complete_closed_outcome_count,
+            "unmatched_mark_count": len(mark_snapshots) - len(matched_marks),
+            "unmatched_outcome_count": len(outcome_facts) - len(matched_outcomes),
             "ready_for_experiment": status in {"ready_for_experiment", "ready_for_proposal"},
             "ready_for_proposal": status == "ready_for_proposal",
         },
@@ -187,8 +228,14 @@ def _domain_readiness(decisions: list[dict[str, Any]], *, min_sample: int) -> di
     return out
 
 
-def _data_mode(marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> str:
-    if outcomes and any(is_usable_mark(row) for row in marks):
+def _data_mode(
+    marks: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    *,
+    complete_closed_outcome_count: int,
+    min_sample: int,
+) -> str:
+    if complete_closed_outcome_count >= min_sample and any(is_usable_mark(row) for row in marks):
         return "closed_replay"
     if any(is_usable_mark(row) for row in marks):
         return "path_only"
@@ -203,7 +250,12 @@ def _status(
     data_mode: str,
     has_supported_domain: bool,
 ) -> str:
-    fatal = {"candidate_universe_missing", "decision_instance_missing"}
+    fatal = {
+        "candidate_universe_missing",
+        "decision_instance_missing",
+        "dataset_integrity_unverified",
+        "evidence_coverage_unverified",
+    }
     if any(blocker in fatal for blocker in blockers):
         return "not_ready"
     if candidate_count < min_sample or not has_supported_domain:

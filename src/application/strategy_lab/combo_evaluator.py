@@ -8,15 +8,16 @@ from typing import Any
 
 from src.application.shadow_replay.common import (
     abs_first_float,
+    decision_instance_key,
     first_float,
-    instrument_key,
+    group_occurrence_key,
     normal_status,
     safety_payload,
     text,
     utc_now,
 )
 from src.application.strategy_lab.decisions import strategy_family
-from src.application.shadow_replay.settlement import mark_time
+from src.application.shadow_replay.settlement import is_complete_closed_outcome, mark_time
 
 
 COMBO_GROUP_EXPERIMENT_SCHEMA_VERSION = "strategy_lab_combo_yield_group_experiment.v1"
@@ -86,9 +87,9 @@ def _combo_groups(
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     missing: list[dict[str, Any]] = []
     for row in rows:
-        group_id = text(row.get("strategy_group_id"))
-        if group_id:
-            grouped[group_id].append(row)
+        occurrence_id = group_occurrence_key(row)
+        if occurrence_id:
+            grouped[occurrence_id].append(row)
         else:
             missing.append(row)
 
@@ -106,7 +107,7 @@ def _combo_groups(
     for idx, row in enumerate(missing, start=1):
         groups.append(
             _group_payload(
-                group_id=f"missing-group-{idx}:{instrument_key(row) or idx}",
+                group_id=f"missing-group-{idx}:{decision_instance_key(row) or idx}",
                 strategy_group_id=None,
                 legs=[row],
                 extra_blockers=["combo_yield_group_identity_missing"],
@@ -147,12 +148,27 @@ def _group_payload(
     )
     return {
         "group_id": group_id,
-        "strategy_group_id": group_id if strategy_group_id is None and not extra_blockers else strategy_group_id,
+        "strategy_group_id": (
+            strategy_group_id
+            or next(
+                (
+                    text(row.get("strategy_group_id"))
+                    for row in legs
+                    if text(row.get("strategy_group_id"))
+                ),
+                None,
+            )
+        ),
+        "group_occurrence_id": group_id if not extra_blockers else None,
         "decision_status": status,
         "structure_mode": structure_mode,
         "leg_count": len(legs),
         "leg_roles": sorted(roles),
-        "candidate_ids": [instrument_key(row) for row in legs if instrument_key(row)],
+        "candidate_ids": [
+            decision_instance_key(row)
+            for row in legs
+            if decision_instance_key(row)
+        ],
         "metrics": metrics,
         "outcome_evaluation": outcome_evaluation,
         "missing_metrics": missing_metrics,
@@ -164,7 +180,7 @@ def _group_payload(
 def _rows_by_instrument(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         if key:
             out[key].append(row)
     return out
@@ -194,7 +210,11 @@ def _leg_blockers(legs: list[dict[str, Any]]) -> list[str]:
             blockers.append("combo_yield_participation_call_option_type_invalid")
         if text(call_leg.get("side") or call_leg.get("position_side")).lower() != "long":
             blockers.append("combo_yield_participation_call_side_invalid")
-    contracts = [instrument_key(row) for row in legs if instrument_key(row)]
+    contracts = [
+        decision_instance_key(row)
+        for row in legs
+        if decision_instance_key(row)
+    ]
     if len(set(contracts)) != len(contracts):
         blockers.append("combo_yield_contract_duplicate")
     return blockers
@@ -397,7 +417,7 @@ def _group_outcome_evaluation(
     realized_pnls: list[float] = []
     outcome_labels: list[str] = []
     for leg in legs:
-        key = instrument_key(leg)
+        key = decision_instance_key(leg)
         outcomes = outcomes_by_key.get(key) or []
         if not outcomes:
             blockers.append(f"combo_yield_outcome_missing:{key or 'unknown'}")
@@ -406,7 +426,14 @@ def _group_outcome_evaluation(
             blockers.append(f"combo_yield_outcome_duplicate:{key or 'unknown'}")
             continue
         outcome = outcomes[0]
-        pnl = first_float(outcome, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl")
+        if not is_complete_closed_outcome(outcome):
+            blockers.append(f"combo_yield_complete_closed_outcome_missing:{key or 'unknown'}")
+            continue
+        occurrence_id = group_occurrence_key(leg)
+        if text(outcome.get("group_occurrence_id")) != occurrence_id:
+            blockers.append(f"combo_yield_outcome_group_occurrence_mismatch:{key or 'unknown'}")
+            continue
+        pnl = first_float(outcome, "lifecycle_pnl_net")
         if pnl is None:
             blockers.append(f"combo_yield_outcome_pnl_missing:{key or 'unknown'}")
             continue
@@ -454,7 +481,7 @@ def _synchronized_group_mark_path(
     blockers: list[str] = []
     per_leg: list[dict[str, float]] = []
     for leg in legs:
-        key = instrument_key(leg)
+        key = decision_instance_key(leg)
         by_time: dict[str, float] = {}
         for mark in marks_by_key.get(key) or []:
             timestamp = mark_time(mark)

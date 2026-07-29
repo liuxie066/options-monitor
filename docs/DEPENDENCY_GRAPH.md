@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 866 (`src`: 471, `domain`: 73, `scripts`: 8, `tests`: 314)
-- Internal import edges: 5083 total, 2282 production/script edges excluding tests
+- Python files scanned: 872 (`src`: 476, `domain`: 73, `scripts`: 8, `tests`: 315)
+- Internal import edges: 5184 total, 2325 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|380| domain
+  application -->|385| domain
   application -->|3| domain_services
   application -->|133| infrastructure
   application -->|43| storage
@@ -44,11 +44,11 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1965| application
-  tests -->|452| domain
+  tests -->|2019| application
+  tests -->|454| domain
   tests -->|2| domain_services
   tests -->|129| infrastructure
-  tests -->|195| interfaces
+  tests -->|197| interfaces
   tests -->|13| scripts
   tests -->|16| storage
 ```
@@ -57,7 +57,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 380 |
+| application | domain | 385 |
 | application | infrastructure | 133 |
 | interfaces | application | 133 |
 | application | storage | 43 |
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1965 |
-| tests | domain | 452 |
-| tests | interfaces | 195 |
+| tests | application | 2019 |
+| tests | domain | 454 |
+| tests | interfaces | 197 |
 | tests | infrastructure | 129 |
 | tests | storage | 16 |
 | tests | scripts | 13 |
@@ -89,7 +89,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 228 |
+| src.application | domain.domain | 232 |
 | src.interfaces | src.application | 111 |
 | src.application | src.infrastructure | 100 |
 | src.application.ledger | domain.domain | 37 |
@@ -97,7 +97,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | domain.domain.ledger | 30 |
 | src.application | src.application.ledger | 23 |
 | src.application.positions | src.application | 23 |
-| src.application | domain.domain.engine | 21 |
+| src.application | domain.domain.engine | 22 |
 | src.application.multi_tick | src.application | 17 |
 | src.application.trades | domain.domain | 17 |
 | src.application | src.application.settings | 16 |
@@ -136,6 +136,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
 | src.application | domain.services | 2 |
+| src.application | src.application.research | 2 |
 | src.application.trades | src.application.positions | 2 |
 | domain.domain.engine | domain.domain | 2 |
 | domain.services | domain.storage | 2 |
@@ -146,7 +147,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.research | src.application.ledger | 1 |
 | src.application.research | src.application.settings | 1 |
 | src.application.setup | src.application.settings | 1 |
-| src.application | src.application.research | 1 |
 | src.application | src.application.setup | 1 |
 | src.interfaces | src.application.inbound | 1 |
 
@@ -177,19 +177,19 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 94 |
 | domain.domain.symbol_identity | 61 |
-| src.application.agent_tool_config | 56 |
+| src.application.agent_tool_config | 57 |
 | src.infrastructure.io_utils | 56 |
 | src.application.ledger.api | 40 |
 | domain.domain.ledger.position_fields | 40 |
 | domain.domain.option_position_identity | 39 |
 | src.application.account_config | 33 |
+| src.application.shadow_replay.common | 25 |
+| domain.domain.engine | 24 |
 | src.application.settings | 24 |
 | domain.domain.trade_contract_identity | 24 |
-| domain.domain.engine | 23 |
 | src.application.agent_tools.runtime_helpers | 23 |
 | domain.domain.decision_state_fingerprint | 20 |
 | src.application.runtime_cli_format | 20 |
-| src.application.shadow_replay.common | 20 |
 
 ### Highest Fan-Out Production Modules
 

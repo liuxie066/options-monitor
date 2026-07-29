@@ -4,7 +4,20 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.common import resolve_output_path, safety_payload, text, utc_now, write_json
+from src.application.research.redaction import redact_value
+from src.application.shadow_replay.common import (
+    resolve_output_path,
+    safety_payload,
+    text,
+    utc_now,
+    validate_artifact_provenance,
+    write_json,
+)
+from src.application.strategy_lab.experiment import EXPERIMENT_SCHEMA_VERSION
+from src.application.strategy_lab.proposal import (
+    PROPOSAL_SCHEMA_VERSION,
+    build_strategy_lab_proposal,
+)
 
 
 LLM_CONTEXT_SCHEMA_VERSION = "strategy_lab_llm_context.v1"
@@ -44,11 +57,75 @@ def build_strategy_lab_llm_context(
         names=("proposal.json", "strategy_lab_proposal.json"),
         label="strategy lab proposal",
     )
+    experiment_validation = (
+        validate_artifact_provenance(
+            experiment_payload,
+            artifact_kind="strategy_lab_experiment",
+            schema_version=EXPERIMENT_SCHEMA_VERSION,
+        )
+        if experiment_payload is not None
+        else None
+    )
+    proposal_validation = (
+        validate_artifact_provenance(
+            proposal_payload,
+            artifact_kind="strategy_lab_proposal",
+            schema_version=PROPOSAL_SCHEMA_VERSION,
+        )
+        if proposal_payload is not None
+        else None
+    )
+    if experiment_validation is not None and isinstance(experiment, dict):
+        experiment_validation["errors"] = list(experiment_validation["errors"]) + [
+            "inline_experiment_is_display_only"
+        ]
+        experiment_validation["trusted"] = False
+    if proposal_validation is not None and isinstance(proposal, dict):
+        proposal_validation["errors"] = list(proposal_validation["errors"]) + [
+            "inline_proposal_is_display_only"
+        ]
+        proposal_validation["trusted"] = False
+    linkage_errors: list[str] = []
+    if experiment_validation and proposal_payload:
+        linked = (proposal_payload.get("source_artifacts") or {}).get("experiment")
+        linked = linked if isinstance(linked, dict) else {}
+        if linked.get("artifact_id") != experiment_validation.get("artifact_id"):
+            linkage_errors.append("proposal_experiment_artifact_id_mismatch")
+        if linked.get("content_sha256") != experiment_validation.get("content_sha256"):
+            linkage_errors.append("proposal_experiment_content_sha256_mismatch")
+        if not isinstance(experiment, dict) and not isinstance(proposal, dict):
+            try:
+                recomputed_proposal = build_strategy_lab_proposal(
+                    experiment=experiment,
+                )
+            except Exception:
+                linkage_errors.append("proposal_recompute_failed")
+            else:
+                if _proposal_semantics(proposal_payload) != _proposal_semantics(
+                    recomputed_proposal
+                ):
+                    linkage_errors.append("proposal_recompute_mismatch")
+    elif proposal_validation is not None:
+        linkage_errors.append("experiment_required_for_trusted_proposal")
+    artifact_inputs = [
+        item
+        for item in (experiment_validation, proposal_validation)
+        if item is not None
+    ]
+    trusted = bool(artifact_inputs) and all(
+        bool(item.get("trusted")) for item in artifact_inputs
+    ) and not linkage_errors
 
     result: dict[str, Any] = {
         "schema_version": LLM_CONTEXT_SCHEMA_VERSION,
         "generated_at_utc": utc_now(),
         "role": "strategy_research_assistant",
+        "trust_mode": "trusted_research_artifacts" if trusted else "display_only_untrusted",
+        "artifact_validation": {
+            "experiment": experiment_validation,
+            "proposal": proposal_validation,
+            "linkage_errors": linkage_errors,
+        },
         "source": {
             "experiment": _source_ref(experiment),
             "proposal": _source_ref(proposal),
@@ -96,10 +173,26 @@ def build_strategy_lab_llm_context(
             "llm_can_apply_patch": False,
         },
     }
-    result = _redact(result)
+    result = redact_value(result)
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+def _proposal_semantics(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: payload.get(key)
+        for key in (
+            "status",
+            "strategy_family",
+            "recommended_variant",
+            "confidence",
+            "runtime_config_write_allowed",
+            "production_recommendation_allowed",
+            "dry_run_patch",
+            "source_artifacts",
+        )
+    }
 
 
 def _load_json_artifact(

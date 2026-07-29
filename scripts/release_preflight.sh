@@ -98,6 +98,13 @@ fi
 if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
   run_step "agent/plugin focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+  run_step "research domain focused tests" \
+    "${PYTHON_BIN}" -m pytest \
+      tests/test_research.py \
+      tests/test_research_archive.py \
+      tests/test_shadow_replay.py \
+      tests/test_shadow_replay_candidate_impact.py \
+      tests/test_strategy_lab.py
   run_step "configuration and control-plane focused tests" \
     "${PYTHON_BIN}" -m pytest \
       tests/test_config_yaml.py \

@@ -359,6 +359,86 @@ DATASET_ID=us-<run-id>
 ./om research shadow-replay analyze --dataset "$DATASET" --min-sample 30
 ```
 
+## Combo Yield 同期/跨期研究变体
+
+Combo 变体使用独立的 Shadow 数据集和 `shadow_combo_pair_id`，不会创建
+`strategy_group_id`、pair intent、ledger event、通知或生产候选。生产
+`rank_yield_enhancement_*` delegate 在这个流程中保持不变。
+
+先预览捕获范围和 OpenD 调用预算：
+
+```bash
+./om research shadow-replay capture-combo-variants \
+  --config-key us \
+  --account lx \
+  --symbols NVDA \
+  --variant-spec docs/examples/combo-yield-shadow-variants.json
+```
+
+确认预算和 expiration union 后，显式 `--write` 才会在本地 Shadow dataset root
+创建不可覆盖的数据集。捕获会把 production reference 与全部研究变体的 Put/Call
+期限取并集；任何 discovery、fetch、合约完整性、报价时间或 authored call cap
+问题均 fail closed。
+manifest 中的 `source_quote_observations` 明确采用
+`timestamp_basis=fetch_completed_at_utc`：它是 OpenD 拉取完成时间，用于控制同批
+数据的新鲜度和腿间时间偏差，不冒充交易所原生 quote timestamp。
+
+```bash
+./om research shadow-replay capture-combo-variants \
+  --config-key us \
+  --account lx \
+  --symbols NVDA \
+  --variant-spec docs/examples/combo-yield-shadow-variants.json \
+  --dataset-id combo-nvda-20260729 \
+  --write
+```
+
+用与该数据集绑定的 portfolio context 运行 canonical
+scan/event/cash/insurance-underwriting。默认仍是预览，只有 `--write` 才在数据集内
+生成带 source receipt 的 `combo_owned_underwritten_puts.csv`：
+
+```bash
+./om research shadow-replay prepare-combo-funding-puts \
+  --dataset output_shared/research/shadow_replay/datasets/combo-nvda-20260729 \
+  --portfolio-context <prepared-portfolio-context.json> \
+  --usd-per-cny <rate> \
+  --write
+```
+
+然后从该 dataset-owned Put artifact 生成决策 facet：
+
+```bash
+./om research shadow-replay evaluate-combo-variants \
+  --dataset output_shared/research/shadow_replay/datasets/combo-nvda-20260729 \
+  --write
+```
+
+评估会校验 Put source receipt、捕获文件 hash，并保留原始一基 Funding Put
+underwriting rank。`--underwritten-put-path` 仅用于显式指定同一个 dataset-owned
+canonical artifact；不接受外部或未绑定的 CSV。
+baseline 和 proposed 使用同一 pair universe，但调用不同的 rank authority；研究排序
+不读取 `premium_funding_score`。显式 `min_net_credit_retention` 和
+`max_call_cost_to_put_credit` 同时存在时必须分别通过。
+
+后续仍使用通用 mark/settle 命令：
+
+```bash
+./om research shadow-replay collect-marks \
+  --dataset output_shared/research/shadow_replay/datasets/combo-nvda-20260729 \
+  --source opend \
+  --write
+
+./om research shadow-replay settle \
+  --dataset output_shared/research/shadow_replay/datasets/combo-nvda-20260729 \
+  --write
+```
+
+Combo mark facet记录 Funding Put、Participation Call 和 underlying。到期结算只接受
+带 settlement authority 的到期 spot；历史缺失不插值。跨期结果分别报告 Put
+funding horizon、Call participation horizon、research-assigned stock continuation、
+完整组合、Put-only baseline、资本天数、路径回撤和非概率加权的提前指派压力包络。
+同期与跨期 scorecard 只比较各 selector 共同完整的 decision instances。
+
 重点看：
 
 - `summary.status`：只有 `needs_human_review` 才说明证据足够进入人工评审。

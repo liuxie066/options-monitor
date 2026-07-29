@@ -15,16 +15,19 @@ from src.application.shadow_replay.common import (
     OPTIONAL_CLOSE_DATASET_FILES,
     abs_first_float,
     dataset_dir_from_arg,
+    dataset_write_lock,
     first_float,
     instrument_key,
     read_csv_rows,
     read_jsonl,
+    refresh_dataset_manifest,
     resolve_output_path,
     resolve_path,
     safe_rel,
     safety_payload,
     text,
     utc_now,
+    validate_dataset_integrity,
     write_json,
     write_jsonl,
 )
@@ -49,14 +52,68 @@ def mark_shadow_replay_dataset(
     replace: bool = False,
     mark_time_basis: str | None = None,
     quote_collection_source: str | None = None,
+    allowed_required_data_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> dict[str, Any]:
     """Generate local mark path snapshots from required-data CSV quotes."""
 
+    dataset_dir = dataset_dir_from_arg(dataset)
+    if not write:
+        return _mark_shadow_replay_dataset_unlocked(
+            dataset=dataset,
+            required_data_root=required_data_root,
+            as_of=as_of,
+            repo_root=repo_root,
+            output=output,
+            write=False,
+            replace=replace,
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+            allowed_required_data_paths=allowed_required_data_paths,
+        )
+    with dataset_write_lock(dataset_dir):
+        validate_dataset_integrity(dataset_dir)
+        result = _mark_shadow_replay_dataset_unlocked(
+            dataset=dataset,
+            required_data_root=required_data_root,
+            as_of=as_of,
+            repo_root=repo_root,
+            output=output,
+            write=True,
+            replace=replace,
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+            allowed_required_data_paths=allowed_required_data_paths,
+        )
+        result["dataset_integrity"] = refresh_dataset_manifest(dataset_dir)["integrity"]
+        return result
+
+
+def _mark_shadow_replay_dataset_unlocked(
+    *,
+    dataset: str | Path,
+    required_data_root: str | Path,
+    as_of: str | None = None,
+    repo_root: str | Path | None = None,
+    output: str | Path | None = None,
+    write: bool = False,
+    replace: bool = False,
+    mark_time_basis: str | None = None,
+    quote_collection_source: str | None = None,
+    allowed_required_data_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+) -> dict[str, Any]:
     dataset_dir = dataset_dir_from_arg(dataset)
     base = Path(repo_root).expanduser().resolve() if repo_root is not None else dataset_dir
     required_root = resolve_path(required_data_root, base=base)
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
     existing_marks = [] if replace else read_jsonl(dataset_dir / "mark_path_snapshots.jsonl")
+    combo_decision_path = dataset_dir / "combo_pair_decisions.jsonl"
+    combo_facet_exists = combo_decision_path.is_file()
+    combo_decisions = read_jsonl(combo_decision_path) if combo_facet_exists else []
+    existing_combo_marks = (
+        []
+        if replace
+        else read_jsonl(dataset_dir / "combo_pair_mark_paths.jsonl")
+    )
     close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
     close_facet_exists = close_episode_path.is_file()
     close_episodes = read_jsonl(close_episode_path) if close_facet_exists else []
@@ -66,7 +123,20 @@ def mark_shadow_replay_dataset(
         else read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1])
     )
     aliases = _load_symbol_aliases(base)
-    quote_index = _load_required_data_quote_index(required_root, aliases=aliases, base=base)
+    allowed_paths = (
+        {
+            Path(path).expanduser().resolve()
+            for path in allowed_required_data_paths
+        }
+        if allowed_required_data_paths is not None
+        else None
+    )
+    quote_index = _load_required_data_quote_index(
+        required_root,
+        aliases=aliases,
+        base=base,
+        allowed_paths=allowed_paths,
+    )
     mark_at = text(as_of) or utc_now()
     resolved_mark_time_basis = text(mark_time_basis).lower() or (
         "operator_asserted_as_of" if text(as_of) else "collection_time"
@@ -75,7 +145,14 @@ def mark_shadow_replay_dataset(
         raise ValueError("mark_time_basis must be collection_time or operator_asserted_as_of")
     resolved_quote_source = text(quote_collection_source).lower() or "external_required_data"
     generated_all = [
-        _mark_snapshot_from_required_data(candidate, quote_index=quote_index, aliases=aliases, mark_at=mark_at)
+        _mark_snapshot_from_required_data(
+            candidate,
+            quote_index=quote_index,
+            aliases=aliases,
+            mark_at=mark_at,
+            mark_time_basis=resolved_mark_time_basis,
+            quote_collection_source=resolved_quote_source,
+        )
         for candidate in candidate_snapshots
     ]
     existing_identities = {_mark_identity(row) for row in existing_marks}
@@ -105,6 +182,29 @@ def mark_shadow_replay_dataset(
         if replace or _close_mark_identity(row) not in existing_close_identities
     ]
     merged_close = generated_close if replace else existing_close_marks + generated_close
+    generated_combo_all = [
+        mark
+        for decision in combo_decisions
+        if _combo_decision_is_selected(decision)
+        for mark in _combo_marks_from_required_data(
+            decision,
+            quote_index=quote_index,
+            aliases=aliases,
+            mark_at=mark_at,
+            mark_time_basis=resolved_mark_time_basis,
+            quote_collection_source=resolved_quote_source,
+        )
+    ]
+    existing_combo_identities = {
+        _combo_mark_identity(row)
+        for row in existing_combo_marks
+    }
+    generated_combo = [
+        row
+        for row in generated_combo_all
+        if replace or _combo_mark_identity(row) not in existing_combo_identities
+    ]
+    merged_combo = generated_combo if replace else existing_combo_marks + generated_combo
     usable_count = sum(1 for row in generated if is_usable_mark(row))
     missing_count = sum(1 for row in generated if str(row.get("quote_status") or "") == "missing_quote")
     result = {
@@ -131,18 +231,261 @@ def mark_shadow_replay_dataset(
                 1 for row in generated_close if is_usable_close_mark(row)
             ),
             "close_mark_outside_window_count": len(close_episodes) - len(generated_close_all),
+            "combo_pair_decision_count": len(combo_decisions),
+            "generated_combo_pair_mark_count": len(generated_combo),
+            "usable_combo_pair_mark_count": sum(
+                1
+                for row in generated_combo
+                if text(row.get("mark_quality")).lower() in {"usable", "settlement"}
+            ),
         },
         "generated_mark_snapshots": generated,
         "generated_close_marks": generated_close,
+        "generated_combo_pair_marks": generated_combo,
         "safety": safety_payload(writes_local_dataset=bool(write)),
     }
     if write:
         write_jsonl(dataset_dir / "mark_path_snapshots.jsonl", merged)
         if close_facet_exists:
             write_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1], merged_close)
+        if combo_facet_exists:
+            write_jsonl(dataset_dir / "combo_pair_mark_paths.jsonl", merged_combo)
+            from src.application.shadow_replay.combo_variants import (
+                refresh_combo_pair_facet_manifest,
+            )
+
+            refresh_combo_pair_facet_manifest(dataset_dir)
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+def _combo_decision_is_selected(decision: dict[str, Any]) -> bool:
+    return bool(decision.get("baseline_selected")) or any(
+        bool(item.get("selected"))
+        for item in decision.get("variant_decisions") or []
+        if isinstance(item, dict)
+    )
+
+
+def _combo_marks_from_required_data(
+    decision: dict[str, Any],
+    *,
+    quote_index: dict[str, Any],
+    aliases: Mapping[str, Any] | None,
+    mark_at: str,
+    mark_time_basis: str,
+    quote_collection_source: str,
+) -> list[dict[str, Any]]:
+    marked_at = _strict_utc_datetime(mark_at, label="Combo mark as_of")
+    entry_at = _strict_utc_datetime(
+        text(decision.get("entry_observed_at_utc")),
+        label="Combo entry observed_at_utc",
+    )
+    if marked_at <= entry_at:
+        return []
+    put_expiration = text(decision.get("put_expiration"))[:10]
+    call_expiration = text(decision.get("call_expiration"))[:10]
+    marked_date = marked_at.date().isoformat()
+    if marked_date == call_expiration and call_expiration != put_expiration:
+        horizon = "call_expiry"
+    elif marked_date == put_expiration:
+        horizon = "put_expiry"
+    else:
+        horizon = "intermediate"
+    identities = (
+        (
+            "funding_put",
+            {
+                "symbol": decision.get("symbol"),
+                "contract_symbol": decision.get("put_contract_symbol"),
+                "option_type": "put",
+                "expiration": decision.get("put_expiration"),
+                "strike": decision.get("put_strike"),
+            },
+        ),
+        (
+            "participation_call",
+            {
+                "symbol": decision.get("symbol"),
+                "contract_symbol": decision.get("call_contract_symbol"),
+                "option_type": "call",
+                "expiration": decision.get("call_expiration"),
+                "strike": decision.get("call_strike"),
+            },
+        ),
+    )
+    marks: list[dict[str, Any]] = []
+    matched_quotes: list[dict[str, Any]] = []
+    for role, identity in identities:
+        quote, matched_by = _match_required_data_quote(
+            identity,
+            quote_index=quote_index,
+            aliases=aliases,
+        )
+        base = _combo_mark_base(
+            decision,
+            role=role,
+            horizon=horizon,
+            marked_at=marked_at,
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+        )
+        if not quote:
+            marks.append(
+                {
+                    **base,
+                    "point_in_time_status": "missing_quote",
+                    "quote_status": "missing_quote",
+                    "mark_quality": "missing_quote",
+                    "matched_by": None,
+                    "settlement_authority": False,
+                }
+            )
+            continue
+        matched_quotes.append(quote)
+        mid, flags = _quote_mid(quote)
+        bid = first_float(quote, "bid")
+        ask = first_float(quote, "ask")
+        close_price = ask if role == "funding_put" else bid
+        close_fee = _combo_close_fee(
+            decision,
+            role=role,
+            price=close_price,
+        )
+        marks.append(
+            {
+                **base,
+                "quote_status": "matched",
+                "mark_quality": "usable" if mid is not None else "missing_mid",
+                "matched_by": matched_by,
+                "required_data_source_path": quote.get("_source_path"),
+                "required_data_source_row_number": quote.get("_source_row_number"),
+                "bid": bid,
+                "ask": ask,
+                "option_mid": mid,
+                "spot": first_float(quote, "spot", "underlying_price"),
+                "currency": text(quote.get("currency")) or decision.get("currency"),
+                "multiplier": first_float(quote, "multiplier"),
+                "quote_flags": flags,
+                "future_close_fee": close_fee,
+                "future_close_fee_status": (
+                    "estimated" if close_fee is not None else "unavailable"
+                ),
+                "settlement_authority": False,
+            }
+        )
+    spots = [
+        first_float(quote, "spot", "underlying_price")
+        for quote in matched_quotes
+        if first_float(quote, "spot", "underlying_price") is not None
+    ]
+    spot_consistent = bool(spots) and max(spots) == min(spots)
+    settlement_authority = bool(
+        horizon in {"put_expiry", "call_expiry"}
+        and spot_consistent
+        and quote_collection_source == "opend"
+        and mark_time_basis == "collection_time"
+    )
+    marks.append(
+        {
+            **_combo_mark_base(
+                decision,
+                role="underlying",
+                horizon=horizon,
+                marked_at=marked_at,
+                mark_time_basis=mark_time_basis,
+                quote_collection_source=quote_collection_source,
+            ),
+            "point_in_time_status": (
+                _point_in_time_status(
+                    mark_time_basis=mark_time_basis,
+                    quote_collection_source=quote_collection_source,
+                )
+                if spot_consistent
+                else "missing_quote"
+            ),
+            "quote_status": "matched" if spot_consistent else "missing_quote",
+            "mark_quality": "settlement" if settlement_authority else "usable" if spot_consistent else "missing_quote",
+            "spot": spots[0] if spot_consistent else None,
+            "settlement_authority": settlement_authority,
+            "spot_consistency_status": "exact" if spot_consistent else "unavailable",
+        }
+    )
+    return marks
+
+
+def _combo_mark_base(
+    decision: dict[str, Any],
+    *,
+    role: str,
+    horizon: str,
+    marked_at: datetime,
+    mark_time_basis: str,
+    quote_collection_source: str,
+) -> dict[str, Any]:
+    contract = (
+        decision.get("put_contract_symbol")
+        if role == "funding_put"
+        else decision.get("call_contract_symbol")
+        if role == "participation_call"
+        else None
+    )
+    return {
+        "schema_version": "shadow_combo_pair_mark.v1",
+        "shadow_combo_pair_id": decision.get("shadow_combo_pair_id"),
+        "dataset_id": decision.get("dataset_id"),
+        "account": decision.get("account"),
+        "symbol": decision.get("symbol"),
+        "leg_role": role,
+        "contract_symbol": contract,
+        "horizon": horizon,
+        "marked_at_utc": marked_at.isoformat().replace("+00:00", "Z"),
+        "mark_time_basis": mark_time_basis,
+        "quote_collection_source": quote_collection_source,
+        "point_in_time_status": _point_in_time_status(
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+        ),
+        "writes_runtime_config": False,
+        "writes_trade_state": False,
+    }
+
+
+def _combo_mark_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        (
+            text(row.get("shadow_combo_pair_id")),
+            text(row.get("leg_role")),
+            text(row.get("marked_at_utc")),
+        )
+    )
+
+
+def _combo_close_fee(
+    decision: dict[str, Any],
+    *,
+    role: str,
+    price: float | None,
+) -> float | None:
+    multiplier = first_float(decision, "multiplier")
+    currency = text(decision.get("currency"))
+    if price is None or price < 0 or multiplier is None or multiplier <= 0 or not currency:
+        return None
+    if price == 0:
+        return 0.0
+    try:
+        return float(
+            calc_futu_option_fee(
+                currency,
+                price,
+                contracts=1,
+                multiplier=int(multiplier),
+                is_sell=role == "participation_call",
+            )
+        )
+    except ValueError:
+        return None
 
 
 _CLOSE_HORIZON_WINDOWS = (
@@ -215,6 +558,7 @@ def _close_mark_snapshot_from_required_data(
         return {
             **base,
             **replacement_payload,
+            "point_in_time_status": "missing_quote",
             "quote_status": "missing_quote",
             "mark_quality": "missing_quote",
             "matched_by": None,
@@ -429,19 +773,32 @@ def _load_symbol_aliases(base: Path) -> Mapping[str, Any] | None:
         return None
 
 
-def _load_required_data_quote_index(required_data_root: Path, *, aliases: Mapping[str, Any] | None, base: Path) -> dict[str, Any]:
+def _load_required_data_quote_index(
+    required_data_root: Path,
+    *,
+    aliases: Mapping[str, Any] | None,
+    base: Path,
+    allowed_paths: set[Path] | None = None,
+) -> dict[str, Any]:
     parsed = required_data_root / "parsed"
     source_dir = parsed if parsed.exists() and parsed.is_dir() else required_data_root
     by_contract: dict[str, dict[str, Any]] = {}
     by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     quote_count = 0
     for path in sorted(source_dir.glob("*_required_data.csv")):
+        if allowed_paths is not None and path.resolve() not in allowed_paths:
+            continue
         symbol_from_name = path.name.removesuffix("_required_data.csv").upper()
+        source_mtime = datetime.fromtimestamp(
+            path.stat().st_mtime,
+            tz=timezone.utc,
+        ).isoformat().replace("+00:00", "Z")
         for row_number, row in enumerate(read_csv_rows(path), start=1):
             quote_count += 1
             item = dict(row)
             item["_source_path"] = safe_rel(path, base=base)
             item["_source_row_number"] = row_number
+            item["_source_mtime_utc"] = source_mtime
             contract = text(item.get("contract_symbol") or item.get("option_symbol")).upper()
             if contract:
                 by_contract.setdefault(contract, item)
@@ -477,12 +834,17 @@ def _mark_snapshot_from_required_data(
     quote_index: dict[str, Any],
     aliases: Mapping[str, Any] | None,
     mark_at: str,
+    mark_time_basis: str,
+    quote_collection_source: str,
 ) -> dict[str, Any]:
     quote, matched_by = _match_required_data_quote(candidate, quote_index=quote_index, aliases=aliases)
     base = {
         "schema_version": MARK_PATH_SCHEMA_VERSION,
         "source_kind": "required_data_csv",
         "mark_at": mark_at,
+        "decision_instance_id": candidate.get("decision_instance_id"),
+        "group_occurrence_id": candidate.get("group_occurrence_id"),
+        "run_id": candidate.get("run_id"),
         "candidate_status": candidate.get("status"),
         "account": candidate.get("account"),
         "symbol": candidate.get("symbol"),
@@ -491,12 +853,19 @@ def _mark_snapshot_from_required_data(
         "expiration": candidate.get("expiration"),
         "strike": candidate.get("strike"),
         "instrument_key": instrument_key(candidate),
+        "mark_time_basis": mark_time_basis,
+        "quote_collection_source": quote_collection_source,
+        "point_in_time_status": _point_in_time_status(
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+        ),
         "writes_runtime_config": False,
         "writes_trade_state": False,
     }
     if not quote:
         return {
             **base,
+            "point_in_time_status": "missing_quote",
             "quote_status": "missing_quote",
             "mark_quality": "missing_quote",
             "matched_by": None,
@@ -509,6 +878,11 @@ def _mark_snapshot_from_required_data(
         "matched_by": matched_by,
         "required_data_source_path": quote.get("_source_path"),
         "required_data_source_row_number": quote.get("_source_row_number"),
+        "quote_observed_at_utc": _quote_observed_at(quote),
+        "point_in_time_status": _point_in_time_status(
+            mark_time_basis=mark_time_basis,
+            quote_collection_source=quote_collection_source,
+        ),
         "bid": first_float(quote, "bid"),
         "ask": first_float(quote, "ask"),
         "mid": first_float(quote, "mid"),
@@ -526,12 +900,29 @@ def _mark_snapshot_from_required_data(
         "currency": text(quote.get("currency")) or None,
         "quote_flags": mid_flags,
     }
+    verified_fresh = payload["point_in_time_status"] == "verified_fresh_collection"
     expiration_intrinsic = expiration_intrinsic_value(candidate, payload)
-    can_settle_expiration = is_expiration_mark(candidate, payload) and expiration_intrinsic is not None
-    payload["mark_quality"] = "usable" if mid is not None else ("expiration_spot" if can_settle_expiration else "missing_mid")
+    can_settle_expiration = (
+        verified_fresh
+        and is_expiration_mark(candidate, payload)
+        and expiration_intrinsic is not None
+    )
+    payload["mark_quality"] = (
+        "usable"
+        if mid is not None and verified_fresh
+        else (
+            "unverified_point_in_time"
+            if mid is not None
+            else ("expiration_spot" if can_settle_expiration else "missing_mid")
+        )
+    )
     if can_settle_expiration:
         payload["expiration_intrinsic_value"] = expiration_intrinsic
-    pnl, model, quality, outcome = derive_outcome_result(candidate, payload)
+    pnl, model, quality, outcome = (
+        derive_outcome_result(candidate, payload)
+        if verified_fresh
+        else (None, "unavailable", "mark_point_in_time_unverified", "inconclusive")
+    )
     if pnl is not None:
         payload["counterfactual_pnl"] = pnl
         payload["pnl_model"] = model
@@ -541,6 +932,22 @@ def _mark_snapshot_from_required_data(
         payload["pnl_model"] = model
         payload["pnl_quality"] = quality
     return payload
+
+
+def _quote_observed_at(quote: dict[str, Any]) -> str | None:
+    for key in (
+        "quote_observed_at_utc",
+        "quote_as_of_utc",
+        "quote_timestamp_utc",
+        "quote_timestamp",
+        "as_of_utc",
+        "generated_at_utc",
+        "_source_mtime_utc",
+    ):
+        value = text(quote.get(key))
+        if value:
+            return value
+    return None
 
 
 def _match_required_data_quote(

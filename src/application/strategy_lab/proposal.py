@@ -4,8 +4,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.shadow_replay.common import resolve_output_path, safety_payload, text, utc_now, write_json
+from src.application.shadow_replay.common import (
+    attach_artifact_provenance,
+    dataset_dir_from_arg,
+    resolve_output_path,
+    safety_payload,
+    text,
+    utc_now,
+    validate_artifact_provenance,
+    validate_dataset_integrity,
+    write_json,
+    write_text_artifact,
+)
 from src.application.shadow_replay.parameter_sets import EXPERIMENT_ONLY_PARAMETERS
+from src.application.strategy_lab.experiment import (
+    EXPERIMENT_SCHEMA_VERSION,
+    run_strategy_lab_experiment,
+)
 
 
 PROPOSAL_SCHEMA_VERSION = "strategy_lab_proposal.v1"
@@ -18,7 +33,23 @@ def build_strategy_lab_proposal(
     markdown_output: str | Path | None = None,
 ) -> dict[str, Any]:
     experiment_payload = _load_experiment(experiment)
-    best, best_source = _best_variant(experiment_payload)
+    experiment_validation = validate_artifact_provenance(
+        experiment_payload,
+        artifact_kind="strategy_lab_experiment",
+        schema_version=EXPERIMENT_SCHEMA_VERSION,
+    )
+    source_errors = _experiment_source_errors(
+        experiment,
+        validation=experiment_validation,
+    )
+    if source_errors:
+        experiment_validation["errors"] = list(experiment_validation["errors"]) + source_errors
+        experiment_validation["trusted"] = False
+    best, best_source = (
+        _best_variant(experiment_payload)
+        if experiment_validation["trusted"]
+        else (None, "untrusted_experiment")
+    )
     evaluation = experiment_payload.get("evaluation") or {}
     variant_payload = _evaluated_variant_for_best(
         evaluation=evaluation,
@@ -30,17 +61,35 @@ def build_strategy_lab_proposal(
         best_source=best_source,
         variant=variant_payload,
     )
+    if patch_allowed:
+        semantic_errors = _experiment_semantic_errors(
+            experiment_payload,
+            validation=experiment_validation,
+        )
+        if semantic_errors:
+            experiment_validation["errors"] = (
+                list(experiment_validation["errors"]) + semantic_errors
+            )
+            experiment_validation["trusted"] = False
+            best = None
+            best_source = "untrusted_experiment"
+            variant_payload = None
+            patch_allowed = False
     dry_run_patch = (
         _dry_run_patch(experiment_payload=experiment_payload, best=best or {}, variant=variant_payload)
         if patch_allowed
         else {}
     )
-    status = _proposal_status(
+    status = (
+        _proposal_status(
         experiment_payload=experiment_payload,
         best=best,
         best_source=best_source,
         dry_run_patch=dry_run_patch,
         patch_allowed=patch_allowed,
+        )
+        if experiment_validation["trusted"]
+        else "display_only_untrusted"
     )
     limitations = _limitations(
         experiment_payload=experiment_payload,
@@ -63,6 +112,15 @@ def build_strategy_lab_proposal(
         "runtime_config_write_allowed": False,
         "production_recommendation_allowed": False,
         "dry_run_patch": dry_run_patch,
+        "artifact_validation": {
+            "experiment": experiment_validation,
+        },
+        "source_artifacts": {
+            "experiment": {
+                "artifact_id": experiment_validation.get("artifact_id"),
+                "content_sha256": experiment_validation.get("content_sha256"),
+            }
+        },
         "evidence_summary": _evidence_summary(
             experiment_payload=experiment_payload,
             best_source=best_source,
@@ -83,12 +141,16 @@ def build_strategy_lab_proposal(
         },
     }
     result["proposal_markdown"] = _render_markdown(result)
+    attach_artifact_provenance(
+        result,
+        artifact_kind="strategy_lab_proposal",
+        source_generation=experiment_validation.get("source_generation") or {},
+    )
     if output:
         write_json(resolve_output_path(output), result)
     if markdown_output:
         path = resolve_output_path(markdown_output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(result["proposal_markdown"], encoding="utf-8")
+        write_text_artifact(path, result["proposal_markdown"])
     return result
 
 
@@ -121,6 +183,100 @@ def _load_experiment(experiment: str | Path | dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("strategy lab experiment must be a JSON object")
     return payload
+
+
+def _experiment_source_errors(
+    experiment: str | Path | dict[str, Any],
+    *,
+    validation: dict[str, Any],
+) -> list[str]:
+    if isinstance(experiment, dict):
+        return ["inline_experiment_is_display_only"]
+    source_generation = validation.get("source_generation")
+    source_generation = (
+        source_generation if isinstance(source_generation, dict) else {}
+    )
+    dataset_value = source_generation.get("dataset_dir")
+    if not dataset_value:
+        return ["source_dataset_missing"]
+    try:
+        current = validate_dataset_integrity(dataset_dir_from_arg(dataset_value))
+    except ValueError:
+        return ["source_dataset_integrity_invalid"]
+    if current.get("generation_id") != source_generation.get("generation_id"):
+        return ["source_dataset_generation_mismatch"]
+    if current.get("revision") != source_generation.get("revision"):
+        return ["source_dataset_revision_mismatch"]
+    return []
+
+
+def _experiment_semantic_errors(
+    payload: dict[str, Any],
+    *,
+    validation: dict[str, Any],
+) -> list[str]:
+    source_generation = validation.get("source_generation")
+    source_generation = (
+        source_generation if isinstance(source_generation, dict) else {}
+    )
+    dataset_value = text(source_generation.get("dataset_dir"))
+    repo_root_value = text(source_generation.get("repo_root"))
+    if not dataset_value:
+        return ["source_dataset_missing_for_gate_recompute"]
+    if not repo_root_value:
+        return ["source_repo_root_missing_for_gate_recompute"]
+    summary = payload.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    try:
+        min_sample = max(1, int(summary.get("min_sample") or 30))
+    except (TypeError, ValueError):
+        return ["experiment_min_sample_invalid"]
+    try:
+        recomputed = run_strategy_lab_experiment(
+            repo_root=repo_root_value,
+            dataset=dataset_value,
+            min_sample=min_sample,
+            auto=bool(summary.get("auto_generated_hypotheses", True)),
+        )
+    except Exception:
+        return ["experiment_gate_recompute_failed"]
+    if _promotion_semantics(payload) != _promotion_semantics(recomputed):
+        return ["experiment_gate_recompute_mismatch"]
+    return []
+
+
+def _promotion_semantics(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    return _stable_semantics(
+        {
+            "summary": {
+                key: summary.get(key)
+                for key in (
+                    "status",
+                    "min_sample",
+                    "readiness_status",
+                    "hypothesis_status",
+                    "candidate_impact_allowed",
+                )
+            },
+            "hypotheses": payload.get("hypotheses"),
+            "evaluation": payload.get("evaluation"),
+            "scorecard": payload.get("scorecard"),
+        }
+    )
+
+
+def _stable_semantics(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_semantics(item)
+            for key, item in sorted(value.items())
+            if key not in {"artifact_provenance", "generated_at_utc"}
+        }
+    if isinstance(value, list):
+        return [_stable_semantics(item) for item in value]
+    return value
 
 
 def _proposal_status(
@@ -190,7 +346,19 @@ def _dry_run_patch_allowed(
     if text(evaluation.get("data_mode")) != "closed_replay":
         return False
     production_gate = (evaluation.get("gates") or {}).get("production_recommendation") or {}
-    return bool(production_gate.get("allowed"))
+    variant_name = text((variant or {}).get("name") or best.get("variant"))
+    if not bool(production_gate.get("allowed")):
+        return False
+    if variant_name not in set(production_gate.get("ready_variants") or []):
+        return False
+    receipt = (production_gate.get("variant_eligibility") or {}).get(variant_name)
+    if not isinstance(receipt, dict) or not bool(receipt.get("allowed")):
+        return False
+    if text(receipt.get("strategy_family")) != family:
+        return False
+    if text((variant or {}).get("strategy_family")) != family:
+        return False
+    return bool((variant or {}).get("production_closed_replay_eligible"))
 
 
 def _has_experiment_only_parameters(variant: dict[str, Any] | None) -> bool:

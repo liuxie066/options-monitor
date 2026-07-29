@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import sqrt
-from typing import Any
+from typing import Any, Iterable
 
 
 @dataclass(frozen=True)
@@ -476,6 +476,282 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
 
 def rank_yield_enhancement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted([dict(row) for row in rows], key=yield_enhancement_rank_key)
+
+
+@dataclass(frozen=True)
+class ComboYieldResearchPolicy:
+    """Immutable Shadow-only policy for proposed Combo Yield selection."""
+
+    variant_id: str
+    structure_mode: str
+    min_net_credit_retention: float
+    min_abs_call_delta: float
+    target_abs_call_delta: float
+    max_abs_call_delta: float
+    max_call_cost_to_put_credit: float | None = None
+    min_expiry_gap_days: int | None = None
+    target_expiry_gap_days: int | None = None
+    max_expiry_gap_days: int | None = None
+
+    def __post_init__(self) -> None:
+        variant_id = str(self.variant_id or "").strip()
+        if not variant_id:
+            raise ValueError("variant_id is required")
+        mode = str(self.structure_mode or "").strip().lower()
+        if mode not in {"same_expiry_pair", "staggered_expiry_pair"}:
+            raise ValueError(f"unsupported Combo Yield research structure_mode: {mode or '<empty>'}")
+        retention = float(self.min_net_credit_retention)
+        if not 0.0 <= retention <= 1.0:
+            raise ValueError("min_net_credit_retention must be between 0 and 1")
+        delta_values = (
+            float(self.min_abs_call_delta),
+            float(self.target_abs_call_delta),
+            float(self.max_abs_call_delta),
+        )
+        if not 0.0 <= delta_values[0] <= delta_values[1] <= delta_values[2] <= 1.0:
+            raise ValueError("Call Delta bounds must satisfy 0 <= min <= target <= max <= 1")
+        if self.max_call_cost_to_put_credit is not None:
+            max_cost = float(self.max_call_cost_to_put_credit)
+            if not 0.0 <= max_cost <= 1.0:
+                raise ValueError("max_call_cost_to_put_credit must be between 0 and 1")
+        gaps = (
+            self.min_expiry_gap_days,
+            self.target_expiry_gap_days,
+            self.max_expiry_gap_days,
+        )
+        if mode == "same_expiry_pair":
+            if any(value is not None for value in gaps):
+                raise ValueError("same_expiry_pair must not author expiry-gap targets")
+        else:
+            if any(value is None for value in gaps):
+                raise ValueError("staggered_expiry_pair requires min/target/max expiry-gap days")
+            normalized = tuple(int(value) for value in gaps if value is not None)
+            if not 1 <= normalized[0] <= normalized[1] <= normalized[2]:
+                raise ValueError("expiry-gap bounds must satisfy 1 <= min <= target <= max")
+
+
+def combo_yield_proposed_gate_reasons(
+    row: dict[str, Any],
+    policy: ComboYieldResearchPolicy,
+) -> tuple[str, ...]:
+    """Return deterministic Shadow gate failures without mutating production rows."""
+
+    reasons: list[str] = []
+    mode = str(row.get("structure_mode") or "").strip().lower()
+    if mode != policy.structure_mode:
+        reasons.append("structure_mode")
+    if (
+        mode == "same_expiry_pair"
+        and row.get("same_expiry_min_net_credit_annualized_pass") is False
+    ):
+        reasons.append("min_net_credit_annualized")
+
+    put_credit = _safe_float(row.get("put_net_credit"))
+    call_cost = _safe_float(row.get("call_total_cost"))
+    combo_credit = _safe_float(row.get("combo_net_credit"))
+    retention = _safe_float(row.get("net_credit_retention"))
+    cost_ratio = _safe_float(row.get("call_cost_to_put_credit"))
+    call_delta = _safe_float(row.get("call_delta"))
+    multiplier = _safe_float(row.get("multiplier"))
+    put_bid = _safe_float(row.get("put_bid"))
+    call_ask = _safe_float(row.get("call_ask"))
+    put_iv = _safe_float(row.get("put_implied_volatility"))
+    call_iv = _safe_float(row.get("call_implied_volatility"))
+    put_strike = _safe_float(row.get("put_strike"))
+    call_strike = _safe_float(row.get("call_strike"))
+    spot = _safe_float(row.get("spot"))
+    if put_credit is None or put_credit <= 0:
+        reasons.append("put_net_credit")
+    if call_cost is None or call_cost <= 0:
+        reasons.append("call_total_cost")
+    if combo_credit is None or combo_credit < 0:
+        reasons.append("combo_net_credit")
+    if multiplier is None or multiplier <= 0:
+        reasons.append("multiplier")
+    if put_bid is None or put_bid <= 0:
+        reasons.append("put_bid")
+    if call_ask is None or call_ask <= 0:
+        reasons.append("call_ask")
+    if put_iv is None or put_iv <= 0:
+        reasons.append("put_implied_volatility")
+    if call_iv is None or call_iv <= 0:
+        reasons.append("call_implied_volatility")
+    if not str(row.get("currency") or "").strip():
+        reasons.append("currency")
+    if put_strike is None or call_strike is None or put_strike >= call_strike:
+        reasons.append("strike_relation")
+    if retention is None or retention < float(policy.min_net_credit_retention):
+        reasons.append("min_net_credit_retention")
+    if policy.max_call_cost_to_put_credit is not None and (
+        cost_ratio is None or cost_ratio > float(policy.max_call_cost_to_put_credit)
+    ):
+        reasons.append("max_call_cost_to_put_credit")
+    if call_delta is None:
+        reasons.append("call_delta")
+    else:
+        absolute_delta = abs(call_delta)
+        if absolute_delta < float(policy.min_abs_call_delta):
+            reasons.append("min_abs_call_delta")
+        if absolute_delta > float(policy.max_abs_call_delta):
+            reasons.append("max_abs_call_delta")
+
+    funding_rank = _positive_int(row.get("funding_put_rank"))
+    if funding_rank is None:
+        reasons.append("funding_put_rank")
+    for field in ("put_contract_symbol", "call_contract_symbol"):
+        if not str(row.get(field) or "").strip():
+            reasons.append(field)
+    for field in (
+        "put_spread_ratio",
+        "put_open_interest",
+        "call_spread_ratio",
+        "call_open_interest",
+    ):
+        if _safe_float(row.get(field)) is None:
+            reasons.append(field)
+
+    gap = _expiry_gap_days(row)
+    if policy.structure_mode == "same_expiry_pair":
+        if gap is None or gap != 0:
+            reasons.append("same_expiry")
+        if spot is None or call_strike is None or call_strike < spot:
+            reasons.append("call_strike_below_spot")
+    else:
+        if gap is None:
+            reasons.append("expiry_gap_days")
+        else:
+            assert policy.min_expiry_gap_days is not None
+            assert policy.max_expiry_gap_days is not None
+            if gap < int(policy.min_expiry_gap_days):
+                reasons.append("min_expiry_gap_days")
+            if gap > int(policy.max_expiry_gap_days):
+                reasons.append("max_expiry_gap_days")
+    return tuple(dict.fromkeys(reasons))
+
+
+def combo_yield_proposed_rank_key(
+    row: dict[str, Any],
+    policy: ComboYieldResearchPolicy,
+) -> tuple[Any, ...]:
+    """Rank a gate-passing proposed row; Funding Put quality is dominant."""
+
+    funding_rank = _positive_int(row.get("funding_put_rank"))
+    if funding_rank is None:
+        funding_rank = 2**31 - 1
+    call_delta = abs(_safe_float(row.get("call_delta")) or 0.0)
+    call_spread = _safe_float(row.get("call_spread_ratio"))
+    call_oi = _safe_float(row.get("call_open_interest"))
+    key: list[Any] = [funding_rank]
+    if policy.structure_mode == "staggered_expiry_pair":
+        gap = _expiry_gap_days(row)
+        assert policy.target_expiry_gap_days is not None
+        key.append(abs((gap if gap is not None else 2**31 - 1) - int(policy.target_expiry_gap_days)))
+    key.extend(
+        [
+            abs(call_delta - float(policy.target_abs_call_delta)),
+            float(call_spread if call_spread is not None else 999.0),
+            -float(call_oi if call_oi is not None else 0.0),
+            str(row.get("put_contract_symbol") or ""),
+            str(row.get("call_contract_symbol") or ""),
+        ]
+    )
+    return tuple(key)
+
+
+def rank_combo_yield_proposed_rows(
+    rows: Iterable[dict[str, Any]],
+    policy: ComboYieldResearchPolicy,
+) -> list[dict[str, Any]]:
+    """Return accepted proposed rows with explicit variant diagnostics."""
+
+    accepted: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        reasons = combo_yield_proposed_gate_reasons(row, policy)
+        if reasons:
+            continue
+        row["policy_variant_id"] = policy.variant_id
+        row["proposed_rank_key"] = _typed_rank_key(combo_yield_proposed_rank_key(row, policy))
+        accepted.append(row)
+    return sorted(accepted, key=lambda row: combo_yield_proposed_rank_key(row, policy))
+
+
+def rank_combo_yield_proposed_calls_for_put(
+    rows: Iterable[dict[str, Any]],
+    policy: ComboYieldResearchPolicy,
+) -> list[dict[str, Any]]:
+    accepted = rank_combo_yield_proposed_rows(rows, policy)
+    put_symbols = {str(row.get("put_contract_symbol") or "") for row in accepted}
+    if len(put_symbols) > 1:
+        raise ValueError("proposed Call ranking requires exactly one Funding Put")
+    return sorted(
+        accepted,
+        key=lambda row: combo_yield_proposed_rank_key(row, policy)[1:],
+    )
+
+
+def select_best_combo_yield_proposed_pairs(
+    rows: Iterable[dict[str, Any]],
+    policy: ComboYieldResearchPolicy,
+) -> list[dict[str, Any]]:
+    accepted = rank_combo_yield_proposed_rows(rows, policy)
+    by_put: dict[str, list[dict[str, Any]]] = {}
+    for row in accepted:
+        by_put.setdefault(str(row.get("put_contract_symbol") or ""), []).append(row)
+    per_put = [
+        rank_combo_yield_proposed_calls_for_put(group, policy)[0]
+        for _put, group in sorted(by_put.items())
+        if group
+    ]
+    selected: list[dict[str, Any]] = []
+    seen_symbols: set[str] = set()
+    for row in sorted(per_put, key=lambda item: combo_yield_proposed_rank_key(item, policy)):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        selected.append(row)
+    return selected
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _expiry_gap_days(row: dict[str, Any]) -> int | None:
+    direct = _safe_float(row.get("expiry_gap_days"))
+    if direct is not None:
+        return int(direct)
+    try:
+        from datetime import date
+
+        put_expiry = date.fromisoformat(str(row.get("put_expiration") or "")[:10])
+        call_expiry = date.fromisoformat(str(row.get("call_expiration") or "")[:10])
+    except (TypeError, ValueError):
+        return None
+    return (call_expiry - put_expiry).days
+
+
+def _typed_rank_key(values: tuple[Any, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": (
+                "bool"
+                if isinstance(value, bool)
+                else "int"
+                if isinstance(value, int)
+                else "float"
+                if isinstance(value, float)
+                else "str"
+            ),
+            "value": value,
+        }
+        for value in values
+    ]
 
 
 def select_best_yield_enhancement_per_symbol(

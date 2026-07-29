@@ -4,6 +4,9 @@ import hashlib
 import json
 import math
 import re
+import os
+import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,8 @@ from src.application.shadow_replay.common import (
     RANK_SNAPSHOT_SCHEMA_VERSION,
     abs_first_float,
     account_hint,
+    bind_legacy_decision_evidence,
+    dataset_integrity_payload,
     dataset_output_dir,
     default_dataset_id,
     first_float,
@@ -51,6 +56,7 @@ from src.application.shadow_replay.common import (
     text,
     unique,
     utc_now,
+    with_decision_identity,
     write_json,
     write_jsonl,
 )
@@ -179,10 +185,14 @@ def build_shadow_replay_dataset(
     candidate_rows = accepted_candidate_snapshots(resolved_candidates, base=base)
     filter_decisions = filter_decision_rows(resolved_traces, resolved_reject_logs, base=base)
     rejected_rows = candidate_snapshots_from_filter_decisions(filter_decisions)
-    candidate_snapshots = dedupe_snapshots(candidate_rows + rejected_rows)
+    candidate_snapshots = dedupe_snapshots(
+        _attach_parameter_snapshots(candidate_rows + rejected_rows, filter_decisions)
+    )
     rank_snapshots = rank_snapshots_for_candidates(candidate_snapshots)
     mark_snapshots = read_replay_rows(resolved_marks, schema_version=MARK_PATH_SCHEMA_VERSION, base=base)
     outcome_facts = read_replay_rows(resolved_outcomes, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base)
+    mark_snapshots = bind_legacy_decision_evidence(candidate_snapshots, mark_snapshots)
+    outcome_facts = bind_legacy_decision_evidence(candidate_snapshots, outcome_facts)
 
     ds_id = str(dataset_id or "").strip() or default_dataset_id()
     dataset_root_path = resolve_optional(dataset_root, base=base)
@@ -191,17 +201,6 @@ def build_shadow_replay_dataset(
         if output_dir is None and dataset_root_path is not None
         else dataset_output_dir(output_dir, dataset_id=ds_id, base=base)
     )
-    target.mkdir(parents=True, exist_ok=True)
-    write_jsonl(target / "candidate_snapshots.jsonl", candidate_snapshots)
-    write_jsonl(target / "filter_decisions.jsonl", filter_decisions)
-    write_jsonl(target / "rank_snapshots.jsonl", rank_snapshots)
-    write_jsonl(target / "mark_path_snapshots.jsonl", mark_snapshots)
-    write_jsonl(target / "outcome_facts.jsonl", outcome_facts)
-    if close_facet_requested:
-        write_jsonl(target / OPTIONAL_CLOSE_DATASET_FILES[0], close_decision_episodes)
-        write_jsonl(target / OPTIONAL_CLOSE_DATASET_FILES[1], [])
-        write_jsonl(target / OPTIONAL_CLOSE_DATASET_FILES[2], [])
-
     analysis_seed = analyze_rows(
         candidate_snapshots=candidate_snapshots,
         filter_decisions=filter_decisions,
@@ -253,7 +252,31 @@ def build_shadow_replay_dataset(
             "outcome_schema_version": CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
             "episode_count": len(close_decision_episodes),
         }
-    write_json(target / "manifest.json", manifest)
+    if target.exists():
+        raise ValueError(f"Shadow Replay dataset target already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target.name}.staging-",
+        dir=str(target.parent),
+    ) as raw_staging:
+        staging = Path(raw_staging)
+        write_jsonl(staging / "candidate_snapshots.jsonl", candidate_snapshots)
+        write_jsonl(staging / "filter_decisions.jsonl", filter_decisions)
+        write_jsonl(staging / "rank_snapshots.jsonl", rank_snapshots)
+        write_jsonl(staging / "mark_path_snapshots.jsonl", mark_snapshots)
+        write_jsonl(staging / "outcome_facts.jsonl", outcome_facts)
+        if close_facet_requested:
+            write_jsonl(staging / OPTIONAL_CLOSE_DATASET_FILES[0], close_decision_episodes)
+            write_jsonl(staging / OPTIONAL_CLOSE_DATASET_FILES[1], [])
+            write_jsonl(staging / OPTIONAL_CLOSE_DATASET_FILES[2], [])
+        (staging / ".dataset.lock").touch()
+        manifest["integrity"] = dataset_integrity_payload(
+            staging,
+            generation_id=f"generation:{uuid.uuid4().hex}",
+            revision=1,
+        )
+        write_json(staging / "manifest.json", manifest)
+        os.replace(staging, target)
     return manifest
 
 
@@ -1209,7 +1232,8 @@ def snapshot_from_row(
     mode_norm = text(row.get("mode") or row.get("option_type") or mode).lower() or None
     family = _strategy_family_value(row, strategy)
     profile = _strategy_profile_value(row, strategy=strategy, family=family)
-    return {
+    parameter_snapshot = _parameter_snapshot(row)
+    payload = {
         "schema_version": schema_version,
         "source_kind": source_kind,
         "source_path": source_path,
@@ -1218,6 +1242,13 @@ def snapshot_from_row(
         "strategy": strategy,
         "strategy_family": family,
         "strategy_profile": profile,
+        "parameter_snapshot": parameter_snapshot or None,
+        "parameter_snapshot_sha256": (
+            _payload_digest(parameter_snapshot) if parameter_snapshot else None
+        ),
+        "parameter_snapshot_source": (
+            "decision_trace_config_values" if parameter_snapshot else None
+        ),
         "strategy_group_id": text(row.get("strategy_group_id") or row.get("group_id")) or None,
         "candidate_pair_id": text(row.get("candidate_pair_id")) or None,
         "structure_mode": text(row.get("structure_mode")).lower() or None,
@@ -1308,6 +1339,78 @@ def snapshot_from_row(
         "net_credit_retention": first_float(row, "net_credit_retention"),
         "call_cost_to_put_credit": first_float(row, "call_cost_to_put_credit"),
     }
+    return with_decision_identity(payload)
+
+
+def _parameter_snapshot(row: dict[str, Any]) -> dict[str, float]:
+    raw = row.get("parameter_snapshot")
+    sources = [raw if isinstance(raw, dict) else {}, row.get("config_values"), row]
+    aliases = {
+        "min_annualized_return": ("min_annualized_return", "min_annualized_net_return"),
+        "min_iv_rv_ratio": ("min_iv_rv_ratio",),
+        "min_iv_minus_rv": ("min_iv_minus_rv",),
+        "min_dte": ("min_dte",),
+        "max_dte": ("max_dte",),
+    }
+    out: dict[str, float] = {}
+    for canonical, keys in aliases.items():
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = first_float(source, *keys)
+            if value is not None:
+                out[canonical] = value
+                break
+    return out
+
+
+def _payload_digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _attach_parameter_snapshots(
+    candidates: list[dict[str, Any]],
+    filter_decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cohorts: dict[tuple[str, str, str, str], dict[str, dict[str, float]]] = {}
+    for decision in filter_decisions:
+        snapshot = _parameter_snapshot(decision)
+        if not snapshot:
+            continue
+        key = _parameter_cohort_key(decision)
+        cohorts.setdefault(key, {})[_payload_digest(snapshot)] = snapshot
+    out: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payload = dict(candidate)
+        if isinstance(payload.get("parameter_snapshot"), dict):
+            out.append(payload)
+            continue
+        options = cohorts.get(_parameter_cohort_key(payload), {})
+        if len(options) == 1:
+            digest, snapshot = next(iter(options.items()))
+            payload["parameter_snapshot"] = snapshot
+            payload["parameter_snapshot_sha256"] = digest
+            payload["parameter_snapshot_source"] = "run_cohort_decision_trace"
+        elif len(options) > 1:
+            payload["parameter_snapshot_source"] = "ambiguous_run_cohort"
+        out.append(payload)
+    return out
+
+
+def _parameter_cohort_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        text(row.get("run_id")),
+        text(row.get("account")).lower(),
+        text(row.get("strategy_family") or row.get("function")).lower(),
+        text(row.get("strategy_profile")).lower(),
+    )
 
 
 def _config_value(row: dict[str, Any], *keys: str) -> Any:
