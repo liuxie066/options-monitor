@@ -439,6 +439,179 @@ class InboundOperationStore:
     def mark_failed(self, operation_id: str, *, result: dict[str, Any]) -> None:
         self._set_status(operation_id, "failed", result_json=_json(result))
 
+    def mark_terminal_with_outbox(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        result: dict[str, Any],
+        outbox_id: str,
+        outbox_payload: dict[str, Any],
+    ) -> bool:
+        normalized_status = str(status or "").strip()
+        if normalized_status not in {"applied", "failed"}:
+            raise ValueError(f"unsupported terminal operation status: {normalized_status}")
+        self._ensure_schema()
+        now = utc_now_iso()
+        applied_at = now if normalized_status == "applied" else None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE inbound_pending_operations
+                SET status = ?,
+                    applied_at = COALESCE(?, applied_at),
+                    result_json = ?
+                WHERE operation_id = ?
+                  AND status IN ('confirmed', 'running')
+                """,
+                (
+                    normalized_status,
+                    applied_at,
+                    _json(result),
+                    str(operation_id),
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing = conn.execute(
+                    "SELECT status FROM inbound_pending_operations WHERE operation_id = ?",
+                    (str(operation_id),),
+                ).fetchone()
+                if existing is None or str(existing["status"] or "") != normalized_status:
+                    return False
+            conn.execute(
+                """
+                INSERT INTO inbound_operation_outbox (
+                    outbox_id,
+                    operation_id,
+                    kind,
+                    status,
+                    payload_json,
+                    attempts,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, 'upgrade_final_receipt', 'pending', ?, 0, ?, ?)
+                ON CONFLICT(outbox_id) DO NOTHING
+                """,
+                (
+                    str(outbox_id),
+                    str(operation_id),
+                    _json(outbox_payload),
+                    now,
+                    now,
+                ),
+            )
+            return True
+
+    def get_outbox(self, outbox_id: str) -> dict[str, Any] | None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbound_operation_outbox WHERE outbox_id = ? LIMIT 1",
+                (str(outbox_id),),
+            ).fetchone()
+        return _row_to_outbox(row)
+
+    def get_operation_outbox(self, operation_id: str, *, kind: str = "upgrade_final_receipt") -> dict[str, Any] | None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM inbound_operation_outbox
+                WHERE operation_id = ?
+                  AND kind = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(operation_id), str(kind)),
+            ).fetchone()
+        return _row_to_outbox(row)
+
+    def claim_outbox(
+        self,
+        outbox_id: str,
+        *,
+        now: datetime | None = None,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any] | None:
+        self._ensure_schema()
+        claim_time = now or datetime.now(timezone.utc)
+        if claim_time.tzinfo is None:
+            claim_time = claim_time.replace(tzinfo=timezone.utc)
+        now_iso = claim_time.isoformat()
+        lease_cutoff = (
+            claim_time - timedelta(seconds=max(1, int(lease_seconds)))
+        ).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE inbound_operation_outbox
+                SET status = 'sending',
+                    attempts = attempts + 1,
+                    updated_at = ?
+                WHERE outbox_id = ?
+                  AND (
+                    status IN ('pending', 'failed')
+                    OR (status = 'sending' AND updated_at <= ?)
+                  )
+                """,
+                (now_iso, str(outbox_id), lease_cutoff),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM inbound_operation_outbox WHERE outbox_id = ? LIMIT 1",
+                (str(outbox_id),),
+            ).fetchone()
+        return _row_to_outbox(row)
+
+    def complete_outbox(self, outbox_id: str, *, receipt: dict[str, Any]) -> dict[str, Any] | None:
+        self._ensure_schema()
+        now = utc_now_iso()
+        delivery_status = "sent" if bool(receipt.get("ok")) else "failed"
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbound_operation_outbox WHERE outbox_id = ? LIMIT 1",
+                (str(outbox_id),),
+            ).fetchone()
+            outbox = _row_to_outbox(row)
+            if outbox is None:
+                return None
+            conn.execute(
+                """
+                UPDATE inbound_operation_outbox
+                SET status = ?,
+                    receipt_json = ?,
+                    updated_at = ?,
+                    sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END
+                WHERE outbox_id = ?
+                """,
+                (
+                    delivery_status,
+                    _json(receipt),
+                    now,
+                    delivery_status,
+                    now,
+                    str(outbox_id),
+                ),
+            )
+            operation_row = conn.execute(
+                "SELECT result_json FROM inbound_pending_operations WHERE operation_id = ? LIMIT 1",
+                (str(outbox["operation_id"]),),
+            ).fetchone()
+            operation_result = _loads(operation_row["result_json"]) if operation_row is not None else {}
+            operation_result["final_receipt"] = {
+                **receipt,
+                "outbox_id": str(outbox_id),
+                "outbox_status": delivery_status,
+            }
+            conn.execute(
+                "UPDATE inbound_pending_operations SET result_json = ? WHERE operation_id = ?",
+                (_json(operation_result), str(outbox["operation_id"])),
+            )
+        return self.get_outbox(outbox_id)
+
     def _set_status(
         self,
         operation_id: str,
@@ -554,6 +727,29 @@ class InboundOperationStore:
                         applied_at TEXT,
                         cancelled_at TEXT
                     )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS inbound_operation_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        outbox_id TEXT NOT NULL UNIQUE,
+                        operation_id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        receipt_json TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        sent_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_inbound_operation_outbox_pending
+                    ON inbound_operation_outbox(status, updated_at)
                     """
                 )
                 conn.execute(
@@ -832,4 +1028,13 @@ def _row_to_operation(row: sqlite3.Row | None) -> dict[str, Any] | None:
     out["payload"] = _loads(out.get("payload_json"))
     out["preview"] = _loads(out.get("preview_json"))
     out["result"] = _loads(out.get("result_json"))
+    return out
+
+
+def _row_to_outbox(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    out = {key: row[key] for key in row.keys()}
+    out["payload"] = _loads(out.get("payload_json"))
+    out["receipt"] = _loads(out.get("receipt_json"))
     return out

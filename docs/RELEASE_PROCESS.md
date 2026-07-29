@@ -189,7 +189,15 @@ VERSION="$(cat VERSION)"
 ./.venv/bin/python scripts/generate_dependency_graph.py --check
 ./.venv/bin/python tests/run_smoke.py
 ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
-./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_layered_config.py
+./.venv/bin/python -m pytest \
+  tests/test_config_yaml.py \
+  tests/test_config_template_inheritance.py \
+  tests/test_config_authoring_transaction.py \
+  tests/test_runtime_config_identity.py \
+  tests/test_service_deploy.py \
+  tests/test_inbound_control.py \
+  tests/test_setup_check.py \
+  tests/test_cli_operator_commands.py
 ./om config init --dry-run --output /tmp/options-monitor-config.yaml --runtime-output-dir /tmp/options-monitor-runtime-config
 ./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example

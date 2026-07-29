@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
+from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.llm_model_profiles import resolve_authoring_assistant_config
 from src.application.config_primitives import (
@@ -86,7 +87,7 @@ def default_yaml_config_path(*, repo_root: Path) -> Path:
 
 def default_yaml_output_config_path(*, repo_root: Path, market: str, runtime_root: str | Path | None = None) -> Path:
     runtime = resolve_runtime_root(repo_root=repo_root, runtime_root=runtime_root)
-    return (runtime.runtime_root / "resolved" / f"config.{market}.json").resolve()
+    return (runtime.runtime_root / f"config.{market}.json").resolve()
 
 
 def default_yaml_assistant_config_path(*, repo_root: Path, runtime_root: str | Path | None = None) -> Path:
@@ -234,7 +235,7 @@ def _normalize_market_accounts(raw_accounts: Any, *, path: str) -> list[str]:
     return out
 
 
-def _normalize_symbols(raw_symbols: Any, *, path: str) -> list[str]:
+def _normalize_symbols(raw_symbols: Any, *, path: str, market: str) -> list[str]:
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be a non-empty list of symbol strings")
     out: list[str] = []
@@ -247,11 +248,26 @@ def _normalize_symbols(raw_symbols: Any, *, path: str) -> list[str]:
                 hint="Keep symbols as a string list and put per-symbol settings under markets.<market>.overrides.",
             )
         symbol = _normalize_symbol(raw, path=f"{path}[{index}]")
+        _ensure_symbol_market(symbol, market=market, path=f"{path}[{index}]")
         if symbol in seen:
             raise AgentToolError(code="CONFIG_ERROR", message=f"duplicate symbol in {path}: {symbol}")
         seen.add(symbol)
         out.append(symbol)
     return out
+
+
+def _ensure_symbol_market(symbol: str, *, market: str, path: str) -> None:
+    actual_market = str(symbol_market(symbol) or "").strip().lower()
+    expected_market = _normalize_market(market)
+    if actual_market and actual_market != expected_market:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=(
+                f"{path} resolves to {actual_market.upper()} but is configured under "
+                f"markets.{expected_market}"
+            ),
+            hint=f"Move {symbol} to markets.{actual_market}.symbols.",
+        )
 
 
 def _apply_range_shorthand(item: dict[str, Any], *, key: str, min_key: str, max_key: str, path: str) -> None:
@@ -564,7 +580,11 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
             )
         account_settings[account] = deepcopy(account_defs[account])
 
-    symbols = _normalize_symbols(market_cfg.get("symbols"), path=f"markets.{normalized_market}.symbols")
+    symbols = _normalize_symbols(
+        market_cfg.get("symbols"),
+        path=f"markets.{normalized_market}.symbols",
+        market=normalized_market,
+    )
     overrides_raw = market_cfg.get("overrides") or {}
     if not isinstance(overrides_raw, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{normalized_market}.overrides must be an object")
@@ -573,6 +593,11 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     symbol_set = set(symbols)
     for raw_symbol, raw_override in overrides_raw.items():
         symbol = _normalize_symbol(raw_symbol, path=f"markets.{normalized_market}.overrides.<key>")
+        _ensure_symbol_market(
+            symbol,
+            market=normalized_market,
+            path=f"markets.{normalized_market}.overrides.{symbol}",
+        )
         if symbol not in symbol_set:
             raise AgentToolError(
                 code="CONFIG_ERROR",

@@ -28,11 +28,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser.add_argument("--env-file", default=None, help="explicit env file to load before running the tool")
     run_parser.add_argument("--no-local-env-file", action="store_true", help="do not auto-load .env/options-monitor.env")
 
-    add_account_parser = sub.add_parser("add-account", help="append one account to an existing runtime config")
+    add_account_parser = sub.add_parser("add-account", help="append one account to authoritative config.yaml")
     add_account_parser.add_argument("--market", required=True, choices=("us", "hk"))
     add_account_parser.add_argument("--account-label", required=True)
     add_account_parser.add_argument("--account-type", required=True, choices=("futu", "external_holdings"))
-    add_account_parser.add_argument("--config-path", default=None)
+    add_account_parser.add_argument("--config-yaml", "--config-path", dest="config_path", default=None)
+    add_account_parser.add_argument("--rebuild-runtime-root", default=None)
     add_account_parser.add_argument("--futu-acc-id", default=None)
     add_account_parser.add_argument("--futu-host", default=None)
     add_account_parser.add_argument("--futu-port", type=int, default=None)
@@ -40,10 +41,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_account_parser.add_argument("--dry-run", action="store_true", help="validate and preview the mutation without writing")
     add_account_parser.add_argument("--confirm", action="store_true", help="required with OM_AGENT_ENABLE_WRITE_TOOLS=true for writes")
 
-    edit_account_parser = sub.add_parser("edit-account", help="edit one existing account in a runtime config")
+    edit_account_parser = sub.add_parser("edit-account", help="edit one existing account in authoritative config.yaml")
     edit_account_parser.add_argument("--market", required=True, choices=("us", "hk"))
     edit_account_parser.add_argument("--account-label", required=True)
-    edit_account_parser.add_argument("--config-path", default=None)
+    edit_account_parser.add_argument("--config-yaml", "--config-path", dest="config_path", default=None)
+    edit_account_parser.add_argument("--rebuild-runtime-root", default=None)
     edit_account_parser.add_argument("--account-type", default=None, choices=("futu", "external_holdings"))
     edit_account_parser.add_argument("--futu-acc-id", default=None)
     edit_account_parser.add_argument("--futu-host", default=None)
@@ -53,10 +55,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     edit_account_parser.add_argument("--dry-run", action="store_true", help="validate and preview the mutation without writing")
     edit_account_parser.add_argument("--confirm", action="store_true", help="required with OM_AGENT_ENABLE_WRITE_TOOLS=true for writes")
 
-    remove_account_parser = sub.add_parser("remove-account", help="remove one account from a runtime config")
+    remove_account_parser = sub.add_parser("remove-account", help="remove one account from authoritative config.yaml")
     remove_account_parser.add_argument("--market", required=True, choices=("us", "hk"))
     remove_account_parser.add_argument("--account-label", required=True)
-    remove_account_parser.add_argument("--config-path", default=None)
+    remove_account_parser.add_argument("--config-yaml", "--config-path", dest="config_path", default=None)
+    remove_account_parser.add_argument("--rebuild-runtime-root", default=None)
     remove_account_parser.add_argument("--dry-run", action="store_true", help="validate and preview the mutation without writing")
     remove_account_parser.add_argument("--confirm", action="store_true", help="required with OM_AGENT_ENABLE_WRITE_TOOLS=true for writes")
     return parser.parse_args(argv)
@@ -125,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 futu_host=args.futu_host,
                 futu_port=args.futu_port,
                 holdings_account=args.holdings_account,
+                rebuild_runtime_root=args.rebuild_runtime_root,
                 dry_run=bool(args.dry_run),
             )
             sys.stdout.write(dumps_json(build_response(tool_name="add-account", ok=True, data=result)))
@@ -141,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                 futu_port=args.futu_port,
                 holdings_account=args.holdings_account,
                 clear_holdings_account=bool(args.clear_holdings_account),
+                rebuild_runtime_root=args.rebuild_runtime_root,
                 dry_run=bool(args.dry_run),
             )
             sys.stdout.write(dumps_json(build_response(tool_name="edit-account", ok=True, data=result)))
@@ -151,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 market=str(args.market),
                 account_label=str(args.account_label),
                 config_path=args.config_path,
+                rebuild_runtime_root=args.rebuild_runtime_root,
                 dry_run=bool(args.dry_run),
             )
             sys.stdout.write(dumps_json(build_response(tool_name="remove-account", ok=True, data=result)))

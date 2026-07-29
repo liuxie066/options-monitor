@@ -526,7 +526,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
-| Config | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_layered_config.py`; YAML validate/build dry-runs; runtime validate for generated snapshots |
+| Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 

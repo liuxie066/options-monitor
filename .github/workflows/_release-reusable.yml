@@ -48,6 +48,18 @@ jobs:
           ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
           ./.venv/bin/python -m pytest tests/test_release_check.py tests/test_release_delta_coverage.py tests/test_release_version_recommendation.py tests/test_version_check.py
 
+      - name: Configuration and control-plane release gate
+        run: |
+          ./.venv/bin/python -m pytest \
+            tests/test_config_yaml.py \
+            tests/test_config_template_inheritance.py \
+            tests/test_config_authoring_transaction.py \
+            tests/test_runtime_config_identity.py \
+            tests/test_service_deploy.py \
+            tests/test_inbound_control.py \
+            tests/test_setup_check.py \
+            tests/test_cli_operator_commands.py
+
       - name: Build source archive
         run: |
           git archive --format=tar.gz --output options-monitor-${{ inputs.tag }}.tar.gz HEAD

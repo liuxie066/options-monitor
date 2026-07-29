@@ -36,10 +36,10 @@ def service_drift(
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
 
-    Dry-run is the default. Confirmed apply writes missing or changed unit files
-    and the refreshed service profile, then enables missing timers and restarts
-    changed timers. Long-running services are written when missing or changed but
-    are not enabled or restarted here.
+    Dry-run is the default. Confirmed apply writes missing or changed unit files,
+    repairs expected timer activation, retires extra managed units, and refreshes
+    the service profile. Long-running expected services are not enabled or
+    restarted here.
     """
 
     initial = _load_profile_and_paths(
@@ -49,6 +49,7 @@ def service_drift(
         profile=profile,
         systemd_unit_root=systemd_unit_root,
     )
+    initial["run_cmd"] = run_cmd
     before = _build_drift(initial)
     operations: list[dict[str, Any]] = []
     apply_errors: list[str] = []
@@ -150,9 +151,7 @@ def _load_profile_and_paths(
 
 
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
-    original_profile = ctx["profile"]
-    profile = _profile_with_discovered_managed_services(original_profile, ctx=ctx)
-    ctx["profile"] = profile
+    profile = ctx["profile"]
     provider = str(ctx["provider"] or "").strip().lower()
     if provider not in {"systemd", "launchd"}:
         return {
@@ -184,6 +183,9 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "extra_profile_units": [],
             "extra_installed_units": [],
             "mismatched_units": [],
+            "activation_states": {},
+            "active_states": {},
+            "activation_drift_units": [],
             "required_units": [],
             "missing_required_units": [],
             "profile_content_changed": False,
@@ -205,17 +207,37 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     missing_installed_units = sorted(set(expected_files) - set(installed_units))
     extra_installed_units = sorted(set(installed_units) - set(expected_files))
     mismatched_units = _mismatched_units(provider=provider, expected_files=expected_files, ctx=ctx)
+    activation_states = _activation_states(
+        provider=provider,
+        expected_files=expected_files,
+        installed_units=installed_units,
+        ctx=ctx,
+    )
+    active_states = _active_states(
+        provider=provider,
+        expected_files=expected_files,
+        installed_units=installed_units,
+        ctx=ctx,
+    )
+    activation_drift_units = sorted(
+        name
+        for name in set(activation_states) | set(active_states)
+        if activation_states.get(name) in {"disabled", "masked"}
+        or active_states.get(name) in {"inactive", "failed", "deactivating"}
+    )
     required_units = _required_units(provider, expected_services)
     missing_required_units = sorted(
         unit
         for unit in required_units
         if unit in set(missing_profile_units) or unit in set(missing_installed_units)
     )
-    profile_content_changed = _profile_content_changed(profile, bundle) or profile != original_profile
+    profile_content_changed = _profile_content_changed(profile, bundle)
     manual_actions = _manual_actions(
         provider=provider,
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
+        activation_drift_units=activation_drift_units,
+        extra_installed_units=extra_installed_units,
         profile_path=ctx["profile_path"],
     )
     summary = _drift_summary(
@@ -226,6 +248,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         extra_profile_units=extra_profile_units,
         extra_installed_units=extra_installed_units,
         mismatched_units=mismatched_units,
+        activation_drift_units=activation_drift_units,
         profile_content_changed=profile_content_changed,
     )
     return {
@@ -244,52 +267,15 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "extra_profile_units": extra_profile_units,
         "extra_installed_units": extra_installed_units,
         "mismatched_units": mismatched_units,
+        "activation_states": activation_states,
+        "active_states": active_states,
+        "activation_drift_units": activation_drift_units,
         "required_units": required_units,
         "missing_required_units": missing_required_units,
         "profile_content_changed": profile_content_changed,
         "manual_actions": manual_actions,
         "summary": summary,
     }
-
-
-def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: dict[str, Any]) -> dict[str, Any]:
-    provider = str(ctx.get("provider") or "").strip().lower()
-    if provider != "systemd":
-        return profile
-    services = _service_names_from_profile(profile)
-    discovered = []
-    opend_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-opend.service"
-    feishu_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-feishu-ws.service"
-    wechat_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-wechat-clawbot.service"
-    if "options-monitor-opend.service" not in services and opend_unit.exists():
-        discovered.append("options-monitor-opend.service")
-    if "options-monitor-feishu-ws.service" not in services and feishu_unit.exists():
-        discovered.append("options-monitor-feishu-ws.service")
-    if "options-monitor-wechat-clawbot.service" not in services and wechat_unit.exists():
-        discovered.append("options-monitor-wechat-clawbot.service")
-    if not discovered:
-        return profile
-    out = dict(profile)
-    raw_services = out.get("services")
-    service_items = list(raw_services) if isinstance(raw_services, list) else []
-    service_items.extend({"name": name} for name in discovered)
-    out["services"] = service_items
-    if "options-monitor-opend.service" in discovered:
-        opend = out.get("opend")
-        next_opend = dict(opend) if isinstance(opend, dict) else {}
-        next_opend.setdefault("enabled", True)
-        out["opend"] = next_opend
-    if "options-monitor-feishu-ws.service" in discovered:
-        feishu_ws = out.get("feishu_ws")
-        next_feishu_ws = dict(feishu_ws) if isinstance(feishu_ws, dict) else {}
-        next_feishu_ws.setdefault("enabled", True)
-        out["feishu_ws"] = next_feishu_ws
-    if "options-monitor-wechat-clawbot.service" in discovered:
-        wechat_clawbot = out.get("wechat_clawbot")
-        next_wechat_clawbot = dict(wechat_clawbot) if isinstance(wechat_clawbot, dict) else {}
-        next_wechat_clawbot.setdefault("enabled", True)
-        out["wechat_clawbot"] = next_wechat_clawbot
-    return out
 
 
 def _expected_bundle_from_profile(
@@ -515,6 +501,65 @@ def _mismatched_units(*, provider: str, expected_files: dict[str, dict[str, Any]
     return sorted(out)
 
 
+def _activation_states(
+    *,
+    provider: str,
+    expected_files: dict[str, dict[str, Any]],
+    installed_units: list[str],
+    ctx: dict[str, Any],
+) -> dict[str, str]:
+    if provider != "systemd":
+        return {}
+    installed = set(installed_units)
+    states: dict[str, str] = {}
+    for name in sorted(expected_files):
+        if not name.endswith(".timer") or name not in installed:
+            continue
+        result = _run_systemctl(ctx, ["is-enabled", name], run_cmd=ctx.get("run_cmd") or subprocess.run)
+        stdout = str(result.get("stdout") or "").strip().lower()
+        stderr = str(result.get("stderr") or "").strip().lower()
+        state = (stdout or stderr).splitlines()[0].strip() if (stdout or stderr) else ""
+        if state not in {"enabled", "enabled-runtime", "disabled", "masked", "masked-runtime", "static", "indirect", "generated", "transient"}:
+            state = "unknown"
+        if state == "masked-runtime":
+            state = "masked"
+        states[name] = state
+    return states
+
+
+def _active_states(
+    *,
+    provider: str,
+    expected_files: dict[str, dict[str, Any]],
+    installed_units: list[str],
+    ctx: dict[str, Any],
+) -> dict[str, str]:
+    if provider != "systemd":
+        return {}
+    installed = set(installed_units)
+    states: dict[str, str] = {}
+    for name in sorted(expected_files):
+        if not name.endswith(".timer") or name not in installed:
+            continue
+        result = _run_systemctl(ctx, ["is-active", name], run_cmd=ctx.get("run_cmd") or subprocess.run)
+        stdout = str(result.get("stdout") or "").strip().lower()
+        stderr = str(result.get("stderr") or "").strip().lower()
+        state = (stdout or stderr).splitlines()[0].strip() if (stdout or stderr) else ""
+        if state not in {
+            "active",
+            "reloading",
+            "inactive",
+            "failed",
+            "activating",
+            "deactivating",
+            "maintenance",
+            "refreshing",
+        }:
+            state = "unknown"
+        states[name] = state
+    return states
+
+
 def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) -> bool:
     expected = _bundle_profile(bundle)
     keys = (
@@ -557,6 +602,7 @@ def _drift_summary(
     extra_profile_units: list[str],
     extra_installed_units: list[str],
     mismatched_units: list[str],
+    activation_drift_units: list[str],
     profile_content_changed: bool,
 ) -> dict[str, Any]:
     warning_count = sum(
@@ -567,12 +613,13 @@ def _drift_summary(
             extra_profile_units,
             extra_installed_units,
             mismatched_units,
+            activation_drift_units,
         )
         if values
     )
     if profile_content_changed:
         warning_count += 1
-    error_count = 1 if missing_required_units else 0
+    error_count = int(bool(missing_required_units)) + int(bool(activation_drift_units))
     status = "error" if error_count else ("warn" if warning_count else "ok")
     return {
         "ok": status == "ok",
@@ -586,6 +633,7 @@ def _drift_summary(
         "extra_profile_count": len(extra_profile_units),
         "extra_installed_count": len(extra_installed_units),
         "mismatched_count": len(mismatched_units),
+        "activation_drift_count": len(activation_drift_units),
         "profile_content_changed": bool(profile_content_changed),
     }
 
@@ -604,10 +652,12 @@ def _manual_actions(
     provider: str,
     missing_installed_units: list[str],
     mismatched_units: list[str],
+    activation_drift_units: list[str],
+    extra_installed_units: list[str],
     profile_path: Path,
 ) -> list[str]:
     actions: list[str] = []
-    if missing_installed_units or mismatched_units:
+    if missing_installed_units or mismatched_units or activation_drift_units or extra_installed_units:
         actions.append(f"./om service drift --profile-path {profile_path} --confirm")
     if provider == "systemd":
         long_running = [
@@ -618,6 +668,8 @@ def _manual_actions(
         ]
         actions.extend(f"manual_enable_long_running_service: sudo systemctl enable --now {name}" for name in long_running)
         actions.extend(f"manual_review_unit_content: sudo systemctl cat {name}" for name in mismatched_units)
+        actions.extend(f"manual_enable_timer: sudo systemctl enable --now {name}" for name in activation_drift_units)
+        actions.extend(f"manual_retire_unit: sudo systemctl disable --now {name}" for name in extra_installed_units)
     return actions
 
 
@@ -636,6 +688,7 @@ def _apply_service_drift(
             "written_units": [],
             "enabled_timers": [],
             "restarted_timers": [],
+            "retired_units": [],
             "profile_written": False,
         }
     bundle = _expected_bundle_from_profile(
@@ -681,12 +734,20 @@ def _apply_service_drift(
 
     enabled_timers: list[str] = []
     restarted_timers: list[str] = []
+    retired_units: list[str] = []
+    activation_drift = set(before.get("activation_drift_units") or [])
+    extra_installed = set(before.get("extra_installed_units") or [])
     if written_units:
         result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
         operations.append(result)
         if not result.get("ok"):
             errors.append(f"daemon-reload: {result.get('stderr') or result.get('stdout') or result.get('error') or result.get('returncode')}")
-    for name in sorted(item for item in missing if item.endswith(".timer")):
+    for name in sorted(item for item in activation_drift if before.get("activation_states", {}).get(item) == "masked"):
+        result = _run_systemctl(ctx, ["unmask", name], run_cmd=run_cmd)
+        operations.append(result)
+        if not result.get("ok"):
+            errors.append(f"unmask {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
+    for name in sorted(item for item in missing | activation_drift if item.endswith(".timer")):
         result = _run_systemctl(ctx, ["enable", "--now", name], run_cmd=run_cmd)
         operations.append(result)
         if result.get("ok"):
@@ -700,14 +761,69 @@ def _apply_service_drift(
             restarted_timers.append(name)
         else:
             errors.append(f"restart {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
+    retired_paths_changed = False
+    for name in sorted(extra_installed):
+        stop_result = _run_systemctl(ctx, ["disable", "--now", name], run_cmd=run_cmd)
+        operations.append(stop_result)
+        if not stop_result.get("ok"):
+            errors.append(f"retire {name}: {stop_result.get('stderr') or stop_result.get('stdout') or stop_result.get('returncode')}")
+            continue
+        path = Path(ctx["systemd_unit_root"]) / name
+        delete_result = _delete_unit_with_sudo_fallback(path, run_cmd=run_cmd)
+        operations.append({**delete_result, "unit": name})
+        if not delete_result.get("ok"):
+            errors.append(f"delete {path}: {delete_result.get('error') or delete_result.get('stderr') or delete_result.get('returncode')}")
+            continue
+        retired_units.append(name)
+        retired_paths_changed = True
+    if retired_paths_changed:
+        result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
+        operations.append(result)
+        if not result.get("ok"):
+            errors.append(f"daemon-reload after retire: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
 
     return {
-        "changed": bool(written_units or profile_written or enabled_timers or restarted_timers),
+        "changed": bool(written_units or profile_written or enabled_timers or restarted_timers or retired_units),
         "errors": errors,
         "written_units": written_units,
         "enabled_timers": enabled_timers,
         "restarted_timers": restarted_timers,
+        "retired_units": retired_units,
         "profile_written": profile_written,
+    }
+
+
+def _delete_unit_with_sudo_fallback(path: Path, *, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+    try:
+        path.unlink()
+        return {"operation": "delete_unit", "path": str(path), "ok": True, "sudo_fallback": False}
+    except FileNotFoundError:
+        return {"operation": "delete_unit", "path": str(path), "ok": True, "sudo_fallback": False, "already_missing": True}
+    except Exception as exc:
+        first_error = f"{type(exc).__name__}: {exc}"
+    command = ["sudo", "-n", "rm", "--", str(path)]
+    try:
+        proc = run_cmd(command, capture_output=True, text=True, timeout=60, check=False)
+    except Exception as exc:
+        return {
+            "operation": "delete_unit",
+            "path": str(path),
+            "ok": False,
+            "error": f"{first_error}; sudo fallback failed: {type(exc).__name__}: {exc}",
+            "sudo_fallback": True,
+            "command": command,
+        }
+    rc = int(getattr(proc, "returncode", 1))
+    return {
+        "operation": "delete_unit",
+        "path": str(path),
+        "ok": rc == 0,
+        "error": None if rc == 0 else first_error,
+        "sudo_fallback": True,
+        "command": command,
+        "returncode": rc,
+        "stdout": str(getattr(proc, "stdout", "") or "")[-2000:],
+        "stderr": str(getattr(proc, "stderr", "") or "")[-2000:],
     }
 
 

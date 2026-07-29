@@ -54,6 +54,29 @@ def test_validate_config_accepts_enabled_sell_call_with_call_base() -> None:
     assert effective["sell_call"]["strategy"] == "insurance_underwriting"
 
 
+@pytest.mark.parametrize(
+    "use",
+    (
+        ["put_base", "missing_guardrail"],
+        ["put_base", "put_base"],
+        ["put_base", 7],
+        {"profile": "put_base"},
+    ),
+)
+def test_validate_config_rejects_invalid_template_references(use) -> None:
+    cfg = _base_cfg(
+        {
+            "symbol": "PDD",
+            "use": use,
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45},
+            "sell_call": {"enabled": False},
+        }
+    )
+
+    with pytest.raises(SystemExit):
+        validate_config(cfg)
+
+
 def test_edit_symbol_entry_can_ensure_call_base_for_covered_call() -> None:
     cfg = _base_cfg(
         {

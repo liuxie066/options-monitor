@@ -85,12 +85,56 @@ REMOVED_SCHEDULE_FIELDS = (
 )
 INLINE_SECRET_CONFIG_KEYS = {
     'access_token',
+    'api_key',
     'app_secret',
+    'bot_token',
     'client_secret',
     'password',
     'private_key',
     'refresh_token',
+    'secret',
+    'token',
     'tenant_access_token',
+}
+INLINE_SECRET_CONFIG_SUFFIXES = (
+    '_access_token',
+    '_api_key',
+    '_app_secret',
+    '_bot_token',
+    '_client_secret',
+    '_password',
+    '_private_key',
+    '_refresh_token',
+    '_secret',
+)
+NOTIFICATION_CONFIG_KEYS = {
+    'cash_footer_accounts',
+    'channel',
+    'daily_brief',
+    'enabled',
+    'opend_alert_after_consecutive_failures',
+    'opend_alert_burst_max',
+    'opend_alert_burst_window_sec',
+    'opend_alert_cooldown_sec',
+    'opend_alert_send_recovery_notice',
+    'provider',
+    'render_style',
+    'target',
+    'transport_channel',
+    'wechat_clawbot_label',
+    'wechat_clawbot_state_dir',
+}
+NOTIFICATION_DAILY_BRIEF_KEYS = {
+    'enabled',
+    'max_actions_per_priority',
+    'max_candidates_per_strategy',
+    'max_rejection_reasons',
+}
+WATCHDOG_CONFIG_KEYS = {
+    'retry_enabled',
+    'retry_interval_sec',
+    'retry_timeout_sec',
+    'success_threshold',
 }
 VALID_FUTU_TRD_ENVS = {'REAL', 'SIMULATE'}
 ASSISTANT_CONFIG_KEYS = {
@@ -787,7 +831,16 @@ def _validate_no_inline_secrets_or_retired_callback_cfg(value, path: str = '') -
             key_lower = key_text.lower()
             if key_lower in RETIRED_FEISHU_CALLBACK_KEYS and item not in (None, '', {}, []):
                 die(f'{child_path} is no longer supported; Feishu inbound uses long-connection Bot env settings')
-            if key_lower in INLINE_SECRET_CONFIG_KEYS and isinstance(item, str) and item.strip():
+            is_secret_key = (
+                key_lower in INLINE_SECRET_CONFIG_KEYS
+                or key_lower.endswith(INLINE_SECRET_CONFIG_SUFFIXES)
+            )
+            if (
+                is_secret_key
+                and not key_lower.endswith('_env')
+                and isinstance(item, str)
+                and item.strip()
+            ):
                 die(f'{child_path} must not contain inline secret material; store it in the env file instead')
             _validate_no_inline_secrets_or_retired_callback_cfg(item, child_path)
     elif isinstance(value, list):
@@ -801,6 +854,57 @@ def _validate_futu_trd_env(value, path: str) -> None:
     normalized = str(value).strip().upper()
     if normalized not in VALID_FUTU_TRD_ENVS:
         die(f'{path} must be one of: REAL, SIMULATE')
+
+
+def _validate_watchdog_config(value) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        die('watchdog must be an object')
+    unknown = sorted(str(key) for key in value if str(key) not in WATCHDOG_CONFIG_KEYS)
+    if unknown:
+        die(f"watchdog contains unsupported keys: {', '.join(unknown)}")
+    if 'retry_enabled' in value and not isinstance(value.get('retry_enabled'), bool):
+        die('watchdog.retry_enabled must be a boolean')
+    for key in ('retry_interval_sec', 'retry_timeout_sec'):
+        if key not in value:
+            continue
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            die(f'watchdog.{key} must be a number')
+        if raw <= 0:
+            die(f'watchdog.{key} must be > 0')
+    if 'success_threshold' in value:
+        raw = value.get('success_threshold')
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            die('watchdog.success_threshold must be an integer')
+        if raw < 1:
+            die('watchdog.success_threshold must be >= 1')
+
+
+def _validate_template_use(item: dict, *, templates: dict, symbol: str) -> None:
+    if 'use' not in item:
+        return
+    raw = item.get('use')
+    if isinstance(raw, str):
+        name = raw.strip()
+        if not name:
+            die(f'{symbol}.use must not be empty')
+        names = [name]
+    elif isinstance(raw, list):
+        if not raw:
+            die(f'{symbol}.use must not be empty')
+        if any(not isinstance(value, str) or not value.strip() for value in raw):
+            die(f'{symbol}.use must contain only non-empty strings')
+        names = [value.strip() for value in raw]
+    else:
+        die(f'{symbol}.use must be a string or list of strings')
+        return
+    if len(set(names)) != len(names):
+        die(f'{symbol}.use must not contain duplicate template references')
+    unknown = [name for name in names if not isinstance(templates.get(name), dict)]
+    if unknown:
+        die(f"{symbol}.use references unknown templates: {', '.join(unknown)}")
 
 
 def validate_config(cfg: dict):
@@ -822,6 +926,7 @@ def validate_config(cfg: dict):
             die('accounts contains duplicate labels after trim + lowercase normalization')
 
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
+    _validate_watchdog_config(cfg.get('watchdog'))
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
     _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
@@ -902,10 +1007,30 @@ def validate_config(cfg: dict):
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
+        unknown_notification_keys = sorted(
+            str(key)
+            for key in notifications
+            if str(key) not in NOTIFICATION_CONFIG_KEYS
+        )
+        if unknown_notification_keys:
+            die(
+                'notifications contains unsupported keys: '
+                + ', '.join(unknown_notification_keys)
+            )
         daily_brief = notifications.get('daily_brief')
         if daily_brief is not None:
             if not isinstance(daily_brief, dict):
                 die('notifications.daily_brief must be an object')
+            unknown_daily_brief_keys = sorted(
+                str(key)
+                for key in daily_brief
+                if str(key) not in NOTIFICATION_DAILY_BRIEF_KEYS
+            )
+            if unknown_daily_brief_keys:
+                die(
+                    'notifications.daily_brief contains unsupported keys: '
+                    + ', '.join(unknown_daily_brief_keys)
+                )
             if 'enabled' in daily_brief and not isinstance(daily_brief.get('enabled'), bool):
                 die('notifications.daily_brief.enabled must be a boolean')
             if 'enabled' in daily_brief:
@@ -968,6 +1093,33 @@ def validate_config(cfg: dict):
             for key in ('wechat_clawbot_label', 'wechat_clawbot_state_dir'):
                 if key in notifications and notifications.get(key) is not None and not isinstance(notifications.get(key), str):
                     die(f'notifications.{key} must be a string when configured')
+        if 'enabled' in notifications and not isinstance(notifications.get('enabled'), bool):
+            die('notifications.enabled must be a boolean')
+        cash_footer_accounts = notifications.get('cash_footer_accounts')
+        if cash_footer_accounts is not None:
+            if not isinstance(cash_footer_accounts, list) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in cash_footer_accounts
+            ):
+                die('notifications.cash_footer_accounts must be a list of non-empty strings')
+        for key in (
+            'opend_alert_cooldown_sec',
+            'opend_alert_burst_window_sec',
+            'opend_alert_burst_max',
+            'opend_alert_after_consecutive_failures',
+        ):
+            if key not in notifications:
+                continue
+            value = notifications.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                die(f'notifications.{key} must be an integer')
+            if value < 1:
+                die(f'notifications.{key} must be >= 1')
+        if (
+            'opend_alert_send_recovery_notice' in notifications
+            and not isinstance(notifications.get('opend_alert_send_recovery_notice'), bool)
+        ):
+            die('notifications.opend_alert_send_recovery_notice must be a boolean')
 
     close_advice = cfg.get('close_advice') or {}
     if close_advice and not isinstance(close_advice, dict):
@@ -1222,6 +1374,7 @@ def validate_config(cfg: dict):
         if sym in seen:
             die(f"duplicate symbol: {sym}")
         seen.add(sym)
+        _validate_template_use(item, templates=templates, symbol=sym)
 
         fetch = item.get('fetch') or {}
         if fetch and not isinstance(fetch, dict):
