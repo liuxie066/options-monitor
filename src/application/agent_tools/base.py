@@ -37,6 +37,7 @@ class AgentTool:
     copilot_input_fields: tuple[str, ...] = ()
     copilot_input_schema: dict[str, Any] = field(default_factory=dict)
     copilot_input_normalizer: CopilotInputNormalizer | None = field(default=None, repr=False, compare=False)
+    allow_additional_input: bool = True
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -87,7 +88,7 @@ class AgentTool:
     def execution_input_json_schema(self) -> dict[str, Any]:
         return build_tool_input_json_schema(
             self.input_schema,
-            additional_properties=True,
+            additional_properties=bool(self.allow_additional_input),
         )
 
     def resolve_output_contract(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -155,6 +156,7 @@ def build_agent_tool(
     copilot_input_fields: tuple[str, ...] = (),
     copilot_input_schema: dict[str, Any] | None = None,
     copilot_input_normalizer: CopilotInputNormalizer | None = None,
+    allow_additional_input: bool = True,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -183,4 +185,5 @@ def build_agent_tool(
         copilot_input_fields=tuple(copilot_input_fields),
         copilot_input_schema=deepcopy(copilot_input_schema or {}),
         copilot_input_normalizer=copilot_input_normalizer,
+        allow_additional_input=bool(allow_additional_input),
     )

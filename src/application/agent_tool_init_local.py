@@ -5,9 +5,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from src.application.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, normalize_accounts
-from src.application.config_validator import validate_config
+from src.application.account_config import ACCOUNT_TYPE_FUTU, normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_validator import validate_config
 from src.application.layered_config import build_layered_runtime_config_from_user_config
 from src.application.runtime_config_freshness import GENERATED_KEY, build_inline_generated_metadata
 
@@ -56,16 +56,6 @@ def _normalize_symbols(value: list[str] | tuple[str, ...] | None, *, market: str
     if items:
         return items
     return [DEFAULT_SYMBOLS[market]]
-
-
-def _normalize_account_type(value: str | None) -> str:
-    raw = str(value or "").strip().lower()
-    if raw not in {ACCOUNT_TYPE_FUTU, ACCOUNT_TYPE_EXTERNAL_HOLDINGS}:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="account_type must be futu or external_holdings",
-        )
-    return raw
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -127,8 +117,16 @@ def init_local_config(
     data_template_path = _example_data_config_path(repo_root=repo_root)
     data_cfg = _read_json_object(data_template_path)
 
-    target_config_path = Path(config_path).expanduser().resolve() if config_path else default_runtime_config_path(repo_root=repo_root, market=normalized_market)
-    target_data_config_path = Path(data_config_path).expanduser().resolve() if data_config_path else default_data_config_path(repo_root=repo_root)
+    target_config_path = (
+        Path(config_path).expanduser().resolve()
+        if config_path
+        else default_runtime_config_path(repo_root=repo_root, market=normalized_market)
+    )
+    target_data_config_path = (
+        Path(data_config_path).expanduser().resolve()
+        if data_config_path
+        else default_data_config_path(repo_root=repo_root)
+    )
 
     if target_config_path.exists() and not force:
         raise AgentToolError(
@@ -200,20 +198,32 @@ def init_local_config(
     _validate_runtime_config_or_raise(runtime_cfg)
     target_config_path.parent.mkdir(parents=True, exist_ok=True)
     target_data_config_path.parent.mkdir(parents=True, exist_ok=True)
-    target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    target_config_path.write_text(
+        json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     if not reuse_existing_data_config or force:
-        target_data_config_path.write_text(json.dumps(data_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        target_data_config_path.write_text(
+            json.dumps(data_cfg, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     if used_defaults:
         warnings.append(
-            "Starter defaults applied: " + ", ".join(used_defaults) + ". Review account label, symbols, and local data_config before long-term use."
+            "Starter defaults applied: "
+            + ", ".join(used_defaults)
+            + ". Review account label, symbols, and local data_config before long-term use."
         )
 
     return {
         "market": normalized_market,
         "account_label": normalized_account,
         "futu_acc_id_masked": f"...{normalized_acc_id[-4:]}",
-        **({"holdings_account": str(holdings_account).strip()} if str(holdings_account or "").strip() else {}),
+        **(
+            {"holdings_account": str(holdings_account).strip()}
+            if str(holdings_account or "").strip()
+            else {}
+        ),
         "symbols": normalized_symbols,
         "config_path": str(target_config_path),
         "data_config_path": str(target_data_config_path),
@@ -231,94 +241,6 @@ def init_local_config(
         ],
         "recommended_flow": ["healthcheck", "scan_opportunities", "get_close_advice"],
     }
-
-
-def _load_runtime_config_for_update(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"runtime config not found: {path.name}",
-        )
-    return _read_json_object(path)
-
-
-def _target_runtime_config_path(*, repo_root: Path, market: str, config_path: str | Path | None) -> Path:
-    normalized_market = _normalize_market(market)
-    return Path(config_path).expanduser().resolve() if config_path else default_runtime_config_path(repo_root=repo_root, market=normalized_market)
-
-
-def _require_existing_account(runtime_cfg: dict[str, Any], *, account_label: str) -> tuple[list[str], str]:
-    accounts = normalize_accounts(runtime_cfg.get("accounts"), fallback=())
-    normalized_account = _normalize_account_label(account_label)
-    if normalized_account not in accounts:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=f"account not found: {normalized_account}",
-        )
-    return accounts, normalized_account
-
-
-def _resolve_futu_mapping(runtime_cfg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
-    trade_intake = runtime_cfg.get("trade_intake")
-    if not isinstance(trade_intake, dict):
-        trade_intake = {}
-    account_mapping = trade_intake.get("account_mapping")
-    if not isinstance(account_mapping, dict):
-        account_mapping = {}
-    futu_mapping = account_mapping.get("futu")
-    if not isinstance(futu_mapping, dict):
-        futu_mapping = {}
-    return trade_intake, account_mapping, futu_mapping
-
-
-def _legacy_futu_connection(runtime_cfg: dict[str, Any]) -> tuple[str | None, int | None]:
-    portfolio = runtime_cfg.get("portfolio")
-    futu_cfg = portfolio.get("futu") if isinstance(portfolio, dict) else None
-    if not isinstance(futu_cfg, dict):
-        return None, None
-    host = str(futu_cfg.get("host") or "").strip() or None
-    raw_port = futu_cfg.get("port")
-    if raw_port in (None, ""):
-        return host, None
-    try:
-        port = int(raw_port)
-    except Exception:
-        port = None
-    return host, port
-
-
-def _backfill_legacy_futu_connection_settings(runtime_cfg: dict[str, Any], account_settings: dict[str, Any]) -> None:
-    host, port = _legacy_futu_connection(runtime_cfg)
-    if not host and port is None:
-        return
-    for raw_setting in account_settings.values():
-        if not isinstance(raw_setting, dict):
-            continue
-        if str(raw_setting.get("type") or "").strip().lower() != ACCOUNT_TYPE_FUTU:
-            continue
-        raw_futu = raw_setting.get("futu")
-        futu_cfg = raw_futu if isinstance(raw_futu, dict) else {}
-        merged_futu = dict(futu_cfg)
-        if host and not str(merged_futu.get("host") or "").strip():
-            merged_futu["host"] = host
-        if port is not None and merged_futu.get("port") in (None, ""):
-            merged_futu["port"] = port
-        if merged_futu:
-            raw_setting["futu"] = merged_futu
-
-
-def _futu_accounts_from_settings(account_settings: dict[str, Any], *, exclude: str | None = None) -> list[str]:
-    excluded = str(exclude or "").strip().lower()
-    out: list[str] = []
-    for account, raw_setting in account_settings.items():
-        account_key = str(account or "").strip().lower()
-        if excluded and account_key == excluded:
-            continue
-        if not isinstance(raw_setting, dict):
-            continue
-        if str(raw_setting.get("type") or "").strip().lower() == ACCOUNT_TYPE_FUTU:
-            out.append(account_key)
-    return out
 
 
 def add_account_to_local_config(
@@ -340,118 +262,27 @@ def add_account_to_local_config(
     bitable_view_name: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    normalized_market = _normalize_market(market)
-    normalized_account = _normalize_account_label(account_label)
-    normalized_type = _normalize_account_type(account_type)
-    target_config_path = _target_runtime_config_path(repo_root=repo_root, market=normalized_market, config_path=config_path)
-    runtime_cfg = _load_runtime_config_for_update(target_config_path)
+    from src.application.config_yaml_accounts import mutate_yaml_account_config
 
-    accounts = normalize_accounts(runtime_cfg.get("accounts"), fallback=())
-    if normalized_account in accounts:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=f"account already exists: {normalized_account}",
-        )
-    runtime_cfg["accounts"] = [*accounts, normalized_account]
-
-    account_settings = runtime_cfg.get("account_settings")
-    if not isinstance(account_settings, dict):
-        account_settings = {}
-    _backfill_legacy_futu_connection_settings(runtime_cfg, account_settings)
-    setting: dict[str, Any] = {"type": normalized_type}
-    normalized_market_label = str(market_label or normalized_market).strip().lower()
-    if normalized_market_label in {"us", "hk"}:
-        setting["market"] = normalized_market_label
-    setting["enabled"] = True if enabled is None else bool(enabled)
-    setting["trade_intake_enabled"] = (
-        (normalized_type == ACCOUNT_TYPE_FUTU) if trade_intake_enabled is None else bool(trade_intake_enabled)
+    return mutate_yaml_account_config(
+        repo_root=repo_root,
+        action="add",
+        market=market,
+        account_label=account_label,
+        account_type=account_type,
+        config_path=config_path,
+        futu_acc_id=futu_acc_id,
+        holdings_account=holdings_account,
+        market_label=market_label,
+        enabled=enabled,
+        trade_intake_enabled=trade_intake_enabled,
+        futu_host=futu_host,
+        futu_port=futu_port,
+        bitable_app_token=bitable_app_token,
+        bitable_table_id=bitable_table_id,
+        bitable_view_name=bitable_view_name,
+        apply=not bool(dry_run),
     )
-    holdings_value = str(holdings_account or "").strip()
-    if normalized_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
-        holdings_value = holdings_value or normalized_account
-        if not holdings_value:
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message="holdings_account must be a non-empty string for external_holdings",
-            )
-    if holdings_value:
-        setting["holdings_account"] = holdings_value
-    normalized_acc_id: str | None = None
-    if normalized_type == ACCOUNT_TYPE_FUTU:
-        normalized_acc_id = _normalize_futu_acc_id(futu_acc_id)
-        existing_futu_accounts = _futu_accounts_from_settings(account_settings)
-        if existing_futu_accounts and (not str(futu_host or "").strip() or futu_port in (None, "")):
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message="futu_host and futu_port are required when adding a Futu account to a config that already has Futu accounts",
-                hint="Run a separate OpenD for the new Futu account and pass its host/port explicitly.",
-            )
-        futu_cfg: dict[str, Any] = {}
-        host = str(futu_host or "").strip()
-        if host:
-            futu_cfg["host"] = host
-        if futu_port not in (None, ""):
-            futu_cfg["port"] = int(futu_port)
-        futu_cfg["account_id"] = normalized_acc_id
-        if futu_cfg:
-            setting["futu"] = futu_cfg
-    else:
-        bitable_cfg: dict[str, Any] = {}
-        for key, value in {
-            "app_token": bitable_app_token,
-            "table_id": bitable_table_id,
-            "view_name": bitable_view_name,
-        }.items():
-            raw = str(value or "").strip()
-            if raw:
-                bitable_cfg[key] = raw
-        if bitable_cfg:
-            setting["bitable"] = bitable_cfg
-    account_settings[normalized_account] = setting
-    runtime_cfg["account_settings"] = account_settings
-
-    portfolio = runtime_cfg.get("portfolio")
-    if not isinstance(portfolio, dict):
-        portfolio = {}
-    source_by_account = portfolio.get("source_by_account")
-    if not isinstance(source_by_account, dict):
-        source_by_account = {}
-    source_by_account[normalized_account] = ("futu" if normalized_type == ACCOUNT_TYPE_FUTU else "holdings")
-    portfolio["source_by_account"] = source_by_account
-    runtime_cfg["portfolio"] = portfolio
-
-    trade_intake, account_mapping, futu_mapping = _resolve_futu_mapping(runtime_cfg)
-
-    if normalized_type == ACCOUNT_TYPE_FUTU:
-        if normalized_acc_id in futu_mapping:
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message=f"futu acc_id already exists: ...{normalized_acc_id[-4:]}",
-            )
-        futu_mapping[normalized_acc_id] = normalized_account
-        account_mapping["futu"] = futu_mapping
-        trade_intake["enabled"] = True
-    trade_intake["account_mapping"] = account_mapping
-    runtime_cfg["trade_intake"] = trade_intake
-
-    _validate_runtime_config_or_raise(runtime_cfg)
-    if not dry_run:
-        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    result: dict[str, Any] = {
-        "market": normalized_market,
-        "account_label": normalized_account,
-        "account_type": normalized_type,
-        "config_path": str(target_config_path),
-        "accounts": runtime_cfg["accounts"],
-        "dry_run": bool(dry_run),
-        "write_applied": not bool(dry_run),
-    }
-    if holdings_value:
-        result["holdings_account"] = holdings_value
-    if normalized_type == ACCOUNT_TYPE_FUTU:
-        result["futu_acc_id_masked"] = f"...{str(futu_acc_id or '')[-4:]}"
-    return result
 
 
 def edit_account_in_local_config(
@@ -474,155 +305,28 @@ def edit_account_in_local_config(
     bitable_view_name: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    target_config_path = _target_runtime_config_path(repo_root=repo_root, market=market, config_path=config_path)
-    runtime_cfg = _load_runtime_config_for_update(target_config_path)
-    accounts, normalized_account = _require_existing_account(runtime_cfg, account_label=account_label)
+    from src.application.config_yaml_accounts import mutate_yaml_account_config
 
-    account_settings = runtime_cfg.get("account_settings")
-    if not isinstance(account_settings, dict):
-        account_settings = {}
-    _backfill_legacy_futu_connection_settings(runtime_cfg, account_settings)
-    current_setting = account_settings.get(normalized_account)
-    if not isinstance(current_setting, dict):
-        current_setting = {"type": ACCOUNT_TYPE_FUTU}
-    current_type = _normalize_account_type(current_setting.get("type"))
-    new_type = _normalize_account_type(account_type) if account_type is not None else current_type
-
-    trade_intake, account_mapping, futu_mapping = _resolve_futu_mapping(runtime_cfg)
-    existing_acc_ids = [key for key, value in futu_mapping.items() if str(value or "").strip().lower() == normalized_account]
-
-    setting: dict[str, Any] = {"type": new_type}
-    current_market = str(current_setting.get("market") or "").strip().lower()
-    normalized_market_label = str(market_label or current_market or _normalize_market(market)).strip().lower()
-    if normalized_market_label in {"us", "hk"}:
-        setting["market"] = normalized_market_label
-    if enabled is None:
-        if "enabled" in current_setting:
-            setting["enabled"] = bool(current_setting.get("enabled"))
-    else:
-        setting["enabled"] = bool(enabled)
-    if trade_intake_enabled is None:
-        if "trade_intake_enabled" in current_setting:
-            setting["trade_intake_enabled"] = bool(current_setting.get("trade_intake_enabled"))
-        else:
-            setting["trade_intake_enabled"] = new_type == ACCOUNT_TYPE_FUTU
-    else:
-        setting["trade_intake_enabled"] = bool(trade_intake_enabled)
-    if clear_holdings_account:
-        pass
-    elif holdings_account is not None:
-        holdings_value = str(holdings_account).strip()
-        if holdings_value:
-            setting["holdings_account"] = holdings_value
-    elif str(current_setting.get("holdings_account") or "").strip():
-        setting["holdings_account"] = str(current_setting.get("holdings_account")).strip()
-
-    if new_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS and not str(setting.get("holdings_account") or "").strip():
-        setting["holdings_account"] = normalized_account
-
-    if new_type == ACCOUNT_TYPE_FUTU:
-        raw_futu_cfg = current_setting.get("futu")
-        futu_cfg = raw_futu_cfg if isinstance(raw_futu_cfg, dict) else {}
-        merged_futu: dict[str, Any] = {str(key): value for key, value in futu_cfg.items()}
-        if futu_host is not None:
-            host = str(futu_host).strip()
-            if host:
-                merged_futu["host"] = host
-            else:
-                merged_futu.pop("host", None)
-        if futu_port is not None:
-            merged_futu["port"] = int(futu_port)
-        if futu_acc_id is not None and str(futu_acc_id).strip():
-            merged_futu["account_id"] = str(futu_acc_id).strip()
-        other_futu_accounts = _futu_accounts_from_settings(account_settings, exclude=normalized_account)
-        if other_futu_accounts and (not str(merged_futu.get("host") or "").strip() or merged_futu.get("port") in (None, "")):
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message="futu_host and futu_port are required when editing an account to Futu in a config that already has Futu accounts",
-                hint="Run a separate OpenD for this Futu account and pass its host/port explicitly.",
-            )
-        if merged_futu:
-            setting["futu"] = merged_futu
-    else:
-        raw_bitable_cfg = current_setting.get("bitable")
-        bitable_cfg = raw_bitable_cfg if isinstance(raw_bitable_cfg, dict) else {}
-        merged_bitable: dict[str, Any] = {str(key): value for key, value in bitable_cfg.items()}
-        for key, value in {
-            "app_token": bitable_app_token,
-            "table_id": bitable_table_id,
-            "view_name": bitable_view_name,
-        }.items():
-            if value is None:
-                continue
-            raw = str(value).strip()
-            if raw:
-                merged_bitable[key] = raw
-            else:
-                merged_bitable.pop(key, None)
-        if merged_bitable:
-            setting["bitable"] = merged_bitable
-
-    for acc_id in existing_acc_ids:
-        futu_mapping.pop(acc_id, None)
-
-    normalized_acc_id: str | None = None
-    if new_type == ACCOUNT_TYPE_FUTU:
-        raw_acc_id = futu_acc_id
-        if raw_acc_id is None:
-            if len(existing_acc_ids) == 1:
-                raw_acc_id = existing_acc_ids[0]
-            elif len(existing_acc_ids) > 1:
-                raise AgentToolError(
-                    code="INPUT_ERROR",
-                    message=f"account has multiple futu acc_ids; pass --futu-acc-id explicitly for {normalized_account}",
-                )
-        normalized_acc_id = _normalize_futu_acc_id(raw_acc_id)
-        existing_owner = futu_mapping.get(normalized_acc_id)
-        if existing_owner is not None and str(existing_owner).strip().lower() != normalized_account:
-            raise AgentToolError(
-                code="INPUT_ERROR",
-                message=f"futu acc_id already exists: ...{normalized_acc_id[-4:]}",
-            )
-        futu_mapping[normalized_acc_id] = normalized_account
-        trade_intake["enabled"] = True
-
-    account_mapping["futu"] = futu_mapping
-    trade_intake["account_mapping"] = account_mapping
-    runtime_cfg["trade_intake"] = trade_intake
-
-    account_settings[normalized_account] = setting
-    runtime_cfg["account_settings"] = account_settings
-
-    portfolio = runtime_cfg.get("portfolio")
-    if not isinstance(portfolio, dict):
-        portfolio = {}
-    source_by_account = portfolio.get("source_by_account")
-    if not isinstance(source_by_account, dict):
-        source_by_account = {}
-    source_by_account[normalized_account] = ("futu" if new_type == ACCOUNT_TYPE_FUTU else "holdings")
-    portfolio["source_by_account"] = source_by_account
-    if str(portfolio.get("account") or "").strip().lower() not in accounts:
-        portfolio["account"] = normalized_account
-    runtime_cfg["portfolio"] = portfolio
-
-    _validate_runtime_config_or_raise(runtime_cfg)
-    if not dry_run:
-        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    result: dict[str, Any] = {
-        "market": _normalize_market(market),
-        "account_label": normalized_account,
-        "account_type": new_type,
-        "config_path": str(target_config_path),
-        "accounts": accounts,
-        "dry_run": bool(dry_run),
-        "write_applied": not bool(dry_run),
-    }
-    if str(setting.get("holdings_account") or "").strip():
-        result["holdings_account"] = str(setting["holdings_account"])
-    if normalized_acc_id is not None:
-        result["futu_acc_id_masked"] = f"...{normalized_acc_id[-4:]}"
-    return result
+    return mutate_yaml_account_config(
+        repo_root=repo_root,
+        action="edit",
+        market=market,
+        account_label=account_label,
+        account_type=account_type,
+        config_path=config_path,
+        futu_acc_id=futu_acc_id,
+        holdings_account=holdings_account,
+        clear_holdings_account=clear_holdings_account,
+        market_label=market_label,
+        enabled=enabled,
+        trade_intake_enabled=trade_intake_enabled,
+        futu_host=futu_host,
+        futu_port=futu_port,
+        bitable_app_token=bitable_app_token,
+        bitable_table_id=bitable_table_id,
+        bitable_view_name=bitable_view_name,
+        apply=not bool(dry_run),
+    )
 
 
 def remove_account_from_local_config(
@@ -633,53 +337,13 @@ def remove_account_from_local_config(
     config_path: str | Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    target_config_path = _target_runtime_config_path(repo_root=repo_root, market=market, config_path=config_path)
-    runtime_cfg = _load_runtime_config_for_update(target_config_path)
-    accounts, normalized_account = _require_existing_account(runtime_cfg, account_label=account_label)
+    from src.application.config_yaml_accounts import mutate_yaml_account_config
 
-    remaining_accounts = [item for item in accounts if item != normalized_account]
-    if not remaining_accounts:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="cannot remove the last account",
-            hint="Keep at least one account in the runtime config.",
-        )
-    runtime_cfg["accounts"] = remaining_accounts
-
-    account_settings = runtime_cfg.get("account_settings")
-    if isinstance(account_settings, dict):
-        account_settings.pop(normalized_account, None)
-        runtime_cfg["account_settings"] = account_settings
-
-    portfolio = runtime_cfg.get("portfolio")
-    if not isinstance(portfolio, dict):
-        portfolio = {}
-    source_by_account = portfolio.get("source_by_account")
-    if isinstance(source_by_account, dict):
-        source_by_account.pop(normalized_account, None)
-        portfolio["source_by_account"] = source_by_account
-    if str(portfolio.get("account") or "").strip().lower() == normalized_account:
-        portfolio["account"] = remaining_accounts[0]
-    runtime_cfg["portfolio"] = portfolio
-
-    trade_intake, account_mapping, futu_mapping = _resolve_futu_mapping(runtime_cfg)
-    stale_keys = [key for key, value in futu_mapping.items() if str(value or "").strip().lower() == normalized_account]
-    for key in stale_keys:
-        futu_mapping.pop(key, None)
-    account_mapping["futu"] = futu_mapping
-    trade_intake["account_mapping"] = account_mapping
-    runtime_cfg["trade_intake"] = trade_intake
-
-    _validate_runtime_config_or_raise(runtime_cfg)
-    if not dry_run:
-        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    return {
-        "market": _normalize_market(market),
-        "removed_account": normalized_account,
-        "config_path": str(target_config_path),
-        "accounts": remaining_accounts,
-        "portfolio_account": str((runtime_cfg.get("portfolio") or {}).get("account") or ""),
-        "dry_run": bool(dry_run),
-        "write_applied": not bool(dry_run),
-    }
+    return mutate_yaml_account_config(
+        repo_root=repo_root,
+        action="remove",
+        market=market,
+        account_label=account_label,
+        config_path=config_path,
+        apply=not bool(dry_run),
+    )

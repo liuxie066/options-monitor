@@ -661,7 +661,7 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
     assert ["sudo", "-n", "systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
 
 
-def test_service_drift_discovers_installed_feishu_ws_as_managed_service(tmp_path: Path) -> None:
+def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declares_it(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
@@ -676,17 +676,138 @@ def test_service_drift_discovers_installed_feishu_ws_as_managed_service(tmp_path
     profile["services"] = [item for item in profile["services"] if item["name"] != "options-monitor-feishu-ws.service"]
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
+    calls: list[list[str]] = []
 
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root, confirm=True)
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
     refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
 
-    assert "options-monitor-feishu-ws.service" in out["expected_services"]
-    assert {"name": "options-monitor-feishu-ws.service"} in refreshed["services"]
-    assert refreshed["feishu_ws"]["enabled"] is True
-    assert refreshed["restart"]["services"] == [
-        "options-monitor-trade-intake.service",
-        "options-monitor-feishu-ws.service",
-    ]
+    assert "options-monitor-feishu-ws.service" not in out["expected_services"]
+    assert {"name": "options-monitor-feishu-ws.service"} not in refreshed["services"]
+    assert "feishu_ws" not in refreshed
+    assert not (systemd_root / "options-monitor-feishu-ws.service").exists()
+    assert out["before"]["extra_installed_units"] == ["options-monitor-feishu-ws.service"]
+    assert out["applied"]["retired_units"] == ["options-monitor-feishu-ws.service"]
+    assert ["systemctl", "disable", "--now", "options-monitor-feishu-ws.service"] in calls
+
+
+def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    target = "options-monitor-projection-verify.timer"
+    states = {target: "masked"}
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[-2:] == ["is-enabled", target]:
+            state = states[target]
+            return subprocess.CompletedProcess(command, 0 if state == "enabled" else 1, stdout=f"{state}\n", stderr="")
+        if command[-2:] == ["unmask", target]:
+            states[target] = "disabled"
+        if command[-3:] == ["enable", "--now", target]:
+            states[target] = "enabled"
+        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["before"]["activation_states"][target] == "masked"
+    assert out["before"]["activation_drift_units"] == [target]
+    assert out["activation_states"][target] == "enabled"
+    assert out["activation_drift_units"] == []
+    assert out["summary"]["status"] == "ok"
+    assert ["systemctl", "unmask", target] in calls
+    assert ["systemctl", "enable", "--now", target] in calls
+
+
+def test_service_drift_repairs_enabled_but_inactive_expected_timer(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"]
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    target = "options-monitor-projection-verify.timer"
+    active_states = {target: "inactive"}
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        command = list(command)
+        calls.append(command)
+        if command[-2:] == ["is-enabled", target]:
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        if command[-2:] == ["is-active", target]:
+            state = active_states[target]
+            return subprocess.CompletedProcess(
+                command,
+                0 if state == "active" else 3,
+                stdout=f"{state}\n",
+                stderr="",
+            )
+        if command[-3:] == ["enable", "--now", target]:
+            active_states[target] = "active"
+        if len(command) >= 2 and command[-2] == "is-active":
+            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["before"]["activation_states"][target] == "enabled"
+    assert out["before"]["active_states"][target] == "inactive"
+    assert out["before"]["activation_drift_units"] == [target]
+    assert out["active_states"][target] == "active"
+    assert out["activation_drift_units"] == []
+    assert out["summary"]["status"] == "ok"
+    assert ["systemctl", "enable", "--now", target] in calls
 
 
 def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp_path: Path) -> None:
@@ -2781,7 +2902,7 @@ def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> 
     assert "liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in remediation
 
 
-def test_service_upgrade_partial_success_when_restart_denied_after_switch(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_symlink(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
@@ -2853,11 +2974,12 @@ def test_service_upgrade_partial_success_when_restart_denied_after_switch(monkey
         run_cmd=_run_cmd,
     )
 
-    assert out["ok"] is True
+    assert out["ok"] is False
     assert out["status"] == "upgraded_restart_failed"
     assert out["changed"] is True
-    assert out["symlink_switched"] is True
-    assert current.resolve() == (releases / "1.0.1").resolve()
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
+    assert out["compensation"]["symlink_restored"] is True
     assert out["restart_failed_services"] == [
         "options-monitor-trade-intake.service",
         "options-monitor-feishu-ws.service",
@@ -3459,11 +3581,16 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
-            hk_runtime.write_text('{"ok": true}\n', encoding="utf-8")
+            assert not hk_runtime.exists()
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built hk\n", stderr="")
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "us"]:
-            us_runtime.write_text('{"ok": true}\n', encoding="utf-8")
+            assert not us_runtime.exists()
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built us\n", stderr="")
+        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="legacy build should not run")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -3480,27 +3607,94 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
     assert out["status"] == "upgraded"
     assert out["runtime_config_prepare"]["overlays"] == []
     assert out["runtime_config_prepare"]["preserved_hotfixes"] == []
-    assert ["./om", "config", "build", "--source", "yaml", "--market", "hk", "--config-yaml", str(config_yaml), "--output", str(hk_runtime)] in calls
-    assert ["./om", "config", "build", "--source", "yaml", "--market", "us", "--config-yaml", str(config_yaml), "--output", str(us_runtime)] in calls
-    assert [
-        "./om",
-        "config",
-        "build-assistant",
-        "--source",
-        "yaml",
-        "--config-yaml",
-        str(config_yaml),
-        "--output",
-        str(runtime / "resolved" / "config.assistant.json"),
-    ] in calls
-    assert out["runtime_config_prepare"]["assistant_rebuilt"] == {
-        "config_path": str(runtime / "resolved" / "config.assistant.json"),
-        "source": "yaml",
-        "phase": "pre_switch",
-    }
+    artifacts = out["runtime_config_prepare"]["artifacts"]
+    artifact_by_kind_market = {(item["kind"], item.get("market")): item for item in artifacts}
+    assert artifact_by_kind_market[("runtime_config", "hk")]["live_path"] == str(hk_runtime)
+    assert artifact_by_kind_market[("runtime_config", "us")]["live_path"] == str(us_runtime)
+    assert artifact_by_kind_market[("assistant_config", None)]["live_path"] == str(
+        runtime / "resolved" / "config.assistant.json"
+    )
+    assert hk_runtime.exists()
+    assert us_runtime.exists()
+    assert (runtime / "resolved" / "config.assistant.json").exists()
     assert not (releases / "1.0.1" / "configs" / "user.hk.json").exists()
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert refreshed_profile["config_authoring"]["config_yaml"] == str(config_yaml)
+
+
+def test_service_upgrade_post_switch_config_validation_failure_restores_symlink_and_bundle(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
+    us_runtime = runtime / "config.us.json"
+    assistant_runtime = runtime / "resolved" / "config.assistant.json"
+    assistant_runtime.parent.mkdir()
+    us_runtime.write_text('{"generation": "old"}\n', encoding="utf-8")
+    assistant_runtime.write_text('{"generation": "old-assistant"}\n', encoding="utf-8")
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["us"],
+                "config_paths": {"us": str(us_runtime)},
+                "config_authoring": {
+                    "source": "yaml",
+                    "config_yaml": str(config_yaml),
+                    "markets": ["us"],
+                },
+                "services": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
+        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+            _create_fake_venv_python_at(Path(command[-1]))
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "us"]:
+            assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"generation": "old"}
+            Path(command[-1]).write_text('{"generation": "new"}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
+            assert json.loads(assistant_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
+            Path(command[-1]).write_text('{"generation": "new-assistant"}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
+        if command[:4] == ["./om", "config", "validate", "--config-path"] and command[4] == str(us_runtime):
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="target validation failed")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "upgrade_failed_rolled_back"
+    assert out["rolled_back"] is True
+    assert out["changed"] is False
+    assert current.resolve() == v100.resolve()
+    assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"generation": "old"}
+    assert json.loads(assistant_runtime.read_text(encoding="utf-8")) == {"generation": "old-assistant"}
 
 
 def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
@@ -3687,6 +3881,9 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        if command[:4] == ["./om", "config", "build-assistant", "--source"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade(
@@ -3749,6 +3946,66 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     )
     assert out["status"] == "rolled_back"
     assert current.resolve() == v100.resolve()
+
+
+def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_rollback
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    _write_upgrade_release_skeleton(v101, "1.0.1")
+    current = install / "current"
+    current.symlink_to(v101, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
+    us_runtime = runtime / "config.us.json"
+    us_runtime.write_text('{"release": "1.0.1"}\n', encoding="utf-8")
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["us"],
+                "config_paths": {"us": str(us_runtime)},
+                "config_authoring": {
+                    "source": "yaml",
+                    "config_yaml": str(config_yaml),
+                    "markets": ["us"],
+                },
+                "services": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "us"]:
+            assert current.resolve() == v101.resolve()
+            assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"release": "1.0.1"}
+            Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
+        elif command[:4] == ["./om", "config", "build-assistant", "--source"]:
+            Path(command[-1]).write_text('{"release": "1.0.0"}\n', encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_rollback(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        to_version="1.0.0",
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "rolled_back"
+    assert current.resolve() == v100.resolve()
+    assert json.loads(us_runtime.read_text(encoding="utf-8")) == {"release": "1.0.0"}
+    assert out["runtime_config_commit"]["status"] == "committed"
 
 
 def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path) -> None:
@@ -4274,6 +4531,80 @@ def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
 
     assert out["ok"] is False
     assert out["status"] == "repo_root_not_symlink"
+
+
+def test_service_cleanup_reports_delete_failure_and_only_actual_freed_bytes(monkeypatch, tmp_path: Path) -> None:
+    import src.application.service_cleanup as cleanup_module
+
+    releases = tmp_path / "releases"
+    active = releases / "1.2.0"
+    previous = releases / "1.1.0"
+    old_ok = releases / "1.0.0"
+    old_failed = releases / "0.9.0"
+    for path, payload in (
+        (active, b"active"),
+        (previous, b"previous"),
+        (old_ok, b"delete-me"),
+        (old_failed, b"keep-me"),
+    ):
+        path.mkdir(parents=True)
+        (path / "VERSION").write_text(path.name, encoding="utf-8")
+        (path / "payload.bin").write_bytes(payload)
+    current = tmp_path / "current"
+    current.symlink_to(active, target_is_directory=True)
+    original_delete = cleanup_module._delete_path
+
+    def _delete(path: Path) -> None:
+        if path == old_failed:
+            raise PermissionError("denied")
+        original_delete(path)
+
+    monkeypatch.setattr(cleanup_module, "_delete_path", _delete)
+
+    out = cleanup_module.service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        keep_releases=2,
+        confirm=True,
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "partial_failure"
+    assert out["failure_count"] == 1
+    assert out["freed_bytes"] > 0
+    assert out["freed_bytes"] < out["estimated_freed_bytes"]
+    assert not old_ok.exists()
+    assert old_failed.exists()
+
+
+def test_service_cleanup_reports_journal_command_failure(tmp_path: Path) -> None:
+    from src.application.service_cleanup import service_cleanup
+
+    releases = tmp_path / "releases"
+    active = releases / "1.2.0"
+    previous = releases / "1.1.0"
+    for path in (active, previous):
+        path.mkdir(parents=True)
+        (path / "VERSION").write_text(path.name, encoding="utf-8")
+    current = tmp_path / "current"
+    current.symlink_to(active, target_is_directory=True)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        journal_vacuum_size="256M",
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "cleanup_failed"
+    assert out["changed"] is False
+    assert out["failure_count"] == 1
+    assert out["freed_bytes"] == 0
     assert out["changed"] is False
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
@@ -96,6 +98,32 @@ def _delete_path(path: Path) -> None:
         path.unlink()
         return
     shutil.rmtree(path)
+
+
+def _delete_path_result(path: Path, *, kind: str) -> dict[str, Any]:
+    before_bytes = _path_size(path)
+    try:
+        _delete_path(path)
+    except Exception as exc:
+        return {
+            "path": str(path),
+            "kind": kind,
+            "ok": False,
+            "reason": "delete_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "before_bytes": before_bytes,
+            "after_bytes": _path_size(path),
+            "freed_bytes": 0,
+        }
+    after_bytes = _path_size(path)
+    return {
+        "path": str(path),
+        "kind": kind,
+        "ok": True,
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+        "freed_bytes": max(0, before_bytes - after_bytes),
+    }
 
 
 def _mtime_utc(path: Path) -> datetime:
@@ -280,6 +308,26 @@ def _runtime_log_cleanup_plan(
     }
 
 
+def _output_runs_plan_sha256(payload: dict[str, Any]) -> str:
+    rows = payload.get("delete_runs") if isinstance(payload, dict) else []
+    normalized = [
+        {
+            "path": str(item.get("path") or ""),
+            "estimated_bytes": int(item.get("estimated_bytes") or 0),
+            "mtime_utc": item.get("mtime_utc"),
+        }
+        for item in rows or []
+        if isinstance(item, dict)
+    ]
+    encoded = json.dumps(
+        sorted(normalized, key=lambda item: item["path"]),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _cache_candidates(
     *,
     apps_root: Path,
@@ -331,6 +379,7 @@ def service_cleanup(
     output_runs_keep_count: int = 200,
     cleanup_runtime_logs: bool = False,
     runtime_logs_keep_days: int = 14,
+    expected_output_runs_plan_sha256: str | None = None,
     confirm: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
     now: datetime | None = None,
@@ -481,28 +530,65 @@ def service_cleanup(
             ],
         }
 
+    output_runs_plan_sha256 = _output_runs_plan_sha256(output_runs_cleanup)
+    expected_plan_sha256 = str(expected_output_runs_plan_sha256 or "").strip().lower()
+    if confirm and expected_plan_sha256 and expected_plan_sha256 != output_runs_plan_sha256:
+        return {
+            **base,
+            "ok": False,
+            "status": "output_runs_plan_changed",
+            "reason": "current output-runs deletion plan does not match the confirmed preview",
+            "changed": False,
+            "output_runs_cleanup": output_runs_cleanup,
+            "output_runs_plan_sha256": output_runs_plan_sha256,
+            "expected_output_runs_plan_sha256": expected_plan_sha256,
+            "deleted_paths": [],
+            "operations": [],
+        }
+
     if confirm:
         for path in delete_releases:
             if path.resolve() == active_release or path.resolve() in kept_set or not _safe_child(path, parent=releases):
                 operations.append({"path": str(path), "ok": False, "skipped": True, "reason": "unsafe_release_path"})
                 continue
-            _delete_path(path)
-            deleted_paths.append(str(path))
-            operations.append({"path": str(path), "ok": True, "kind": "release"})
+            operation = _delete_path_result(path, kind="release")
+            operations.append(operation)
+            if operation.get("ok"):
+                deleted_paths.append(str(path))
         for item in cache_items:
             path = Path(str(item["path"]))
             if not item.get("exists"):
                 continue
             if item.get("kind") == "apt_cache":
-                result = run_cmd(["apt-get", "clean"], capture_output=True, text=True, timeout=120, check=False)
+                before_bytes = _path_size(path)
+                command = ["apt-get", "clean"]
+                try:
+                    result = run_cmd(command, capture_output=True, text=True, timeout=120, check=False)
+                except Exception as exc:
+                    operations.append(
+                        {
+                            "kind": "apt_cache",
+                            "command": command,
+                            "ok": False,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "before_bytes": before_bytes,
+                            "after_bytes": _path_size(path),
+                            "freed_bytes": 0,
+                        }
+                    )
+                    continue
+                after_bytes = _path_size(path)
                 operations.append(
                     {
                         "kind": "apt_cache",
-                        "command": ["apt-get", "clean"],
+                        "command": command,
                         "ok": int(getattr(result, "returncode", 1)) == 0,
                         "returncode": int(getattr(result, "returncode", 1)),
                         "stdout": str(getattr(result, "stdout", "") or "")[-2000:],
                         "stderr": str(getattr(result, "stderr", "") or "")[-2000:],
+                        "before_bytes": before_bytes,
+                        "after_bytes": after_bytes,
+                        "freed_bytes": max(0, before_bytes - after_bytes),
                     }
                 )
                 if int(getattr(result, "returncode", 1)) == 0:
@@ -511,9 +597,10 @@ def service_cleanup(
             if item.get("kind") == "downloads" and not _safe_child(path, parent=apps_root):
                 operations.append({"path": str(path), "ok": False, "skipped": True, "reason": "unsafe_cache_path"})
                 continue
-            _delete_path(path)
-            deleted_paths.append(str(path))
-            operations.append({"path": str(path), "ok": True, "kind": item.get("kind")})
+            operation = _delete_path_result(path, kind=str(item.get("kind") or "cache"))
+            operations.append(operation)
+            if operation.get("ok"):
+                deleted_paths.append(str(path))
         if cleanup_output_runs:
             try:
                 with position_advice_manifest_locks(
@@ -530,6 +617,23 @@ def service_cleanup(
                         now=runtime_now,
                         position_advice_protected_runs=current_runs,
                     )
+                    current_plan_sha256 = _output_runs_plan_sha256(output_runs_cleanup)
+                    if (
+                        expected_plan_sha256
+                        and current_plan_sha256 != expected_plan_sha256
+                    ):
+                        operations.append(
+                            {
+                                "ok": False,
+                                "skipped": True,
+                                "reason": "output_runs_plan_changed",
+                                "kind": "output_run_cleanup",
+                                "expected_output_runs_plan_sha256": expected_plan_sha256,
+                                "output_runs_plan_sha256": current_plan_sha256,
+                            }
+                        )
+                        output_runs_cleanup["plan_sha256"] = current_plan_sha256
+                        raise _OutputRunsPlanChanged
                     for item in output_runs_cleanup.get("delete_runs") or []:
                         path = Path(str(item.get("path") or ""))
                         runs_root = Path(str(output_runs_cleanup.get("root") or ""))
@@ -558,11 +662,12 @@ def service_cleanup(
                                 }
                             )
                             continue
-                        _delete_path(path)
-                        deleted_paths.append(str(path))
-                        operations.append(
-                            {"path": str(path), "ok": True, "kind": "output_run"}
-                        )
+                        operation = _delete_path_result(path, kind="output_run")
+                        operations.append(operation)
+                        if operation.get("ok"):
+                            deleted_paths.append(str(path))
+            except _OutputRunsPlanChanged:
+                pass
             except (PositionAdviceCurrentError, PositionAdviceLockError, OSError) as exc:
                 operations.append(
                     {
@@ -584,9 +689,10 @@ def service_cleanup(
                     {"path": str(path), "ok": False, "skipped": True, "reason": "unsafe_runtime_log_path", "kind": "runtime_log"}
                 )
                 continue
-            _delete_path(path)
-            deleted_paths.append(str(path))
-            operations.append({"path": str(path), "ok": True, "kind": "runtime_log"})
+            operation = _delete_path_result(path, kind="runtime_log")
+            operations.append(operation)
+            if operation.get("ok"):
+                deleted_paths.append(str(path))
         if journal_vacuum_size:
             operations.append({"kind": "journal", **_run_journal_vacuum(size=journal_vacuum_size, run_cmd=run_cmd)})
 
@@ -602,21 +708,38 @@ def service_cleanup(
         "active release",
         "rollback release",
     ]
+    failures = [
+        item
+        for item in operations
+        if item.get("ok") is False and str(item.get("reason") or "") != "missing"
+    ]
+    freed_bytes = sum(max(0, int(item.get("freed_bytes") or 0)) for item in operations if item.get("ok"))
+    successful_journal = any(item.get("kind") == "journal" and item.get("ok") for item in operations)
+    changed = bool(confirm and (deleted_paths or successful_journal))
+    status = "dry_run"
+    if confirm and failures:
+        status = "partial_failure" if changed else "cleanup_failed"
+    elif confirm:
+        status = "cleaned"
 
     return {
         **base,
-        "ok": True,
-        "status": "cleaned" if confirm else "dry_run",
-        "changed": bool(confirm and (deleted_paths or journal_vacuum_size)),
+        "ok": not failures,
+        "status": status,
+        "changed": changed,
         "active_release": str(active_release),
         "kept_releases": [{"path": str(path), "version": path.name} for path in kept],
         "delete_releases": release_items,
         "cache_dirs": cache_items,
         "output_runs_cleanup": output_runs_cleanup,
+        "output_runs_plan_sha256": _output_runs_plan_sha256(output_runs_cleanup),
+        "expected_output_runs_plan_sha256": expected_plan_sha256 or None,
         "runtime_logs_cleanup": runtime_logs_cleanup,
         "journal_vacuum_size": journal_vacuum_size,
         "estimated_freed_bytes": estimated,
-        "freed_bytes": estimated if confirm else 0,
+        "freed_bytes": freed_bytes if confirm else 0,
+        "failure_count": len(failures),
+        "failures": failures,
         "deleted_paths": deleted_paths,
         "operations": operations,
         "protected": unsafe_roots,
@@ -624,3 +747,7 @@ def service_cleanup(
 
 
 __all__ = ["service_cleanup"]
+
+
+class _OutputRunsPlanChanged(Exception):
+    pass

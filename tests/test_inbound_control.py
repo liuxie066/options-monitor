@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -336,22 +336,68 @@ def _write_inbound_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _write_symbols_runtime_config(tmp_path: Path) -> Path:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        f"""\
+accounts:
+  sy:
+    type: external_holdings
+    holdings_account: sy
+portfolio:
+  account: sy
+  data_config: {data_cfg_path}
+templates:
+  put_base:
+    sell_put: {{}}
+  call_base:
+    covered_call:
+      strategy: insurance_underwriting
+markets:
+  us:
+    accounts: [sy]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        use: [put_base]
+        sell_put:
+          enabled: true
+          min_dte: 20
+          max_dte: 45
+        covered_call:
+          enabled: false
+  hk:
+    accounts: [sy]
+    symbols: [0883.HK]
+    overrides:
+      0883.HK:
+        use: [put_base]
+        sell_put:
+          enabled: true
+          min_dte: 20
+          max_dte: 45
+        covered_call:
+          enabled: false
+""",
+        encoding="utf-8",
+    )
     cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_runtime_cfg(str(data_cfg_path)), ensure_ascii=False, indent=2), encoding="utf-8")
     hk_cfg_path = tmp_path / "config.hk.json"
-    hk_cfg = _runtime_cfg(str(data_cfg_path), market="hk")
-    hk_cfg["symbols"] = [
-        {
-            "symbol": "0883.HK",
-            "fetch": {"source": "futu", "limit_expirations": 8},
-            "use": ["put_base"],
-            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45},
-            "sell_call": {"enabled": False},
-        }
-    ]
-    hk_cfg_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    build_yaml_runtime_config_file(
+        repo_root=Path(__file__).resolve().parents[1],
+        market="us",
+        config_path=config_yaml,
+        output_config_path=cfg_path,
+    )
+    build_yaml_runtime_config_file(
+        repo_root=Path(__file__).resolve().parents[1],
+        market="hk",
+        config_path=config_yaml,
+        output_config_path=hk_cfg_path,
+    )
     return cfg_path
 
 
@@ -446,9 +492,14 @@ def _enable_inbound_monitor_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
     config_yaml = tmp_path / "config.yaml"
-    assistant_config = tmp_path / "config.assistant.json"
+    assistant_config = tmp_path / "resolved" / "config.assistant.json"
+    assistant_config.parent.mkdir(parents=True)
     config_yaml.write_text(
         """
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
 assistant:
   enabled: true
   copilot:
@@ -463,6 +514,13 @@ assistant:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+  hk:
+    accounts: [lx]
+    symbols: [0700.HK]
 """.lstrip(),
         encoding="utf-8",
     )
@@ -632,6 +690,38 @@ def test_inbound_model_use_requires_preview_and_confirm(
     generated = json.loads(assistant_config.read_text(encoding="utf-8"))
     assert generated["assistant"]["llm"]["provider"] == "deepseek"
     assert generated["assistant"]["llm"]["model"] == "deepseek-chat"
+
+
+def test_inbound_model_confirm_rejects_stale_config_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+    _enable_inbound_model_write(monkeypatch)
+    request_kwargs = {
+        "sender_id": "ou_1",
+        "channel": "feishu",
+        "conversation_id": "feishu:oc_1:ou_1",
+        "audit_db": str(tmp_path / "audit.sqlite3"),
+        "assistant_config_path": str(assistant_config),
+    }
+
+    preview = handle_assistant_request(
+        AssistantRequest(text="/model use deepseek-default", message_id="model_stale_preview", **request_kwargs),
+        allowed_senders="feishu:ou_1",
+    )
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["config"]["source_sha256"]
+    config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(text="确认模型", message_id="model_stale_confirm", **request_kwargs),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is False
+    assert confirmed["error"]["code"] == "STALE_PREVIEW"
+    assert "active_model: openai-default" in config_yaml.read_text(encoding="utf-8")
 
 
 def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
@@ -1537,7 +1627,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
 def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable_inbound_trade_write(monkeypatch)
     monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
-    cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
     trade_preview = handle_assistant_request(
@@ -1985,6 +2075,13 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
     assert confirmed["ok"] is True
 
     def _reply_fn(**kwargs):  # type: ignore[no-untyped-def]
+        persisted = InboundOperationStore(audit_db).get(operation_id)
+        persisted_outbox = InboundOperationStore(audit_db).get_operation_outbox(operation_id)
+        assert persisted is not None
+        assert persisted["status"] == "applied"
+        assert persisted["result"]["final_receipt"]["reason"] == "pending_outbox"
+        assert persisted_outbox is not None
+        assert persisted_outbox["status"] == "sending"
         reply_attempts.append(dict(kwargs))
         if len(reply_attempts) == 1:
             raise RuntimeError("temporary feishu reply failure")
@@ -2006,6 +2103,89 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
     assert reply_attempts[-1]["message_id"] == "msg_upgrade_confirm"
     assert reply_attempts[-1]["uuid"] == f"{operation_id}:upgrade-final"
     assert "升级执行完成" in str(reply_attempts[-1]["text"])
+
+
+def test_inbound_upgrade_worker_recovers_pending_outbox_without_reapplying_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.assistant import upgrade_operations
+    from src.application.assistant.operation_signature import hash_operation_payload
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundOperationStore(audit_db)
+    operation_id = "in_upgrade_outbox_crash"
+    payload = {
+        "operation_type": "upgrade_now",
+        "arguments": {"target_version": "1.2.111"},
+        "receipt_target": {"channel": "feishu", "message_id": "msg_confirm"},
+    }
+    store.save_preview(
+        operation_id=operation_id,
+        command_id=operation_id,
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        operation_type="upgrade_now",
+        payload_hash=hash_operation_payload(payload),
+        payload=payload,
+        preview={"upgrade": {"ok": True, "planned_operations": ["upgrade"]}},
+        ttl_seconds=600,
+    )
+    assert store.mark_confirmed(operation_id) is True
+    apply_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: apply_calls.append(dict(kwargs))
+        or {
+            "ok": True,
+            "status": "upgraded",
+            "changed": True,
+            "current_version": "1.2.110",
+            "target_version": "1.2.111",
+        },
+    )
+    real_dispatch = upgrade_operations._dispatch_final_receipt_outbox
+
+    def _crash_before_dispatch(**_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("simulated crash after terminal commit")
+
+    monkeypatch.setattr(upgrade_operations, "_dispatch_final_receipt_outbox", _crash_before_dispatch)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        upgrade_operations.run_confirmed_upgrade_operation(
+            operation_id=operation_id,
+            audit_db=audit_db,
+            send_receipt=False,
+        )
+
+    terminal = store.get(operation_id)
+    outbox = store.get_operation_outbox(operation_id)
+    assert terminal is not None
+    assert terminal["status"] == "applied"
+    assert outbox is not None
+    assert outbox["status"] == "pending"
+    assert len(apply_calls) == 1
+
+    stale_claim = store.claim_outbox(
+        str(outbox["outbox_id"]),
+        now=datetime.now(timezone.utc) - timedelta(minutes=10),
+    )
+    assert stale_claim is not None
+    assert stale_claim["status"] == "sending"
+
+    monkeypatch.setattr(upgrade_operations, "_dispatch_final_receipt_outbox", real_dispatch)
+    recovered = upgrade_operations.run_confirmed_upgrade_operation(
+        operation_id=operation_id,
+        audit_db=audit_db,
+        send_receipt=False,
+    )
+
+    assert recovered["ok"] is True
+    assert len(apply_calls) == 1
+    assert store.get_operation_outbox(operation_id)["status"] == "sent"  # type: ignore[index]
+    assert store.get(operation_id)["result"]["final_receipt"]["reason"] == "disabled"  # type: ignore[index]
 
 
 def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
@@ -2836,25 +3016,64 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert nvda["sell_call"]["min_strike"] == 140.0
 
 
-def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_inbound_symbol_confirm_rejects_stale_config_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     _enable_inbound_symbol_write(monkeypatch)
-    data_cfg_path = tmp_path / "portfolio.runtime.json"
-    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
-    us_cfg_path = tmp_path / "config.us.json"
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    config_yaml = tmp_path / "config.yaml"
+    request_kwargs = {
+        "sender_id": "ou_1",
+        "channel": "feishu",
+        "config_path": str(cfg_path),
+        "audit_db": str(tmp_path / "inbound.sqlite3"),
+    }
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/symbol edit NVDA sell_put.max_strike=90",
+            message_id="symbol_stale_preview",
+            **request_kwargs,
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["config"]["source_sha256"]
+    config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(text="确认监控", message_id="symbol_stale_confirm", **request_kwargs),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is False
+    assert confirmed["error"]["code"] == "STALE_PREVIEW"
+    assert "max_strike: 90" not in config_yaml.read_text(encoding="utf-8")
+
+
+def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    _enable_inbound_symbol_write(monkeypatch)
+    us_cfg_path = _write_symbols_runtime_config(tmp_path)
     hk_cfg_path = tmp_path / "config.hk.json"
-    us_cfg = _runtime_cfg(str(data_cfg_path), market="us")
-    hk_cfg = _runtime_cfg(str(data_cfg_path), market="hk")
-    hk_cfg["symbols"] = [
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "limit_expirations": 8},
-            "use": ["put_base"],
-            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45, "max_strike": 450},
-            "sell_call": {"enabled": False},
-        }
-    ]
-    us_cfg_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    hk_cfg_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    config_yaml = tmp_path / "config.yaml"
+    config_doc = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    config_doc["markets"]["hk"]["symbols"].append("0700.HK")
+    config_doc["markets"]["hk"]["overrides"]["0700.HK"] = {
+        "use": ["put_base"],
+        "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45, "max_strike": 450},
+        "covered_call": {"enabled": False},
+    }
+    config_yaml.write_text(yaml.safe_dump(config_doc, sort_keys=False), encoding="utf-8")
+    for market, path in (("us", us_cfg_path), ("hk", hk_cfg_path)):
+        build_yaml_runtime_config_file(
+            repo_root=Path(__file__).resolve().parents[1],
+            market=market,
+            config_path=config_yaml,
+            output_config_path=path,
+        )
     audit_db = tmp_path / "inbound.sqlite3"
 
     preview = handle_assistant_request(
@@ -2870,10 +3089,11 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
     )
 
     assert preview["ok"] is True
-    assert preview["data"]["payload"]["config"]["config_key"] == "hk"
-    assert preview["data"]["payload"]["config"]["config_path"] == str(hk_cfg_path)
+    assert preview["data"]["payload"]["config"]["source_format"] == "yaml"
+    assert preview["data"]["payload"]["config"]["market"] == "hk"
+    assert preview["data"]["payload"]["config"]["config_yaml_path"] == str(config_yaml)
     assert "校准为：0700.HK" in preview["data"]["response_text"]
-    assert f"配置：{hk_cfg_path}" in preview["data"]["response_text"]
+    assert f"配置：{config_yaml}" in preview["data"]["response_text"]
 
     confirmed = handle_assistant_request(
         AssistantRequest(
@@ -2891,7 +3111,8 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
     current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
     current_hk = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
     assert current_us["symbols"][0]["symbol"] == "NVDA"
-    assert current_hk["symbols"][0]["sell_put"]["max_strike"] == 480
+    hk_0700 = next(item for item in current_hk["symbols"] if item["symbol"] == "0700.HK")
+    assert hk_0700["sell_put"]["max_strike"] == 480
 
 
 def test_inbound_symbol_setting_writes_yaml_and_rebuilds_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -3005,7 +3226,7 @@ markets:
     assert preview["ok"] is True
     assert preview["data"]["payload"]["config"]["source_format"] == "yaml"
     assert preview["data"]["payload"]["config"]["config_yaml_path"] == str(config_yaml)
-    assert preview["data"]["payload"]["yaml_symbol_set"]["sell_put_max_strike"] == 90.0
+    assert preview["data"]["payload"]["yaml_symbol_mutation"]["set"]["sell_put.max_strike"] == 90
     assert "markets.us.overrides.FUTU.sell_put.max_strike" in preview["data"]["response_text"]
     assert "max_strike: 120" in config_yaml.read_text(encoding="utf-8")
 
@@ -3071,7 +3292,7 @@ markets:
     )
 
     assert preview["ok"] is True
-    assert preview["data"]["payload"]["yaml_symbol_set"]["combo_yield_enabled"] is True
+    assert preview["data"]["payload"]["yaml_symbol_mutation"]["set"]["combo_yield.enabled"] is True
     assert "markets.hk.overrides.3690.HK.combo_yield.enabled" in preview["data"]["response_text"]
     assert "enabled: false" in config_yaml.read_text(encoding="utf-8")
 

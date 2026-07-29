@@ -236,6 +236,13 @@ class RuntimePrepareError(RuntimeError):
         self.runtime_prepare = runtime_prepare
 
 
+class ServiceTransitionError(RuntimeError):
+    def __init__(self, message: str, *, status: str, remediation: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.remediation = remediation or []
+
+
 def _load_service_profile(runtime_root: Path) -> dict[str, Any]:
     profile_path = runtime_root / "service.profile.json"
     try:
@@ -1063,30 +1070,272 @@ def _prepare_runtime_configs_for_release(
     if not targets and assistant_target is None:
         return {"status": "skipped", "reason": "service profile has no runtime config targets"}
 
+    staging_root = runtime_root / "upgrade_staging" / f"{previous_dir.name}-to-{target_dir.name}"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staged_root = staging_root / "desired"
+    staged_root.mkdir(parents=True, exist_ok=True)
+    staged_targets: list[dict[str, str]] = []
+    artifacts: list[dict[str, str]] = []
+    for item in targets:
+        live_path = Path(item["config_path"]).expanduser()
+        staged_path = staged_root / f"{item['market']}-{live_path.name}"
+        staged_targets.append({**item, "config_path": str(staged_path)})
+        artifacts.append(
+            {
+                "kind": "runtime_config",
+                "market": item["market"],
+                "live_path": str(live_path),
+                "staged_path": str(staged_path),
+            }
+        )
+    staged_assistant_target: dict[str, str] | None = None
+    if assistant_target is not None:
+        assistant_live_path = Path(assistant_target["config_path"]).expanduser()
+        assistant_staged_path = staged_root / f"assistant-{assistant_live_path.name}"
+        staged_assistant_target = {**assistant_target, "config_path": str(assistant_staged_path)}
+        artifacts.append(
+            {
+                "kind": "assistant_config",
+                "live_path": str(assistant_live_path),
+                "staged_path": str(assistant_staged_path),
+            }
+        )
+
     rebuilt = _rebuild_and_validate_runtime_configs(
-        targets=targets,
+        targets=staged_targets,
         cwd=target_dir,
         run_cmd=run_cmd,
         operations=operations,
         phase="pre_switch",
     )
     assistant_rebuilt = _rebuild_assistant_config(
-        target=assistant_target,
+        target=staged_assistant_target,
         cwd=target_dir,
         run_cmd=run_cmd,
         operations=operations,
         phase="pre_switch",
+    )
+    for artifact in artifacts:
+        _retarget_staged_rebuild_command(
+            staged_path=Path(artifact["staged_path"]),
+            live_path=Path(artifact["live_path"]),
+        )
+    manifest_path = staging_root / "manifest.json"
+    _write_json_atomic_file(
+        manifest_path,
+        {
+            "schema_version": 1,
+            "state": "prepared",
+            "previous_dir": str(previous_dir),
+            "target_dir": str(target_dir),
+            "releases_root": str(releases_root),
+            "artifacts": artifacts,
+        },
     )
 
     return {
         "status": "prepared",
         "targets": targets,
         "assistant_target": assistant_target,
+        "staging_root": str(staging_root),
+        "manifest_path": str(manifest_path),
+        "artifacts": artifacts,
         "overlays": [],
         "preserved_hotfixes": [],
         "rebuilt": rebuilt,
         "assistant_rebuilt": assistant_rebuilt,
     }
+
+
+def _write_json_atomic_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _retarget_staged_rebuild_command(*, staged_path: Path, live_path: Path) -> None:
+    try:
+        payload = json.loads(staged_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeConfigPrepareError(
+            f"staged runtime config is not valid JSON: {staged_path}",
+            remediation=[f"inspect_staged_config: {staged_path}"],
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeConfigPrepareError(
+            f"staged runtime config must be a JSON object: {staged_path}",
+            remediation=[f"inspect_staged_config: {staged_path}"],
+        )
+    generated = payload.get(GENERATED_KEY)
+    if isinstance(generated, dict):
+        command = str(generated.get("rebuild_command") or "")
+        if command:
+            generated["rebuild_command"] = command.replace(str(staged_path), str(live_path))
+    _write_json_atomic_file(staged_path, payload)
+
+
+def _commit_prepared_runtime_configs(
+    *,
+    prepared: dict[str, Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if prepared.get("status") != "prepared":
+        return {"status": "skipped", "artifacts": []}
+    staging_root = Path(str(prepared["staging_root"]))
+    manifest_path = Path(str(prepared["manifest_path"]))
+    backup_root = staging_root / "backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    committed: list[dict[str, Any]] = []
+    manifest = {
+        "schema_version": 1,
+        "state": "committing",
+        "artifacts": prepared.get("artifacts") or [],
+        "committed": committed,
+    }
+    _write_json_atomic_file(manifest_path, manifest)
+    try:
+        for index, raw in enumerate(prepared.get("artifacts") or []):
+            artifact = dict(raw)
+            staged_path = Path(str(artifact["staged_path"]))
+            live_path = Path(str(artifact["live_path"]))
+            if not staged_path.is_file():
+                raise RuntimeError(f"staged config missing: {staged_path}")
+            live_path.parent.mkdir(parents=True, exist_ok=True)
+            existed = live_path.exists()
+            backup_path = backup_root / f"{index}-{live_path.name}"
+            if existed:
+                shutil.copy2(live_path, backup_path)
+            temp_path = live_path.with_name(f".{live_path.name}.upgrade-tmp")
+            shutil.copy2(staged_path, temp_path)
+            os.replace(temp_path, live_path)
+            item = {
+                **artifact,
+                "existed_before": existed,
+                "backup_path": str(backup_path) if existed else None,
+            }
+            committed.append(item)
+            operations.append(
+                {
+                    "operation": "commit_runtime_config",
+                    "path": str(live_path),
+                    "staged_path": str(staged_path),
+                    "ok": True,
+                }
+            )
+            manifest["committed"] = committed
+            _write_json_atomic_file(manifest_path, manifest)
+    except Exception as exc:
+        restore = _restore_committed_runtime_configs(
+            commit={"status": "committing", "manifest_path": str(manifest_path), "artifacts": committed},
+            operations=operations,
+        )
+        raise RuntimeConfigPrepareError(
+            f"failed to commit runtime config bundle: {type(exc).__name__}: {exc}",
+            remediation=[
+                f"inspect_upgrade_manifest: {manifest_path}",
+                *([f"manual_restore_required: {item}" for item in restore.get("errors") or []]),
+            ],
+        ) from exc
+    manifest["state"] = "committed"
+    _write_json_atomic_file(manifest_path, manifest)
+    return {
+        "status": "committed",
+        "manifest_path": str(manifest_path),
+        "artifacts": committed,
+    }
+
+
+def _restore_committed_runtime_configs(
+    *,
+    commit: dict[str, Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    restored: list[str] = []
+    errors: list[str] = []
+    for artifact in reversed(list(commit.get("artifacts") or [])):
+        live_path = Path(str(artifact.get("live_path") or ""))
+        backup_raw = str(artifact.get("backup_path") or "")
+        try:
+            if bool(artifact.get("existed_before")):
+                backup_path = Path(backup_raw)
+                if not backup_path.is_file():
+                    raise RuntimeError(f"backup missing: {backup_path}")
+                temp_path = live_path.with_name(f".{live_path.name}.restore-tmp")
+                shutil.copy2(backup_path, temp_path)
+                os.replace(temp_path, live_path)
+            else:
+                live_path.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"{live_path}: {type(exc).__name__}: {exc}")
+            operations.append(
+                {
+                    "operation": "restore_runtime_config",
+                    "path": str(live_path),
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        else:
+            restored.append(str(live_path))
+            operations.append({"operation": "restore_runtime_config", "path": str(live_path), "ok": True})
+    manifest_raw = str(commit.get("manifest_path") or "")
+    if manifest_raw:
+        manifest_path = Path(manifest_raw)
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["state"] = "restored" if not errors else "restore_failed"
+                payload["restore_errors"] = errors
+                _write_json_atomic_file(manifest_path, payload)
+        except Exception:
+            pass
+    return {"ok": not errors, "restored": restored, "errors": errors}
+
+
+def _validate_committed_runtime_configs(
+    *,
+    prepared: dict[str, Any],
+    cwd: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    validated: list[dict[str, str]] = []
+    for item in prepared.get("targets") or []:
+        market = str(item["market"])
+        config_path = str(item["config_path"])
+        try:
+            _run_required(
+                ["./om", "config", "validate", "--config-path", config_path, "--market", market],
+                cwd=cwd,
+                run_cmd=run_cmd,
+                operations=operations,
+                timeout=120,
+            )
+        except RuntimeError as exc:
+            raise RuntimeConfigPrepareError(
+                f"failed to validate committed runtime config for {market}: {config_path}",
+                remediation=[f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}"],
+            ) from exc
+        validated.append({"market": market, "config_path": config_path, "phase": "post_switch"})
+    assistant = prepared.get("assistant_target")
+    if isinstance(assistant, dict) and assistant.get("config_path"):
+        path = Path(str(assistant["config_path"]))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeConfigPrepareError(
+                f"committed assistant config is invalid: {path}",
+                remediation=[f"manual_rebuild: cd {cwd} && ./om config build-assistant --source yaml --output {path}"],
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeConfigPrepareError(
+                f"committed assistant config must be an object: {path}",
+                remediation=[f"inspect_assistant_config: {path}"],
+            )
+        operations.append({"operation": "validate_assistant_config", "path": str(path), "ok": True})
+    return validated
 
 
 def _upgrade_installer_mode() -> str:
@@ -1837,6 +2086,92 @@ def _switch_current_symlink(*, current_link: Path, target_dir: Path) -> None:
     os.replace(tmp_link, current_link)
 
 
+def _compensate_service_transition(
+    *,
+    repo_link: Path,
+    previous_dir: Path,
+    runtime_root: Path,
+    previous_profile: dict[str, Any],
+    config_commit: dict[str, Any],
+    restart_services: bool,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    symlink_restored = False
+    config_restore: dict[str, Any] = {"ok": True, "status": "skipped", "restored": [], "errors": []}
+    try:
+        _switch_current_symlink(current_link=repo_link, target_dir=previous_dir)
+    except Exception as exc:
+        errors.append(f"restore symlink: {type(exc).__name__}: {exc}")
+    else:
+        symlink_restored = True
+        operations.append(
+            {
+                "operation": "restore_current_symlink",
+                "path": str(repo_link),
+                "target": str(previous_dir),
+                "ok": True,
+            }
+        )
+        config_restore = _restore_committed_runtime_configs(commit=config_commit, operations=operations)
+    if not config_restore.get("ok", True):
+        errors.extend(f"restore config: {item}" for item in config_restore.get("errors") or [])
+
+    service_reconcile: dict[str, Any] = {}
+    if symlink_restored and previous_profile:
+        try:
+            service_reconcile = service_drift(
+                repo_root=repo_link,
+                runtime_root=runtime_root,
+                profile_path=runtime_root / "service.profile.json",
+                profile=previous_profile,
+                confirm=True,
+                run_cmd=run_cmd,
+            )
+        except Exception as exc:
+            errors.append(f"restore services: {type(exc).__name__}: {exc}")
+        else:
+            if _service_reconcile_failed(service_reconcile):
+                errors.extend(f"restore services: {item}" for item in _service_reconcile_remediation(service_reconcile))
+
+    restarted: list[str] = []
+    service_health: dict[str, Any] = {}
+    if symlink_restored and restart_services:
+        try:
+            restarted = _restart_services_from_loaded_profile(
+                profile=previous_profile,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+        except ServiceRestartError as exc:
+            restarted = exc.restarted_services
+            errors.append(f"restore restart: {exc}")
+            errors.extend(f"restore restart: {item}" for item in exc.remediation)
+        try:
+            service_health = _post_upgrade_service_health(
+                profile=previous_profile,
+                repo_root=repo_link,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+        except Exception as exc:
+            errors.append(f"restore health: {type(exc).__name__}: {exc}")
+        else:
+            if not bool(service_health.get("ok", True)):
+                errors.extend(f"restore health: {item}" for item in service_health.get("remediation") or [])
+
+    return {
+        "ok": not errors,
+        "symlink_restored": symlink_restored,
+        "config_restore": config_restore,
+        "service_reconcile": service_reconcile,
+        "restarted_services": restarted,
+        "service_health": service_health,
+        "errors": errors,
+    }
+
+
 def service_upgrade(
     *,
     repo_root: str | Path,
@@ -1978,9 +2313,12 @@ def service_upgrade(
     release_materialize = _release_materialize_summary(tag=str(tag), target_dir=target_dir, cache_root=cache)
     runtime_prepare: dict[str, Any] = {}
     runtime_config_prepare: dict[str, Any] = {}
+    runtime_config_commit: dict[str, Any] = {}
     post_switch_runtime_config_validate: list[dict[str, Any]] = []
     service_reconcile: dict[str, Any] = {}
     service_health: dict[str, Any] = {}
+    compensation: dict[str, Any] = {}
+    restarted: list[str] = []
     pre_upgrade_profile = _load_service_profile(runtime)
     try:
         with _UpgradeLock(lock_path):
@@ -2057,16 +2395,15 @@ def service_upgrade(
             )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
-            post_switch_runtime_config_validate = (
-                _rebuild_and_validate_runtime_configs(
-                    targets=runtime_config_prepare.get("targets", []),
-                    cwd=repo_link,
-                    run_cmd=run_cmd,
-                    operations=operations,
-                    phase="post_switch",
-                )
-                if runtime_config_prepare.get("status") == "prepared"
-                else []
+            runtime_config_commit = _commit_prepared_runtime_configs(
+                prepared=runtime_config_prepare,
+                operations=operations,
+            )
+            post_switch_runtime_config_validate = _validate_committed_runtime_configs(
+                prepared=runtime_config_prepare,
+                cwd=repo_link,
+                run_cmd=run_cmd,
+                operations=operations,
             )
             if pre_upgrade_profile:
                 service_reconcile = service_drift(
@@ -2077,6 +2414,12 @@ def service_upgrade(
                     confirm=True,
                     run_cmd=run_cmd,
                 )
+                if _service_reconcile_failed(service_reconcile):
+                    raise ServiceTransitionError(
+                        "service drift reconciliation failed after upgrade",
+                        status="upgraded_service_reconcile_failed",
+                        remediation=_service_reconcile_remediation(service_reconcile),
+                    )
             restart_profile = _load_service_profile(runtime) or pre_upgrade_profile
             restarted = (
                 _restart_services_from_loaded_profile(profile=restart_profile, run_cmd=run_cmd, operations=operations)
@@ -2093,19 +2436,40 @@ def service_upgrade(
                 if restart_services
                 else {"ok": True, "status": "skipped", "reason": "service_restart_disabled", "checks": [], "failed_checks": []}
             )
+            if service_health and not bool(service_health.get("ok", True)):
+                raise ServiceTransitionError(
+                    "service health checks failed after upgrade",
+                    status="upgraded_service_health_failed",
+                    remediation=[str(item) for item in service_health.get("remediation") or []],
+                )
     except ServiceRestartError as exc:
+        if symlink_switched:
+            compensation = _compensate_service_transition(
+                repo_link=repo_link,
+                previous_dir=previous_dir,
+                runtime_root=runtime,
+                previous_profile=pre_upgrade_profile,
+                config_commit=runtime_config_commit,
+                restart_services=restart_services,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+        compensated = bool(compensation.get("ok")) if symlink_switched else False
         out = {
             **status_base,
-            "ok": True,
-            "status": "upgraded_restart_failed",
-            "changed": bool(symlink_switched),
-            "symlink_switched": bool(symlink_switched),
+            "ok": False,
+            "status": "upgrade_failed_rolled_back" if compensated else "upgraded_restart_failed",
+            "failure_status": "upgraded_restart_failed",
+            "changed": bool(symlink_switched and not compensated),
+            "symlink_switched": bool(symlink_switched and not compensation.get("symlink_restored")),
+            "rolled_back": compensated,
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
             "release_materialize": release_materialize,
             "runtime_prepare": runtime_prepare,
             "runtime_config_prepare": runtime_config_prepare,
+            "runtime_config_commit": runtime_config_commit,
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
             "service_reconcile": service_reconcile,
             "service_health": service_health,
@@ -2113,73 +2477,52 @@ def service_upgrade(
             "restart_failed_services": exc.failed_services,
             "manual_remediation": exc.remediation,
             "remediation": exc.remediation,
+            "compensation": compensation,
             "error": f"{type(exc).__name__}: {exc}",
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
     except Exception as exc:
+        if symlink_switched:
+            compensation = _compensate_service_transition(
+                repo_link=repo_link,
+                previous_dir=previous_dir,
+                runtime_root=runtime,
+                previous_profile=pre_upgrade_profile,
+                config_commit=runtime_config_commit,
+                restart_services=restart_services,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+        compensated = bool(compensation.get("ok")) if symlink_switched else False
+        failure_status = exc.status if isinstance(exc, ServiceTransitionError) else "failed"
+        remediation = (
+            exc.remediation
+            if isinstance(exc, (RuntimeConfigPrepareError, ServiceTransitionError))
+            else []
+        )
         out = {
             **status_base,
             "ok": False,
-            "status": "failed",
-            "changed": bool(symlink_switched),
-            "symlink_switched": bool(symlink_switched),
+            "status": "upgrade_failed_rolled_back" if compensated else failure_status,
+            "failure_status": failure_status,
+            "changed": bool(symlink_switched and not compensated),
+            "symlink_switched": bool(symlink_switched and not compensation.get("symlink_restored")),
+            "rolled_back": compensated,
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
             "release_materialize": release_materialize,
             "runtime_prepare": exc.runtime_prepare if isinstance(exc, RuntimePrepareError) else runtime_prepare,
+            "runtime_config_prepare": runtime_config_prepare,
+            "runtime_config_commit": runtime_config_commit,
+            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "service_reconcile": service_reconcile,
+            "service_health": service_health,
+            "compensation": compensation,
             "error": f"{type(exc).__name__}: {exc}",
-            **({"remediation": exc.remediation} if isinstance(exc, RuntimeConfigPrepareError) else {}),
-            "operations": operations,
-        }
-        write_upgrade_status(runtime_root=runtime, payload=out)
-        return out
-
-    if _service_reconcile_failed(service_reconcile):
-        out = {
-            **status_base,
-            "ok": True,
-            "status": "upgraded_service_reconcile_failed",
-            "changed": bool(symlink_switched),
-            "symlink_switched": bool(symlink_switched),
-            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
-            "target_dir": str(target_dir),
-            "previous_dir": str(previous_dir),
-            "release_materialize": release_materialize,
-            "runtime_prepare": runtime_prepare,
-            "runtime_config_prepare": runtime_config_prepare,
-            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
-            "service_reconcile": service_reconcile,
-            "service_health": service_health,
-            "restarted_services": restarted,
-            "manual_remediation": _service_reconcile_remediation(service_reconcile),
-            "remediation": _service_reconcile_remediation(service_reconcile),
-            "operations": operations,
-        }
-        write_upgrade_status(runtime_root=runtime, payload=out)
-        return out
-
-    if service_health and not bool(service_health.get("ok", True)):
-        out = {
-            **status_base,
-            "ok": True,
-            "status": "upgraded_service_health_failed",
-            "changed": bool(symlink_switched),
-            "symlink_switched": bool(symlink_switched),
-            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
-            "target_dir": str(target_dir),
-            "previous_dir": str(previous_dir),
-            "release_materialize": release_materialize,
-            "runtime_prepare": runtime_prepare,
-            "runtime_config_prepare": runtime_config_prepare,
-            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
-            "service_reconcile": service_reconcile,
-            "service_health": service_health,
-            "restarted_services": restarted,
-            "manual_remediation": service_health.get("remediation") or [],
-            "remediation": service_health.get("remediation") or [],
+            **({"remediation": remediation} if remediation else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -2249,6 +2592,7 @@ def service_upgrade(
         "release_materialize": release_materialize,
         "runtime_prepare": runtime_prepare,
         "runtime_config_prepare": runtime_config_prepare,
+        "runtime_config_commit": runtime_config_commit,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "service_reconcile": service_reconcile,
         "service_health": service_health,
@@ -2316,30 +2660,130 @@ def service_rollback(
             "changed": False,
             "target_dir": str(target_dir),
             "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
-            "planned_operations": [f"switch {repo_link} -> {target_dir}"],
+            "planned_operations": [
+                f"stage and validate runtime configs with {target_dir}",
+                f"switch {repo_link} -> {target_dir}",
+                "commit the staged runtime config bundle",
+                "reconcile service drift for the rollback release",
+                "restart and health-check long-running services" if restart_services else "skip service restart",
+            ],
             "operations": operations,
         }
 
     symlink_switched = False
+    runtime_config_prepare: dict[str, Any] = {}
+    runtime_config_commit: dict[str, Any] = {}
+    post_switch_runtime_config_validate: list[dict[str, str]] = []
+    service_reconcile: dict[str, Any] = {}
+    service_health: dict[str, Any] = {}
+    compensation: dict[str, Any] = {}
+    restarted: list[str] = []
+    previous_profile = _load_service_profile(runtime)
     try:
         with _UpgradeLock(runtime / "locks" / "upgrade.lock"):
+            runtime_config_prepare = _prepare_runtime_configs_for_release(
+                previous_dir=repo,
+                target_dir=target_dir,
+                runtime_root=runtime,
+                releases_root=releases,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
+            runtime_config_commit = _commit_prepared_runtime_configs(
+                prepared=runtime_config_prepare,
+                operations=operations,
+            )
+            post_switch_runtime_config_validate = _validate_committed_runtime_configs(
+                prepared=runtime_config_prepare,
+                cwd=repo_link,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+            if previous_profile:
+                service_reconcile = service_drift(
+                    repo_root=repo_link,
+                    runtime_root=runtime,
+                    profile_path=runtime / "service.profile.json",
+                    profile=previous_profile,
+                    confirm=True,
+                    run_cmd=run_cmd,
+                )
+                if _service_reconcile_failed(service_reconcile):
+                    raise ServiceTransitionError(
+                        "service drift reconciliation failed during rollback",
+                        status="rollback_service_reconcile_failed",
+                        remediation=_service_reconcile_remediation(service_reconcile),
+                    )
+            rollback_profile = _load_service_profile(runtime) or previous_profile
             restarted = (
-                _restart_services_from_profile(runtime_root=runtime, run_cmd=run_cmd, operations=operations)
+                _restart_services_from_loaded_profile(
+                    profile=rollback_profile,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                )
                 if restart_services
                 else []
             )
+            service_health = (
+                _post_upgrade_service_health(
+                    profile=rollback_profile,
+                    repo_root=repo_link,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                )
+                if restart_services
+                else {"ok": True, "status": "skipped", "reason": "service_restart_disabled", "checks": [], "failed_checks": []}
+            )
+            if service_health and not bool(service_health.get("ok", True)):
+                raise ServiceTransitionError(
+                    "service health checks failed during rollback",
+                    status="rollback_service_health_failed",
+                    remediation=[str(item) for item in service_health.get("remediation") or []],
+                )
     except Exception as exc:
+        if symlink_switched:
+            compensation = _compensate_service_transition(
+                repo_link=repo_link,
+                previous_dir=repo,
+                runtime_root=runtime,
+                previous_profile=previous_profile,
+                config_commit=runtime_config_commit,
+                restart_services=restart_services,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+        compensated = bool(compensation.get("ok")) if symlink_switched else False
+        failure_status = (
+            exc.status
+            if isinstance(exc, ServiceTransitionError)
+            else "rollback_restart_failed"
+            if isinstance(exc, ServiceRestartError)
+            else "rollback_failed"
+        )
+        remediation = (
+            exc.remediation
+            if isinstance(exc, (RuntimeConfigPrepareError, ServiceTransitionError, ServiceRestartError))
+            else []
+        )
         out = {
             **status_base,
             "ok": False,
-            "status": "failed",
-            "changed": bool(symlink_switched),
-            "symlink_switched": bool(symlink_switched),
+            "status": "rollback_failed_restored" if compensated else failure_status,
+            "failure_status": failure_status,
+            "changed": bool(symlink_switched and not compensated),
+            "symlink_switched": bool(symlink_switched and not compensation.get("symlink_restored")),
+            "restored_original": compensated,
             "target_dir": str(target_dir),
+            "runtime_config_prepare": runtime_config_prepare,
+            "runtime_config_commit": runtime_config_commit,
+            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "service_reconcile": service_reconcile,
+            "service_health": service_health,
+            "compensation": compensation,
             "error": f"{type(exc).__name__}: {exc}",
-            **({"remediation": exc.remediation} if isinstance(exc, ServiceRestartError) else {}),
+            **({"remediation": remediation} if remediation else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -2350,6 +2794,11 @@ def service_rollback(
         "status": "rolled_back",
         "changed": True,
         "target_dir": str(target_dir),
+        "runtime_config_prepare": runtime_config_prepare,
+        "runtime_config_commit": runtime_config_commit,
+        "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+        "service_reconcile": service_reconcile,
+        "service_health": service_health,
         "restarted_services": restarted,
         "operations": operations,
     }
