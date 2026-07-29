@@ -231,6 +231,11 @@ VERSION="$(cat VERSION)"
 因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打上同名 tag。
 普通开发提交因为不修改 `VERSION`，不会触发这条发布工作流。
 
+如果 VERSION push 已触发发布但门禁失败，应先在 `main` 修复根因并重新完成 release delta
+审阅与发布前检查，再从 GitHub Actions 手动运行 `Release from VERSION`。手动入口使用当前
+`main` 的 `VERSION` 和提交 SHA，仍执行同一套 metadata、coverage、测试、归档和发布步骤；
+不得用它跳过失败门禁或从未审阅的提交补发 tag。
+
 ---
 
 ## 远端自动升级
