@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.1 - 2026-07-29
+
+### Bug Fixes
+- Ignored validation diagnostics from historical ledger events already superseded by a valid void, allowing Daily Brief and Position Advice to trust the repaired projection while unresolved invalid events continue to fail closed.
+
 ## 1.7.0 - 2026-07-29
 
 ### New Features
