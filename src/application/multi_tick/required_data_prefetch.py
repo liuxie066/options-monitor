@@ -19,6 +19,7 @@ from domain.services import (
     adapt_opend_tool_payload,
 )
 from domain.domain.fetch_source import resolve_symbol_fetch_source
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.storage.repositories import state_repo
 from src.application.config_sections import (
     resolve_templates_config,
@@ -204,6 +205,13 @@ def _build_single_prefetch_fetch_plan(
     want_put = bool(sell_put_cfg.get("enabled", False))
     want_call = bool(sell_call_cfg.get("enabled", False))
     want_yield_enhancement = bool(yield_policy.enabled)
+    position_requirements = [
+        dict(item)
+        for item in list(
+            symbol_cfg.get("_close_advice_position_requirements") or []
+        )
+        if isinstance(item, dict)
+    ]
     snapshot_cfg = _as_dict(opend_fetch_cfg.get("market_snapshot"))
     expiration_cfg = _as_dict(opend_fetch_cfg.get("option_expiration"))
     return build_required_data_fetch_plan(
@@ -216,6 +224,7 @@ def _build_single_prefetch_fetch_plan(
         sell_put_cfg=sell_put_cfg,
         sell_call_cfg=sell_call_cfg,
         yield_enhancement_cfg=yield_enhancement_cfg,
+        position_requirements=position_requirements,
         symbol_cfg=symbol_cfg,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=_to_int(fetch_cfg.get("port") or 11111, 11111),
@@ -301,6 +310,15 @@ def _global_required_data_plan_summary(
     items: list[dict[str, Any]] = []
     for symbol_cfg in symbol_cfgs:
         fetch_plan = fetch_plans_by_config_id[id(symbol_cfg)]
+        fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+        binding_source, _binding_decision = resolve_symbol_fetch_source(
+            fetch_cfg
+        )
+        binding_payload = {
+            "source": binding_source,
+            "host": str(fetch_cfg.get("host") or "127.0.0.1").strip(),
+            "port": _to_int(fetch_cfg.get("port") or 11111, 11111),
+        }
         expirations = sorted({
             str(expiration)
             for side_plan in fetch_plan.side_plans
@@ -316,7 +334,20 @@ def _global_required_data_plan_summary(
         items.append(
             {
                 "symbol": str(symbol_cfg.get("symbol") or "").strip(),
-                "source": str(_as_dict(symbol_cfg.get("fetch")).get("source") or "futu"),
+                "source": binding_source,
+                "fetch_binding": {
+                    **binding_payload,
+                    "binding_id": canonical_sha256(binding_payload),
+                },
+                "close_advice_requirement_plan_hash": (
+                    str(
+                        symbol_cfg.get(
+                            "_close_advice_requirement_plan_hash"
+                        )
+                        or ""
+                    ).strip()
+                    or None
+                ),
                 "planning_mode": (
                     "strategy_exact_expirations"
                     if has_strategy_requirements

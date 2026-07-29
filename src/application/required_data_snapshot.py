@@ -60,6 +60,7 @@ def seal_required_data_snapshot(
     required_data_root: Path,
     run_id: str,
     prefetch_summary: Mapping[str, Any],
+    close_advice_required_data_plan_path: Path | None = None,
     sealed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Publish the terminal run snapshot manifest as the only commit marker."""
@@ -142,6 +143,28 @@ def seal_required_data_snapshot(
             "failed": failed,
         },
     }
+    if close_advice_required_data_plan_path is not None:
+        plan_path = Path(close_advice_required_data_plan_path).resolve()
+        if not plan_path.is_file() or plan_path.is_symlink():
+            raise RequiredDataSnapshotError(
+                "close-advice required-data plan is unavailable"
+            )
+        try:
+            plan_relpath = plan_path.relative_to(target.parent)
+        except ValueError as exc:
+            raise RequiredDataSnapshotError(
+                "close-advice required-data plan is outside run state"
+            ) from exc
+        payload.update(
+            {
+                "close_advice_required_data_plan_relpath": (
+                    plan_relpath.as_posix()
+                ),
+                "close_advice_required_data_plan_sha256": sha256_bytes(
+                    plan_path.read_bytes()
+                ),
+            }
+        )
     payload["content_sha256"] = canonical_sha256(payload)
     atomic_write_json(target, payload)
     return payload
@@ -204,6 +227,24 @@ def resolve_frozen_required_data(
     required_data_root: Path,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    validated, _csv_bytes = resolve_frozen_required_data_csv_bytes(
+        manifest_path=manifest_path,
+        expected_run_id=expected_run_id,
+        symbol=symbol,
+        required_data_root=required_data_root,
+        now=now,
+    )
+    return validated
+
+
+def resolve_frozen_required_data_csv_bytes(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    symbol: str,
+    required_data_root: Path,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], bytes]:
     symbol_norm = _required_text(symbol, "symbol").upper()
     try:
         manifest, root = load_required_data_snapshot_manifest(
@@ -231,7 +272,7 @@ def resolve_frozen_required_data(
             detail=str(entry.get("error_type") or ""),
         )
     try:
-        validated = _validate_ready_entry(
+        validated, csv_bytes = _validate_ready_entry(
             root=root,
             run_id=str(manifest["run_id"]),
             symbol=symbol_norm,
@@ -256,12 +297,15 @@ def resolve_frozen_required_data(
             receipt_relpath=str(entry.get("receipt_relpath") or ""),
         ) from exc
     manifest_bytes = Path(manifest_path).resolve().read_bytes()
-    return {
-        **validated,
-        "manifest_path": str(Path(manifest_path).resolve()),
-        "manifest_sha256": sha256_bytes(manifest_bytes),
-        "plan_id": str(manifest["plan_id"]),
-    }
+    return (
+        {
+            **validated,
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "manifest_sha256": sha256_bytes(manifest_bytes),
+            "plan_id": str(manifest["plan_id"]),
+        },
+        csv_bytes,
+    )
 
 
 def _ready_manifest_entry(
@@ -324,7 +368,7 @@ def _validate_ready_entry(
     symbol: str,
     entry: Mapping[str, Any],
     now: datetime,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bytes]:
     receipt_relpath = _required_text(entry.get("receipt_relpath"), "receipt_relpath")
     receipt_path = safe_existing_relative_path(root, receipt_relpath)
     receipt_bytes = receipt_path.read_bytes()
@@ -388,14 +432,20 @@ def _validate_ready_entry(
     )
     if raw_bytes != captured_raw or csv_bytes != captured_csv:
         raise PositionAdviceSourceError("required-data bytes do not match the sealed receipt")
-    return {
-        "receipt_relpath": receipt_relpath,
-        "receipt_hash": sha256_bytes(receipt_bytes),
-        "snapshot_id": str(validated["snapshot_id"]),
-        "payload_sha256": str(validated["payload_sha256"]),
-        "source_observed_at": str(validated["source_observed_at"]),
-        "expires_at": str(validated["expires_at"]),
-    }
+    return (
+        {
+            "receipt_relpath": receipt_relpath,
+            "receipt_hash": sha256_bytes(receipt_bytes),
+            "snapshot_id": str(validated["snapshot_id"]),
+            "payload_sha256": str(validated["payload_sha256"]),
+            "source_observed_at": str(validated["source_observed_at"]),
+            "expires_at": str(validated["expires_at"]),
+            "raw_json_relpath": raw_relpath,
+            "required_data_csv_relpath": csv_relpath,
+            "required_data_root": str(root),
+        },
+        captured_csv,
+    )
 
 
 def _validate_complete_required_data_bundle(bundle: Mapping[str, Any]) -> None:
@@ -466,5 +516,6 @@ __all__ = [
     "RequiredDataSnapshotError",
     "load_required_data_snapshot_manifest",
     "resolve_frozen_required_data",
+    "resolve_frozen_required_data_csv_bytes",
     "seal_required_data_snapshot",
 ]

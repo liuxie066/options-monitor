@@ -355,6 +355,17 @@ Keep scoring, thesis checks, and exit-state policy in the domain layer. The
 runner stays focused on loading local artifacts, pairing yield-enhancement legs,
 preserving `not_evaluable` rows, and formatting CSV/text output.
 
+Scheduled Tick runs use one immutable required-data barrier for Close Advice:
+
+- Before the single cross-account prefetch, enabled accounts contribute exact active position requirements to `output_runs/<run_id>/state/close_advice_required_data_plan.json`. Disabled accounts are `not_applicable` and are not part of the readiness denominator.
+- Candidate demand owns an already-selected symbol fetch route. A position requirement may join that route only when its resolved source, host, and port match; conflicting or ambiguous requirements become typed `required_data_route_conflict` gaps and never create a second fetch.
+- `required_data_snapshot_manifest.json` binds the requirements-plan path and hashes. Re-entry restores that binding from the manifest instead of rereading the ledger or rebuilding requirements.
+- Scheduled Close Advice receives `quote_mode=frozen_snapshot` and may only read sealed required-data bytes and receipts. It performs zero OpenD fallback calls, cache repairs, or required-data writes. Missing coverage is a per-position `not_evaluable` gap; manifest, plan, receipt, or payload integrity failure invalidates the account pipeline and suppresses its normal Daily Brief.
+- Each Close Advice CSV row carries the snapshot-plan, manifest, requirement-plan, route-binding, snapshot, receipt, payload, observation-time, and expiry identifiers needed to trace the decision to its frozen inputs.
+
+The legacy mutable runner mode remains available to direct compatibility
+callers, but it is not the scheduled Tick authority.
+
 Position Advice v2 remains an independent immutable portfolio plan. Its Agent
 surface is pure-read; shared authority changes and unknown-delivery resolution
 are human CLI operations only. `v2_shadow` must not enter scheduled
@@ -525,6 +536,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Research / Shadow Replay / Strategy Lab | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
+| Close Advice frozen snapshot | `python3.12 -m pytest -q -p no:cacheprovider tests/test_close_advice_required_data.py tests/test_close_advice_runner.py tests/test_account_run.py tests/test_tick_account_execution_barrier.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
 | Config / control plane | `./.venv/bin/python -m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py tests/test_cli_operator_commands.py`; YAML validate/build dry-runs |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
@@ -586,6 +598,7 @@ Smallest remaining actions, with blockers called out.
 - Persistence order: durable successful outcome or fixed-failure evidence plus exact envelope -> exact scheduled-target watermark -> provider send -> attempt/ambiguous/confirmed transition.
 - Retry: no-scan wake-ups may replay only an already persisted exact envelope. They must not run broker access, pipeline, assembler, candidate detection, revision persistence, or message re-rendering.
 - Successful current: ready/degraded reliable scans advance current; failed/blocked/no-op scans do not. Query always reads the latest successful current, never the last delivered message.
+- Close Advice projection: structured positions retain every evaluated holding for the total count, but only priced rows selected by the canonical `close_advice.notify_levels`, ranking, and `max_items_per_account` policy enter Daily Brief actions and actionable position details. Quote/evaluation gaps remain explicit data-quality evidence rather than recommendations.
 - Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. Sell Put capacities share account cash and cannot be summed.
 - Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
 - Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
