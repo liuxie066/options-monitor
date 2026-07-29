@@ -281,6 +281,97 @@ def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:
     assert "leg_role" not in fields
 
 
+def test_publisher_ignores_import_diagnostics_for_voided_invalid_event() -> None:
+    key = _key(
+        strike=510.0,
+        expiration_ymd="2026-05-28",
+        option_type="call",
+    )
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-nvda-call",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=key,
+                contracts=2,
+                price=4.1,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_open-nvda-call",
+            ),
+            TradeEvent(
+                event_id="invalid-close",
+                event_type="close",
+                event_time_ms=0,
+                contract_key=key,
+                contracts=2,
+                price=0.28,
+                currency="USD",
+                source="opend_push",
+                multiplier=100,
+                target_lot_id="lot_open-nvda-call",
+            ),
+            TradeEvent(
+                event_id="void-invalid-close",
+                event_type="void",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=0,
+                price=0.0,
+                currency="USD",
+                source="cli_trade_event_repair",
+                multiplier=100,
+                target_event_id="invalid-close",
+            ),
+            TradeEvent(
+                event_id="replacement-close",
+                event_type="close",
+                event_time_ms=3000,
+                contract_key=key,
+                contracts=2,
+                price=0.28,
+                currency="USD",
+                source="cli_trade_event_repair",
+                multiplier=100,
+                target_lot_id="lot_open-nvda-call",
+            ),
+        ]
+    )
+
+    assert projection.diagnostics == []
+    assert projection.lots[0].fields["status"] == "close"
+
+
+def test_publisher_keeps_import_diagnostics_for_active_invalid_event() -> None:
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="invalid-open",
+                event_type="open",
+                event_time_ms=0,
+                contract_key=_key(
+                    strike=100.0,
+                    expiration_ymd="2026-06-19",
+                ),
+                contracts=1,
+                price=2.5,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_invalid-open",
+            ),
+        ]
+    )
+
+    assert projection.has_errors is True
+    assert {
+        item.code
+        for item in projection.diagnostics
+    } == {"event_time_must_be_positive"}
+
+
 def test_publisher_does_not_apply_strategy_patch_from_rejected_adjust() -> None:
     open_key = _key(
         strike=140.0,
