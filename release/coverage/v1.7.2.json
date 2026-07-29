@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.2",
+  "base": {
+    "tag": "v1.7.1",
+    "commit": "660d495cee4a085bf457f280a4666f6125c208f8"
+  },
+  "reviewed_head": "15607d151042b03ea230c7d21039374fb288c51a",
+  "commits": [
+    {
+      "sha": "15607d151042b03ea230c7d21039374fb288c51a",
+      "subject": "fix: validate position advice before market filter"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Validated the complete immutable Position Advice artifact before filtering its returned rows by market, preventing valid multi-market advice from being rejected as an authority conflict.",
+      "commits": [
+        "15607d151042b03ea230c7d21039374fb288c51a"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
