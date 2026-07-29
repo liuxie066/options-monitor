@@ -18,8 +18,8 @@ from src.application.agent_tool_config import repo_base
 from src.application.config_sections import resolve_watchlist_config
 from src.application.scan_scheduler import decide as scheduler_decide
 from src.application.agent_tools.runtime_helpers import validate_runtime_config
-from src.application.agent_tools.runtime_helpers import write_json_atomic
 from src.application.agent_tool_config import write_tools_enabled
+from src.application.config_yaml_symbols import mutate_yaml_symbol_config
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
@@ -185,8 +185,10 @@ def _manage_symbols_tool(
             resolve_watchlist_config=resolve_watchlist_config,
             normalize_accounts=normalize_accounts,
         ),
-        write_json_atomic=write_json_atomic,
         mask_path=mask_path,
+        repo_base_fn=repo_base,
+        infer_runtime_config_market_fn=infer_runtime_config_market,
+        mutate_yaml_symbol_config_fn=mutate_yaml_symbol_config,
     )
 
 
@@ -481,18 +483,41 @@ SYMBOL_RESOLVE_TOOL = build_agent_tool(
 
 MANAGE_SYMBOLS_TOOL = build_agent_tool(
     name="manage_symbols",
-    description="List or mutate symbols[] entries. Write actions require OM_AGENT_ENABLE_WRITE_TOOLS=true and confirm=true.",
+    description="List runtime symbols or mutate authoritative config.yaml and publish generated snapshots. Writes require OM_AGENT_ENABLE_WRITE_TOOLS=true and confirm=true.",
     requires=("runtime_config",),
     capabilities=("config_write",),
-    side_effects=("writes_runtime_config",),
+    side_effects=("writes_config_yaml", "publishes_generated_runtime_configs"),
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
         "action": "list|add|edit|remove",
         "symbol": "required for add/edit/remove",
         "set": _MANAGE_SYMBOLS_SET_SCHEMA,
+        "limit_expirations": {"type": "integer", "minimum": 1, "description": "add-only option expiration fetch limit"},
+        "sell_put_enabled": {"type": "boolean", "description": "add-only Sell Put enable switch"},
+        "sell_put_min_dte": {"type": "integer", "minimum": 0, "description": "required when sell_put_enabled=true"},
+        "sell_put_max_dte": {"type": "integer", "minimum": 0, "description": "required when sell_put_enabled=true"},
+        "sell_put_min_strike": {"type": "number", "minimum": 0, "description": "optional add-only minimum put strike"},
+        "sell_put_max_strike": {"type": "number", "minimum": 0, "description": "optional add-only maximum put strike"},
+        "sell_call_enabled": {"type": "boolean", "description": "add-only Covered Call enable switch"},
+        "sell_call_min_dte": {"type": "integer", "minimum": 0, "description": "required when sell_call_enabled=true"},
+        "sell_call_max_dte": {"type": "integer", "minimum": 0, "description": "required when sell_call_enabled=true"},
+        "sell_call_min_strike": {"type": "number", "minimum": 0, "description": "optional add-only minimum call strike"},
+        "sell_call_max_strike": {"type": "number", "minimum": 0, "description": "optional add-only maximum call strike"},
+        "broker": {"type": "string", "minLength": 1, "description": "optional add-only broker override"},
+        "use": {
+            "type": ["string", "array"],
+            "items": {"type": "string", "minLength": 1},
+            "description": "optional add-only template reference or ordered template list",
+        },
+        "accounts": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": "optional add-only account scope",
+        },
         "dry_run": "optional bool",
         "confirm": "required true for non-dry-run writes",
+        "yes": {"type": "boolean", "description": "alias for confirm on non-dry-run writes"},
     },
     handler=_manage_symbols_tool,
     read_only=False,
@@ -503,8 +528,20 @@ MANAGE_SYMBOLS_TOOL = build_agent_tool(
     write_request_predicate=_manage_symbols_write_requested,
     examples=(
         {"input": {"config_key": "us", "action": "list"}},
-        {"input": {"config_key": "us", "action": "add", "symbol": "NVDA", "dry_run": True}},
+        {
+            "input": {
+                "config_key": "us",
+                "action": "add",
+                "symbol": "NVDA",
+                "sell_put_enabled": True,
+                "sell_put_min_dte": 20,
+                "sell_put_max_dte": 45,
+                "use": "put_base",
+                "dry_run": True,
+            }
+        },
     ),
+    allow_additional_input=False,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

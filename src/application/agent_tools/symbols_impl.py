@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -163,8 +164,10 @@ def manage_symbols_tool(
     apply_symbol_mutation_fn,
     validate_runtime_config,
     list_symbol_rows_fn,
-    write_json_atomic,
     mask_path,
+    repo_base_fn,
+    infer_runtime_config_market_fn,
+    mutate_yaml_symbol_config_fn,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     action = str(payload.get("action") or "list").strip().lower()
@@ -179,13 +182,68 @@ def manage_symbols_tool(
     validate_runtime_config(mutated)
     rows = list_symbol_rows_fn(mutated)
     write_applied = action != "list" and not dry_run
-    result = {"action": action, "symbols": rows, "symbol_count": len(rows)}
-    if write_applied:
-        write_json_atomic(config_path, mutated)
+    authoring = None
+    config_yaml_path = None
+    if action != "list":
+        market = infer_runtime_config_market_fn(
+            config_key=payload.get("config_key"),
+            config_path=config_path,
+            config=cfg,
+        )
+        if market not in {"us", "hk"}:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="cannot infer symbol authoring market from runtime config",
+            )
+        config_yaml_path = _authoritative_config_yaml_path(
+            cfg,
+            repo_root=repo_base_fn(),
+        )
+        authoring = mutate_yaml_symbol_config_fn(
+            repo_root=repo_base_fn(),
+            market=market,
+            payload=payload,
+            config_path=config_yaml_path,
+            rebuild_runtime_root=config_path.parent,
+            apply=write_applied,
+        )
+    result = {
+        "action": action,
+        "symbols": rows,
+        "symbol_count": len(rows),
+        **({"authoring": authoring} if authoring is not None else {}),
+    }
     result = attach_write_contract(
         result,
         dry_run=(action != "list" and not write_applied),
         write_applied=write_applied,
-        rollback_hint=f"restore config from backup or revert symbol mutation in {config_path}" if write_applied else None,
+        backup_path=authoring.get("backup_path") if isinstance(authoring, dict) else None,
+        rollback_hint=authoring.get("rollback_hint") if isinstance(authoring, dict) else None,
     )
-    return result, [], {"config_path": mask_path(config_path), "write_applied": write_applied}
+    return result, [], {
+        "config_path": mask_path(config_path),
+        "config_yaml_path": mask_path(config_yaml_path) if config_yaml_path is not None else None,
+        "write_applied": write_applied,
+    }
+
+
+def _authoritative_config_yaml_path(cfg: dict[str, Any], *, repo_root: Path) -> Path:
+    resolved = cfg.get("_resolved")
+    raw_path = str(resolved.get("config_yaml_path") or "").strip() if isinstance(resolved, dict) else ""
+    if not raw_path:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message="runtime config does not declare its authoritative config.yaml path",
+            hint="Rebuild it with `./om config build --source yaml --market <market>` before using manage_symbols.",
+        )
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    path = path.resolve()
+    if not path.exists():
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"authoritative config.yaml not found: {path}",
+            hint="Restore the YAML source or rebuild the runtime snapshot from the correct config.yaml.",
+        )
+    return path

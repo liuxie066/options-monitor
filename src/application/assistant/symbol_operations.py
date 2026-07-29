@@ -13,8 +13,9 @@ from src.application.config_sections import (
     set_watchlist_config,
 )
 from src.application.config_validator import validate_config
+from src.application.config_authoring_transaction import config_source_sha256
 from src.application.config_yaml import RESOLVED_KEY, load_yaml_config_file
-from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.config_yaml_symbols import mutate_yaml_symbol_config
 from src.application.runtime_config_freshness import GENERATED_KEY, infer_runtime_config_market
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
@@ -26,7 +27,6 @@ from src.application.assistant.operation_lifecycle import (
 from src.application.assistant.operation_policy import enforce_symbol_write_allowed
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint
-from src.application.runtime_config_paths import write_json_atomic
 from src.application.symbol_calibration import calibrate_symbol
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
 
@@ -50,17 +50,13 @@ def handle_symbol_operation(
     if intent.intent_name in PREVIEW_INTENTS:
         arguments = dict(intent.arguments)
         yaml_payload = _build_yaml_operation_payload(intent.intent_name, arguments, request=request)
-        if yaml_payload is not None:
-            return _preview_and_save(
-                yaml_payload,
-                request=request,
-                command_id=command_id,
-                store=store,
-                ttl_seconds=policy.confirm_ttl_seconds,
-            )
-        config_path, _cfg, config_key = _load_config_for_symbol_request(request, arguments=arguments)
-        payload = _build_operation_payload(intent.intent_name, arguments, request=request, config_path=config_path, config_key=config_key)
-        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+        return _preview_and_save(
+            yaml_payload,
+            request=request,
+            command_id=command_id,
+            store=store,
+            ttl_seconds=policy.confirm_ttl_seconds,
+        )
     if intent.intent_name == "symbol_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
     if intent.intent_name == "symbol_cancel":
@@ -230,29 +226,13 @@ def _build_yaml_operation_payload(
     arguments: dict[str, Any],
     *,
     request: AssistantRequest,
-) -> dict[str, Any] | None:
-    if operation_type != "symbol_edit":
-        return None
+) -> dict[str, Any]:
     config_yaml_path = _discover_config_yaml_path(request)
     if config_yaml_path is None:
-        return None
-    settings = _yaml_symbol_settings_from_edit(arguments)
-    if settings is None:
         raise AgentToolError(
-            code="NEEDS_CLARIFICATION",
-            message="IM config.yaml 设置目前支持 covered call 开关、covered call 最低行权价、sell put 开关、sell put 最高行权价、combo yield 开关。",
-            hint="示例：设置 09898 covered call min strike 85，或使用 covered_call.min_strike=85 / sell_put.enabled=false / sell_put.max_strike=90 / combo_yield.enabled=true。",
-            details={
-                "supported_fields": [
-                    "sell_call.enabled",
-                    "covered_call.enabled",
-                    "sell_call.min_strike",
-                    "covered_call.min_strike",
-                    "sell_put.enabled",
-                    "sell_put.max_strike",
-                    "combo_yield.enabled",
-                ]
-            },
+            code="CONFIG_ERROR",
+            message="runtime config does not declare an authoritative config.yaml source",
+            hint="Rebuild the runtime config from config.yaml before using inbound symbol controls.",
         )
     config_doc = load_yaml_config_file(config_yaml_path)
     market = _yaml_symbol_market(arguments, config_doc=config_doc, request=request)
@@ -263,6 +243,20 @@ def _build_yaml_operation_payload(
             hint="请明确美股或港股，或使用可以校准市场的 symbol，例如 09898 / 9898.HK / NVDA。",
         )
     runtime_root = _runtime_root_for_rebuild(request)
+    mutation = {
+        "action": operation_type.removeprefix("symbol_"),
+        **arguments,
+        "symbol": _required_text(arguments.get("symbol"), "symbol"),
+    }
+    if operation_type == "symbol_add":
+        if bool(mutation.get("sell_put_enabled")):
+            mutation.setdefault("sell_put_min_dte", 7)
+            mutation.setdefault("sell_put_max_dte", 45)
+        if bool(mutation.get("sell_call_enabled")):
+            mutation.setdefault("sell_call_min_dte", 7)
+            mutation.setdefault("sell_call_max_dte", 45)
+    if operation_type == "symbol_edit" and _yaml_symbol_settings_from_edit(arguments) is not None:
+        mutation["upsert"] = True
     return {
         "schema_version": "1.0",
         "operation_type": operation_type,
@@ -272,23 +266,22 @@ def _build_yaml_operation_payload(
             "config_yaml_path": str(config_yaml_path),
             "market": market,
             "runtime_root": str(runtime_root) if runtime_root else None,
+            "source_sha256": config_source_sha256(config_yaml_path),
         },
-        "yaml_symbol_set": {
-            "symbol": _required_text(arguments.get("symbol"), "symbol"),
-            **settings,
-        },
+        "yaml_symbol_mutation": mutation,
     }
 
 
 def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
     if _payload_source_format(payload) == "yaml":
-        result = _run_yaml_symbol_set(payload, apply=False)
+        result = _run_yaml_symbol_mutation(payload, apply=False)
         summary = result["summary"] if isinstance(result.get("summary"), dict) else {}
         return {
             "config_path": result.get("config_yaml_path"),
             "summary": summary,
             "validation": result.get("validation"),
             "source_format": "yaml",
+            "source_revision": result.get("source_revision"),
         }
     config_path, cfg = _load_config_for_payload(payload)
     mutated = deepcopy(cfg)
@@ -299,7 +292,7 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     if _payload_source_format(payload) == "yaml":
-        result = _run_yaml_symbol_set(payload, apply=True)
+        result = _run_yaml_symbol_mutation(payload, apply=True)
         return {
             "status": "applied",
             "config_path": result.get("config_yaml_path"),
@@ -311,12 +304,10 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
             "audit_id": result.get("audit_id"),
             "rollback_hint": result.get("rollback_hint"),
         }
-    config_path, cfg = _load_config_for_payload(payload)
-    summary = _apply_symbol_payload(cfg, payload)
-    canonical = set_watchlist_config(cfg, resolve_watchlist_config(cfg))
-    _validate_symbols_config(canonical)
-    write_json_atomic(config_path, canonical)
-    return {"status": "applied", "config_path": str(config_path), "summary": summary, "symbol_count": len(_symbol_rows(canonical))}
+    raise AgentToolError(
+        code="CONFIG_ERROR",
+        message="inbound symbol writes require config.yaml authority",
+    )
 
 
 def _apply_symbol_payload(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -359,24 +350,20 @@ def _payload_source_format(payload: dict[str, Any]) -> str:
     return str(config.get("source_format") or "").strip().lower()
 
 
-def _run_yaml_symbol_set(payload: dict[str, Any], *, apply: bool) -> dict[str, Any]:
+def _run_yaml_symbol_mutation(payload: dict[str, Any], *, apply: bool) -> dict[str, Any]:
     config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    settings = payload.get("yaml_symbol_set") if isinstance(payload.get("yaml_symbol_set"), dict) else {}
+    mutation = payload.get("yaml_symbol_mutation") if isinstance(payload.get("yaml_symbol_mutation"), dict) else {}
     config_yaml_path = _resolve_path(config.get("config_yaml_path"))
     runtime_root = _optional_path(config.get("runtime_root"))
-    return set_yaml_symbol_config(
+    return mutate_yaml_symbol_config(
         repo_root=repo_base(),
         market=_required_text(config.get("market"), "market"),
-        symbol=_required_text(settings.get("symbol"), "symbol"),
+        payload=dict(mutation),
         config_path=config_yaml_path,
-        covered_call_enabled=_optional_bool(settings.get("covered_call_enabled"), "covered_call_enabled"),
-        covered_call_min_strike=_optional_float(settings.get("covered_call_min_strike"), "covered_call_min_strike"),
-        sell_put_enabled=_optional_bool(settings.get("sell_put_enabled"), "sell_put_enabled"),
-        sell_put_max_strike=_optional_float(settings.get("sell_put_max_strike"), "sell_put_max_strike"),
-        combo_yield_enabled=_optional_bool(settings.get("combo_yield_enabled"), "combo_yield_enabled"),
         rebuild_runtime_root=runtime_root,
         apply=apply,
         backup=True,
+        expected_source_sha256=_required_text(config.get("source_sha256"), "source_sha256") if apply else None,
     )
 
 

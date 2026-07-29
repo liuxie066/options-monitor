@@ -10,8 +10,8 @@ from typing import Any, Iterable
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_validator import validate_config
 from src.application.platform_profile import PlatformProfile, current_platform_profile
+from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
 
@@ -126,9 +126,10 @@ def run_setup_check(
         hint="./om settings doctor",
     )
 
+    runtime = resolve_runtime_root(repo_root=root)
     config_ok_markets: list[str] = []
     for market in selected_markets:
-        config_path = root / f"config.{market}.json"
+        config_path = runtime.runtime_root / f"config.{market}.json"
         if not config_path.exists():
             add(
                 f"config.{market}",
@@ -140,22 +141,33 @@ def run_setup_check(
             continue
         try:
             _path, cfg = load_runtime_config(config_key=market, config_path=config_path)
-            validate_config(dict(cfg))
         except AgentToolError as exc:
             add(f"config.{market}", "error", exc.message, {"config_path": str(config_path)}, hint=exc.hint)
             continue
-        except SystemExit as exc:
-            add(f"config.{market}", "error", str(exc), {"config_path": str(config_path)}, hint=f"./om config validate --config-path {config_path}")
+        readiness = evaluate_runtime_config_readiness(
+            dict(cfg),
+            repo_root=root,
+            runtime_config_path=config_path,
+            explicit_market=market,
+            config_key=market,
+        )
+        if not readiness["ok"]:
+            add(
+                f"config.{market}",
+                "error",
+                f"{market.upper()} runtime config is not ready",
+                readiness,
+                hint=f"./om config validate --config-path {config_path} --market {market}",
+            )
             continue
         config_ok_markets.append(market)
         add(
             f"config.{market}",
             "ok",
             f"{market.upper()} runtime config validates",
-            {"config_path": str(config_path)},
+            readiness,
         )
 
-    runtime = resolve_runtime_root(repo_root=root)
     sqlite_path = runtime.runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
     add(
         "runtime_root",

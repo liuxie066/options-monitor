@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 862 (`src`: 468, `domain`: 73, `scripts`: 8, `tests`: 313)
-- Internal import edges: 5037 total, 2262 production/script edges excluding tests
+- Python files scanned: 866 (`src`: 471, `domain`: 73, `scripts`: 8, `tests`: 314)
+- Internal import edges: 5083 total, 2282 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|378| domain
+  application -->|380| domain
   application -->|3| domain_services
   application -->|133| infrastructure
   application -->|43| storage
@@ -39,12 +39,12 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|3| application
   infrastructure -->|3| domain
-  interfaces -->|134| application
-  interfaces -->|3| domain
+  interfaces -->|133| application
+  interfaces -->|2| domain
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|1939| application
+  tests -->|1965| application
   tests -->|452| domain
   tests -->|2| domain_services
   tests -->|129| infrastructure
@@ -57,16 +57,16 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 378 |
-| interfaces | application | 134 |
+| application | domain | 380 |
 | application | infrastructure | 133 |
+| interfaces | application | 133 |
 | application | storage | 43 |
 | scripts | application | 12 |
 | domain_services | domain | 5 |
 | application | domain_services | 3 |
 | infrastructure | domain | 3 |
 | infrastructure | application | 3 |
-| interfaces | domain | 3 |
+| interfaces | domain | 2 |
 | domain_services | storage | 2 |
 | storage | domain | 1 |
 | scripts | infrastructure | 1 |
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1939 |
+| tests | application | 1965 |
 | tests | domain | 452 |
 | tests | interfaces | 195 |
 | tests | infrastructure | 129 |
@@ -89,8 +89,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 226 |
-| src.interfaces | src.application | 112 |
+| src.application | domain.domain | 228 |
+| src.interfaces | src.application | 111 |
 | src.application | src.infrastructure | 100 |
 | src.application.ledger | domain.domain | 37 |
 | src.application | domain.storage | 34 |
@@ -137,7 +137,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.multi_tick | domain.storage | 2 |
 | src.application | domain.services | 2 |
 | src.application.trades | src.application.positions | 2 |
-| src.interfaces | domain.domain | 2 |
 | domain.domain.engine | domain.domain | 2 |
 | domain.services | domain.storage | 2 |
 | src.application.inbound | domain.domain | 1 |
@@ -149,6 +148,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.setup | src.application.settings | 1 |
 | src.application | src.application.research | 1 |
 | src.application | src.application.setup | 1 |
+| src.interfaces | src.application.inbound | 1 |
 
 ## Boundary Checks
 
@@ -175,18 +175,18 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 91 |
-| domain.domain.symbol_identity | 60 |
+| src.application.agent_tool_contracts | 94 |
+| domain.domain.symbol_identity | 61 |
 | src.application.agent_tool_config | 56 |
 | src.infrastructure.io_utils | 56 |
 | src.application.ledger.api | 40 |
 | domain.domain.ledger.position_fields | 40 |
 | domain.domain.option_position_identity | 39 |
-| src.application.account_config | 31 |
+| src.application.account_config | 33 |
 | src.application.settings | 24 |
-| src.application.agent_tools.runtime_helpers | 24 |
 | domain.domain.trade_contract_identity | 24 |
 | domain.domain.engine | 23 |
+| src.application.agent_tools.runtime_helpers | 23 |
 | domain.domain.decision_state_fingerprint | 20 |
 | src.application.runtime_cli_format | 20 |
 | src.application.shadow_replay.common | 20 |

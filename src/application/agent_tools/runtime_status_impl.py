@@ -955,7 +955,10 @@ def _upgrade_status_evaluation(
     lock_info = _upgrade_lock_info(lock_path)
     lock_exists = bool(lock_info.get("exists"))
     error = upgrade_json.get("error")
-    failed_statuses = {"failed", "upgraded_restart_failed"}
+    failed_status = bool(upgrade_json.get("ok") is False) and historical_status not in {
+        "already_current",
+        "dry_run",
+    }
     failed_services = _upgrade_failed_services(upgrade_json)
     remediation = _upgrade_remediation(upgrade_json)
     service_check: dict[str, Any] = {"checked": False, "services": []}
@@ -986,8 +989,21 @@ def _upgrade_status_evaluation(
             "lock_path": _relative_path(lock_path, base=base),
         }
 
-    if historical_status not in failed_statuses:
+    if not failed_status:
         return out
+
+    compensation = upgrade_json.get("compensation")
+    compensation_payload = compensation if isinstance(compensation, dict) else {}
+    if bool(upgrade_json.get("rolled_back") or upgrade_json.get("restored_original")) and bool(
+        compensation_payload.get("ok")
+    ):
+        return {
+            **out,
+            "status": "historical_failed",
+            "runtime_failed": False,
+            "warning": True,
+            "reason": "failed_transition_was_compensated",
+        }
 
     target_is_current = bool(target_version and current_version and target_version == current_version)
     symlink_switched = bool(upgrade_json.get("symlink_switched") or upgrade_json.get("changed"))

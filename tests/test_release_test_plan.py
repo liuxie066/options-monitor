@@ -202,6 +202,29 @@ def test_python_ci_workflows_use_supported_runtime() -> None:
         assert "python-version: '3.11'" not in text
 
 
+def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
+    root = Path(__file__).resolve().parents[1]
+    required_suites = (
+        "tests/test_config_yaml.py",
+        "tests/test_config_template_inheritance.py",
+        "tests/test_config_authoring_transaction.py",
+        "tests/test_runtime_config_identity.py",
+        "tests/test_service_deploy.py",
+        "tests/test_inbound_control.py",
+        "tests/test_setup_check.py",
+        "tests/test_cli_operator_commands.py",
+    )
+    workflows = (
+        root / ".github" / "workflows" / "guardrails.yml",
+        root / ".github" / "workflows" / "_release-reusable.yml",
+    )
+
+    for workflow in workflows:
+        text = workflow.read_text(encoding="utf-8")
+        for suite in required_suites:
+            assert suite in text, f"{workflow.name} is missing required suite {suite}"
+
+
 def _run_release_preflight_with_fake_python(tmp_path: Path, *args: str) -> list[str]:
     root = Path(__file__).resolve().parents[1]
     log_path = tmp_path / "python-commands.log"
@@ -250,7 +273,13 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
 
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == [
-        "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py"
+        "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
+        (
+            "-m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py "
+            "tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py "
+            "tests/test_service_deploy.py tests/test_inbound_control.py tests/test_setup_check.py "
+            "tests/test_cli_operator_commands.py"
+        ),
     ]
 
 

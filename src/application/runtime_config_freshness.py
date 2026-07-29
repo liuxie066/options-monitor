@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 from src.application.config_primitives import file_sha256 as _file_sha256
 from src.application.config_primitives import path_for_metadata as _path_for_metadata
 
@@ -437,7 +438,8 @@ def check_runtime_config_freshness(
         enabled = bool(item.get("enabled", True))
         inline = bool(item.get("inline"))
         if loaded and inline:
-            if not str(item.get("sha256") or "").strip():
+            actual_inline_sha = str(item.get("sha256") or "").strip()
+            if not actual_inline_sha:
                 errors.append(
                     {
                         "code": "inline_source_fingerprint_missing",
@@ -445,6 +447,19 @@ def check_runtime_config_freshness(
                         "role": role,
                     }
                 )
+            elif role == "system" and str(item.get("ref") or "").strip() == DEFAULT_CONFIG_REF:
+                expected_inline_sha = default_config_sha256()
+                if actual_inline_sha != expected_inline_sha:
+                    errors.append(
+                        {
+                            "code": "inline_source_changed",
+                            "message": "inline runtime config source changed after generation",
+                            "role": role,
+                            "ref": DEFAULT_CONFIG_REF,
+                            "expected_sha256": actual_inline_sha,
+                            "actual_sha256": expected_inline_sha,
+                        }
+                    )
             continue
         path = _resolve_metadata_path(item.get("path"), repo_root=repo_root)
         if path is None:

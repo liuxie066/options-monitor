@@ -4,11 +4,9 @@ import argparse
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.config_edit import get_runtime_config_value
-from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     build_yaml_assistant_config_file,
     build_yaml_runtime_config_file,
@@ -18,11 +16,7 @@ from src.application.config_yaml import (
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.config_yaml_symbols import set_yaml_symbol_config
-from src.application.runtime_config_freshness import (
-    RuntimeConfigFreshnessError,
-    ensure_runtime_config_freshness,
-    infer_runtime_config_market,
-)
+from src.application.runtime_config_readiness import require_runtime_config_readiness
 
 
 def add_config_commands(subparsers: Any) -> None:
@@ -165,53 +159,26 @@ def _validate_runtime_config(
         config_path=config_path,
         expected_market=market,
     )
-    validate_config(dict(cfg))
-    inferred_market = infer_runtime_config_market(
+    readiness = require_runtime_config_readiness(
+        dict(cfg),
+        repo_root=repo_base_fn(),
+        runtime_config_path=path,
         explicit_market=market,
         config_key=config_key,
-        config_path=path,
-        config=cfg,
     )
-    freshness = None
-    schedule_contract = None
-    if inferred_market:
-        try:
-            schedule_contract = ensure_runtime_schedule_matches_market(
-                cfg,
-                config_path=path,
-                market_config=inferred_market,
-            )
-        except SystemExit as exc:
-            raise AgentToolError(
-                code="CONFIG_ERROR",
-                message=str(exc),
-                details={"config_path": str(path), "market": str(inferred_market)},
-            ) from exc
-        try:
-            freshness = ensure_runtime_config_freshness(
-                cfg,
-                repo_root=repo_base_fn(),
-                market=inferred_market,
-                runtime_config_path=path,
-            )
-        except RuntimeConfigFreshnessError as exc:
-            raise AgentToolError(
-                code="CONFIG_ERROR",
-                message=str(exc),
-                details=exc.result,
-            ) from exc
     return {
         "ok": True,
         "config_path": str(path),
         "config_key": str(config_key or "").strip().lower() or None,
-        "market": inferred_market,
+        "market": readiness.get("market"),
         "source_format": (
             (cfg.get("_generated") or {}).get("source_format")
             if isinstance(cfg.get("_generated"), dict)
             else None
         ),
-        "schedule_contract": schedule_contract,
-        "freshness": freshness,
+        "schedule_contract": readiness.get("schedule"),
+        "freshness": readiness.get("freshness"),
+        "readiness": readiness,
     }
 
 
@@ -315,6 +282,7 @@ def handle_config_command(
                 config_key=args.config_key,
                 config_path=args.config_path,
                 key=args.key,
+                repo_root=repo_base_fn(),
             ),
         )
 

@@ -305,6 +305,16 @@ def run_confirmed_upgrade_operation(
         raise AgentToolError(code="INPUT_ERROR", message="找不到待执行的升级操作。", details={"operation_id": operation_id})
     status = str(operation.get("status") or "").strip()
     if status in {"applied", "failed", "cancelled", "expired"}:
+        if status in {"applied", "failed"}:
+            outbox = store.get_operation_outbox(operation_id)
+            if outbox is not None and str(outbox.get("status") or "") != "sent":
+                _dispatch_final_receipt_outbox(
+                    store=store,
+                    outbox_id=str(outbox["outbox_id"]),
+                    reply_fn=reply_fn,
+                    wechat_reply_fn=wechat_reply_fn,
+                )
+                operation = store.get(operation_id) or operation
         existing = operation.get("result")
         result = existing if isinstance(existing, dict) else {}
         return build_response(
@@ -363,26 +373,59 @@ def run_confirmed_upgrade_operation(
         result = _apply_operation(payload)
     except AgentToolError as exc:
         failed = {"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
-        store.mark_failed(operation_id, result=failed)
+        _persist_terminal_and_dispatch_receipt(
+            store=store,
+            operation_id=operation_id,
+            terminal_status="failed",
+            terminal_result=failed,
+            receipt_target=receipt_target,
+            payload=payload,
+            preview=preview,
+            receipt_result=failed,
+            send_receipt=send_receipt,
+            reply_fn=reply_fn,
+            wechat_reply_fn=wechat_reply_fn,
+        )
         raise
     except Exception as exc:
         failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
-        store.mark_failed(operation_id, result=failed)
+        _persist_terminal_and_dispatch_receipt(
+            store=store,
+            operation_id=operation_id,
+            terminal_status="failed",
+            terminal_result=failed,
+            receipt_target=receipt_target,
+            payload=payload,
+            preview=preview,
+            receipt_result=failed,
+            send_receipt=send_receipt,
+            reply_fn=reply_fn,
+            wechat_reply_fn=wechat_reply_fn,
+        )
         raise AgentToolError(code="INTERNAL_ERROR", message="upgrade operation failed in background worker", details=failed) from exc
 
     if not bool(result.get("ok", False)):
         failed = {"operation_id": operation_id, "status": "failed", "result": result}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=result, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
-        store.mark_failed(operation_id, result=failed)
+        persisted = _persist_terminal_and_dispatch_receipt(
+            store=store,
+            operation_id=operation_id,
+            terminal_status="failed",
+            terminal_result=failed,
+            receipt_target=receipt_target,
+            payload=payload,
+            preview=preview,
+            receipt_result=result,
+            send_receipt=send_receipt,
+            reply_fn=reply_fn,
+            wechat_reply_fn=wechat_reply_fn,
+        )
         return build_response(
             tool_name="inbound.upgrade.worker",
             ok=False,
             data={
                 "operation_id": operation_id,
                 "status": "failed",
-                "result": result,
+                "result": persisted,
                 "response_text": render_upgrade_response(status="failed", operation_id=operation_id, payload=payload, preview=preview, result=result),
             },
             error=build_error_payload(AgentToolError(code="UPGRADE_FAILED", message=f"立即升级未成功：{result.get('status') or 'unknown'}", details=result)),
@@ -392,8 +435,19 @@ def run_confirmed_upgrade_operation(
     applied = dict(result)
     applied["operation_id"] = operation_id
     applied["status"] = "applied"
-    applied["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=applied, status="applied", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
-    store.mark_applied(operation_id, result=applied)
+    applied = _persist_terminal_and_dispatch_receipt(
+        store=store,
+        operation_id=operation_id,
+        terminal_status="applied",
+        terminal_result=applied,
+        receipt_target=receipt_target,
+        payload=payload,
+        preview=preview,
+        receipt_result=applied,
+        send_receipt=send_receipt,
+        reply_fn=reply_fn,
+        wechat_reply_fn=wechat_reply_fn,
+    )
     return build_response(
         tool_name="inbound.upgrade.worker",
         ok=True,
@@ -405,6 +459,110 @@ def run_confirmed_upgrade_operation(
         },
         meta={"audit_db": mask_path(store.path)},
     )
+
+
+def _persist_terminal_and_dispatch_receipt(
+    *,
+    store: InboundOperationStore,
+    operation_id: str,
+    terminal_status: str,
+    terminal_result: dict[str, Any],
+    receipt_target: dict[str, Any],
+    payload: dict[str, Any],
+    preview: dict[str, Any],
+    receipt_result: dict[str, Any],
+    send_receipt: bool,
+    reply_fn: ReplyFn,
+    wechat_reply_fn: WechatReplyFn | None,
+) -> dict[str, Any]:
+    outbox_id = f"{operation_id}:upgrade-final"
+    durable_result = {
+        **terminal_result,
+        "final_receipt": {
+            "attempted": False,
+            "ok": True,
+            "reason": "pending_outbox",
+            "outbox_id": outbox_id,
+            "outbox_status": "pending",
+        },
+    }
+    persisted = store.mark_terminal_with_outbox(
+        operation_id,
+        status=terminal_status,
+        result=durable_result,
+        outbox_id=outbox_id,
+        outbox_payload={
+            "operation_id": operation_id,
+            "receipt_target": receipt_target,
+            "payload": payload,
+            "preview": preview,
+            "result": receipt_result,
+            "status": terminal_status,
+            "enabled": bool(send_receipt),
+        },
+    )
+    if not persisted:
+        raise AgentToolError(
+            code="INTERNAL_ERROR",
+            message="failed to atomically persist upgrade terminal state and receipt outbox",
+            details={"operation_id": operation_id, "status": terminal_status, "outbox_id": outbox_id},
+        )
+    _dispatch_final_receipt_outbox(
+        store=store,
+        outbox_id=outbox_id,
+        reply_fn=reply_fn,
+        wechat_reply_fn=wechat_reply_fn,
+    )
+    operation = store.get(operation_id) or {}
+    result = operation.get("result")
+    return result if isinstance(result, dict) else durable_result
+
+
+def _dispatch_final_receipt_outbox(
+    *,
+    store: InboundOperationStore,
+    outbox_id: str,
+    reply_fn: ReplyFn,
+    wechat_reply_fn: WechatReplyFn | None,
+) -> dict[str, Any]:
+    existing = store.get_outbox(outbox_id)
+    if existing is None:
+        return {"attempted": False, "ok": False, "reason": "outbox_missing", "outbox_id": outbox_id}
+    if str(existing.get("status") or "") == "sent":
+        receipt = existing.get("receipt")
+        return receipt if isinstance(receipt, dict) else {"attempted": False, "ok": True, "reason": "already_sent"}
+    claimed = store.claim_outbox(outbox_id)
+    if claimed is None:
+        return {
+            "attempted": False,
+            "ok": False,
+            "reason": "outbox_not_claimed",
+            "outbox_id": outbox_id,
+            "outbox_status": existing.get("status"),
+        }
+    item = claimed.get("payload")
+    payload_map = item if isinstance(item, dict) else {}
+    try:
+        receipt = _send_final_receipt(
+            operation_id=str(payload_map.get("operation_id") or claimed.get("operation_id") or ""),
+            receipt_target=payload_map.get("receipt_target") if isinstance(payload_map.get("receipt_target"), dict) else {},
+            payload=payload_map.get("payload") if isinstance(payload_map.get("payload"), dict) else {},
+            preview=payload_map.get("preview") if isinstance(payload_map.get("preview"), dict) else {},
+            result=payload_map.get("result") if isinstance(payload_map.get("result"), dict) else {},
+            status=str(payload_map.get("status") or "failed"),
+            enabled=bool(payload_map.get("enabled", True)),
+            reply_fn=reply_fn,
+            wechat_reply_fn=wechat_reply_fn,
+        )
+    except Exception as exc:
+        receipt = {
+            "attempted": True,
+            "ok": False,
+            "reason": "dispatcher_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    store.complete_outbox(outbox_id, receipt=receipt)
+    return receipt
 
 
 def _launch_upgrade_worker(*, operation_id: str, audit_db: Path) -> dict[str, Any]:

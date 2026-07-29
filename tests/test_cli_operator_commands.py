@@ -1647,6 +1647,7 @@ def test_service_upgrade_compat_commands_are_removed(capsys) -> None:
 
 def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
+    from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 
     cfg = {
         "_generated": {
@@ -1654,6 +1655,22 @@ def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
             "generator": "options-monitor",
             "source_format": "yaml",
             "market": "us",
+            "sources": [
+                {
+                    "role": "system",
+                    "loaded": True,
+                    "inline": True,
+                    "ref": DEFAULT_CONFIG_REF,
+                    "sha256": default_config_sha256(),
+                },
+                {
+                    "role": "market_user",
+                    "loaded": True,
+                    "inline": True,
+                    "ref": "test-inline",
+                    "sha256": "test-inline-sha",
+                },
+            ],
         },
         "symbols": [
             {
@@ -1666,6 +1683,7 @@ def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
                 },
             }
         ],
+        "schedule": {"timezone": "America/New_York"},
         "runtime": {"prefetch": {"max_workers": 2}},
     }
     path = tmp_path / "config.us.json"
@@ -1682,8 +1700,62 @@ def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
     payload = _read_json_output(capsys)
     assert payload["tool_name"] == "config.get"
     assert payload["data"]["value"] == 2
+    assert payload["data"]["readiness"]["ok"] is True
 
     assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 2
+
+
+def test_config_get_rejects_stale_runtime_snapshot(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
+    from src.application.config_edit import get_runtime_config_value
+
+    source = tmp_path / "config.yaml"
+    source.write_text("accounts: {}\n", encoding="utf-8")
+    path = tmp_path / "config.us.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                    "sources": [
+                        {
+                            "role": "system",
+                            "loaded": True,
+                            "inline": True,
+                            "ref": DEFAULT_CONFIG_REF,
+                            "sha256": default_config_sha256(),
+                        },
+                        {
+                            "role": "market_user",
+                            "loaded": True,
+                            "inline": False,
+                            "path": str(source),
+                            "sha256": "stale-sha",
+                        },
+                    ],
+                },
+                "schedule": {"timezone": "America/New_York"},
+                "runtime": {"prefetch": {"max_workers": 2}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AgentToolError) as exc:
+        get_runtime_config_value(
+            config_path=path,
+            key="runtime.prefetch.max_workers",
+            repo_root=tmp_path,
+        )
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.details["freshness"]["ok"] is False
+    assert exc.value.details["freshness"]["errors"][0]["code"] == "source_changed"
 
 
 def test_config_symbol_set_delegates_to_yaml_authoring(monkeypatch, capsys, tmp_path: Path) -> None:

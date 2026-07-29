@@ -11,7 +11,6 @@ from src.application.assistant.llm_model_profiles import (
     configured_model_profiles_payload,
     current_model_payload,
     switch_active_model_profile,
-    write_model_config_update,
 )
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
@@ -22,12 +21,8 @@ from src.application.assistant.operation_lifecycle import (
 from src.application.assistant.operation_policy import enforce_model_write_allowed
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint
-from src.application.config_yaml import (
-    build_yaml_assistant_config_file,
-    default_yaml_assistant_config_path,
-    default_yaml_config_path,
-    load_yaml_config_file,
-)
+from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
+from src.application.config_yaml import default_yaml_assistant_config_path, default_yaml_config_path, load_yaml_config_file
 from src.application.runtime_config_freshness import GENERATED_KEY
 from src.application.config_yaml import RESOLVED_KEY
 
@@ -217,6 +212,7 @@ def _model_candidate_hint(action: str, candidates: Any) -> str:
 def _build_model_payload(operation_type: str, arguments: dict[str, Any], *, request: AssistantRequest) -> dict[str, Any]:
     config_yaml_path = _resolve_config_yaml_path(request)
     assistant_config_path = _resolve_assistant_config_path(request, config_yaml_path=config_yaml_path)
+    runtime_root = assistant_config_path.parent.parent if assistant_config_path.parent.name == "resolved" else config_yaml_path.parent
     return {
         "schema_version": "1.0",
         "operation_type": operation_type,
@@ -226,6 +222,8 @@ def _build_model_payload(operation_type: str, arguments: dict[str, Any], *, requ
         "config": {
             "config_yaml_path": str(config_yaml_path),
             "assistant_config_path": str(assistant_config_path),
+            "runtime_root": str(runtime_root),
+            "source_sha256": config_source_sha256(config_yaml_path),
         },
     }
 
@@ -251,6 +249,9 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
         "target_profile": profile.public_payload(active=True),
         "before": before,
         "after": after,
+        "source_revision": {
+            "before_sha256": config_source_sha256(config_yaml_path),
+        },
     }
 
 
@@ -258,26 +259,43 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     config_yaml_path, assistant_config_path, config_doc = _load_config_for_payload(payload)
     target = _target_profile(payload)
     after_doc, profile = switch_active_model_profile(config_doc, name=target)
-    write_result = write_model_config_update(
-        config_path=config_yaml_path,
-        before_doc=config_doc,
-        after_doc=after_doc,
-        apply=True,
-        action="use",
-        payload={"profile": profile.public_payload(active=True), "active_model": profile.name},
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    runtime_root = _resolve_path(
+        config.get("runtime_root"),
+        default=assistant_config_path.parent.parent if assistant_config_path.parent.name == "resolved" else config_yaml_path.parent,
     )
-    rebuild = build_yaml_assistant_config_file(
+    transaction = publish_yaml_config_generation(
         repo_root=repo_base(),
-        config_path=config_yaml_path,
-        output_config_path=assistant_config_path,
-        dry_run=False,
+        config_yaml_path=config_yaml_path,
+        config_doc=after_doc,
+        runtime_root=runtime_root,
+        markets=_markets_in_doc(after_doc),
+        include_assistant=True,
+        apply=True,
+        backup=True,
+        expected_source_sha256=_required_text(config.get("source_sha256"), "source_sha256"),
     )
     return {
         "status": "applied",
         "active_model": profile.name,
         "profile": profile.public_payload(active=True),
-        "config_write": _without_yaml(write_result),
-        "assistant_rebuild": rebuild,
+        "config_write": {
+            "ok": True,
+            "action": "use",
+            "config_yaml_path": str(config_yaml_path),
+            "changed": config_doc != after_doc,
+            "write_applied": transaction.get("write_applied"),
+            "backup_path": transaction.get("backup_path"),
+            "rollback_hint": (
+                f"restore {transaction.get('backup_path')} to {config_yaml_path}"
+                if transaction.get("backup_path")
+                else f"edit or restore {config_yaml_path}"
+            ),
+            "audit_id": transaction.get("audit_id"),
+            "source_revision": transaction.get("source_revision"),
+        },
+        "assistant_rebuild": transaction.get("assistant"),
+        "runtime_rebuild": transaction.get("markets"),
     }
 
 
@@ -467,8 +485,11 @@ def _active_model_name(payload: dict[str, Any]) -> str | None:
     return value or None
 
 
-def _without_yaml(payload: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in payload.items() if key != "yaml"}
+def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
+    markets = config_doc.get("markets")
+    if not isinstance(markets, dict):
+        return []
+    return [market for market in ("us", "hk") if isinstance(markets.get(market), dict)]
 
 
 def _required_text(value: Any, field_name: str) -> str:

@@ -1,24 +1,19 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from src.application.account_config import normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
 from src.application.config_primitives import normalize_config_market, resolve_config_path
 from src.application.config_yaml import (
-    build_yaml_assistant_config_file,
-    build_yaml_runtime_config_file,
     default_yaml_config_path,
     load_yaml_config_file,
-    validate_yaml_runtime_config,
 )
 from src.application.symbol_calibration import require_calibrated_symbol
+from src.application.symbol_mutations import default_use_for_enabled_sides, set_path
 from src.application.write_contract import attach_write_contract
 
 
@@ -36,6 +31,7 @@ def set_yaml_symbol_config(
     rebuild_runtime_root: str | Path | None = None,
     apply: bool = False,
     backup: bool = True,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
     if (
         covered_call_enabled is None
@@ -48,9 +44,10 @@ def set_yaml_symbol_config(
             code="INPUT_ERROR",
             message="at least one symbol setting is required",
             hint="Pass --covered-call-enabled, --covered-call-min-strike, --sell-put-enabled, --sell-put-max-strike, or --combo-yield-enabled.",
-        )
+    )
     config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
     market_key = normalize_config_market(market)
+    loaded_source_sha = config_source_sha256(config_yaml_path)
     after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
     summary = _mutate_symbol_config(
         after_doc,
@@ -62,20 +59,25 @@ def set_yaml_symbol_config(
         sell_put_max_strike=sell_put_max_strike,
         combo_yield_enabled=combo_yield_enabled,
     )
-    validation = _validate_doc(repo_root=repo_root, config_doc=after_doc, markets=_markets_in_doc(after_doc))
-    backup_path = None
-    if apply:
-        if backup:
-            backup_path = _backup_existing_config(config_yaml_path)
-        _write_yaml_config(config_yaml_path, after_doc)
-    rebuild = None
-    if apply and rebuild_runtime_root:
-        rebuild = _rebuild_runtime_configs(
-            repo_root=repo_root,
-            config_yaml_path=config_yaml_path,
-            runtime_root=Path(rebuild_runtime_root).expanduser(),
-            markets=_markets_in_doc(after_doc),
-        )
+    runtime_root = (
+        Path(rebuild_runtime_root).expanduser().resolve()
+        if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
+        else config_yaml_path.parent
+    )
+    transaction = publish_yaml_config_generation(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_doc=after_doc,
+        runtime_root=runtime_root,
+        markets=_markets_in_doc(after_doc),
+        include_assistant=True,
+        apply=bool(apply),
+        backup=bool(backup),
+        expected_source_sha256=expected_source_sha256 or loaded_source_sha,
+    )
+    validation = transaction["markets"]
+    backup_path = transaction.get("backup_path")
+    rebuild = transaction if apply else None
     payload = {
         "ok": True,
         "source_format": "yaml",
@@ -84,6 +86,8 @@ def set_yaml_symbol_config(
         "summary": summary,
         "validation": validation,
         "rebuild": rebuild,
+        "source_revision": transaction.get("source_revision"),
+        "audit_id": transaction.get("audit_id"),
     }
     return attach_write_contract(
         payload,
@@ -92,6 +96,270 @@ def set_yaml_symbol_config(
         backup_path=backup_path,
         rollback_hint=f"restore {backup_path} to {config_yaml_path}" if backup_path else f"edit or restore {config_yaml_path}",
     )
+
+
+def mutate_yaml_symbol_config(
+    *,
+    repo_root: Path,
+    market: str,
+    payload: dict[str, Any],
+    config_path: str | Path | None = None,
+    rebuild_runtime_root: str | Path | None = None,
+    apply: bool = False,
+    backup: bool = True,
+    expected_source_sha256: str | None = None,
+) -> dict[str, Any]:
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"add", "edit", "remove"}:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manage_symbols action: {action}")
+    market_key = normalize_config_market(market)
+    config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    loaded_source_sha = config_source_sha256(config_yaml_path)
+    after_doc = deepcopy(load_yaml_config_file(config_yaml_path))
+    summary = _mutate_generic_symbol_config(after_doc, market=market_key, action=action, payload=payload)
+    runtime_root = (
+        Path(rebuild_runtime_root).expanduser().resolve()
+        if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
+        else config_yaml_path.parent
+    )
+    transaction = publish_yaml_config_generation(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_doc=after_doc,
+        runtime_root=runtime_root,
+        markets=_markets_in_doc(after_doc),
+        include_assistant=True,
+        apply=bool(apply),
+        backup=bool(backup),
+        expected_source_sha256=expected_source_sha256 or loaded_source_sha,
+    )
+    backup_path = transaction.get("backup_path")
+    result = {
+        "ok": True,
+        "action": action,
+        "source_format": "yaml",
+        "config_yaml_path": str(config_yaml_path),
+        "market": market_key,
+        "summary": summary,
+        "validation": transaction["markets"],
+        "rebuild": transaction if apply else None,
+        "source_revision": transaction.get("source_revision"),
+        "audit_id": transaction.get("audit_id"),
+    }
+    return attach_write_contract(
+        result,
+        dry_run=not bool(apply),
+        write_applied=bool(apply),
+        backup_path=backup_path,
+        rollback_hint=f"restore {backup_path} to {config_yaml_path}" if backup_path else f"edit or restore {config_yaml_path}",
+    )
+
+
+def _mutate_generic_symbol_config(
+    config_doc: dict[str, Any],
+    *,
+    market: str,
+    action: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    market_doc = _market_doc(config_doc, market=market)
+    calibration = require_calibrated_symbol(
+        str(payload.get("symbol") or ""),
+        config=config_doc,
+        error_factory=_input_error,
+    )
+    symbol = str(calibration.canonical_symbol or "")
+    symbols = _symbols_list(market_doc, market=market)
+    overrides = market_doc.get("overrides")
+    if overrides is None:
+        overrides = {}
+        market_doc["overrides"] = overrides
+    if not isinstance(overrides, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides must be an object")
+    existing = symbol in symbols
+
+    if action == "remove":
+        if not existing:
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol not found: {symbol}")
+        symbols.remove(symbol)
+        overrides.pop(symbol, None)
+        return {
+            "action": "remove",
+            "raw_symbol": str(payload.get("symbol") or "").strip(),
+            "canonical_symbol": symbol,
+            "calibration": calibration.public_payload(),
+            "changed_paths": [f"markets.{market}.symbols", f"markets.{market}.overrides.{symbol}"],
+        }
+
+    if action == "add":
+        if existing:
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol already exists: {symbol}")
+        override = _build_generic_add_override(config_doc, market=market, payload=payload)
+        symbols.append(symbol)
+        if override:
+            overrides[symbol] = override
+        return {
+            "action": "add",
+            "raw_symbol": str(payload.get("symbol") or "").strip(),
+            "canonical_symbol": symbol,
+            "calibration": calibration.public_payload(),
+            "changed_paths": [f"markets.{market}.symbols[]", f"markets.{market}.overrides.{symbol}"],
+            "entry": deepcopy(override),
+        }
+
+    symbol_added = False
+    if not existing:
+        if not bool(payload.get("upsert", False)):
+            raise AgentToolError(code="INPUT_ERROR", message=f"symbol not found: {symbol}")
+        symbols.append(symbol)
+        symbol_added = True
+    sets = payload.get("set")
+    if not isinstance(sets, dict) or not sets:
+        raise AgentToolError(code="INPUT_ERROR", message="edit requires non-empty set object")
+    override = overrides.get(symbol)
+    if override is None:
+        override = {}
+        overrides[symbol] = override
+    if not isinstance(override, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides.{symbol} must be an object")
+    changed_paths: list[str] = []
+    if symbol_added:
+        changed_paths.append(f"markets.{market}.symbols[]")
+    for raw_path, value in sets.items():
+        authoring_path = _authoring_edit_path(override, str(raw_path))
+        try:
+            set_path(
+                override,
+                authoring_path,
+                value,
+                error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+            )
+        except AgentToolError:
+            raise
+        changed_paths.append(f"markets.{market}.overrides.{symbol}.{authoring_path}")
+    if symbol_added and _enables_call_without_put(override):
+        override.setdefault("sell_put", {})["enabled"] = False
+        changed_paths.append(f"markets.{market}.overrides.{symbol}.sell_put.enabled")
+    ensure_use = payload.get("ensure_use")
+    if isinstance(ensure_use, list):
+        current_use = _use_templates(override.get("use"))
+        for raw_template in ensure_use:
+            template = str(raw_template or "").strip()
+            if template and template not in current_use:
+                current_use.append(template)
+        if current_use != _use_templates(override.get("use")):
+            override["use"] = current_use
+            changed_paths.append(f"markets.{market}.overrides.{symbol}.use")
+    return {
+        "action": "edit",
+        "raw_symbol": str(payload.get("symbol") or "").strip(),
+        "canonical_symbol": symbol,
+        "calibration": calibration.public_payload(),
+        "changed_paths": changed_paths,
+        "entry": deepcopy(override),
+    }
+
+
+def _enables_call_without_put(override: dict[str, Any]) -> bool:
+    call = override.get("covered_call")
+    if not isinstance(call, dict):
+        call = override.get("sell_call")
+    return isinstance(call, dict) and call.get("enabled") is True and not isinstance(override.get("sell_put"), dict)
+
+
+def _build_generic_add_override(
+    config_doc: dict[str, Any],
+    *,
+    market: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    sell_put_enabled = bool(payload.get("sell_put_enabled", False))
+    sell_call_enabled = bool(payload.get("sell_call_enabled", False))
+    if sell_put_enabled:
+        _require_payload_fields(payload, "sell_put_min_dte", "sell_put_max_dte")
+    if sell_call_enabled:
+        _require_payload_fields(payload, "sell_call_min_dte", "sell_call_max_dte")
+    broker = str(payload.get("broker") or "").strip().upper()
+    if broker and broker != market.upper():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"broker {broker} conflicts with market {market}",
+        )
+    override: dict[str, Any] = {
+        "fetch": {"limit_expirations": int(payload.get("limit_expirations") or 8)},
+        "sell_put": {"enabled": sell_put_enabled},
+        "covered_call": {"enabled": sell_call_enabled},
+    }
+    if sell_put_enabled:
+        override["sell_put"].update(
+            {
+                "min_dte": int(payload["sell_put_min_dte"]),
+                "max_dte": int(payload["sell_put_max_dte"]),
+            }
+        )
+        for source, target in (
+            ("sell_put_min_strike", "min_strike"),
+            ("sell_put_max_strike", "max_strike"),
+        ):
+            if payload.get(source) is not None:
+                override["sell_put"][target] = float(payload[source])
+    if sell_call_enabled:
+        override["covered_call"].update(
+            {
+                "min_dte": int(payload["sell_call_min_dte"]),
+                "max_dte": int(payload["sell_call_max_dte"]),
+            }
+        )
+        for source, target in (
+            ("sell_call_min_strike", "min_strike"),
+            ("sell_call_max_strike", "max_strike"),
+        ):
+            if payload.get(source) is not None:
+                override["covered_call"][target] = float(payload[source])
+    use = payload.get("use")
+    if use is None:
+        use = default_use_for_enabled_sides(
+            sell_put_enabled=sell_put_enabled,
+            sell_call_enabled=sell_call_enabled,
+        )
+    if use is not None:
+        override["use"] = deepcopy(use)
+    if payload.get("accounts") is not None:
+        scoped_accounts = normalize_accounts(payload.get("accounts"), fallback=())
+        market_accounts = set(_market_accounts(config_doc, market=market))
+        unknown = [account for account in scoped_accounts if account not in market_accounts]
+        if unknown:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message=f"symbol accounts are not enabled for market {market}: {', '.join(unknown)}",
+            )
+        override["accounts"] = scoped_accounts
+    return override
+
+
+def _require_payload_fields(payload: dict[str, Any], *fields: str) -> None:
+    for field in fields:
+        if payload.get(field) is None:
+            raise AgentToolError(code="INPUT_ERROR", message=f"{field} is required")
+
+
+def _authoring_edit_path(override: dict[str, Any], path: str) -> str:
+    parts = [item.strip() for item in path.split(".")]
+    if not parts or any(not item for item in parts):
+        raise AgentToolError(code="INPUT_ERROR", message=f"invalid setting path: {path}")
+    if parts[0] == "sell_call":
+        parts[0] = "sell_call" if "sell_call" in override else "covered_call"
+    elif parts[0] == "yield_enhancement":
+        parts[0] = "combo_yield"
+    return ".".join(parts)
+
+
+def _market_accounts(config_doc: dict[str, Any], *, market: str) -> list[str]:
+    market_doc = _market_doc(config_doc, market=market)
+    raw = market_doc.get("accounts")
+    if not isinstance(raw, list):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.accounts must be a list")
+    return normalize_accounts(raw, fallback=())
 
 
 def _mutate_symbol_config(
@@ -302,76 +570,8 @@ def _markets_in_doc(config_doc: dict[str, Any]) -> list[str]:
     return out
 
 
-def _validate_doc(*, repo_root: Path, config_doc: dict[str, Any], markets: list[str]) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="om-config-symbol-") as temp_dir:
-        temp_path = Path(temp_dir) / "config.yaml"
-        _write_yaml_config(temp_path, config_doc)
-        out: dict[str, Any] = {}
-        for market in markets:
-            out[market] = validate_yaml_runtime_config(
-                repo_root=repo_root,
-                market=market,
-                config_path=temp_path,
-            )
-        return out
-
-
-def _rebuild_runtime_configs(
-    *,
-    repo_root: Path,
-    config_yaml_path: Path,
-    runtime_root: Path,
-    markets: list[str],
-) -> dict[str, Any]:
-    runtime_root = runtime_root.resolve()
-    out: dict[str, Any] = {"runtime_root": str(runtime_root), "markets": {}, "assistant": None}
-    for market in markets:
-        output = runtime_root / f"config.{market}.json"
-        build = build_yaml_runtime_config_file(
-            repo_root=repo_root,
-            market=market,
-            config_path=config_yaml_path,
-            output_config_path=output,
-            dry_run=False,
-        )
-        validate = validate_yaml_runtime_config(
-            repo_root=repo_root,
-            market=market,
-            config_path=config_yaml_path,
-        )
-        out["markets"][market] = {
-            "build": build,
-            "validate": validate,
-        }
-    assistant_output = runtime_root / "resolved" / "config.assistant.json"
-    out["assistant"] = build_yaml_assistant_config_file(
-        repo_root=repo_root,
-        config_path=config_yaml_path,
-        output_config_path=assistant_output,
-        dry_run=False,
-    )
-    return out
-
-
-def _backup_existing_config(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = path.with_name(f"{path.name}.bak.{stamp}")
-    shutil.copy2(path, backup_path)
-    return backup_path
-
-
-def _write_yaml_config(path: Path, config_doc: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(config_doc, allow_unicode=True, sort_keys=False, default_flow_style=False)
-    if not text.endswith("\n"):
-        text += "\n"
-    path.write_text(text, encoding="utf-8")
-
-
 def _input_error(message: str) -> AgentToolError:
     return AgentToolError(code="INPUT_ERROR", message=message)
 
 
-__all__ = ["set_yaml_symbol_config"]
+__all__ = ["mutate_yaml_symbol_config", "set_yaml_symbol_config"]

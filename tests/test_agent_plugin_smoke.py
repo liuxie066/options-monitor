@@ -65,6 +65,48 @@ def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
     }
 
 
+def _write_manage_symbols_generation(tmp_path: Path, *, market: str = "us") -> tuple[Path, Path]:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  user1:
+    type: external_holdings
+    holdings_account: user1
+templates:
+  put_base:
+    sell_put: {}
+  call_base:
+    covered_call:
+      strategy: insurance_underwriting
+markets:
+  us:
+    accounts: [user1]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        use: [put_base]
+  hk:
+    accounts: [user1]
+    symbols: [0700.HK]
+    overrides:
+      0700.HK:
+        use: [put_base]
+""",
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / f"config.{market}.json"
+    build_yaml_runtime_config_file(
+        repo_root=BASE,
+        market=market,
+        config_path=config_yaml,
+        output_config_path=cfg_path,
+    )
+    return config_yaml, cfg_path
+
+
 def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
     cfg = _minimal_cfg(market=market)
     cfg["account_settings"] = {
@@ -4098,8 +4140,7 @@ def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> 
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    _config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
 
     out_list = run_tool("manage_symbols", {"config_path": str(cfg_path), "action": "list"})
     assert out_list["ok"] is True
@@ -4214,8 +4255,7 @@ def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_
 def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    _config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
 
     blocked = run_tool(
         "manage_symbols",
@@ -4232,8 +4272,7 @@ def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
 def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
     out = run_tool(
@@ -4259,15 +4298,15 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
     added = next(item for item in current["symbols"] if item["symbol"] == "TSLA")
     assert added["broker"] == "US"
     assert "market" not in added
+    source = config_yaml.read_text(encoding="utf-8")
+    assert "TSLA" in source
+    assert out["data"]["authoring"]["source_format"] == "yaml"
 
 
 def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.hk.json"
-    cfg = _minimal_cfg(market="hk")
-    cfg["symbols"] = [{"symbol": "NVDA"}]
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    _config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path, market="hk")
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
     out = run_tool(
@@ -4275,7 +4314,7 @@ def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path
         {
             "config_path": str(cfg_path),
             "action": "add",
-            "symbol": "HK.00700",
+            "symbol": "HK.09988",
             "sell_put_enabled": True,
             "sell_put_min_dte": 20,
             "sell_put_max_dte": 45,
@@ -4285,14 +4324,13 @@ def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path
 
     assert out["ok"] is True
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert [item["symbol"] for item in current["symbols"]] == ["NVDA", "0700.HK"]
+    assert [item["symbol"] for item in current["symbols"]] == ["0700.HK", "9988.HK"]
 
 
 def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    _config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
     out = run_tool(

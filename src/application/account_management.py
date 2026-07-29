@@ -4,11 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_config import repo_base as agent_repo_base
-from src.application.agent_tool_init_local import (
-    add_account_to_local_config,
-    edit_account_in_local_config,
-    remove_account_from_local_config,
-)
+from src.application.config_yaml_accounts import mutate_yaml_account_config
 
 
 def add_account(
@@ -27,10 +23,15 @@ def add_account(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
-    dry_run: bool = False,
+    rebuild_runtime_root: str | Path | None = None,
+    apply: bool = False,
+    dry_run: bool | None = None,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return add_account_to_local_config(
+    write_apply = bool(apply) if dry_run is None else not bool(dry_run)
+    return mutate_yaml_account_config(
         repo_root=agent_repo_base(),
+        action="add",
         market=str(market),
         account_label=str(account_label),
         account_type=str(account_type),
@@ -45,7 +46,9 @@ def add_account(
         bitable_app_token=bitable_app_token,
         bitable_table_id=bitable_table_id,
         bitable_view_name=bitable_view_name,
-        dry_run=bool(dry_run),
+        rebuild_runtime_root=rebuild_runtime_root,
+        apply=write_apply,
+        expected_source_sha256=expected_source_sha256,
     )
 
 
@@ -66,10 +69,15 @@ def edit_account(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
-    dry_run: bool = False,
+    rebuild_runtime_root: str | Path | None = None,
+    apply: bool = False,
+    dry_run: bool | None = None,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return edit_account_in_local_config(
+    write_apply = bool(apply) if dry_run is None else not bool(dry_run)
+    return mutate_yaml_account_config(
         repo_root=agent_repo_base(),
+        action="edit",
         market=str(market),
         account_label=str(account_label),
         config_path=config_path,
@@ -85,7 +93,9 @@ def edit_account(
         bitable_app_token=bitable_app_token,
         bitable_table_id=bitable_table_id,
         bitable_view_name=bitable_view_name,
-        dry_run=bool(dry_run),
+        rebuild_runtime_root=rebuild_runtime_root,
+        apply=write_apply,
+        expected_source_sha256=expected_source_sha256,
     )
 
 
@@ -94,12 +104,19 @@ def remove_account(
     market: str,
     account_label: str,
     config_path: str | Path | None = None,
-    dry_run: bool = False,
+    rebuild_runtime_root: str | Path | None = None,
+    apply: bool = False,
+    dry_run: bool | None = None,
+    expected_source_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return remove_account_from_local_config(
+    write_apply = bool(apply) if dry_run is None else not bool(dry_run)
+    return mutate_yaml_account_config(
         repo_root=agent_repo_base(),
+        action="remove",
         market=str(market),
         account_label=str(account_label),
         config_path=config_path,
-        dry_run=bool(dry_run),
+        rebuild_runtime_root=rebuild_runtime_root,
+        apply=write_apply,
+        expected_source_sha256=expected_source_sha256,
     )

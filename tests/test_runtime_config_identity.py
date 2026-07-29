@@ -8,7 +8,7 @@ import pytest
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml import build_yaml_runtime_config_file
-from src.application.runtime_config_freshness import GENERATED_KEY
+from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -117,3 +117,45 @@ markets:
     assert payload["source_format"] == "yaml"
     assert payload["schedule_contract"]["validated"] is True
     assert payload["freshness"]["ok"] is True
+
+
+def test_runtime_freshness_rejects_changed_inline_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
+    runtime_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_yaml,
+        output_config_path=runtime_path,
+    )
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        "src.application.runtime_config_freshness.default_config_sha256",
+        lambda: "changed-defaults-sha256",
+    )
+    result = check_runtime_config_freshness(
+        payload,
+        repo_root=REPO_ROOT,
+        market="us",
+        runtime_config_path=runtime_path,
+    )
+
+    assert result["ok"] is False
+    assert any(item["code"] == "inline_source_changed" for item in result["errors"])

@@ -10,7 +10,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import config_key_parts as _key_parts
 from src.application.config_primitives import config_path_get as _path_get
-from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
+from src.application.runtime_config_readiness import require_runtime_config_readiness
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -44,39 +44,21 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _ensure_runtime_config_identity(
-    cfg: dict[str, Any],
-    *,
-    config_key: str | None,
-    path: Path,
-) -> None:
-    try:
-        ensure_runtime_config_identity(
-            cfg,
-            config_key=config_key,
-            runtime_config_path=path,
-        )
-    except RuntimeConfigIdentityError as exc:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=str(exc),
-            hint=(
-                "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
-                "`om config build --source yaml --market <market>`."
-            ),
-            details=exc.result,
-        ) from exc
-
-
 def get_runtime_config_value(
     *,
     config_key: str | None = None,
     config_path: str | Path | None = None,
     key: str,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
     cfg = _read_json_object(path)
-    _ensure_runtime_config_identity(cfg, config_key=config_key, path=path)
+    readiness = require_runtime_config_readiness(
+        cfg,
+        repo_root=Path(repo_root).expanduser() if repo_root is not None else Path.cwd(),
+        runtime_config_path=path,
+        config_key=config_key,
+    )
     parts = _key_parts(key)
     exists, current = _path_get(cfg, parts)
     if not exists:
@@ -90,6 +72,7 @@ def get_runtime_config_value(
         "key": key,
         "exists": True,
         "value": deepcopy(current),
+        "readiness": readiness,
     }
 
 

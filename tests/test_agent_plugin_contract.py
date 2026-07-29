@@ -157,6 +157,26 @@ def test_agent_spec_uses_symbols_public_name() -> None:
         "boolean",
         "null",
     ]
+    manage_symbols_properties = manage_symbols["input_json_schema"]["properties"]
+    assert manage_symbols["input_json_schema"]["additionalProperties"] is False
+    for field in (
+        "limit_expirations",
+        "sell_put_enabled",
+        "sell_put_min_dte",
+        "sell_put_max_dte",
+        "sell_put_min_strike",
+        "sell_put_max_strike",
+        "sell_call_enabled",
+        "sell_call_min_dte",
+        "sell_call_max_dte",
+        "sell_call_min_strike",
+        "sell_call_max_strike",
+        "broker",
+        "use",
+        "accounts",
+        "yes",
+    ):
+        assert field in manage_symbols_properties
     candidate_rank_explain = next(item for item in spec["tools"] if item["name"] == "candidate_rank_explain")
     assert candidate_rank_explain["risk_level"] == "read_only"
     assert candidate_rank_explain["requires_confirm"] is False

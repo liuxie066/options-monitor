@@ -9,10 +9,12 @@ import yaml
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.settings import AssistantSettings
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
+from src.application.config_yaml_accounts import mutate_yaml_account_config
 from src.application.config_profiles import apply_profiles
 from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     RESOLVED_KEY,
+    build_yaml_runtime_config_file,
     build_yaml_assistant_config_file,
     explain_yaml_config_key,
     resolve_yaml_assistant_config,
@@ -182,6 +184,93 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg[RESOLVED_KEY]["default_source"] == DEFAULT_CONFIG_REF
 
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_runtime_build_defaults_to_canonical_runtime_path(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    out = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        runtime_root=tmp_path / "runtime",
+        dry_run=True,
+    )
+
+    assert out["output_config_path"] == str((tmp_path / "runtime" / "config.us.json").resolve())
+    assert "/resolved/" not in out["output_config_path"]
+
+
+def test_yaml_config_rejects_symbol_from_another_market(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: ["0700.HK"]
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="resolves to HK but is configured under markets.us"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    (
+        (
+            """\
+notifications:
+  providre: feishu_app
+  target: wechat:ops
+""",
+            "notifications contains unsupported keys: providre",
+        ),
+        (
+            """\
+notifications:
+  provider: wechat_clawbot
+  target: wechat:ops
+  bot_token: plaintext-secret
+""",
+            "notifications.bot_token must not contain inline secret material",
+        ),
+        (
+            """\
+watchdog:
+  retry_enabled: "false"
+""",
+            "watchdog.retry_enabled must be a boolean",
+        ),
+    ),
+)
+def test_yaml_config_rejects_unsafe_control_plane_values(
+    tmp_path: Path,
+    section: str,
+    expected: str,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        f"""\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+{section}
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    with pytest.raises(AgentToolError, match=expected):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
 
 
 def test_yaml_combo_yield_keeps_only_authored_fields_explicit(tmp_path: Path) -> None:
@@ -495,6 +584,74 @@ def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
     assert item["sell_call"]["min_strike"] == 85.0
     assert (runtime_root / "config.us.json").exists()
     assert (runtime_root / "resolved" / "config.assistant.json").exists()
+
+
+def test_yaml_account_add_is_preview_only_by_default(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    before = config_path.read_bytes()
+
+    out = mutate_yaml_account_config(
+        repo_root=REPO_ROOT,
+        action="add",
+        market="us",
+        account_label="new",
+        account_type="external_holdings",
+        config_path=config_path,
+    )
+
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert out["summary"]["accounts"] == ["lx", "sy", "new"]
+    assert out["summary"]["holdings_account"] == "new"
+    assert config_path.read_bytes() == before
+    assert not (tmp_path / "config.us.json").exists()
+
+
+def test_yaml_account_add_apply_publishes_one_generation(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    runtime_root = tmp_path / "runtime"
+
+    out = mutate_yaml_account_config(
+        repo_root=REPO_ROOT,
+        action="add",
+        market="us",
+        account_label="new",
+        account_type="external_holdings",
+        config_path=config_path,
+        rebuild_runtime_root=runtime_root,
+        apply=True,
+    )
+
+    assert out["write_applied"] is True
+    source_doc = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert source_doc["accounts"]["new"]["type"] == "external_holdings"
+    assert source_doc["markets"]["us"]["accounts"] == ["lx", "sy", "new"]
+    assert source_doc["markets"]["hk"]["accounts"] == ["lx"]
+    us_runtime = json.loads((runtime_root / "config.us.json").read_text(encoding="utf-8"))
+    hk_runtime = json.loads((runtime_root / "config.hk.json").read_text(encoding="utf-8"))
+    assert us_runtime["accounts"] == ["lx", "sy", "new"]
+    assert hk_runtime["accounts"] == ["lx"]
+    assert us_runtime[RESOLVED_KEY]["config_yaml_sha256"] == out["source_revision"]["after_sha256"]
+    assert hk_runtime[RESOLVED_KEY]["config_yaml_sha256"] == out["source_revision"]["after_sha256"]
+
+
+def test_yaml_account_remove_keeps_global_definition_used_by_other_market(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    out = mutate_yaml_account_config(
+        repo_root=REPO_ROOT,
+        action="remove",
+        market="us",
+        account_label="lx",
+        config_path=config_path,
+        apply=True,
+    )
+
+    source_doc = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert out["summary"]["removed_global_account"] is False
+    assert source_doc["markets"]["us"]["accounts"] == ["sy"]
+    assert source_doc["markets"]["hk"]["accounts"] == ["lx"]
+    assert "lx" in source_doc["accounts"]
 
 
 def test_yaml_symbol_set_preserves_existing_legacy_sell_call_key(tmp_path: Path) -> None:

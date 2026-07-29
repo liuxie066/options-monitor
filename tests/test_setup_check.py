@@ -62,6 +62,58 @@ def test_setup_check_reports_yfinance_as_runtime_dependency(monkeypatch, tmp_pat
     assert checks["install.dependencies"]["value"]["checked"] == ["pandas", "futu", "yfinance"]
 
 
+def test_setup_check_reports_stale_runtime_config_and_schedule_readiness(monkeypatch, tmp_path: Path) -> None:
+    from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    source = tmp_path / "config.yaml"
+    source.write_text("accounts: {}\n", encoding="utf-8")
+    runtime_config = tmp_path / "config.us.json"
+    runtime_config.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                    "sources": [
+                        {
+                            "role": "system",
+                            "loaded": True,
+                            "inline": True,
+                            "ref": DEFAULT_CONFIG_REF,
+                            "sha256": default_config_sha256(),
+                        },
+                        {
+                            "role": "market_user",
+                            "loaded": True,
+                            "inline": False,
+                            "path": str(source),
+                            "sha256": "stale-sha",
+                        },
+                    ],
+                },
+                "schedule": {"timezone": "America/New_York"},
+                "symbols": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+
+    out = run_setup_check(repo_root=tmp_path, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert checks["config.us"]["status"] == "error"
+    assert checks["config.us"]["value"]["identity"]["ok"] is True
+    assert checks["config.us"]["value"]["schedule"]["ok"] is True
+    assert checks["config.us"]["value"]["freshness"]["ok"] is False
+    assert out["summary"]["ok"] is False
+
+
 def test_cli_setup_check_outputs_json(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

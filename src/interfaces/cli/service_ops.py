@@ -133,6 +133,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_cleanup_cmd.add_argument("--output-runs-keep-count", type=int, default=200)
     service_cleanup_cmd.add_argument("--cleanup-runtime-logs", action="store_true")
     service_cleanup_cmd.add_argument("--runtime-logs-keep-days", type=int, default=14)
+    service_cleanup_cmd.add_argument("--expected-output-runs-plan-sha256", default=None)
     service_cleanup_cmd.add_argument("--confirm", action="store_true", help="delete planned paths; without this the command is a dry run")
     service_cleanup_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
 
@@ -305,6 +306,7 @@ def handle_service_update_command(
             output_runs_keep_count=args.output_runs_keep_count,
             cleanup_runtime_logs=bool(args.cleanup_runtime_logs),
             runtime_logs_keep_days=args.runtime_logs_keep_days,
+            expected_output_runs_plan_sha256=args.expected_output_runs_plan_sha256,
             confirm=confirmed,
         )
         data = _service_write_contract(
