@@ -10,8 +10,16 @@ SECRET_KEY_PARTS = (
     "authorization",
     "auth",
     "bearer",
+    "client_secret",
+    "cookie",
+    "credential",
     "password",
+    "private_key",
+    "refresh_token",
     "secret",
+    "session",
+    "signature",
+    "signing",
     "token",
     "webhook",
 )
@@ -19,6 +27,30 @@ SECRET_KEY_PARTS = (
 WEBHOOK_RE = re.compile(r"https?://[^\s\"']*(?:webhook|hook|bot|token|key)[^\s\"']*", re.IGNORECASE)
 LONG_NUMBER_RE = re.compile(r"\b\d{10,}\b")
 BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+BASIC_AUTH_RE = re.compile(r"\bBasic\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+AUTHORIZATION_HEADER_RE = re.compile(
+    r"\b(?:Authorization|Proxy-Authorization)\s*:[^\r\n]*",
+    re.IGNORECASE,
+)
+PEM_RE = re.compile(
+    r"-----BEGIN [^-]*(?:PRIVATE KEY|SECRET)[^-]*-----.*?-----END [^-]*(?:PRIVATE KEY|SECRET)[^-]*-----",
+    re.IGNORECASE | re.DOTALL,
+)
+KEY_VALUE_RE = re.compile(
+    r"(?P<key>\b(?:api[_-]?key|access[_-]?key|authorization|auth|bearer|client[_-]?secret|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session(?:id)?|signature|signing[_-]?key|token|webhook)\b)"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;\"'&]+)",
+    re.IGNORECASE,
+)
+COOKIE_HEADER_RE = re.compile(
+    r"\b(?:Cookie|Set-Cookie)\s*:[^\r\n]*",
+    re.IGNORECASE,
+)
+QUERY_SECRET_RE = re.compile(
+    r"(?P<prefix>[?&](?:access_token|api_key|key|secret|session|sig|signature|token)=)[^&#\s]+",
+    re.IGNORECASE,
+)
+JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 
 
 def redact_value(value: Any) -> Any:
@@ -46,7 +78,20 @@ def redact_dict(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def redact_text(text: str) -> str:
-    out = WEBHOOK_RE.sub("***REDACTED_URL***", str(text))
+    out = PEM_RE.sub("***REDACTED_PEM***", str(text))
+    out = WEBHOOK_RE.sub("***REDACTED_URL***", out)
+    out = AUTHORIZATION_HEADER_RE.sub("Authorization: ***REDACTED***", out)
     out = BEARER_RE.sub("Bearer ***REDACTED***", out)
+    out = BASIC_AUTH_RE.sub("Basic ***REDACTED***", out)
+    out = COOKIE_HEADER_RE.sub("Cookie: ***REDACTED***", out)
+    out = KEY_VALUE_RE.sub(
+        lambda match: f"{match.group('key')}{match.group('sep')}***REDACTED***",
+        out,
+    )
+    out = QUERY_SECRET_RE.sub(
+        lambda match: f"{match.group('prefix')}***REDACTED***",
+        out,
+    )
+    out = JWT_RE.sub("***REDACTED_JWT***", out)
     out = LONG_NUMBER_RE.sub(lambda match: f"...{match.group(0)[-4:]}", out)
     return out

@@ -522,7 +522,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Change area | Suggested checks |
 |---|---|
 | Tool Gateway manifest/handler | `./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
-| Research | `./.venv/bin/python -m pytest tests/test_research.py` |
+| Research / Shadow Replay / Strategy Lab | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |

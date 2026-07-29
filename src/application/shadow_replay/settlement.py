@@ -10,16 +10,22 @@ from src.application.shadow_replay.common import (
     CLOSE_DECISION_OUTCOME_SCHEMA_VERSION,
     OPTIONAL_CLOSE_DATASET_FILES,
     OUTCOME_FACT_SCHEMA_VERSION,
+    bind_legacy_decision_evidence,
     dataset_dir_from_arg,
+    dataset_write_lock,
+    decision_instance_key,
     first_float,
+    freeze_decision_identities,
     instrument_key,
     parse_date,
     read_csv_rows,
     read_jsonl,
+    refresh_dataset_manifest,
     resolve_output_path,
     safety_payload,
     text,
     utc_now,
+    validate_dataset_integrity,
     write_json,
     write_jsonl,
 )
@@ -36,19 +42,49 @@ def settle_shadow_replay_dataset(
     """Derive local outcome facts from candidate snapshots and mark paths."""
 
     dataset_dir = dataset_dir_from_arg(dataset)
+    if not write:
+        return _settle_shadow_replay_dataset_unlocked(
+            dataset=dataset,
+            output=output,
+            write=False,
+            replace=replace,
+            lifecycle_paths=lifecycle_paths,
+        )
+    with dataset_write_lock(dataset_dir):
+        validate_dataset_integrity(dataset_dir)
+        result = _settle_shadow_replay_dataset_unlocked(
+            dataset=dataset,
+            output=output,
+            write=True,
+            replace=replace,
+            lifecycle_paths=lifecycle_paths,
+        )
+        result["dataset_integrity"] = refresh_dataset_manifest(dataset_dir)["integrity"]
+        return result
+
+
+def _settle_shadow_replay_dataset_unlocked(
+    *,
+    dataset: str | Path,
+    output: str | Path | None = None,
+    write: bool = False,
+    replace: bool = False,
+    lifecycle_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+) -> dict[str, Any]:
+    dataset_dir = dataset_dir_from_arg(dataset)
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
     mark_snapshots = read_jsonl(dataset_dir / "mark_path_snapshots.jsonl")
-    existing_outcomes = [] if replace else read_jsonl(dataset_dir / "outcome_facts.jsonl")
+    existing_outcomes = read_jsonl(dataset_dir / "outcome_facts.jsonl")
     generated = derive_outcome_facts(candidate_snapshots, mark_snapshots, existing_outcomes=existing_outcomes)
-    merged = generated if replace else existing_outcomes + generated
+    merged = _merge_outcome_facts(existing_outcomes, generated)
     close_episode_path = dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0]
     close_facet_exists = close_episode_path.is_file()
     close_episodes = read_jsonl(close_episode_path) if close_facet_exists else []
     close_marks = read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[1]) if close_facet_exists else []
     existing_close_outcomes = (
-        []
-        if replace or not close_facet_exists
-        else read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[2])
+        read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[2])
+        if close_facet_exists
+        else []
     )
     lifecycle_facts = _read_close_lifecycle_facts(lifecycle_paths or [])
     generated_close = derive_close_decision_outcomes(
@@ -61,6 +97,16 @@ def settle_shadow_replay_dataset(
         generated_close,
         replace=replace,
     )
+    combo_settlement = None
+    if (dataset_dir / "combo_pair_decisions.jsonl").is_file():
+        from src.application.shadow_replay.combo_settlement import settle_combo_pair_dataset
+
+        combo_settlement = settle_combo_pair_dataset(
+            dataset=dataset_dir,
+            write=write,
+            replace=replace,
+            _lock=False,
+        )
     result = {
         "schema_version": "shadow_replay_settlement.v1",
         "dataset_dir": str(dataset_dir),
@@ -68,7 +114,7 @@ def settle_shadow_replay_dataset(
         "summary": {
             "candidate_snapshot_count": len(candidate_snapshots),
             "mark_path_snapshot_count": len(mark_snapshots),
-            "existing_outcome_fact_count": 0 if replace else len(existing_outcomes),
+            "existing_outcome_fact_count": len(existing_outcomes),
             "generated_outcome_fact_count": len(generated),
             "written": bool(write),
             "replace": bool(replace),
@@ -86,9 +132,20 @@ def settle_shadow_replay_dataset(
                 for row in generated_close
                 if text(row.get("evidence_status")).lower() == "inconclusive"
             ),
+            "generated_combo_pair_outcome_count": (
+                combo_settlement["summary"]["generated_outcome_count"]
+                if combo_settlement is not None
+                else 0
+            ),
+            "complete_combo_pair_outcome_count": (
+                combo_settlement["summary"]["complete_outcome_count"]
+                if combo_settlement is not None
+                else 0
+            ),
         },
         "generated_outcome_facts": generated,
         "generated_close_outcomes": generated_close,
+        "combo_pair_settlement": combo_settlement,
         "safety": safety_payload(writes_local_dataset=bool(write)),
     }
     if write:
@@ -634,8 +691,6 @@ def _merge_close_outcomes(
     *,
     replace: bool,
 ) -> list[dict[str, Any]]:
-    if replace:
-        return generated
     by_key = {
         (text(row.get("episode_id")), text(row.get("outcome_kind"))): row
         for row in existing
@@ -655,6 +710,71 @@ def _merge_close_outcomes(
     return [by_key[key] for key in sorted(by_key)]
 
 
+def _merge_outcome_facts(
+    existing: list[dict[str, Any]],
+    generated: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Monotonically merge one current fact per decision occurrence."""
+
+    by_key: dict[str, dict[str, Any]] = {}
+    unbound: list[dict[str, Any]] = []
+    for row in existing:
+        key = decision_instance_key(row)
+        if not key:
+            unbound.append(row)
+            continue
+        current = by_key.get(key)
+        if current is None or _outcome_can_supersede(current, row):
+            by_key[key] = row
+    for row in generated:
+        key = decision_instance_key(row)
+        if not key:
+            unbound.append(row)
+            continue
+        current = by_key.get(key)
+        if current is None or _outcome_can_supersede(current, row):
+            by_key[key] = row
+    return unbound + [by_key[key] for key in sorted(by_key)]
+
+
+def _outcome_strength(row: dict[str, Any]) -> int:
+    if is_complete_closed_outcome(row):
+        return 4
+    outcome = text(row.get("outcome")).lower()
+    if outcome in {
+        "expired_worthless",
+        "assigned_at_expiry",
+        "called_away_at_expiry",
+        "expired_in_the_money",
+        "assigned",
+        "called_away",
+        "closed_later",
+    }:
+        return 3
+    if outcome == "counterfactual_mark_to_market":
+        return 1
+    return 2 if first_float(row, "realized_pnl", "lifecycle_pnl_net") is not None else 0
+
+
+def _outcome_can_supersede(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    existing_strength = _outcome_strength(existing)
+    candidate_strength = _outcome_strength(candidate)
+    if candidate_strength != existing_strength:
+        return candidate_strength > existing_strength
+    return text(candidate.get("final_mark_at") or candidate.get("observed_at_utc")) > text(
+        existing.get("final_mark_at") or existing.get("observed_at_utc")
+    )
+
+
+def _mark_outcome_strength(
+    candidates: list[dict[str, Any]],
+    mark: dict[str, Any],
+) -> int:
+    if any(is_expiration_mark(candidate, mark) for candidate in candidates):
+        return 3
+    return 1
+
+
 def _nested(source: dict[str, Any], *keys: str) -> Any:
     current: Any = source
     for key in keys:
@@ -670,19 +790,25 @@ def derive_outcome_facts(
     *,
     existing_outcomes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    candidate_snapshots = freeze_decision_identities(candidate_snapshots)
+    mark_snapshots = bind_legacy_decision_evidence(candidate_snapshots, mark_snapshots)
+    existing_outcomes = bind_legacy_decision_evidence(candidate_snapshots, existing_outcomes)
     marks_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for mark in mark_snapshots:
         if not is_usable_mark(mark):
             continue
-        key = instrument_key(mark)
+        key = decision_instance_key(mark)
         if key:
             marks_by_key[key].append(mark)
-    existing_keys = {instrument_key(row) for row in existing_outcomes}
-    existing_keys.discard("")
+    existing_by_key = {
+        decision_instance_key(row): row
+        for row in existing_outcomes
+        if decision_instance_key(row)
+    }
     out: list[dict[str, Any]] = []
     for candidate in candidate_snapshots:
-        key = instrument_key(candidate)
-        if not key or key in existing_keys:
+        key = decision_instance_key(candidate)
+        if not key:
             continue
         marks = marks_by_key.get(key) or []
         if not marks:
@@ -693,36 +819,48 @@ def derive_outcome_facts(
         realized_pnl, model, quality, outcome = derive_outcome_result(candidate, final_mark)
         if realized_pnl is None:
             continue
-        out.append(
-            {
-                "schema_version": OUTCOME_FACT_SCHEMA_VERSION,
-                "source": "derived_from_mark_path",
-                "instrument_key": key,
-                "account": candidate.get("account"),
-                "symbol": candidate.get("symbol"),
-                "contract_symbol": candidate.get("contract_symbol"),
-                "option_type": candidate.get("option_type") or candidate.get("mode"),
-                "expiration": candidate.get("expiration"),
-                "strike": candidate.get("strike"),
-                "candidate_status": candidate.get("status"),
-                "outcome": outcome,
-                "realized_pnl": realized_pnl,
-                "pnl_model": model,
-                "quality": quality,
-                "mark_count": len(marks),
-                "first_mark_at": mark_time(_earliest_mark(marks)),
-                "final_mark_at": mark_time(final_mark),
-                "max_adverse_pnl": min(pnl_values) if pnl_values else None,
-                "max_favorable_pnl": max(pnl_values) if pnl_values else None,
-                **_lifecycle_fact_payload(
-                    candidate,
-                    final_mark,
-                    outcome=outcome,
-                ),
-                "writes_runtime_config": False,
-                "writes_trade_state": False,
+        candidate_outcome = {
+            "schema_version": OUTCOME_FACT_SCHEMA_VERSION,
+            "source": "derived_from_mark_path",
+            "decision_instance_id": key,
+            "group_occurrence_id": candidate.get("group_occurrence_id"),
+            "run_id": candidate.get("run_id"),
+            "instrument_key": instrument_key(candidate),
+            "account": candidate.get("account"),
+            "symbol": candidate.get("symbol"),
+            "contract_symbol": candidate.get("contract_symbol"),
+            "option_type": candidate.get("option_type") or candidate.get("mode"),
+            "expiration": candidate.get("expiration"),
+            "strike": candidate.get("strike"),
+            "candidate_status": candidate.get("status"),
+            "outcome": outcome,
+            "realized_pnl": realized_pnl,
+            "pnl_model": model,
+            "quality": quality,
+            "mark_count": len(marks),
+            "first_mark_at": mark_time(_earliest_mark(marks)),
+            "final_mark_at": mark_time(final_mark),
+            "max_adverse_pnl": min(pnl_values) if pnl_values else None,
+            "max_favorable_pnl": max(pnl_values) if pnl_values else None,
+            **_lifecycle_fact_payload(
+                candidate,
+                final_mark,
+                outcome=outcome,
+            ),
+            "writes_runtime_config": False,
+            "writes_trade_state": False,
+        }
+        existing = existing_by_key.get(key)
+        if existing is not None and not _outcome_can_supersede(existing, candidate_outcome):
+            continue
+        candidate_outcome["revision"] = int(first_float(existing or {}, "revision") or 0) + 1
+        if existing is not None:
+            candidate_outcome["supersedes"] = {
+                "outcome": existing.get("outcome"),
+                "final_mark_at": existing.get("final_mark_at"),
+                "revision": existing.get("revision"),
             }
-        )
+        out.append(candidate_outcome)
     return out
 
 
@@ -800,10 +938,13 @@ def outcome_gap_summary(
 ) -> dict[str, Any]:
     """Classify missing outcomes by the next action that can actually resolve them."""
 
+    candidate_snapshots = freeze_decision_identities(candidate_snapshots)
+    mark_snapshots = bind_legacy_decision_evidence(candidate_snapshots, mark_snapshots)
+    outcome_facts = bind_legacy_decision_evidence(candidate_snapshots, outcome_facts)
     candidates_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     identity_missing_count = 0
     for candidate in candidate_snapshots:
-        key = instrument_key(candidate)
+        key = decision_instance_key(candidate)
         if not key:
             identity_missing_count += 1
             continue
@@ -811,21 +952,29 @@ def outcome_gap_summary(
 
     marks_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for mark in mark_snapshots:
-        key = instrument_key(mark)
+        key = decision_instance_key(mark)
         if key:
             marks_by_key[key].append(mark)
 
-    outcome_keys = {instrument_key(row) for row in outcome_facts}
-    outcome_keys.discard("")
+    outcome_by_key = {
+        decision_instance_key(row): row
+        for row in outcome_facts
+        if decision_instance_key(row)
+    }
     ready_to_settle: list[str] = []
     needs_mark: list[str] = []
     blocked: list[tuple[str, str]] = []
     for key, candidates in candidates_by_key.items():
-        if key in outcome_keys:
-            continue
         usable_marks = [row for row in marks_by_key.get(key, []) if is_usable_mark(row)]
+        existing_outcome = outcome_by_key.get(key)
         if usable_marks:
             final_mark = _latest_mark(usable_marks)
+            if (
+                existing_outcome is not None
+                and _outcome_strength(existing_outcome)
+                >= _mark_outcome_strength(candidates, final_mark)
+            ):
+                continue
             failures: Counter[str] = Counter()
             for candidate in candidates:
                 realized_pnl, _model, quality, _outcome = derive_outcome_result(candidate, final_mark)
@@ -841,6 +990,8 @@ def outcome_gap_summary(
                 blocked.append((key, reason))
             continue
 
+        if existing_outcome is not None:
+            continue
         if not any(_candidate_has_entry_premium(candidate) for candidate in candidates):
             blocked.append((key, "missing_entry_premium"))
             continue
@@ -889,6 +1040,9 @@ def derive_outcome_result(candidate: dict[str, Any], final_mark: dict[str, Any])
 
 
 def is_usable_mark(row: dict[str, Any]) -> bool:
+    point_in_time_status = text(row.get("point_in_time_status")).lower()
+    if point_in_time_status != "verified_fresh_collection":
+        return False
     if text(row.get("quote_status")).lower() == "missing_quote":
         return False
     quality = text(row.get("mark_quality")).lower()

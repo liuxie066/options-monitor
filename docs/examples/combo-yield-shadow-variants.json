@@ -1,0 +1,46 @@
+{
+  "schema_version": "shadow_combo_variant_spec.v1",
+  "max_estimated_option_chain_calls": 120,
+  "max_entry_quote_age_seconds": 60,
+  "max_entry_leg_skew_seconds": 5,
+  "variants": [
+    {
+      "variant_id": "same-ret75-d20",
+      "structure_mode": "same_expiry_pair",
+      "min_net_credit_retention": 0.75,
+      "min_abs_call_delta": 0.10,
+      "target_abs_call_delta": 0.20,
+      "max_abs_call_delta": 0.30
+    },
+    {
+      "variant_id": "same-ret75-d25",
+      "structure_mode": "same_expiry_pair",
+      "min_net_credit_retention": 0.75,
+      "min_abs_call_delta": 0.10,
+      "target_abs_call_delta": 0.25,
+      "max_abs_call_delta": 0.30
+    },
+    {
+      "variant_id": "staggered-ret80-gap28-d20",
+      "structure_mode": "staggered_expiry_pair",
+      "min_net_credit_retention": 0.80,
+      "min_abs_call_delta": 0.10,
+      "target_abs_call_delta": 0.20,
+      "max_abs_call_delta": 0.30,
+      "min_expiry_gap_days": 14,
+      "target_expiry_gap_days": 28,
+      "max_expiry_gap_days": 45
+    },
+    {
+      "variant_id": "staggered-ret80-gap28-d25",
+      "structure_mode": "staggered_expiry_pair",
+      "min_net_credit_retention": 0.80,
+      "min_abs_call_delta": 0.10,
+      "target_abs_call_delta": 0.25,
+      "max_abs_call_delta": 0.30,
+      "min_expiry_gap_days": 14,
+      "target_expiry_gap_days": 28,
+      "max_expiry_gap_days": 45
+    }
+  ]
+}

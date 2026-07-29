@@ -13,8 +13,25 @@ if str(BASE) not in sys.path:
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    if path.name == "mark_path_snapshots.jsonl":
+        rows = [
+            {
+                **row,
+                "point_in_time_status": row.get("point_in_time_status")
+                or "verified_fresh_collection",
+            }
+            for row in rows
+        ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    if path.name == "outcome_facts.jsonl":
+        from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
+
+        for name in DATASET_FILES:
+            candidate = path.parent / name
+            if not candidate.exists():
+                candidate.write_text("", encoding="utf-8")
+        refresh_dataset_manifest(path.parent)
 
 
 def _params() -> dict:
@@ -220,6 +237,7 @@ def test_iv_rv_history_percentile_falls_back_to_absolute_floor(tmp_path: Path) -
                 "option_type": "put",
                 "status": "rejected",
                 "strategy_profile": "insurance_underwriting",
+                "filter_rule": "iv_rv_ratio_below_minimum",
                 "iv_rv_ratio": 1.2,
                 "dte": 30,
             }
@@ -327,6 +345,7 @@ def test_candidate_impact_scopes_variants_to_strategy_family(tmp_path: Path) -> 
                 "strategy_family": "sell_put",
                 "strategy_profile": "insurance_underwriting",
                 "status": "rejected",
+                "filter_rule": "iv_rv_ratio_below_minimum",
                 "iv_rv_ratio": 1.2,
             },
             {
@@ -487,7 +506,10 @@ def test_candidate_impact_compares_dataset_variants_and_preserves_safety_floors(
     assert variant["newly_rejected_count"] == 1
     assert variant["newly_accepted_samples"][0]["symbol"] == "AMD"
     assert variant["newly_rejected_samples"][0]["symbol"] == "TSLA"
-    assert variant["safety_reasons"] == {"spread_ratio_above_safety_floor": 1}
+    assert variant["safety_reasons"] == {
+        "preserved_production_gate:spread_too_wide": 1,
+        "spread_ratio_above_safety_floor": 1,
+    }
     assert variant["safety_rejected_count"] == 1
     assert variant["safety_violation_count"] == 0
     assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
@@ -522,6 +544,7 @@ def test_candidate_impact_closed_replay_uses_complete_lifecycles_and_single_para
             "option_type": "put",
             "status": "rejected",
             "strategy_profile": "insurance_underwriting",
+            "filter_rule": "iv_rv_ratio_below_minimum",
             "iv_rv_ratio": 1.15,
             "iv_minus_rv": 0.06,
             "dte": 30,
@@ -852,6 +875,7 @@ def test_candidate_impact_allows_filter_only_candidate_impact_with_partial_field
                 "option_type": "put",
                 "status": "rejected",
                 "strategy_profile": "short_vol",
+                "filter_rule": "iv_rv_ratio_below_minimum",
                 "iv_rv_ratio": 1.20,
                 "iv_minus_rv": 0.06,
                 "delta": -0.20,
@@ -916,6 +940,7 @@ def test_candidate_impact_without_outcomes_is_filter_only(tmp_path: Path) -> Non
                 "option_type": "put",
                 "status": "rejected",
                 "strategy_profile": "short_vol",
+                "filter_rule": "iv_rv_ratio_below_minimum",
                 "iv_rv_ratio": 1.20,
                 "iv_minus_rv": 0.06,
                 "delta": -0.20,
@@ -1019,3 +1044,68 @@ def test_cli_shadow_replay_candidate_impact_report_command(capsys, monkeypatch, 
     assert markdown_output == output_dir / "result.us.md"
     assert result["schema_version"] == "shadow_replay_candidate_impact.v1"
     assert payload["data"]["candidate_impact_result"]["candidate_impact"]["allowed"] is True
+
+
+def test_candidate_impact_preserves_cash_coverage_and_rank_truncation_gates() -> None:
+    from src.application.shadow_replay.candidate_impact import _evaluate_candidate
+    from src.application.shadow_replay.parameter_sets import parse_parameter_set
+
+    variant = parse_parameter_set(
+        {
+            "variants": [
+                {
+                    "name": "relax_iv",
+                    "insurance_underwriting": {"min_iv_rv_ratio": 1.10},
+                }
+            ]
+        }
+    ).variants[0]
+    common = {
+        "account": "lx",
+        "option_type": "put",
+        "strategy_family": "sell_put",
+        "strategy_profile": "insurance_underwriting",
+        "iv_rv_ratio": 1.25,
+        "net_income": 100,
+        "status": "rejected",
+    }
+
+    cash = _evaluate_candidate(
+        {
+            **common,
+            "contract_symbol": "CASH260619P00100000",
+            "filter_rule": "cash_capacity_insufficient",
+            "cash_required_cny": 10_000,
+            "cash_free_cny": 1_000,
+        },
+        variant=variant,
+    )
+    ranked = _evaluate_candidate(
+        {
+            **common,
+            "contract_symbol": "RANK260619P00100000",
+            "status": "ranked_below",
+        },
+        variant=variant,
+    )
+    covered = _evaluate_candidate(
+        {
+            **common,
+            "contract_symbol": "COVER260619C00100000",
+            "option_type": "call",
+            "strategy_family": "covered_call",
+            "status": "accepted",
+        },
+        variant=variant,
+    )
+
+    assert cash["status"] == "rejected"
+    assert "cash_capacity_insufficient" in cash["safety_reasons"]
+    assert "preserved_production_gate:cash_capacity_insufficient" in cash["reasons"]
+    assert ranked["status"] == "rejected"
+    assert "production_rank_truncation_not_replayed" in ranked["reasons"]
+    assert covered["status"] == "rejected"
+    assert {
+        "covered_call_coverage_context_missing",
+        "covered_call_cost_basis_context_missing",
+    }.issubset(covered["safety_reasons"])

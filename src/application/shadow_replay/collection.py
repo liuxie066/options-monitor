@@ -54,7 +54,12 @@ def collect_shadow_replay_marks(
     mark_time_basis = "operator_asserted_as_of" if text(as_of) else "collection_time"
     candidate_snapshots = read_jsonl(dataset_dir / "candidate_snapshots.jsonl")
     close_episodes = read_jsonl(dataset_dir / OPTIONAL_CLOSE_DATASET_FILES[0])
-    quote_subjects = candidate_snapshots + _close_quote_subjects(close_episodes)
+    combo_decisions = read_jsonl(dataset_dir / "combo_pair_decisions.jsonl")
+    quote_subjects = (
+        candidate_snapshots
+        + _close_quote_subjects(close_episodes)
+        + _combo_quote_subjects(combo_decisions)
+    )
     with ExitStack() as stack:
         effective_required_root = required_root
         fetch_base = base
@@ -86,10 +91,21 @@ def collect_shadow_replay_marks(
             replace=replace,
             mark_time_basis=mark_time_basis,
             quote_collection_source=source_norm,
+            allowed_required_data_paths=(
+                [
+                    item["csv_path"]
+                    for item in fetch_summary.get("requests") or []
+                    if isinstance(item, dict)
+                    and text(item.get("status")).lower() == "ok"
+                    and text(item.get("csv_path"))
+                ]
+                if source_norm == "opend"
+                else None
+            ),
         )
     settlement: dict[str, Any] | None = None
     if settle and write:
-        settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True, replace=True)
+        settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True, replace=False)
 
     persistent_write_targets = _persistent_write_targets(
         source=source_norm,
@@ -111,6 +127,15 @@ def collect_shadow_replay_marks(
         "required_data_root": str(required_root),
         "generated_at_utc": utc_now(),
         "summary": {
+            "status": (
+                "failed"
+                if source_norm == "opend"
+                and int(fetch_summary["summary"]["ok_count"] or 0) == 0
+                and int(fetch_summary["summary"]["error_count"] or 0) > 0
+                else "partial_failed"
+                if int(fetch_summary["summary"]["error_count"] or 0) > 0
+                else "success"
+            ),
             "source": source_norm,
             "mark_as_of": mark_at,
             "mark_time_basis": mark_time_basis,
@@ -140,6 +165,51 @@ def collect_shadow_replay_marks(
     if output:
         write_json(resolve_output_path(output), result)
     return result
+
+
+def _combo_quote_subjects(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    subjects: list[dict[str, Any]] = []
+    for decision in decisions:
+        selected = bool(decision.get("baseline_selected")) or any(
+            bool(item.get("selected"))
+            for item in decision.get("variant_decisions") or []
+            if isinstance(item, dict)
+        )
+        if not selected:
+            continue
+        common = {
+            "symbol": decision.get("symbol"),
+            "account": decision.get("account"),
+            "multiplier": decision.get("multiplier"),
+            "currency": decision.get("currency"),
+        }
+        subjects.extend(
+            [
+                {
+                    **common,
+                    "option_type": "put",
+                    "contract_symbol": decision.get("put_contract_symbol"),
+                    "expiration": decision.get("put_expiration"),
+                    "strike": decision.get("put_strike"),
+                },
+                {
+                    **common,
+                    "option_type": "call",
+                    "contract_symbol": decision.get("call_contract_symbol"),
+                    "expiration": decision.get("call_expiration"),
+                    "strike": decision.get("call_strike"),
+                },
+            ]
+        )
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in subjects:
+        key = (
+            text(row.get("symbol")).upper(),
+            text(row.get("contract_symbol")),
+        )
+        if all(key):
+            deduped[key] = row
+    return [deduped[key] for key in sorted(deduped)]
 
 
 def _close_quote_subjects(episodes: list[dict[str, Any]]) -> list[dict[str, Any]]:

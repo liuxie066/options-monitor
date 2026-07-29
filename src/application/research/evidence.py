@@ -55,14 +55,43 @@ def collect_evidence(
         kind="all",
         lines=tail_limit,
     )
-    candidate_evidence = _candidate_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit, cfg=cfg)
+    collector_deployment = _deployment_snapshot(
+        base=base,
+        config_path=config_path,
+        cfg=cfg,
+        mask_path=mask_path,
+    )
+    producer_provenance = _producer_provenance(
+        payload,
+        source_paths=source_paths,
+        base=base,
+    )
+    attribution = _historical_attribution_status(
+        payload,
+        producer=producer_provenance,
+        collector=collector_deployment,
+    )
+    candidate_evidence = _candidate_evidence(
+        payload,
+        source_paths=source_paths,
+        base=base,
+        tail_limit=tail_limit,
+        cfg=cfg,
+        ranking_attribution_allowed=bool(attribution["configured_ranking_allowed"]),
+        attribution=attribution,
+    )
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
     evidence = {
         "schema_version": "research_evidence.v1",
         "collected_at_utc": now.isoformat().replace("+00:00", "Z"),
         "input": _safe_input_summary(payload),
-        "deployment": _deployment_snapshot(base=base, config_path=config_path, cfg=cfg, mask_path=mask_path),
+        "deployment": {
+            **collector_deployment,
+            "collector": collector_deployment,
+            "producer": producer_provenance,
+            "attribution": attribution,
+        },
         "scheduler_evidence": scheduler_evidence,
         "runtime_status": runtime_data,
         "runtime_status_warnings": list(runtime_warnings),
@@ -75,6 +104,10 @@ def collect_evidence(
     warnings = list(runtime_warnings)
     if not scheduler_evidence.get("provided"):
         warnings.append("scheduler_evidence_missing: online scheduler status was not provided")
+    if not attribution["configured_ranking_allowed"]:
+        warnings.append(
+            "historical_producer_provenance_unavailable_or_mismatched: configured ranking explanation disabled"
+        )
     meta = {
         "config_path": mask_path(config_path),
         "runtime_status_meta": runtime_meta,
@@ -185,6 +218,92 @@ def _deployment_snapshot(
         "config_digest": _file_digest(config_path),
         "config_key": _infer_config_key(config_path),
         "accounts": _accounts_from_config(cfg),
+    }
+
+
+def _producer_provenance(
+    payload: dict[str, Any],
+    *,
+    source_paths: dict[str, Path | None],
+    base: Path,
+) -> dict[str, Any]:
+    run_dir_raw = payload.get("run_dir")
+    if run_dir_raw:
+        run_dir = Path(str(run_dir_raw)).expanduser()
+        run_dir = (
+            run_dir.resolve()
+            if run_dir.is_absolute()
+            else (base / run_dir).resolve()
+        )
+    else:
+        run_dir = source_paths.get("latest_run_dir")
+    if run_dir is None:
+        return {"status": "not_requested"}
+    candidates = (
+        run_dir / "run_manifest.json",
+        run_dir / "manifest.json",
+        run_dir / "state" / "run_manifest.json",
+        run_dir / "run_audit.json",
+        run_dir / "state" / "run_audit.json",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            payload_raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload_raw, dict):
+            continue
+        producer = payload_raw.get("producer")
+        source = producer if isinstance(producer, dict) else payload_raw
+        return {
+            "status": "available",
+            "source_path": _safe_rel(path, base=base),
+            "version": source.get("version"),
+            "git_commit": source.get("git_commit") or source.get("commit_sha"),
+            "config_digest": source.get("config_digest") or source.get("config_sha256"),
+            "policy_digest": source.get("policy_digest") or source.get("ranking_policy_digest"),
+        }
+    return {
+        "status": "missing",
+        "run_dir": _safe_rel(run_dir, base=base),
+    }
+
+
+def _historical_attribution_status(
+    payload: dict[str, Any],
+    *,
+    producer: dict[str, Any],
+    collector: dict[str, Any],
+) -> dict[str, Any]:
+    historical = bool(
+        str(payload.get("run_id") or "").strip()
+        or str(payload.get("run_dir") or "").strip()
+    )
+    if not historical:
+        return {
+            "historical_run": False,
+            "status": "collector_current",
+            "configured_ranking_allowed": True,
+        }
+    producer_commit = str(producer.get("git_commit") or "").strip()
+    producer_config = str(producer.get("config_digest") or "").strip()
+    commit_match = bool(
+        producer_commit
+        and producer_commit == str(collector.get("git_commit") or "").strip()
+    )
+    config_match = bool(
+        producer_config
+        and producer_config == str(collector.get("config_digest") or "").strip()
+    )
+    allowed = commit_match and config_match
+    return {
+        "historical_run": True,
+        "status": "matched" if allowed else "unknown_or_mismatch",
+        "producer_commit_match": commit_match,
+        "producer_config_match": config_match,
+        "configured_ranking_allowed": allowed,
     }
 
 
@@ -339,7 +458,16 @@ def _audit_tails(source_paths: dict[str, Path | None], *, base: Path, tail_limit
     return out
 
 
-def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int, cfg: dict[str, Any]) -> dict[str, Any]:
+def _candidate_evidence(
+    payload: dict[str, Any],
+    *,
+    source_paths: dict[str, Path | None],
+    base: Path,
+    tail_limit: int,
+    cfg: dict[str, Any],
+    ranking_attribution_allowed: bool,
+    attribution: dict[str, Any],
+) -> dict[str, Any]:
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
     reject_log_paths = _explicit_paths(payload.get("reject_log_paths") or payload.get("reject_log_path"), base=base)
@@ -373,7 +501,14 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     combo_yield_pair_diagnostics = _combo_yield_pair_diagnostics(pair_diagnostic_paths, base=base)
     ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
-    ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
+    ranking_evidence = _ranking_evidence(
+        candidate_paths,
+        base=base,
+        cfg=cfg,
+        limit=ranking_limit,
+        configured_attribution_allowed=ranking_attribution_allowed,
+        attribution=attribution,
+    )
     shadow_replay = summarize_shadow_replay_readiness(
         candidate_paths=candidate_paths,
         trace_paths=trace_paths,
@@ -838,14 +973,28 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     return out
 
 
-def _ranking_evidence(candidate_paths: list[Path], *, base: Path, cfg: dict[str, Any], limit: int) -> dict[str, Any]:
+def _ranking_evidence(
+    candidate_paths: list[Path],
+    *,
+    base: Path,
+    cfg: dict[str, Any],
+    limit: int,
+    configured_attribution_allowed: bool,
+    attribution: dict[str, Any],
+) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
     strategy_counts: Counter[str] = Counter()
     cash_constraint_counts: Counter[str] = Counter()
     top_row_count = 0
 
     for path in candidate_paths:
-        report = _ranking_report(path, base=base, cfg=cfg, limit=limit)
+        report = _ranking_report(
+            path,
+            base=base,
+            cfg=cfg,
+            limit=limit,
+            configured_attribution_allowed=configured_attribution_allowed,
+        )
         reports.append(report)
         if report.get("exists"):
             _count_text(strategy_counts, report.get("strategy"))
@@ -864,6 +1013,7 @@ def _ranking_evidence(candidate_paths: list[Path], *, base: Path, cfg: dict[str,
     return {
         "schema_version": "research_ranking_evidence.v1",
         "top_rows_per_report": limit,
+        "attribution": attribution,
         "reports": reports,
         "summary": {
             "report_count": sum(1 for item in reports if item.get("exists")),
@@ -874,7 +1024,14 @@ def _ranking_evidence(candidate_paths: list[Path], *, base: Path, cfg: dict[str,
     }
 
 
-def _ranking_report(path: Path, *, base: Path, cfg: dict[str, Any], limit: int) -> dict[str, Any]:
+def _ranking_report(
+    path: Path,
+    *,
+    base: Path,
+    cfg: dict[str, Any],
+    limit: int,
+    configured_attribution_allowed: bool,
+) -> dict[str, Any]:
     strategy = _strategy_hint(path)
     account_hint = _account_hint(path)
     out: dict[str, Any] = {
@@ -896,7 +1053,16 @@ def _ranking_report(path: Path, *, base: Path, cfg: dict[str, Any], limit: int) 
             for idx, row in enumerate(reader, start=1):
                 out["row_count"] = int(out["row_count"]) + 1
                 if len(rows) < limit:
-                    rows.append(_ranking_row_evidence(row, rank=idx, strategy=strategy, account_hint=account_hint, cfg=cfg))
+                    rows.append(
+                        _ranking_row_evidence(
+                            row,
+                            rank=idx,
+                            strategy=strategy,
+                            account_hint=account_hint,
+                            cfg=cfg,
+                            configured_attribution_allowed=configured_attribution_allowed,
+                        )
+                    )
     except Exception as exc:
         out["read_error"] = f"{type(exc).__name__}: {exc}"
         return out
@@ -912,15 +1078,29 @@ def _ranking_row_evidence(
     strategy: str | None,
     account_hint: str | None,
     cfg: dict[str, Any],
+    configured_attribution_allowed: bool,
 ) -> dict[str, Any]:
     mode = _strategy_mode(strategy)
     symbol = _text(row.get("symbol") or row.get("underlying_symbol")).upper() or None
-    strategy_cfg = _strategy_settings_for_symbol(cfg, symbol=symbol, strategy=strategy)
-    score_weights = _candidate_score_weights(_dict_or_empty(strategy_cfg.get("score_weights")))
+    strategy_cfg = (
+        _strategy_settings_for_symbol(cfg, symbol=symbol, strategy=strategy)
+        if configured_attribution_allowed
+        else {}
+    )
+    score_weights = (
+        _candidate_score_weights(_dict_or_empty(strategy_cfg.get("score_weights")))
+        if configured_attribution_allowed
+        else None
+    )
     rank_explanation: dict[str, Any] | None = None
     rank_key: dict[str, Any] | None = None
 
-    if mode in {"put", "call"}:
+    if not configured_attribution_allowed:
+        rank_explanation = {
+            "status": "unavailable",
+            "reason": "historical_producer_policy_unavailable_or_mismatched",
+        }
+    elif mode in {"put", "call"}:
         try:
             rank_explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
         except Exception as exc:
@@ -964,7 +1144,11 @@ def _ranking_row_evidence(
         "metrics": _ranking_metrics(row),
         "cash_constraint": _cash_constraint(row),
         "configured_thresholds": _strategy_thresholds(strategy_cfg),
-        "configured_score_weights": _score_weights_payload(score_weights),
+        "configured_score_weights": (
+            _score_weights_payload(score_weights)
+            if score_weights is not None
+            else None
+        ),
         "rank_explanation": rank_explanation,
         "combo_yield_rank": rank_key,
     }

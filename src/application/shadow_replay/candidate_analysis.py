@@ -6,9 +6,11 @@ from typing import Any
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 
 from src.application.shadow_replay.common import (
+    bind_legacy_decision_evidence,
+    decision_instance_key,
     first_float,
     float_or_none,
-    instrument_key,
+    freeze_decision_identities,
     normal_status,
     text,
 )
@@ -33,6 +35,9 @@ def analyze_rows(
     outcome_facts: list[dict[str, Any]],
     min_sample: int,
 ) -> dict[str, Any]:
+    candidate_snapshots = freeze_decision_identities(candidate_snapshots)
+    mark_snapshots = bind_legacy_decision_evidence(candidate_snapshots, mark_snapshots)
+    outcome_facts = bind_legacy_decision_evidence(candidate_snapshots, outcome_facts)
     sample_floor = max(1, int(min_sample))
     status_counts = Counter(str(row.get("status") or "unknown") for row in candidate_snapshots)
     rejected_count = sum(status_counts.get(status, 0) for status in ("rejected", "post_filtered", "ranked_below"))
@@ -138,10 +143,10 @@ def decision_summary(decisions: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def outcome_coverage(candidates: list[dict[str, Any]], marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> dict[str, Any]:
-    candidate_keys = {instrument_key(row) for row in candidates}
-    mark_keys = {instrument_key(row) for row in marks}
-    usable_mark_keys = {instrument_key(row) for row in marks if is_usable_mark(row)}
-    outcome_keys = {instrument_key(row) for row in outcomes}
+    candidate_keys = {decision_instance_key(row) for row in candidates}
+    mark_keys = {decision_instance_key(row) for row in marks}
+    usable_mark_keys = {decision_instance_key(row) for row in marks if is_usable_mark(row)}
+    outcome_keys = {decision_instance_key(row) for row in outcomes}
     candidate_keys.discard("")
     mark_keys.discard("")
     usable_mark_keys.discard("")
@@ -161,7 +166,7 @@ def path_risk_stats(candidates: list[dict[str, Any]], marks: list[dict[str, Any]
     candidate_status = _candidate_status_by_instrument(candidates)
     grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"mark_count": 0, "instruments": set(), "pnl_values": []})
     for row in marks:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         status = candidate_status.get(key, "unknown")
         pnl = first_float(row, "unrealized_pnl", "counterfactual_pnl", "pnl", "mark_pnl")
         payload = grouped[status]
@@ -177,7 +182,7 @@ def outcome_stats(candidates: list[dict[str, Any]], outcomes: list[dict[str, Any
     candidate_status = _candidate_status_by_instrument(candidates)
     grouped: dict[str, dict[str, Any]] = defaultdict(_empty_outcome_group)
     for row in outcomes:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         status = candidate_status.get(key, "unknown")
         pnl = first_float(row, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl")
         payload = grouped[status]
@@ -199,7 +204,7 @@ def outcome_bucket_stats(candidates: list[dict[str, Any]], outcomes: list[dict[s
     for dimension, (field, bucket_fn) in dimensions.items():
         bucketed: dict[str, dict[str, Any]] = defaultdict(lambda: {"all": _empty_outcome_group(), "by_status": defaultdict(_empty_outcome_group)})
         for row in outcomes:
-            key = instrument_key(row)
+            key = decision_instance_key(row)
             candidate = candidate_by_key.get(key)
             if not candidate:
                 continue
@@ -235,7 +240,7 @@ def insurance_metrics(
         lambda: defaultdict(_empty_insurance_group)
     )
     for row in outcomes:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         candidate = candidate_by_key.get(key) or {}
         sample = _insurance_sample(candidate=candidate, outcome=row, instrument_key=key, max_adverse_pnl=adverse_by_key.get(key))
         _record_insurance_payload(by_status[sample["status"]], sample)
@@ -535,9 +540,17 @@ def decision_quality(
     min_sample: int,
 ) -> dict[str, Any]:
     sample_floor = max(1, int(min_sample))
-    outcome_by_key = {instrument_key(row): row for row in outcomes if instrument_key(row)}
+    outcome_by_key = {
+        decision_instance_key(row): row
+        for row in outcomes
+        if decision_instance_key(row)
+    }
     adverse_by_key = _max_adverse_pnl_by_instrument(marks)
-    usable_mark_keys = {instrument_key(row) for row in marks if is_usable_mark(row) and instrument_key(row)}
+    usable_mark_keys = {
+        decision_instance_key(row)
+        for row in marks
+        if is_usable_mark(row) and decision_instance_key(row)
+    }
     sample_count = len(candidates)
     force_inconclusive = sample_count < sample_floor
     samples: list[dict[str, Any]] = []
@@ -553,7 +566,7 @@ def decision_quality(
     usable_mark_missing_count = 0
     usable_mark_ready_count = 0
     for candidate in candidates:
-        key = instrument_key(candidate)
+        key = decision_instance_key(candidate)
         has_identity = _has_instrument_identity(candidate)
         if has_identity:
             instrument_identity_ready_count += 1
@@ -762,7 +775,7 @@ def _decision_quality_sample(
     sample_floor: int,
     sample_count: int,
 ) -> dict[str, Any]:
-    key = instrument_key(candidate)
+    key = decision_instance_key(candidate)
     status = normal_status(candidate.get("status"))
     profile = _strategy_profile(candidate)
     family = _strategy_family(candidate)
@@ -1036,7 +1049,7 @@ def insurance_bucket_stats(
     for dimension, (field, bucket_fn) in dimensions.items():
         bucketed: dict[str, dict[str, Any]] = defaultdict(lambda: {"all": _empty_insurance_group(), "by_status": defaultdict(_empty_insurance_group)})
         for row in outcomes:
-            key = instrument_key(row)
+            key = decision_instance_key(row)
             candidate = candidate_by_key.get(key)
             if not candidate:
                 continue
@@ -1173,7 +1186,7 @@ def _candidate_by_instrument(candidates: list[dict[str, Any]]) -> dict[str, dict
     out: dict[str, dict[str, Any]] = {}
     priority = {"accepted": 4, "rejected": 3, "post_filtered": 3, "ranked_below": 2, "unknown": 1}
     for row in candidates:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         if not key:
             continue
         status = normal_status(row.get("status"))
@@ -1188,7 +1201,7 @@ def _candidate_status_by_instrument(candidates: list[dict[str, Any]]) -> dict[st
     out: dict[str, str] = {}
     priority = {"accepted": 4, "rejected": 3, "post_filtered": 3, "ranked_below": 2, "unknown": 1}
     for row in candidates:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         if not key:
             continue
         status = normal_status(row.get("status"))
@@ -1443,7 +1456,7 @@ def _empirical_tail_risk(values: list[float], *, min_sample: int) -> dict[str, A
 def _max_adverse_pnl_by_instrument(marks: list[dict[str, Any]]) -> dict[str, float]:
     out: dict[str, float] = {}
     for row in marks:
-        key = instrument_key(row)
+        key = decision_instance_key(row)
         if not key:
             continue
         pnl = first_float(row, "unrealized_pnl", "counterfactual_pnl", "pnl", "mark_pnl")
