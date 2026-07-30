@@ -98,6 +98,8 @@ def decide_daily_brief_notification(
     *,
     ran_scan: bool,
     pipeline_reliable: bool,
+    normal_delivery_allowed: bool,
+    fixed_failure_delivery_allowed: bool,
     fixed_due: bool,
     pending_candidate_identities: list[str] | tuple[str, ...],
     retryable_envelope_kind: str | None = None,
@@ -110,13 +112,29 @@ def decide_daily_brief_notification(
             "action": "retry_exact" if retry_kind else "none",
             "reason": "retryable_envelope" if retry_kind else "no_scan_no_retry",
         }
-    if not pipeline_reliable:
-        return {
-            "action": "fixed_failure" if fixed_due else "none",
-            "reason": "fixed_scan_failed" if fixed_due else "nonfixed_scan_failed",
-        }
     if fixed_due:
-        return {"action": "fixed_report", "reason": "fixed_report_due"}
+        if pipeline_reliable and normal_delivery_allowed:
+            return {
+                "action": "fixed_report",
+                "reason": "fixed_report_due",
+            }
+        if fixed_failure_delivery_allowed:
+            return {
+                "action": "fixed_failure",
+                "reason": (
+                    "fixed_scan_failed"
+                    if not pipeline_reliable
+                    else "fixed_normal_authority_unavailable"
+                ),
+            }
+        return {
+            "action": "none",
+            "reason": "fixed_failure_authority_unavailable",
+        }
+    if not pipeline_reliable:
+        return {"action": "none", "reason": "nonfixed_scan_failed"}
+    if not normal_delivery_allowed:
+        return {"action": "none", "reason": "normal_authority_unavailable"}
     if pending_candidate_identities:
         return {"action": "candidate_alert", "reason": "pending_candidates"}
     return {"action": "none", "reason": "no_pending_candidates"}
