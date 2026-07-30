@@ -14,6 +14,7 @@ from src.application.position_advice_authority_service import (
     read_authority_resolution,
 )
 from src.application.position_advice_notification_authority import (
+    build_fixed_failure_notification_authority_token,
     build_notification_authority_token,
 )
 
@@ -166,6 +167,16 @@ def _brief(
         authority_policy_hash=resolution.policy_hash,
         account_run_id=run_id,
     )
+    failure_token = build_fixed_failure_notification_authority_token(
+        normalized_account=account,
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=_portfolio_identity_hash(account),
+        selected_advice_contract="v1",
+        resolved_mode="v1",
+        authority_generation=resolution.generation,
+        authority_policy_hash=resolution.policy_hash,
+        account_run_id=run_id,
+    )
     return {
         "market": market,
         "market_trading_date": MARKET_DATE,
@@ -197,9 +208,26 @@ def _brief(
             "resolved_mode": "v1",
             "authority_generation": resolution.generation,
             "authority_policy_hash": resolution.policy_hash,
+            "normal_delivery_allowed": True,
+            "fixed_failure_delivery_allowed": True,
             "notification_allowed": True,
             "blocker": None,
+            "normal_delivery_token": notification_token,
+            "fixed_failure_delivery_token": failure_token,
             "token": notification_token,
+            "failure_authority_resolution_status": (
+                resolution.resolution_status
+            ),
+            "failure_authority_resolved_mode": resolution.mode,
+            "failure_authority_generation": resolution.generation,
+            "failure_authority_policy_hash": resolution.policy_hash,
+            "identity_evidence": {
+                "status": "available",
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": (
+                    _portfolio_identity_hash(account)
+                ),
+            },
         },
     }
 
@@ -565,6 +593,315 @@ def test_pipeline_failure_fixed_sends_explicit_failure_without_advancing_current
     assert envelope["delivery_kind"] == "fixed_failure"
     assert "数据异常" in envelope["rendered_message"]
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["available"] is False
+
+
+def test_pending_fixed_failure_without_provider_attempt_upgrades_to_fixed_report(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch, blocked=True)
+    failed = _request(
+        tmp_path,
+        run_id="failed-before-provider",
+        pipeline_ok=False,
+    )
+    failed_prep = mod._prepare_daily_brief_notification(failed.request)
+    failed_envelope = failed_prep.lifecycles_by_account["lx"]["envelope"]
+    assert failed_envelope["delivery_kind"] == "fixed_failure"
+
+    _patch_assembler(monkeypatch)
+    recovered = _request(tmp_path, run_id="recovered-before-provider")
+    recovered_prep = mod._prepare_daily_brief_notification(
+        recovered.request
+    )
+    recovered_envelope = recovered_prep.lifecycles_by_account["lx"][
+        "envelope"
+    ]
+    audit = recovered.request.tick_metrics["daily_brief"]["prepared"][0]
+
+    assert recovered_envelope["delivery_kind"] == "fixed_report"
+    assert recovered_envelope["render_context"][
+        "notification_authority_token"
+    ]["account_run_id"] == "recovered-before-provider"
+    assert audit["pending_failure_upgrade_status"] == "clear"
+    assert audit["pending_failure_upgrade_applied"] is True
+    assert audit["selected_delivery_kind"] == "fixed_report"
+
+
+def test_pending_fixed_failure_after_definite_failure_upgrades_to_fixed_report(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+    )
+
+    _patch_assembler(monkeypatch, blocked=True)
+    failed_calls: list[dict] = []
+    _patch_sender(
+        monkeypatch,
+        calls=failed_calls,
+        result={
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_FAILED",
+        },
+    )
+    failed = _request(
+        tmp_path,
+        run_id="failed-provider-attempt",
+        pipeline_ok=False,
+    )
+    assert mod.run_tick_notification_flow(failed.request) == 1
+
+    _patch_assembler(monkeypatch)
+    recovered_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=recovered_calls)
+    recovered = _request(tmp_path, run_id="recovered-provider-attempt")
+    assert mod.run_tick_notification_flow(recovered.request) == 0
+
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    envelope = state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    audit = recovered.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert envelope["delivery_kind"] == "fixed_report"
+    assert envelope["status"] == "confirmed"
+    assert len(failed_calls) >= 1
+    assert all("数据异常" in call["message"] for call in failed_calls)
+    assert len(recovered_calls) == 1
+    assert "数据异常" not in recovered_calls[0]["message"]
+    assert audit["pending_failure_upgrade_status"] == "clear"
+    assert audit["pending_failure_upgrade_applied"] is True
+
+
+def test_provider_accepted_unconfirmed_failure_is_not_upgraded(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+    from src.application.position_advice_notification_authority import (
+        execute_notification_with_authority,
+    )
+
+    _patch_assembler(monkeypatch, blocked=True)
+    failed = _request(
+        tmp_path,
+        run_id="accepted-before-confirm",
+        pipeline_ok=False,
+    )
+    failed_prep = mod._prepare_daily_brief_notification(failed.request)
+    failed_envelope = failed_prep.lifecycles_by_account["lx"]["envelope"]
+    failed_token = failed_envelope["render_context"][
+        "notification_authority_token"
+    ]
+    provider_calls: list[str] = []
+    accepted = execute_notification_with_authority(
+        base=tmp_path,
+        token=failed_token,
+        channel="wechat_clawbot",
+        delivery_identity={
+            "account": "lx",
+            "market": "US",
+            "market_trading_date": MARKET_DATE,
+            "delivery_key": failed_envelope["delivery_key"],
+            "source_digest": failed_envelope["source_digest"],
+            "message_sha256": failed_envelope["message_sha256"],
+            "transport_idempotency_key": (
+                build_notification_transport_key(
+                    failed_envelope["delivery_key"]
+                )
+            ),
+            "delivery_kind": "fixed_failure",
+        },
+        send=lambda: provider_calls.append("sent") or {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+        },
+    )
+    assert accepted["authority_receipt_status"] == "accepted"
+    assert provider_calls == ["sent"]
+
+    _patch_assembler(monkeypatch)
+    recovered = _request(tmp_path, run_id="accepted-recovery")
+    recovered_prep = mod._prepare_daily_brief_notification(
+        recovered.request
+    )
+    selected = recovered_prep.lifecycles_by_account["lx"]["envelope"]
+    audit = recovered.request.tick_metrics["daily_brief"]["prepared"][0]
+
+    assert selected["delivery_kind"] == "fixed_failure"
+    assert selected["render_context"]["notification_authority_token"][
+        "account_run_id"
+    ] == "accepted-before-confirm"
+    assert audit["pending_failure_upgrade_status"] == "accepted"
+    assert audit["pending_failure_upgrade_applied"] is False
+    assert audit["selected_delivery_kind"] == "fixed_failure"
+
+
+def test_ambiguous_fixed_failure_is_not_upgraded_or_resent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+    )
+
+    _patch_assembler(monkeypatch, blocked=True)
+    ambiguous_calls: list[dict] = []
+    _patch_sender(
+        monkeypatch,
+        calls=ambiguous_calls,
+        result={
+            "ok": False,
+            "command_ok": True,
+            "delivery_confirmed": False,
+            "returncode": 1,
+            "error_code": "SEND_UNCONFIRMED",
+            "ambiguous_send": True,
+        },
+    )
+    failed = _request(
+        tmp_path,
+        run_id="ambiguous-provider-attempt",
+        pipeline_ok=False,
+    )
+    assert mod.run_tick_notification_flow(failed.request) == 1
+
+    _patch_assembler(monkeypatch)
+    recovered_calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=recovered_calls)
+    recovered = _request(tmp_path, run_id="ambiguous-recovery")
+    assert mod.run_tick_notification_flow(recovered.request) == 1
+
+    state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    envelope = state["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    audit = recovered.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert len(ambiguous_calls) >= 1
+    assert recovered_calls == []
+    assert envelope["delivery_kind"] == "fixed_failure"
+    assert envelope["status"] == "ambiguous"
+    assert envelope["render_context"]["notification_authority_token"][
+        "account_run_id"
+    ] == "ambiguous-provider-attempt"
+    assert audit["pending_failure_upgrade_status"] == "not_applicable"
+    assert audit["pending_failure_upgrade_applied"] is False
+    assert audit["selected_delivery_kind"] == "fixed_failure"
+
+
+def test_lx_normal_and_sy_failure_are_prepared_and_sent_independently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.tick_notification_flow as mod
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+    )
+
+    def assemble(
+        *,
+        base: Path,
+        run_id: str,
+        account: str,
+        markets_to_run: list[str],
+        **_kwargs,
+    ) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for market in markets_to_run:
+            brief = _brief(
+                base=base,
+                run_id=run_id,
+                account=account,
+                market=market,
+                blocked=account == "sy",
+            )
+            if account == "sy":
+                authority = dict(brief["notification_authority"])
+                authority.update(
+                    {
+                        "selected_advice_contract": None,
+                        "normal_delivery_allowed": False,
+                        "notification_allowed": False,
+                        "blocker": (
+                            "position_advice_source_summary_missing"
+                        ),
+                        "normal_delivery_token": None,
+                        "token": None,
+                        "authority_identity_source": (
+                            "current_run_portfolio_receipt"
+                        ),
+                        "identity_snapshot_id": "b" * 64,
+                        "identity_receipt_hash": "c" * 64,
+                    }
+                )
+                brief["notification_authority"] = authority
+            out[market] = brief
+        return out
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(
+        tmp_path,
+        run_id="mixed-authority",
+        accounts=("lx", "sy"),
+    )
+
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+
+    lx_state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["state"]
+    sy_state = read_daily_decision_brief_delivery_state(
+        base=tmp_path,
+        account="sy",
+        market="US",
+    )["state"]
+    lx_envelope = lx_state["days"][MARKET_DATE]["fixed_reports"][
+        FIXED_TARGET
+    ]
+    sy_envelope = sy_state["days"][MARKET_DATE]["fixed_reports"][
+        FIXED_TARGET
+    ]
+
+    assert lx_envelope["delivery_kind"] == "fixed_report"
+    assert lx_envelope["status"] == "confirmed"
+    assert sy_envelope["delivery_kind"] == "fixed_failure"
+    assert sy_envelope["status"] == "confirmed"
+    assert sy_envelope["rendered_transport"] is None
+    assert sy_envelope["candidate_identities"] == []
+    assert "数据异常" in sy_envelope["rendered_message"]
+    assert len(calls) == 2
+    prepared = {
+        item["account"]: item
+        for item in bundle.request.tick_metrics["daily_brief"]["prepared"]
+    }
+    assert prepared["lx"]["decision"] == "fixed_report"
+    assert prepared["lx"]["normal_report_reliable"] is True
+    assert prepared["sy"]["decision"] == "fixed_failure"
+    assert prepared["sy"]["normal_report_reliable"] is False
+    assert prepared["sy"]["fixed_failure_delivery_allowed"] is True
+    assert prepared["sy"]["authority_identity_source"] == (
+        "current_run_portfolio_receipt"
+    )
 
 
 def test_fixed_report_without_candidates_still_contains_positions_and_funds(monkeypatch, tmp_path: Path) -> None:
