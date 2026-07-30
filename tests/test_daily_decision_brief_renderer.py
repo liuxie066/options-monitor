@@ -1224,6 +1224,83 @@ def test_fixed_report_card_renders_v2_roll_economics_outside_table() -> None:
     assert "| 比较期净 carry" not in details_block
 
 
+def test_human_fact_review_is_separate_from_close_advice_metrics() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view,
+        render_fixed_report,
+        render_fixed_report_card_markdown,
+    )
+
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "advice_kind": "close_advice",
+            "position_lot_id": "pdd-put",
+            "symbol": "PDD",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-28",
+            "strike": 85,
+            "option_type": "put",
+            "close_action": "not_evaluable",
+            "evaluation_status": "not_evaluable",
+            "quote_status": "not_evaluable",
+            "notification_eligible": False,
+            "metrics": {"close_mid": 3.375},
+        },
+        {
+            "advice_kind": "position_advice",
+            "position_lot_id": "pdd-put",
+            "symbol": "PDD",
+            "strategy_family": "funding_put",
+            "expiration": "2026-08-28",
+            "strike": 85,
+            "option_type": "put",
+            "recommendation": "review",
+            "close_action": "review",
+            "evaluation_status": "evaluable",
+            "quote_status": "unavailable",
+            "human_review_required": True,
+            "model_trade_actionable": False,
+            "reason_codes": [
+                "combo_identity_unverified",
+                "v2_not_authoritative",
+            ],
+            "metrics": {},
+        },
+    ]
+
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="fixed_report",
+        context=_scheduled_context(),
+    )
+    plain = render_fixed_report(
+        brief,
+        context=_scheduled_context(),
+    )
+    card = render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+    )
+
+    assert view["position_review_total"] == 1
+    assert view["positions"][0]["display_kind"] == "fact_review"
+    for message in (plain, card):
+        assert "## 持仓事实核查（非交易建议）" in message
+        assert "PDD｜08-28 $85 Put｜持仓事实待核查" in message
+        assert "不是平仓、滚仓或开仓建议" in message
+        assert (
+            "核查原因｜组合身份尚未核验；"
+            "Position Advice v2 当前不是正式交易建议来源"
+        ) in message
+        assert "combo_identity_unverified" not in message
+        assert "v2_not_authoritative" not in message
+        assert "建议人工核查" not in message
+    assert "| 持仓 | 建议 | 参考平仓价 |" not in card
+    assert "预计锁定损益" not in card
+    assert "剩余年化" not in card
+
+
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
     from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
 

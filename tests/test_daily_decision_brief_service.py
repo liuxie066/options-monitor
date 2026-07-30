@@ -1090,6 +1090,8 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
                 "call_strike": 220,
                 "bid": 4.25,
                 "linked_call_ask": 0.55,
+                "cash_required_usd": 18_000,
+                "cash_free_usd": 36_000,
                 "structure_mode": "staggered_expiry_pair",
                 "funding_accepted": True,
                 "put_only_annualized_net_return": 0.30,
@@ -1107,6 +1109,13 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert combos[0]["call_leg_role"] == "participation_call"
     assert combos[0]["put_sell_reference"] == 4.25
     assert combos[0]["call_buy_reference"] == 0.55
+    combo_index = {
+        item["symbol"]: item["representative"]
+        for item in brief["candidate_index"]
+        if item["strategy_family"] == "combo_yield"
+    }
+    assert combo_index["AAPL"]["put_sell_reference"] == 4.25
+    assert combo_index["AAPL"]["call_buy_reference"] == 0.55
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
     assert [item["strategy_group_id"] for item in combo_actions] == ["pair-c", "pair-a"]
 
