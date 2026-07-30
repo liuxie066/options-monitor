@@ -1889,6 +1889,7 @@ def _position_view(
         "quote_status",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
+    out["advice_kind"] = "close_advice"
     out["notification_eligible"] = notification_eligible
     out["metrics"] = {
         key: _json_safe(row.get(key))
@@ -2004,6 +2005,7 @@ def _position_advice_position_view(
         )
     }
     out["position_lot_id"] = out.pop("position_id")
+    out["advice_kind"] = "position_advice"
     out["evaluation_status"] = (
         "evaluable" if row.get("recommendation") != "not_evaluable"
         else "not_evaluable"
