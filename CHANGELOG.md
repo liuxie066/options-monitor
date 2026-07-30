@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.7.4 - 2026-07-30
+
+### Bug Fixes
+- Restored per-account scheduled Daily Brief failure notifications when the normal Position Advice source graph is unavailable, using only a purpose-restricted token derived from the current run's verified immutable portfolio identity while keeping normal reports fail closed.
+- Bound fixed-failure authority tokens to the exact persisted delivery envelope and upgraded recovered reports only when no accepted, ambiguous, or in-flight provider evidence exists, preventing cross-run substitutions, duplicate sends, and stale failure messages after recovery.
+
 ## 1.7.3 - 2026-07-29
 
 ### Bug Fixes
