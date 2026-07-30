@@ -37,6 +37,8 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "call_expiration",
     "put_strike",
     "call_strike",
+    "put_sell_reference",
+    "call_buy_reference",
     "priority",
     "metrics",
     "capacity",

@@ -51,10 +51,21 @@ _POSITION_ADVICE_LABELS = {
     "roll": "建议滚仓",
     "replace": "建议替换当前期权腿",
     "reallocate": "建议重新分配资金",
-    "review": "建议人工核查",
+    "review": "持仓事实待核查",
     "hold": "继续观察",
     "not_evaluable": "暂无法评估（证据不足）",
     "none": "继续观察",
+}
+_POSITION_REVIEW_REASON_LABELS = {
+    "combo_identity_unverified": "组合身份尚未核验",
+    "combo_opening_incomplete": "组合开仓证据不完整",
+    "combo_partially_decomposed": "组合已部分拆解，需确认剩余结构",
+    "combo_review_required": "组合状态需要人工确认",
+    "lifecycle_conflict": "持仓生命周期证据存在冲突",
+    "lifecycle_needs_review": "持仓生命周期状态需要人工确认",
+    "lifecycle_read_model_missing": "持仓生命周期读取信息不完整",
+    "promotion_scope_uncovered": "当前持仓不在已批准的 Position Advice 范围",
+    "v2_not_authoritative": "Position Advice v2 当前不是正式交易建议来源",
 }
 _STANDARD_CLOSE_TIER_LABELS = {
     "strong": "强烈建议平仓",
@@ -117,7 +128,12 @@ def build_daily_brief_user_view(
         diff=normalized_diff,
         limits=cfg,
     )
-    position_views, position_total, position_actionable_total = _position_views(
+    (
+        position_views,
+        position_total,
+        position_actionable_total,
+        position_review_total,
+    ) = _position_views(
         brief,
         diff=normalized_diff,
         limits=cfg,
@@ -167,6 +183,7 @@ def build_daily_brief_user_view(
         "positions": position_views,
         "position_total": position_total,
         "position_actionable_total": position_actionable_total,
+        "position_review_total": position_review_total,
         "funds": funds,
         "capacity": capacity,
         "reminders": reminders,
@@ -427,23 +444,41 @@ def _render_user_view(
         for note in view.get("candidate_omissions") or []:
             lines.append(f"补充｜{note}")
 
-    positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
+    position_rows = [
+        item
+        for item in view.get("positions") or []
+        if isinstance(item, Mapping)
+    ]
+    positions, fact_reviews = _partition_position_views(position_rows)
     if projection != "candidate_alert":
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 持仓"])
-        position_total = _whole_number(view.get("position_total")) or 0
-        position_actionable_total = _whole_number(view.get("position_actionable_total")) or 0
-        position_summary = f"汇总｜共 {position_total} 条"
-        if position_actionable_total:
-            position_summary += f"，需处理 {position_actionable_total} 条"
-            if len(positions) < position_actionable_total:
-                position_summary += f"，本消息展示 {len(positions)} 条"
-        else:
-            position_summary += "，当前没有需要处理的持仓"
-        lines.append(position_summary + "。")
+        lines.append(
+            _position_summary(
+                view,
+                visible_actionable_count=len(position_rows),
+            )
+        )
         for item in positions:
             lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
                 lines.append(f"参考｜{detail}")
+        if fact_reviews:
+            lines.extend(
+                [
+                    _VISIBLE_BLANK_LINE,
+                    f"{section_mark} 持仓事实核查（非交易建议）",
+                    "说明｜以下事项仅用于核对持仓或组合身份，不是平仓、滚仓或开仓建议。",
+                ]
+            )
+            for item in fact_reviews:
+                lines.extend(
+                    [
+                        _VISIBLE_BLANK_LINE,
+                        f"**{_flat_title(item['title'])}｜{item['status']}**",
+                    ]
+                )
+                for detail in item.get("details") or []:
+                    lines.append(f"核查原因｜{detail}")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     capacity = [str(item) for item in view.get("capacity") or [] if str(item).strip()]
@@ -506,17 +541,18 @@ def _render_user_view_card(
 
     if projection != "candidate_alert":
         lines.extend(["", "## 持仓"])
-        positions = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
-        position_total = _whole_number(view.get("position_total")) or 0
-        position_actionable_total = _whole_number(view.get("position_actionable_total")) or 0
-        summary = f"汇总｜共 {position_total} 条"
-        if position_actionable_total:
-            summary += f"，需处理 {position_actionable_total} 条"
-            if len(positions) < position_actionable_total:
-                summary += f"，本消息展示 {len(positions)} 条"
-        else:
-            summary += "，当前没有需要处理的持仓"
-        lines.append(summary + "。")
+        position_rows = [
+            item
+            for item in view.get("positions") or []
+            if isinstance(item, Mapping)
+        ]
+        positions, fact_reviews = _partition_position_views(position_rows)
+        lines.append(
+            _position_summary(
+                view,
+                visible_actionable_count=len(position_rows),
+            )
+        )
         if positions:
             lines.extend(
                 [
@@ -545,6 +581,23 @@ def _render_user_view_card(
             )
             if decision_details:
                 lines.extend(["", *decision_details])
+        if fact_reviews:
+            lines.extend(
+                [
+                    "",
+                    "## 持仓事实核查（非交易建议）",
+                    "说明｜以下事项仅用于核对持仓或组合身份，不是平仓、滚仓或开仓建议。",
+                ]
+            )
+            for item in fact_reviews:
+                lines.extend(
+                    [
+                        "",
+                        f"**{_flat_title(item['title'])}｜{item['status']}**",
+                    ]
+                )
+                for detail in item.get("details") or []:
+                    lines.append(f"核查原因｜{detail}")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     lines.extend(["", "## 资金"])
@@ -882,13 +935,14 @@ def _position_views(
     *,
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], int, int, int]:
     positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
     total = len(positions)
     # 无行动指向的持仓（继续观察、无法评估）不逐条展示；
     # 总持仓数和需处理数在汇总中分开呈现，避免把非行动项误说成“折叠”。
     positions = [row for row in positions if _position_has_advice(row)]
     actionable_total = len(positions)
+    review_total = sum(1 for row in positions if _is_position_fact_review(row))
     changed_keys = _changed_position_keys(diff)
     changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
     unchanged_positions = [row for row in positions if row not in changed_positions]
@@ -908,17 +962,23 @@ def _position_views(
         if contract:
             title_parts.append(contract)
         status = _position_status_label(row)
+        display_kind = (
+            "fact_review"
+            if _is_position_fact_review(row)
+            else "advice"
+        )
         out.append(
             {
                 "title": " · ".join(title_parts),
                 "holding": " · ".join(title_parts),
                 "status": status,
+                "display_kind": display_kind,
                 "recommendation": _lower(row.get("recommendation")),
                 "details": _position_close_details(row, market=market, status=status),
                 **_position_card_fields(row, market=market, status=status),
             }
         )
-    return out, total, actionable_total
+    return out, total, actionable_total, review_total
 
 
 def _position_strategy_label(row: Mapping[str, Any]) -> str:
@@ -998,6 +1058,57 @@ def _position_has_advice(row: Mapping[str, Any]) -> bool:
     return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
 
 
+def _is_position_fact_review(row: Mapping[str, Any]) -> bool:
+    return (
+        _lower(row.get("recommendation")) == "review"
+        and row.get("human_review_required") is True
+        and row.get("model_trade_actionable") is not True
+    )
+
+
+def _partition_position_views(
+    rows: list[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    fact_reviews = [
+        row
+        for row in rows
+        if _lower(row.get("display_kind")) == "fact_review"
+    ]
+    advice = [
+        row
+        for row in rows
+        if _lower(row.get("display_kind")) != "fact_review"
+    ]
+    return advice, fact_reviews
+
+
+def _position_summary(
+    view: Mapping[str, Any],
+    *,
+    visible_actionable_count: int,
+) -> str:
+    position_total = _whole_number(view.get("position_total")) or 0
+    actionable_total = (
+        _whole_number(view.get("position_actionable_total")) or 0
+    )
+    review_total = _whole_number(view.get("position_review_total")) or 0
+    summary = f"汇总｜共 {position_total} 条"
+    if review_total:
+        trade_total = max(0, actionable_total - review_total)
+        if trade_total:
+            summary += f"，需交易处理 {trade_total} 条"
+        else:
+            summary += "，当前没有需要交易处理的持仓"
+        summary += f"，另有事实核查 {review_total} 条（非交易建议）"
+    elif actionable_total:
+        summary += f"，需处理 {actionable_total} 条"
+    else:
+        summary += "，当前没有需要处理的持仓"
+    if visible_actionable_count < actionable_total:
+        summary += f"，本消息展示 {visible_actionable_count} 条"
+    return summary + "。"
+
+
 def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:
     recommendation = _lower(row.get("recommendation"))
     if recommendation in {"roll", "replace", "reallocate"}:
@@ -1021,7 +1132,10 @@ def _position_close_details(row: Mapping[str, Any], *, market: str, status: str)
         return [" · ".join(parts)] if parts else []
     if recommendation == "review":
         reasons = [
-            str(item)
+            _POSITION_REVIEW_REASON_LABELS.get(
+                str(item),
+                str(item),
+            )
             for item in row.get("reason_codes") or []
             if str(item)
         ]
