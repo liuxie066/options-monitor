@@ -47,6 +47,7 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.position_advice_notification_authority import (
     execute_notification_with_authority,
+    read_notification_authority_delivery_state,
 )
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
@@ -428,6 +429,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                     "delivery_key": delivery_key,
                     "source_digest": envelope.get("source_digest"),
                     "message_sha256": envelope.get("message_sha256"),
+                    "delivery_kind": envelope.get("delivery_kind"),
                     "transport_idempotency_key": (
                         build_notification_transport_key(delivery_key)
                     ),
@@ -774,7 +776,7 @@ def _prepare_daily_brief_notification(
                     if request.trigger_kind == "scheduled"
                     else ""
                 )
-                reliable = bool(
+                pipeline_reliable = bool(
                     account in ran_pipeline_accounts
                     and brief.get("status") in {"ready", "degraded"}
                     and brief.get("actionability") != "blocked"
@@ -786,17 +788,29 @@ def _prepare_daily_brief_notification(
                     )
                     else {}
                 )
-                authority_allows_notification = (
-                    notification_authority.get("notification_allowed")
-                    is not False
+                normal_delivery_allowed = bool(
+                    notification_authority.get(
+                        "normal_delivery_allowed",
+                        notification_authority.get(
+                            "notification_allowed"
+                        )
+                        is not False,
+                    )
                 )
-                if not authority_allows_notification:
-                    reliable = False
+                fixed_failure_delivery_allowed = (
+                    notification_authority.get(
+                        "fixed_failure_delivery_allowed"
+                    )
+                    is True
+                )
+                normal_report_reliable = (
+                    pipeline_reliable and normal_delivery_allowed
+                )
                 pending: list[str] = []
                 persisted: dict[str, Any] | None = None
                 diff: dict[str, Any] = {}
                 failure_source: tuple[str, str] | None = None
-                if reliable:
+                if normal_report_reliable:
                     persisted = persist_daily_decision_brief_success(base=request.base, brief=brief)
                     previous = persisted.get("previous_successful_brief")
                     if isinstance(previous, dict) and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]:
@@ -824,21 +838,19 @@ def _prepare_daily_brief_notification(
                 decision = (
                     decide_daily_brief_notification(
                         ran_scan=True,
-                        pipeline_reliable=reliable,
+                        pipeline_reliable=pipeline_reliable,
+                        normal_delivery_allowed=(
+                            normal_delivery_allowed
+                        ),
+                        fixed_failure_delivery_allowed=(
+                            fixed_failure_delivery_allowed
+                        ),
                         fixed_due=bool(fixed_target),
                         pending_candidate_identities=pending,
                     )
                     if scheduled_trigger
                     else {"action": "none", "reason": "non_scheduled_snapshot_only"}
                 )
-                if not authority_allows_notification:
-                    decision = {
-                        "action": "none",
-                        "reason": str(
-                            notification_authority.get("blocker")
-                            or "position_advice_notification_authority_unavailable"
-                        ),
-                    }
                 action = str(decision["action"])
                 existing_retry = None
                 if scheduled_trigger and not multi_market:
@@ -848,13 +860,49 @@ def _prepare_daily_brief_notification(
                         market=market,
                         market_trading_date=str(brief["market_trading_date"]),
                     )
+                existing_envelope = (
+                    existing_retry.get("envelope")
+                    if isinstance(existing_retry, dict)
+                    else None
+                )
+                pending_failure_upgrade = (
+                    _pending_fixed_failure_upgrade_decision(
+                        request=request,
+                        action=action,
+                        envelope=existing_envelope,
+                    )
+                )
                 should_prepare = not (
                     isinstance(existing_retry, dict)
-                    and isinstance(existing_retry.get("envelope"), dict)
+                    and isinstance(existing_envelope, dict)
+                ) or pending_failure_upgrade["allowed"]
+                authority_token = (
+                    notification_authority.get(
+                        "fixed_failure_delivery_token"
+                    )
+                    if action == "fixed_failure"
+                    else notification_authority.get(
+                        "normal_delivery_token",
+                        notification_authority.get("token"),
+                    )
                 )
+                if (
+                    should_prepare
+                    and action
+                    in {
+                        "fixed_report",
+                        "candidate_alert",
+                        "fixed_failure",
+                    }
+                    and not isinstance(authority_token, Mapping)
+                ):
+                    decision = {
+                        "action": "none",
+                        "reason": "daily_brief_authority_token_missing",
+                    }
+                    action = "none"
                 if not multi_market and not request.no_send and should_prepare and action in {"fixed_report", "candidate_alert", "fixed_failure"}:
                     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
-                    authority_token = notification_authority.get("token")
                     if isinstance(authority_token, Mapping):
                         render_context["notification_authority_token"] = dict(
                             authority_token
@@ -965,12 +1013,99 @@ def _prepare_daily_brief_notification(
                         "market": market,
                         "market_trading_date": str(brief["market_trading_date"]),
                         "brief_id": (persisted or {}).get("brief", brief).get("brief_id"),
-                        "pipeline_reliable": reliable,
+                        "pipeline_reliable": pipeline_reliable,
+                        "normal_report_reliable": normal_report_reliable,
+                        "normal_delivery_allowed": normal_delivery_allowed,
+                        "fixed_failure_delivery_allowed": (
+                            fixed_failure_delivery_allowed
+                        ),
+                        "authority_source": (
+                            notification_authority.get(
+                                "normalized_portfolio_source"
+                            )
+                            or (
+                                notification_authority.get(
+                                    "identity_evidence"
+                                )
+                                or {}
+                            ).get("normalized_portfolio_source")
+                        ),
+                        "authority_identity_source": (
+                            notification_authority.get(
+                                "authority_identity_source"
+                            )
+                        ),
+                        "authority_resolution_status": (
+                            notification_authority.get(
+                                "failure_authority_resolution_status"
+                            )
+                        ),
+                        "authority_resolved_mode": (
+                            notification_authority.get(
+                                "failure_authority_resolved_mode"
+                            )
+                            or notification_authority.get("resolved_mode")
+                        ),
+                        "authority_generation": (
+                            notification_authority.get(
+                                "failure_authority_generation"
+                            )
+                            if action == "fixed_failure"
+                            else notification_authority.get(
+                                "authority_generation"
+                            )
+                        ),
+                        "authority_policy_hash": (
+                            notification_authority.get(
+                                "failure_authority_policy_hash"
+                            )
+                            if action == "fixed_failure"
+                            else notification_authority.get(
+                                "authority_policy_hash"
+                            )
+                        ),
+                        "portfolio_account_identity_hash": (
+                            notification_authority.get(
+                                "portfolio_account_identity_hash"
+                            )
+                            or (
+                                notification_authority.get(
+                                    "identity_evidence"
+                                )
+                                or {}
+                            ).get(
+                                "portfolio_account_identity_hash"
+                            )
+                        ),
+                        "identity_snapshot_id": (
+                            notification_authority.get(
+                                "identity_snapshot_id"
+                            )
+                        ),
+                        "identity_receipt_hash": (
+                            notification_authority.get(
+                                "identity_receipt_hash"
+                            )
+                        ),
                         "decision": action,
                         "decision_reason": decision["reason"],
                         "fixed_target": fixed_target or None,
                         "pending_candidate_count": len(pending),
+                        "pending_failure_upgrade_status": (
+                            pending_failure_upgrade["status"]
+                        ),
+                        "pending_failure_upgrade_applied": bool(
+                            pending_failure_upgrade["allowed"]
+                            and isinstance(selected_envelope, dict)
+                            and selected_envelope.get("delivery_kind")
+                            == "fixed_report"
+                        ),
                         "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
+                        "selected_delivery_kind": (
+                            selected_envelope.get("delivery_kind")
+                            if isinstance(selected_envelope, dict)
+                            else None
+                        ),
                         "delivery_key": selected_envelope.get("delivery_key") if isinstance(selected_envelope, dict) else None,
                         "message_sha256": selected_envelope.get("message_sha256") if isinstance(selected_envelope, dict) else None,
                         "rendered_transport_sha256": (
@@ -1064,6 +1199,51 @@ def _write_daily_brief_failure_artifact(
     )
     relative = path.resolve().relative_to(request.base.resolve()).as_posix()
     return relative, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _pending_fixed_failure_upgrade_decision(
+    *,
+    request: TickNotificationRequest,
+    action: str,
+    envelope: Any,
+) -> dict[str, Any]:
+    if (
+        action != "fixed_report"
+        or not isinstance(envelope, Mapping)
+        or envelope.get("delivery_kind") != "fixed_failure"
+        or envelope.get("status") != "pending"
+    ):
+        return {"allowed": False, "status": "not_applicable"}
+    render_context = envelope.get("render_context")
+    token = (
+        render_context.get("notification_authority_token")
+        if isinstance(render_context, Mapping)
+        else None
+    )
+    if not isinstance(token, Mapping):
+        return {"allowed": False, "status": "token_missing"}
+    route_hint = _notification_perception_route_hint(request.base_cfg)
+    channel = str(
+        route_hint.get("channel")
+        or route_hint.get("provider")
+        or ""
+    ).strip()
+    if not channel:
+        return {"allowed": False, "status": "channel_unavailable"}
+    try:
+        authority_state = read_notification_authority_delivery_state(
+            base=request.base,
+            token=token,
+            channel=channel,
+        )
+    except (OSError, RuntimeError, TimeoutError, TypeError, ValueError):
+        return {"allowed": False, "status": "authority_state_unavailable"}
+    return {
+        "allowed": (
+            authority_state.get("safe_to_replace_pending") is True
+        ),
+        "status": str(authority_state.get("status") or "unknown"),
+    }
 
 
 def _daily_brief_envelope_audit(account: str, market: str, envelope: dict[str, Any], *, retry: bool) -> dict[str, Any]:

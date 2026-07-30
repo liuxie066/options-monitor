@@ -357,6 +357,221 @@ def test_fixed_failure_validates_source_once_then_retries_from_durable_envelope(
     assert retry["envelope"]["source_reference"] == source_reference
 
 
+def test_pending_fixed_failure_can_upgrade_but_confirmed_failure_cannot(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        prepare_daily_decision_brief_delivery,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    artifact = (
+        tmp_path
+        / "output_runs"
+        / "run-fail"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "pipeline_failure.US.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"reason":"pipeline_failed"}\n', encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    failure = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-fail",
+        delivery_kind="fixed_failure",
+        source_kind="scan_failure",
+        source_digest=digest,
+        source_reference=artifact.relative_to(tmp_path).as_posix(),
+        scheduled_target_market=TARGET_1000,
+        rendered_message="# 本轮扫描失败",
+        render_context={"projection": "fixed_failure"},
+    )
+
+    upgraded = _prepare_fixed(tmp_path, persisted)
+    assert upgraded["prepared"] is True
+    assert upgraded["envelope"]["delivery_kind"] == "fixed_report"
+    assert upgraded["envelope"]["status"] == "pending"
+
+    other_root = tmp_path / "confirmed"
+    confirmed_persisted = _persist(
+        other_root,
+        actions=[_action()],
+    )
+    confirmed_artifact = (
+        other_root
+        / "output_runs"
+        / "run-fail"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "pipeline_failure.US.json"
+    )
+    confirmed_artifact.parent.mkdir(parents=True)
+    confirmed_artifact.write_text(
+        '{"reason":"pipeline_failed"}\n',
+        encoding="utf-8",
+    )
+    confirmed_digest = hashlib.sha256(
+        confirmed_artifact.read_bytes()
+    ).hexdigest()
+    confirmed_failure = prepare_daily_decision_brief_delivery(
+        base=other_root,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-fail",
+        delivery_kind="fixed_failure",
+        source_kind="scan_failure",
+        source_digest=confirmed_digest,
+        source_reference=confirmed_artifact.relative_to(
+            other_root
+        ).as_posix(),
+        scheduled_target_market=TARGET_1000,
+        rendered_message="# 本轮扫描失败",
+        render_context={"projection": "fixed_failure"},
+    )["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=other_root,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=confirmed_failure["delivery_key"],
+        source_digest=confirmed_failure["source_digest"],
+        message_sha256=confirmed_failure["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(
+            confirmed_failure["delivery_key"]
+        ),
+    )
+
+    retained = _prepare_fixed(other_root, confirmed_persisted)
+    assert retained["prepared"] is False
+    assert retained["envelope"]["delivery_kind"] == "fixed_failure"
+    assert retained["envelope"]["status"] == "confirmed"
+
+
+def test_ambiguous_fixed_failure_cannot_upgrade_to_normal_report(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        DailyDecisionBriefStateError,
+        prepare_daily_decision_brief_delivery,
+        record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    artifact = (
+        tmp_path
+        / "output_runs"
+        / "run-fail"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "pipeline_failure.US.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"reason":"pipeline_failed"}\n', encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    failure = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-fail",
+        delivery_kind="fixed_failure",
+        source_kind="scan_failure",
+        source_digest=digest,
+        source_reference=artifact.relative_to(tmp_path).as_posix(),
+        scheduled_target_market=TARGET_1000,
+        rendered_message="# 本轮扫描失败",
+        render_context={"projection": "fixed_failure"},
+    )["envelope"]
+    record_daily_decision_brief_delivery_attempt(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=failure["delivery_key"],
+        source_digest=failure["source_digest"],
+        message_sha256=failure["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(
+            failure["delivery_key"]
+        ),
+        ambiguous=True,
+    )
+
+    with pytest.raises(DailyDecisionBriefStateError, match="frozen"):
+        _prepare_fixed(tmp_path, persisted)
+
+
+def test_delivery_identity_validator_returns_persisted_kind_and_status(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        prepare_daily_decision_brief_delivery,
+        validate_daily_decision_brief_delivery_identity,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    artifact = (
+        tmp_path
+        / "output_runs"
+        / "run-fail"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "pipeline_failure.US.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"reason":"pipeline_failed"}\n', encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    prepared = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-fail",
+        delivery_kind="fixed_failure",
+        source_kind="scan_failure",
+        source_digest=digest,
+        source_reference=artifact.relative_to(tmp_path).as_posix(),
+        scheduled_target_market=TARGET_1000,
+        rendered_message="# 本轮扫描失败",
+        render_context={"projection": "fixed_failure"},
+    )
+    envelope = prepared["envelope"]
+
+    validated = validate_daily_decision_brief_delivery_identity(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(
+            envelope["delivery_key"]
+        ),
+    )
+
+    assert validated["delivery_kind"] == "fixed_failure"
+    assert validated["status"] == "pending"
+    assert validated["envelope"] == envelope
+
+
 def test_ambiguous_envelope_is_frozen_and_tampered_hash_fails_closed(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_repository import (
         DailyDecisionBriefStateError,

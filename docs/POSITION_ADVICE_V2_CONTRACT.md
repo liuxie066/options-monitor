@@ -227,6 +227,42 @@ from final resolution through bounded provider completion. The dedupe key is:
 portfolio_scope_id + authority_generation + account_run_id + channel
 ```
 
+Normal `fixed_report` and `candidate_alert` delivery continues to use
+`position_advice_notification_authority_token.v1`. It requires the successful
+current-run `position_advice_sources.v2.json`; a portfolio receipt by itself
+does not prove candidate, lifecycle, cash-capacity, or share-coverage
+completeness and cannot authorize a normal report.
+
+Scheduled failure delivery uses the separate
+`position_advice_notification_authority_token.v2`. That token has the exact
+purpose binding `authorized_delivery_kinds=["fixed_failure"]`. It may be built
+from the current Account Run's unique fresh immutable portfolio receipt after
+the account, market, run, payload, and recomputed portfolio identity all match
+and authority resolves without conflict. At the final send boundary the
+executor reopens the exact persisted Daily Brief envelope under its repository
+lock and requires the caller kind, persisted kind, and token purpose all to be
+`fixed_failure`, with the envelope still `pending`. The persisted
+`render_context.notification_authority_token` must also exist, validate, and
+match the supplied token's complete canonical payload and hash. Any mismatch is
+`AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED` with zero provider attempts.
+The failure envelope remains plain text, references only the current run's
+`scan_failure` artifact, and carries no candidate identities or normal-report
+claims.
+
+An already prepared envelope retains its original token in `render_context`;
+delivery-only retry reuses the exact message, delivery key, source digest,
+message hash, transport idempotency key, and token. Legacy normal v1 envelopes
+therefore keep their existing retry semantics.
+
+When a later reliable run produces `fixed_report` for the same scheduled target,
+a pending `fixed_failure` may be replaced only after notification authority
+reports no accepted, unresolved unknown, or in-flight provider evidence for the
+frozen failure token and channel. Never-attempted failures and definitely failed
+attempts are replaceable; accepted-but-unconfirmed, ambiguous, and in-flight
+failures retain the exact frozen envelope. This authority state, rather than the
+Daily Brief repository's `pending` status alone, closes the provider-accepted /
+repository-confirm crash window.
+
 Accepted delivery is strongly deduplicated. A definite failed attempt can be
 retried under the same reservation with a new append-only attempt receipt.
 Timeout or ambiguous delivery becomes durable `unknown`; it cannot be resent or

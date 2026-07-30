@@ -553,6 +553,38 @@ def record_daily_decision_brief_delivery_attempt(
         }
 
 
+def validate_daily_decision_brief_delivery_identity(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+) -> dict[str, Any]:
+    """Validate and return the exact persisted envelope without mutating it."""
+
+    with _locked_delivery_envelope(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_trading_date,
+        delivery_key=delivery_key,
+        source_digest=source_digest,
+        message_sha256=message_sha256,
+        transport_idempotency_key=transport_idempotency_key,
+    ) as (_state, _day, envelope, delivery_path):
+        return {
+            "available": True,
+            "delivery_kind": str(envelope["delivery_kind"]),
+            "status": str(envelope["status"]),
+            "envelope": dict(envelope),
+            "path": delivery_path,
+        }
+
+
 def confirm_daily_decision_brief_delivery_v2(
     *,
     base: Path,
@@ -2486,4 +2518,5 @@ __all__ = [
     "read_latest_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",
     "record_daily_decision_brief_candidates",
+    "validate_daily_decision_brief_delivery_identity",
 ]
