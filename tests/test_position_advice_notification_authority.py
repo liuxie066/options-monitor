@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,8 +17,10 @@ from src.application.position_advice_authority_service import (
 )
 from src.application.position_advice_notification_authority import (
     PositionAdviceNotificationAuthorityError,
+    build_fixed_failure_notification_authority_token,
     build_notification_authority_token,
     execute_notification_with_authority,
+    read_notification_authority_delivery_state,
     resolve_notification_unknown,
     unresolved_notification_authority_exists,
 )
@@ -83,6 +86,362 @@ def _token(
         authority_policy_hash=str(policy["policy_hash"]),
         account_run_id=account_run_id,
     )
+
+
+def _failure_token(
+    policy: dict[str, object],
+    *,
+    account_run_id: str = "run-failure",
+) -> dict[str, object]:
+    mode = str(policy["mode"])
+    return build_fixed_failure_notification_authority_token(
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        selected_advice_contract="v1" if mode != "v2" else "v2",
+        resolved_mode=mode,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+        account_run_id=account_run_id,
+    )
+
+
+def _prepare_fixed_failure(
+    base: Path,
+    *,
+    token: dict[str, object] | None,
+) -> dict[str, object]:
+    from src.application.daily_decision_brief_repository import (
+        prepare_daily_decision_brief_delivery,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    artifact = (
+        base
+        / "output_runs"
+        / "run-failure"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "pipeline_failure.US.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"reason":"pipeline_failed"}\n', encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    envelope = prepare_daily_decision_brief_delivery(
+        base=base,
+        account="lx",
+        market="US",
+        market_trading_date="2026-07-27",
+        run_id="run-failure",
+        delivery_kind="fixed_failure",
+        source_kind="scan_failure",
+        source_digest=digest,
+        source_reference=artifact.relative_to(base).as_posix(),
+        scheduled_target_market="2026-07-27T10:00:00-04:00",
+        rendered_message="# 本轮扫描失败",
+        render_context={
+            "projection": "fixed_failure",
+            **(
+                {"notification_authority_token": token}
+                if token is not None
+                else {}
+            ),
+        },
+        prepared_at_utc=NOW,
+    )["envelope"]
+    return {
+        "account": "lx",
+        "market": "US",
+        "market_trading_date": "2026-07-27",
+        "delivery_key": envelope["delivery_key"],
+        "source_digest": envelope["source_digest"],
+        "message_sha256": envelope["message_sha256"],
+        "transport_idempotency_key": build_notification_transport_key(
+            str(envelope["delivery_key"])
+        ),
+        "delivery_kind": "fixed_failure",
+    }
+
+
+def test_failure_token_sends_only_persisted_pending_fixed_failure(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    delivery_identity = _prepare_fixed_failure(tmp_path, token=token)
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": "fixed-failure-1",
+        },
+        now=NOW,
+    )
+
+    assert result["authority_receipt_status"] == "accepted"
+    assert calls == ["sent"]
+    receipt_path = (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "position_advice"
+        / scope_for("lx")
+        / "notification_authority"
+        / "accepted"
+        / f"{result['authority_receipt_id']}.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["delivery_identity"]["delivery_kind"] == "fixed_failure"
+
+
+def test_failure_token_rejects_delivery_kind_substitution_before_send(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    delivery_identity = {
+        **_prepare_fixed_failure(tmp_path, token=token),
+        "delivery_kind": "fixed_report",
+    }
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "delivery_confirmed": True,
+        },
+        now=NOW,
+    )
+
+    assert result["error_code"] == (
+        "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED"
+    )
+    assert result["attempts"] == 0
+    assert calls == []
+
+
+def test_failure_token_requires_persisted_delivery_identity(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=None,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "delivery_confirmed": True,
+        },
+        now=NOW,
+    )
+
+    assert result["error_code"] == (
+        "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED"
+    )
+    assert result["attempts"] == 0
+    assert calls == []
+
+
+def test_failure_token_requires_same_token_frozen_in_envelope(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    persisted_token = _failure_token(
+        dict(applied["policy"]),
+        account_run_id="run-failure",
+    )
+    substituted_token = _failure_token(
+        dict(applied["policy"]),
+        account_run_id="different-run",
+    )
+    delivery_identity = _prepare_fixed_failure(
+        tmp_path,
+        token=persisted_token,
+    )
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=substituted_token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "delivery_confirmed": True,
+        },
+        now=NOW,
+    )
+
+    assert result["error_code"] == (
+        "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED"
+    )
+    assert result["attempts"] == 0
+    assert calls == []
+
+
+def test_failure_token_rejects_tokenless_persisted_envelope(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    delivery_identity = _prepare_fixed_failure(tmp_path, token=None)
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "delivery_confirmed": True,
+        },
+        now=NOW,
+    )
+
+    assert result["error_code"] == (
+        "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED"
+    )
+    assert result["attempts"] == 0
+    assert calls == []
+
+
+def test_failure_token_rejects_invalid_token_frozen_in_envelope(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    invalid_frozen_token = {**token, "token_hash": "f" * 64}
+    delivery_identity = _prepare_fixed_failure(
+        tmp_path,
+        token=invalid_frozen_token,
+    )
+    calls: list[str] = []
+
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("sent") or {
+            "ok": True,
+            "delivery_confirmed": True,
+        },
+        now=NOW,
+    )
+
+    assert result["error_code"] == (
+        "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED"
+    )
+    assert result["attempts"] == 0
+    assert calls == []
+
+
+def test_failure_token_definite_failure_can_retry_exact_pending_envelope(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    delivery_identity = _prepare_fixed_failure(tmp_path, token=token)
+    calls: list[str] = []
+
+    first = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("failed") or {
+            "ok": False,
+            "command_ok": False,
+            "delivery_confirmed": False,
+            "error_code": "SEND_FAILED",
+        },
+        now=NOW,
+    )
+    second = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: calls.append("accepted") or {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": "fixed-failure-retry",
+        },
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert first["authority_receipt_status"] == "failed"
+    assert second["authority_receipt_status"] == "accepted"
+    assert calls == ["failed", "accepted"]
+
+
+def test_failure_token_unknown_is_unsafe_until_resolved_failed(
+    tmp_path: Path,
+) -> None:
+    applied = _apply(tmp_path, mode="v2_shadow")
+    token = _failure_token(dict(applied["policy"]))
+    delivery_identity = _prepare_fixed_failure(tmp_path, token=token)
+    result = execute_notification_with_authority(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+        delivery_identity=delivery_identity,
+        send=lambda: {
+            "ok": False,
+            "command_ok": True,
+            "delivery_confirmed": False,
+            "error_code": "SEND_UNCONFIRMED",
+            "ambiguous_send": True,
+        },
+        now=NOW,
+    )
+
+    unresolved = read_notification_authority_delivery_state(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+    )
+    assert unresolved["status"] == "unknown"
+    assert unresolved["safe_to_replace_pending"] is False
+
+    resolve_notification_unknown(
+        base=tmp_path,
+        normalized_account="lx",
+        receipt_id=str(result["authority_receipt_id"]),
+        resolution="failed",
+        evidence={"provider_audit_id": "audit-fixed-failure"},
+        actor="operator@example",
+        resolved_at=NOW + timedelta(minutes=1),
+        confirm=True,
+        dry_run=False,
+    )
+    resolved = read_notification_authority_delivery_state(
+        base=tmp_path,
+        token=token,
+        channel="feishu",
+    )
+    assert resolved["status"] == "clear"
+    assert resolved["safe_to_replace_pending"] is True
 
 
 def test_notification_receipt_accepts_once_and_suppresses_duplicate(
