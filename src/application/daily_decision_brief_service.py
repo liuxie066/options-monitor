@@ -26,7 +26,6 @@ from domain.domain.engine import (
 )
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
 from domain.domain.cash_secured_utils import read_cash_secured_total_cny
-from domain.domain.position_advice_authority import scope_for
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application import candidate_reject_summary as candidate_rejections
@@ -41,11 +40,16 @@ from src.application.config_loader import resolve_data_config_path
 from src.application.position_advice_reader import (
     read_position_advice_v2_from_ledger,
 )
-from src.application.position_advice_notification_authority import (
-    build_notification_authority_token,
+from src.application.position_advice_account_identity_reader import (
+    PositionAdviceAccountIdentityError,
+    read_current_run_portfolio_identity,
 )
-from src.infrastructure.position_advice_manifest_lock import (
-    position_advice_state_root,
+from src.application.position_advice_authority_service import (
+    read_authority_resolution,
+)
+from src.application.position_advice_notification_authority import (
+    build_fixed_failure_notification_authority_token,
+    build_notification_authority_token,
 )
 
 
@@ -125,6 +129,13 @@ def assemble_daily_decision_brief(
         account=account_norm,
         market=market_norm,
         config=config_map,
+        now_utc=effective_now,
+    )
+    current_run_identity = _daily_brief_current_run_identity(
+        state_dir=state_dir,
+        account_run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
         now_utc=effective_now,
     )
     position_advice_rows: list[dict[str, Any]] = []
@@ -590,8 +601,10 @@ def assemble_daily_decision_brief(
             ),
             "notification_authority": _daily_brief_notification_authority(
                 advice_authority,
+                base=base_path,
                 account=account_norm,
                 account_run_id=run_id_norm,
+                current_run_identity=current_run_identity,
             ),
         }
     )
@@ -796,29 +809,13 @@ def _daily_brief_advice_authority(
     now_utc: datetime,
 ) -> dict[str, Any]:
     summary_path = state_dir / "position_advice_sources.v2.json"
-    scope_id = scope_for(account)
     if not summary_path.exists():
-        scope_dir = position_advice_state_root(base) / scope_id
-        historical = (
-            scope_dir.exists()
-            and scope_dir.is_dir()
-            and any(
-                item.name != ".current.lock" for item in scope_dir.iterdir()
-            )
-        )
-        if historical:
-            return {
-                "mode": "authority_conflict",
-                "available": False,
-                "blocker": "position_advice_identity_source_missing",
-                "rows": [],
-                "preview": {},
-            }
         return {
-            "mode": "v1",
-            "available": True,
-            "blocker": None,
+            "mode": "authority_conflict",
+            "available": False,
+            "blocker": "position_advice_source_summary_missing",
             "rows": [],
+            "human_review_rows": [],
             "preview": {},
         }
     try:
@@ -955,25 +952,29 @@ def _daily_brief_advice_authority(
 def _daily_brief_notification_authority(
     advice_authority: Mapping[str, Any],
     *,
+    base: Path,
     account: str,
     account_run_id: str,
+    current_run_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     selected = str(advice_authority.get("mode") or "").strip()
     available = bool(advice_authority.get("available"))
-    allowed = selected == "v1" or (selected == "v2" and available)
+    normal_allowed = selected == "v1" or (
+        selected == "v2" and available
+    )
     resolved_mode = str(
         advice_authority.get("resolved_mode") or selected
     ).strip()
-    token: dict[str, Any] | None = None
+    normal_token: dict[str, Any] | None = None
     source = str(
         advice_authority.get("normalized_portfolio_source") or ""
     ).strip()
     identity_hash = str(
         advice_authority.get("portfolio_account_identity_hash") or ""
     ).strip()
-    if allowed and source and len(identity_hash) == 64:
+    if normal_allowed and source and len(identity_hash) == 64:
         try:
-            token = build_notification_authority_token(
+            normal_token = build_notification_authority_token(
                 normalized_account=account,
                 normalized_portfolio_source=source,
                 portfolio_account_identity_hash=identity_hash,
@@ -988,9 +989,84 @@ def _daily_brief_notification_authority(
                 account_run_id=account_run_id,
             )
         except (TypeError, ValueError):
-            allowed = False
-    if allowed and token is None:
-        allowed = False
+            normal_allowed = False
+    if normal_allowed and normal_token is None:
+        normal_allowed = False
+
+    failure_token: dict[str, Any] | None = None
+    failure_allowed = False
+    failure_blocker = "position_advice_failure_identity_unavailable"
+    failure_source = source
+    failure_identity_hash = identity_hash
+    failure_identity_source = (
+        "successful_position_advice_summary"
+        if failure_source and len(failure_identity_hash) == 64
+        else None
+    )
+    if not failure_source or len(failure_identity_hash) != 64:
+        if current_run_identity.get("status") == "available":
+            failure_source = str(
+                current_run_identity.get(
+                    "normalized_portfolio_source"
+                )
+                or ""
+            ).strip()
+            failure_identity_hash = str(
+                current_run_identity.get(
+                    "portfolio_account_identity_hash"
+                )
+                or ""
+            ).strip()
+            failure_identity_source = "current_run_portfolio_receipt"
+        else:
+            failure_blocker = str(
+                current_run_identity.get("reason")
+                or failure_blocker
+            )
+    failure_resolution = None
+    if failure_source and len(failure_identity_hash) == 64:
+        try:
+            failure_resolution = read_authority_resolution(
+                base=base,
+                normalized_account=account,
+                normalized_portfolio_source=failure_source,
+                portfolio_account_identity_hash=failure_identity_hash,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError):
+            failure_blocker = (
+                "position_advice_authority_resolution_failed"
+            )
+        else:
+            if failure_resolution.notifications_allowed:
+                failure_selected = (
+                    "v2" if failure_resolution.mode == "v2" else "v1"
+                )
+                try:
+                    failure_token = build_fixed_failure_notification_authority_token(
+                        normalized_account=account,
+                        normalized_portfolio_source=failure_source,
+                        portfolio_account_identity_hash=(
+                            failure_identity_hash
+                        ),
+                        selected_advice_contract=failure_selected,
+                        resolved_mode=str(failure_resolution.mode),
+                        authority_generation=(
+                            failure_resolution.generation
+                        ),
+                        authority_policy_hash=(
+                            failure_resolution.policy_hash
+                        ),
+                        account_run_id=account_run_id,
+                    )
+                except (TypeError, ValueError):
+                    failure_blocker = (
+                        "position_advice_failure_token_build_failed"
+                    )
+                else:
+                    failure_allowed = True
+                    failure_blocker = ""
+            else:
+                failure_blocker = "position_advice_authority_conflict"
     return {
         "selected_advice_contract": (
             selected if selected in {"v1", "v2"} else None
@@ -1002,16 +1078,109 @@ def _daily_brief_notification_authority(
         "authority_policy_hash": advice_authority.get(
             "authority_policy_hash"
         ),
-        "notification_allowed": allowed,
+        "normal_delivery_allowed": normal_allowed,
+        "fixed_failure_delivery_allowed": failure_allowed,
+        "notification_allowed": normal_allowed,
         "blocker": (
             None
-            if allowed
+            if normal_allowed
             else str(
                 advice_authority.get("blocker")
                 or "position_advice_notification_authority_unavailable"
             )
         ),
-        "token": token,
+        "fixed_failure_blocker": failure_blocker or None,
+        "normal_delivery_token": normal_token,
+        "fixed_failure_delivery_token": failure_token,
+        "token": normal_token,
+        "failure_authority_resolution_status": (
+            failure_resolution.resolution_status
+            if failure_resolution is not None
+            else None
+        ),
+        "failure_authority_resolved_mode": (
+            failure_resolution.mode
+            if failure_resolution is not None
+            else None
+        ),
+        "failure_authority_generation": (
+            failure_resolution.generation
+            if failure_resolution is not None
+            else None
+        ),
+        "failure_authority_policy_hash": (
+            failure_resolution.policy_hash
+            if failure_resolution is not None
+            else None
+        ),
+        "normalized_portfolio_source": (
+            failure_source or source or None
+        ),
+        "portfolio_account_identity_hash": (
+            failure_identity_hash
+            if len(failure_identity_hash) == 64
+            else None
+        ),
+        "authority_identity_source": failure_identity_source,
+        "identity_snapshot_id": current_run_identity.get("snapshot_id"),
+        "identity_receipt_hash": current_run_identity.get(
+            "receipt_hash"
+        ),
+        "identity_evidence": _identity_evidence_audit(
+            current_run_identity
+        ),
+    }
+
+
+def _daily_brief_current_run_identity(
+    *,
+    state_dir: Path,
+    account_run_id: str,
+    account: str,
+    market: str,
+    now_utc: datetime,
+) -> dict[str, Any]:
+    try:
+        return read_current_run_portfolio_identity(
+            account_state_dir=state_dir,
+            account_run_id=account_run_id,
+            expected_account=account,
+            expected_market=market,
+            now=now_utc,
+        )
+    except PositionAdviceAccountIdentityError as exc:
+        return {
+            "status": "unavailable",
+            "reason": exc.reason_code,
+        }
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return {
+            "status": "unavailable",
+            "reason": "current_run_portfolio_receipt_invalid",
+        }
+
+
+def _identity_evidence_audit(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    allowed_fields = (
+        "status",
+        "reason",
+        "account",
+        "normalized_portfolio_source",
+        "portfolio_account_identity_hash",
+        "producer_account_run_id",
+        "included_markets",
+        "snapshot_id",
+        "receipt_hash",
+        "payload_sha256",
+        "source_observed_at",
+        "expires_at",
+    )
+    return {
+        field: evidence.get(field)
+        for field in allowed_fields
+        if evidence.get(field) is not None
     }
 
 

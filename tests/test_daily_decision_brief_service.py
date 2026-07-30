@@ -3,11 +3,39 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from src.application.multi_tick.misc import AccountResult
+
+
+@pytest.fixture(autouse=True)
+def _default_successful_v1_position_advice_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    monkeypatch.setattr(
+        service,
+        "read_position_advice_v2_from_ledger",
+        lambda **_kwargs: {
+            "availability_status": "unavailable",
+            "freshness": {"status": "fresh", "reason_codes": []},
+            "authority_mode": "v1",
+            "authority_generation": 0,
+            "authority_policy_hash": None,
+            "portfolio_plan_id": None,
+            "account_run_id": "run-1",
+            "row_count": 0,
+            "actionable_count": 0,
+            "model_actionable_count": 0,
+            "model_trade_actionable_count": 0,
+            "human_review_required_count": 0,
+            "rows": [],
+        },
+    )
 
 
 def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path:
@@ -35,6 +63,16 @@ def _account_dir(base: Path, run_id: str = "run-1", account: str = "lx") -> Path
                     "rates": {"USDCNY": 7.0, "HKDCNY": 0.9},
                     "timestamp": "2026-07-17T13:59:30+00:00",
                 },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "position_advice_sources.v2.json").write_text(
+        json.dumps(
+            {
+                "account": account,
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": "a" * 64,
             }
         ),
         encoding="utf-8",
@@ -129,6 +167,160 @@ def _put_row(
     if priority is not None:
         row["tier"] = priority
     return row
+
+
+def test_missing_success_summary_blocks_normal_delivery_but_current_run_identity_allows_failure(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.position_advice_authority import (
+        portfolio_account_identity_hash,
+    )
+    from src.application.position_advice_source_producers import (
+        publish_portfolio_source_snapshot,
+    )
+
+    account_dir = _account_dir(tmp_path)
+    state_dir = account_dir / "state"
+    (state_dir / "position_advice_sources.v2.json").unlink()
+    identifiers = ["futu-lx-current"]
+    identity_hash = portfolio_account_identity_hash(
+        normalized_portfolio_source="futu",
+        broker_account_identifiers=identifiers,
+    )
+    publish_portfolio_source_snapshot(
+        producer_root=state_dir,
+        account_run_id="run-1",
+        account="lx",
+        broker="futu",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=identity_hash,
+        included_markets=["US"],
+        portfolio_context={
+            "source_observed_at": "2026-07-17T14:00:00+00:00",
+            "source_account_identifiers": identifiers,
+            "cash_by_currency": {"USD": 1000},
+        },
+        completed_at="2026-07-17T14:00:01+00:00",
+    )
+
+    brief = _assemble(tmp_path)
+    authority = brief["notification_authority"]
+
+    assert brief["actionability"] == "blocked"
+    assert authority["normal_delivery_allowed"] is False
+    assert authority["notification_allowed"] is False
+    assert authority["blocker"] == "position_advice_source_summary_missing"
+    assert authority["normal_delivery_token"] is None
+    assert authority["fixed_failure_delivery_allowed"] is True
+    assert authority["fixed_failure_delivery_token"][
+        "schema_version"
+    ] == "position_advice_notification_authority_token.v2"
+    assert authority["fixed_failure_delivery_token"][
+        "authorized_delivery_kinds"
+    ] == ["fixed_failure"]
+    assert authority["identity_evidence"]["status"] == "available"
+    assert authority["authority_identity_source"] == (
+        "current_run_portfolio_receipt"
+    )
+    assert len(authority["identity_snapshot_id"]) == 64
+    assert len(authority["identity_receipt_hash"]) == 64
+    assert (
+        authority["identity_evidence"][
+            "portfolio_account_identity_hash"
+        ]
+        == identity_hash
+    )
+
+
+def test_missing_success_summary_without_current_run_identity_blocks_all_delivery(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    (
+        account_dir
+        / "state"
+        / "position_advice_sources.v2.json"
+    ).unlink()
+
+    brief = _assemble(tmp_path)
+    authority = brief["notification_authority"]
+
+    assert authority["normal_delivery_allowed"] is False
+    assert authority["fixed_failure_delivery_allowed"] is False
+    assert authority["normal_delivery_token"] is None
+    assert authority["fixed_failure_delivery_token"] is None
+    assert authority["identity_evidence"]["reason"] == (
+        "current_run_portfolio_receipt_missing"
+    )
+
+
+@pytest.mark.parametrize(
+    ("authority_allowed", "builder_fails", "expected_blocker"),
+    (
+        (
+            False,
+            False,
+            "position_advice_authority_conflict",
+        ),
+        (
+            True,
+            True,
+            "position_advice_failure_token_build_failed",
+        ),
+    ),
+)
+def test_failure_authority_reason_codes_remain_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authority_allowed: bool,
+    builder_fails: bool,
+    expected_blocker: str,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    monkeypatch.setattr(
+        service,
+        "read_authority_resolution",
+        lambda **_kwargs: SimpleNamespace(
+            notifications_allowed=authority_allowed,
+            resolution_status=(
+                "resolved" if authority_allowed else "authority_conflict"
+            ),
+            mode="v1" if authority_allowed else None,
+            generation=0 if authority_allowed else None,
+            policy_hash=None,
+        ),
+    )
+    if builder_fails:
+        monkeypatch.setattr(
+            service,
+            "build_fixed_failure_notification_authority_token",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                ValueError("invalid token")
+            ),
+        )
+
+    result = service._daily_brief_notification_authority(
+        {
+            "mode": "authority_conflict",
+            "available": False,
+            "blocker": "position_advice_source_summary_missing",
+        },
+        base=tmp_path,
+        account="sy",
+        account_run_id="run-sy",
+        current_run_identity={
+            "status": "available",
+            "normalized_portfolio_source": "futu",
+            "portfolio_account_identity_hash": "a" * 64,
+            "snapshot_id": "b" * 64,
+            "receipt_hash": "c" * 64,
+        },
+    )
+
+    assert result["fixed_failure_delivery_allowed"] is False
+    assert result["fixed_failure_delivery_token"] is None
+    assert result["fixed_failure_blocker"] == expected_blocker
 
 
 def _call_row(*, symbol: str = "NVDA", contract: str = "NVDA260821C00140000", annualized: float = 0.1) -> dict:

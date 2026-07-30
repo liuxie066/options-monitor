@@ -24,6 +24,9 @@ from src.infrastructure.position_advice_manifest_lock import (
 NOTIFICATION_AUTHORITY_TOKEN_SCHEMA = (
     "position_advice_notification_authority_token.v1"
 )
+NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2 = (
+    "position_advice_notification_authority_token.v2"
+)
 NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA = (
     "position_advice_notification_authority_receipt.v1"
 )
@@ -87,6 +90,39 @@ def build_notification_authority_token(
         or not payload["account_run_id"]
     ):
         raise ValueError("notification authority identity is incomplete")
+    return {**payload, "token_hash": canonical_sha256(payload)}
+
+
+def build_fixed_failure_notification_authority_token(
+    *,
+    normalized_account: str,
+    normalized_portfolio_source: str,
+    portfolio_account_identity_hash: str,
+    selected_advice_contract: str,
+    resolved_mode: str,
+    authority_generation: int | None,
+    authority_policy_hash: str | None,
+    account_run_id: str,
+) -> dict[str, Any]:
+    """Build a purpose-bound token that can authorize only fixed failure."""
+
+    normal_token = build_notification_authority_token(
+        normalized_account=normalized_account,
+        normalized_portfolio_source=normalized_portfolio_source,
+        portfolio_account_identity_hash=portfolio_account_identity_hash,
+        selected_advice_contract=selected_advice_contract,
+        resolved_mode=resolved_mode,
+        authority_generation=authority_generation,
+        authority_policy_hash=authority_policy_hash,
+        account_run_id=account_run_id,
+    )
+    payload = {
+        key: value
+        for key, value in normal_token.items()
+        if key != "token_hash"
+    }
+    payload["schema_version"] = NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2
+    payload["authorized_delivery_kinds"] = ["fixed_failure"]
     return {**payload, "token_hash": canonical_sha256(payload)}
 
 
@@ -178,6 +214,111 @@ def execute_notification_with_authority(
                     error_code="AUTHORITY_NOTIFICATION_INFLIGHT",
                 )
 
+            if (
+                item["schema_version"]
+                == NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2
+            ):
+                requested_kind = (
+                    str(
+                        (delivery_identity_value or {}).get(
+                            "delivery_kind"
+                        )
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                )
+                if requested_kind not in item["authorized_delivery_kinds"]:
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                try:
+                    from src.application.daily_decision_brief_repository import (
+                        DailyDecisionBriefStateError,
+                        validate_daily_decision_brief_delivery_identity,
+                    )
+
+                    persisted_delivery = (
+                        validate_daily_decision_brief_delivery_identity(
+                            base=base,
+                            account=str(
+                                delivery_identity_value["account"]
+                            ),
+                            market=str(
+                                delivery_identity_value["market"]
+                            ),
+                            market_trading_date=str(
+                                delivery_identity_value[
+                                    "market_trading_date"
+                                ]
+                            ),
+                            delivery_key=str(
+                                delivery_identity_value["delivery_key"]
+                            ),
+                            source_digest=str(
+                                delivery_identity_value["source_digest"]
+                            ),
+                            message_sha256=str(
+                                delivery_identity_value["message_sha256"]
+                            ),
+                            transport_idempotency_key=str(
+                                delivery_identity_value[
+                                    "transport_idempotency_key"
+                                ]
+                            ),
+                        )
+                    )
+                except (
+                    DailyDecisionBriefStateError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ):
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                if (
+                    persisted_delivery.get("delivery_kind")
+                    != requested_kind
+                    or persisted_delivery.get("status") != "pending"
+                ):
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                persisted_envelope = persisted_delivery.get("envelope")
+                persisted_render_context = (
+                    persisted_envelope.get("render_context")
+                    if isinstance(persisted_envelope, Mapping)
+                    else None
+                )
+                persisted_token = (
+                    persisted_render_context.get(
+                        "notification_authority_token"
+                    )
+                    if isinstance(persisted_render_context, Mapping)
+                    else None
+                )
+                if not isinstance(persisted_token, Mapping):
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                try:
+                    persisted_token_item = _validate_token(persisted_token)
+                except PositionAdviceNotificationAuthorityError:
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                if persisted_token_item != item:
+                    return _delivery_kind_denied_result(
+                        account=str(item["normalized_account"])
+                    )
+                delivery_identity_value = {
+                    **delivery_identity_value,
+                    "delivery_kind": str(
+                        persisted_delivery["delivery_kind"]
+                    ),
+                }
+
             attempt_number = _next_attempt_number(
                 state_dir,
                 notification_key,
@@ -263,6 +404,77 @@ def execute_notification_with_authority(
                 **result,
                 "authority_receipt_id": receipt_id,
                 "authority_receipt_status": terminal_status,
+            }
+
+
+def read_notification_authority_delivery_state(
+    *,
+    base: Path,
+    token: Mapping[str, Any],
+    channel: str,
+    timeout_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Read whether one token has delivered or unresolved provider evidence."""
+
+    item = _validate_token(token)
+    scope_id = str(item["portfolio_scope_id"])
+    channel_value = str(channel or "").strip().lower()
+    if not channel_value:
+        raise ValueError("notification channel is required")
+    notification_key = canonical_sha256(
+        {
+            "portfolio_scope_id": scope_id,
+            "authority_generation": int(item["authority_generation"]),
+            "account_run_id": item["account_run_id"],
+            "channel": channel_value,
+        }
+    )
+    state_dir = (
+        portfolio_scope_state_dir(base, scope_id)
+        / "notification_authority"
+    )
+    with position_advice_manifest_locks(
+        base=base,
+        portfolio_scope_id=scope_id,
+        global_mode="shared",
+        scope_mode="shared",
+        timeout_seconds=timeout_seconds,
+    ):
+        with manifest_file_lock(
+            state_dir / ".send.lock",
+            mode="exclusive",
+            timeout_seconds=timeout_seconds,
+        ):
+            existing = _existing_terminal(state_dir, notification_key)
+            if existing is not None:
+                status, receipt = existing
+                return {
+                    "status": status,
+                    "notification_key": notification_key,
+                    "receipt_id": receipt.get("receipt_id"),
+                    "safe_to_replace_pending": False,
+                }
+            inflight_state = _inflight_state_for_dedupe(
+                state_dir,
+                notification_key,
+            )
+            if inflight_state is not None:
+                inflight_status, receipt = inflight_state
+                return {
+                    "status": (
+                        "accepted"
+                        if inflight_status == "delivered"
+                        else "inflight"
+                    ),
+                    "notification_key": notification_key,
+                    "receipt_id": receipt.get("receipt_id"),
+                    "safe_to_replace_pending": False,
+                }
+            return {
+                "status": "clear",
+                "notification_key": notification_key,
+                "receipt_id": None,
+                "safe_to_replace_pending": True,
             }
 
 
@@ -434,9 +646,36 @@ def unresolved_notification_authority_exists(
 def _validate_token(token: Mapping[str, Any]) -> dict[str, Any]:
     item = dict(token or {})
     actual = item.pop("token_hash", None)
-    if item.get("schema_version") != NOTIFICATION_AUTHORITY_TOKEN_SCHEMA:
+    schema = item.get("schema_version")
+    common_fields = {
+        "schema_version",
+        "normalized_account",
+        "portfolio_scope_id",
+        "normalized_portfolio_source",
+        "portfolio_account_identity_hash",
+        "selected_advice_contract",
+        "resolved_mode",
+        "authority_generation",
+        "authority_policy_hash",
+        "account_run_id",
+    }
+    expected_fields = (
+        common_fields
+        if schema == NOTIFICATION_AUTHORITY_TOKEN_SCHEMA
+        else common_fields | {"authorized_delivery_kinds"}
+        if schema == NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2
+        else set()
+    )
+    if not expected_fields or set(item) != expected_fields:
         raise PositionAdviceNotificationAuthorityError(
             "notification authority token schema is invalid"
+        )
+    if (
+        schema == NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2
+        and item.get("authorized_delivery_kinds") != ["fixed_failure"]
+    ):
+        raise PositionAdviceNotificationAuthorityError(
+            "notification authority token delivery purpose is invalid"
         )
     if actual != canonical_sha256(item):
         raise PositionAdviceNotificationAuthorityError(
@@ -658,6 +897,22 @@ def _blocked_result(
     }
 
 
+def _delivery_kind_denied_result(*, account: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "account": account,
+        "command_ok": False,
+        "delivery_confirmed": False,
+        "error_code": "AUTHORITY_NOTIFICATION_DELIVERY_KIND_DENIED",
+        "attempts": 0,
+        "retry_attempt_count": 0,
+        "ambiguous_send": False,
+        "duplicate_risk": False,
+        "authority_receipt_id": None,
+        "authority_receipt_status": "denied",
+    }
+
+
 def _validate_delivery_identity(
     raw: Mapping[str, Any] | None,
     *,
@@ -692,7 +947,7 @@ def _validate_delivery_identity(
         value = str(item[field]).strip()
         if len(value) != 64:
             raise ValueError(f"daily brief delivery identity {field} is invalid")
-    return {
+    normalized = {
         "account": account,
         "market": str(item["market"]).strip().upper(),
         "market_trading_date": str(
@@ -703,6 +958,18 @@ def _validate_delivery_identity(
         "message_sha256": str(item["message_sha256"]).strip(),
         "transport_idempotency_key": transport_key,
     }
+    if "delivery_kind" in item:
+        delivery_kind = str(item.get("delivery_kind") or "").strip().lower()
+        if delivery_kind not in {
+            "fixed_report",
+            "fixed_failure",
+            "candidate_alert",
+        }:
+            raise ValueError(
+                "daily brief delivery identity delivery kind is invalid"
+            )
+        normalized["delivery_kind"] = delivery_kind
+    return normalized
 
 
 def _resolution_source_receipt(
@@ -895,12 +1162,15 @@ def _parse_timestamp(value: datetime | str) -> datetime:
 
 
 __all__ = [
+    "NOTIFICATION_AUTHORITY_FAILURE_TOKEN_SCHEMA_V2",
     "NOTIFICATION_AUTHORITY_RECEIPT_SCHEMA",
     "NOTIFICATION_AUTHORITY_RESOLUTION_SCHEMA",
     "NOTIFICATION_AUTHORITY_TOKEN_SCHEMA",
     "PositionAdviceNotificationAuthorityError",
+    "build_fixed_failure_notification_authority_token",
     "build_notification_authority_token",
     "execute_notification_with_authority",
+    "read_notification_authority_delivery_state",
     "resolve_notification_unknown",
     "unresolved_notification_authority_exists",
 ]
