@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.8 - 2026-07-31
+
+### Bug Fixes
+- Corrected the IQ quality producer to treat Strategy Lab units as auxiliary, scope lifecycle and option-position evidence by market, and distinguish canonical lifecycle-owned intake rows from actionable stale state while failing closed on ambiguous ownership.
+
 ## 1.7.7 - 2026-07-31
 
 ### Bug Fixes
