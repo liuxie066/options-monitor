@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.7",
+  "base": {
+    "tag": "v1.7.6",
+    "commit": "2e3fff62639aa144f9099a30c3da6eaa134d9a57"
+  },
+  "reviewed_head": "f9198f673a441c51c1657eff6706cb308506701f",
+  "commits": [
+    {
+      "sha": "f9198f673a441c51c1657eff6706cb308506701f",
+      "subject": "fix: classify historical option closes safely"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Stopped lifecycle migration inventory from treating voided or internal manual/system close events as missing broker deals, while recovering legacy Futu closes only when all available account identities agree.",
+      "commits": [
+        "f9198f673a441c51c1657eff6706cb308506701f"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
