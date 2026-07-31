@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.6",
+  "base": {
+    "tag": "v1.7.5",
+    "commit": "52c133a55df7efb6b107b086a27bd5298fde9f8e"
+  },
+  "reviewed_head": "ca9c98e0947304f30a38d599b88d8186a852933a",
+  "commits": [
+    {
+      "sha": "0f1700f8e8732f49dd94bf176ad8e9dcaf63d1e6",
+      "subject": "fix: add explicit lifecycle migration mapping"
+    },
+    {
+      "sha": "ca9c98e0947304f30a38d599b88d8186a852933a",
+      "subject": "Merge branch 'fix/lifecycle-explicit-migration-mapping'"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Made legacy lifecycle cutover require operator-curated account-scoped evidence, existing terminal events, valid allocations, and closed lot projections, while bridging waiting cases only to an existing v2 case with a frozen timing policy; frozen history no longer creates economic terminal events or delivery retries.",
+      "commits": [
+        "0f1700f8e8732f49dd94bf176ad8e9dcaf63d1e6"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ca9c98e0947304f30a38d599b88d8186a852933a",
+      "reason": "Merge-only branch commit; all user-visible changes are covered by the implementation commit release note."
+    }
+  ]
+}
