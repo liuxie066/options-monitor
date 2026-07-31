@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.7 - 2026-07-31
+
+### Bug Fixes
+- Stopped lifecycle migration inventory from treating voided or internal manual/system close events as missing broker deals, while recovering legacy Futu closes only when all available account identities agree.
+
 ## 1.7.6 - 2026-07-31
 
 ### Bug Fixes
