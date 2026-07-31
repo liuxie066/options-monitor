@@ -7,7 +7,10 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
 from src.application.quality.lifecycle_checks import build_lifecycle_datasets, lifecycle_deadline
-from src.application.quality.position_checks import build_position_dataset
+from src.application.quality.position_checks import (
+    build_position_dataset,
+    normalize_opend_positions,
+)
 from src.application.quality.runtime_checks import build_runtime_checks
 from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
 
@@ -173,6 +176,161 @@ def test_position_market_filter_keeps_unknown_market_identity_errors() -> None:
         "local_normalization_error_count": 1,
         "opend_normalization_error_count": 1,
     }
+
+
+def test_zero_quantity_opend_row_does_not_require_contract_identity() -> None:
+    normalized, errors = normalize_opend_positions(
+        [
+            {
+                "code": "HK.TCH260731P440000",
+                "qty": 0,
+                "position_side": "SHORT",
+            }
+        ],
+        market="hk",
+    )
+
+    assert normalized == {}
+    assert errors == []
+
+
+def test_opend_multiplier_uses_first_positive_authoritative_field() -> None:
+    normalized, errors = normalize_opend_positions(
+        [
+            {
+                "code": "HK.POP260828P145000",
+                "qty": -1,
+                "position_side": "SHORT",
+                "options_per_contract": None,
+                "option_contract_multiplier": 200,
+            }
+        ],
+        market="hk",
+    )
+
+    assert normalized == {"9992.HK|put|2026-08-28|145|200": -1}
+    assert errors == []
+
+
+def _pending_lifecycle_case(*, contracts: int = 1) -> tuple[dict, dict]:
+    case = {
+        "case_id": "case-nvda",
+        "account": "lx",
+        "market": "US",
+        "status": "waiting_settlement_evidence",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "multiplier": 100,
+        "expiration_ymd": "2026-07-17",
+    }
+    read_model = {
+        "pending_until_ms": int(
+            datetime(2026, 7, 13, 11, tzinfo=timezone.utc).timestamp()
+            * 1000
+        ),
+        "remaining_contracts_by_lot": {"lot-nvda": contracts},
+    }
+    return case, read_model
+
+
+def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    lifecycle_case, read_model = _pending_lifecycle_case()
+    dataset, state = build_position_dataset(
+        snapshot=_snapshot(qty=0),
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+        day_end_strict=True,
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "partial"
+    assert dataset["blocked_consumers"] == []
+    assert convergence["reason_code"] == "POSITIONS_PENDING_LIFECYCLE"
+    assert convergence["observed"] == {
+        "mismatch_count": 0,
+        "observed_mismatch_count": 1,
+        "expected_lifecycle_pending_count": 1,
+    }
+    assert state["position_mismatches"] == {}
+
+
+def test_position_lifecycle_partial_quantity_does_not_hide_divergence() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    lifecycle_case, read_model = _pending_lifecycle_case(contracts=1)
+    dataset, _state = build_position_dataset(
+        snapshot=_snapshot(qty=0),
+        local_lots=[_local_lot(contracts=2)],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+        day_end_strict=True,
+    )
+
+    assert dataset["status"] == "untrusted"
+    assert dataset["checks"][1]["reason_code"] == (
+        "POSITION_DIVERGENCE_PERSISTENT"
+    )
+
+
+def test_position_lifecycle_overdue_case_does_not_hide_divergence() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    lifecycle_case, read_model = _pending_lifecycle_case()
+    read_model["pending_until_ms"] = int(
+        datetime(2026, 7, 13, 9, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    dataset, _state = build_position_dataset(
+        snapshot=_snapshot(qty=0),
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+        day_end_strict=True,
+    )
+
+    assert dataset["status"] == "untrusted"
+    assert dataset["checks"][1]["reason_code"] == (
+        "POSITION_DIVERGENCE_PERSISTENT"
+    )
+
+
+def test_position_lifecycle_conflict_does_not_hide_divergence() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    lifecycle_case, read_model = _pending_lifecycle_case()
+    read_model["lifecycle_state"] = "conflict"
+    dataset, _state = build_position_dataset(
+        snapshot=_snapshot(qty=0),
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_read_models_by_case={"case-nvda": read_model},
+        day_end_strict=True,
+    )
+
+    assert dataset["status"] == "untrusted"
+    assert dataset["checks"][1]["reason_code"] == (
+        "POSITION_DIVERGENCE_PERSISTENT"
+    )
 
 
 def _open_event(*, event_id: str, deal_id: str, strike: float = 100) -> dict:

@@ -266,6 +266,11 @@ class OMQualityService:
                         observed_at_utc=observed_at,
                         now=now,
                         control_state=control_state,
+                        lifecycle_cases=cases,
+                        lifecycle_read_models_by_case=read_models_by_case,
+                        lifecycle_timing_policies_by_case=(
+                            timing_policies_by_case
+                        ),
                         day_end_strict=day_end_strict,
                         next_authoritative_refresh_due_utc=(
                             utc_iso(next_due) if next_due is not None else None

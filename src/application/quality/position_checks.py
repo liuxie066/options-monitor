@@ -21,6 +21,7 @@ from src.application.quality.model import (
     sha256_json,
     utc_iso,
 )
+from src.application.trades.lifecycle import PENDING_STATUSES
 from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
@@ -28,9 +29,21 @@ def _decimal(value: Any) -> Decimal | None:
     try:
         if value in (None, "", "-"):
             return None
-        return Decimal(str(value)).normalize()
+        parsed = Decimal(str(value)).normalize()
+        return parsed if parsed.is_finite() else None
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _positive_decimal_from(
+    values: dict[str, Any],
+    *keys: str,
+) -> Decimal | None:
+    for key in keys:
+        parsed = _decimal(values.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
 
 
 def _position_side(value: Any, *, qty: Decimal | None = None) -> str | None:
@@ -123,14 +136,16 @@ def normalize_opend_positions(
             continue
         match = OPTION_CODE_RE.match(code)
         qty = _decimal(row.get("qty") if "qty" in row else row.get("quantity"))
-        multiplier = _decimal(
-            row.get("options_per_contract")
-            if "options_per_contract" in row
-            else row.get("contract_multiplier")
-            if "contract_multiplier" in row
-            else row.get("lot_size")
-            if "lot_size" in row
-            else row.get("multiplier")
+        if qty == 0:
+            continue
+        multiplier = _positive_decimal_from(
+            row,
+            "options_per_contract",
+            "option_contract_multiplier",
+            "option_contract_size",
+            "contract_multiplier",
+            "lot_size",
+            "multiplier",
         )
         side = _position_side(
             row.get("position_side") if "position_side" in row else row.get("side"),
@@ -156,6 +171,109 @@ def normalize_opend_positions(
     return {key: value for key, value in quantities.items() if value != 0}, errors
 
 
+def _pending_lifecycle_coverage(
+    *,
+    cases: list[dict[str, Any]],
+    read_models_by_case: dict[str, dict[str, Any]],
+    timing_policies_by_case: dict[str, dict[str, Any]],
+    account: str,
+    market: str,
+    now: datetime,
+) -> tuple[dict[str, Decimal], dict[str, list[str]]]:
+    quantities: dict[str, Decimal] = defaultdict(Decimal)
+    case_ids_by_key: dict[str, list[str]] = defaultdict(list)
+    now_ms = int(now.astimezone(timezone.utc).timestamp() * 1000)
+    for case in cases:
+        if str(case.get("account") or "").strip().lower() != account:
+            continue
+        status = str(case.get("status") or "").strip().lower()
+        if status not in PENDING_STATUSES:
+            continue
+        symbol = canonical_symbol(case.get("symbol"))
+        case_market = str(
+            case.get("market") or symbol_market(symbol) or ""
+        ).strip().lower()
+        if case_market != market.strip().lower():
+            continue
+        case_id = str(case.get("case_id") or "").strip()
+        read_model = (
+            dict(read_models_by_case.get(case_id) or {})
+            if isinstance(read_models_by_case.get(case_id), dict)
+            else {}
+        )
+        if (
+            str(read_model.get("lifecycle_state") or "").strip().lower()
+            == "conflict"
+            or str(read_model.get("reason_state") or "").strip().lower()
+            == "conflict"
+            or str(
+                read_model.get("lifecycle_evidence_status") or ""
+            ).strip().lower()
+            == "conflict"
+        ):
+            continue
+        timing_policy = (
+            dict(timing_policies_by_case.get(case_id) or {})
+            if isinstance(timing_policies_by_case.get(case_id), dict)
+            else {}
+        )
+        deadline_ms = (
+            read_model.get("pending_until_ms")
+            if read_model.get("pending_until_ms") is not None
+            else timing_policy.get("settlement_deadline_ms")
+        )
+        try:
+            deadline = int(deadline_ms)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if deadline <= 0 or now_ms > deadline:
+            continue
+        remaining_by_lot = read_model.get("remaining_contracts_by_lot")
+        if not isinstance(remaining_by_lot, dict) or not remaining_by_lot:
+            continue
+        remaining_values = [
+            _decimal(raw) for raw in remaining_by_lot.values()
+        ]
+        if any(
+            value is None or value < 0 for value in remaining_values
+        ):
+            continue
+        remaining = sum(
+            (value for value in remaining_values if value is not None),
+            Decimal(0),
+        )
+        option_type = str(case.get("option_type") or "").strip().lower()
+        expiration = str(
+            normalize_contract_expiration(case.get("expiration_ymd")) or ""
+        ).strip()
+        strike = _decimal(case.get("strike"))
+        multiplier = _decimal(case.get("multiplier"))
+        side = _position_side(case.get("position_side"))
+        if (
+            not case_id
+            or not symbol
+            or option_type not in {"put", "call"}
+            or not expiration
+            or strike is None
+            or multiplier is None
+            or side is None
+            or remaining <= 0
+        ):
+            continue
+        key = _contract_key(
+            symbol=symbol,
+            option_type=option_type,
+            expiration=expiration,
+            strike=strike,
+            multiplier=multiplier,
+        )
+        quantities[key] += remaining if side == "long" else -remaining
+        case_ids_by_key[key].append(case_id)
+    return dict(quantities), {
+        key: sorted(set(value)) for key, value in case_ids_by_key.items()
+    }
+
+
 def build_position_dataset(
     *,
     snapshot: OpenDOptionSnapshot,
@@ -165,6 +283,9 @@ def build_position_dataset(
     observed_at_utc: str,
     now: datetime,
     control_state: dict[str, Any],
+    lifecycle_cases: list[dict[str, Any]] | None = None,
+    lifecycle_read_models_by_case: dict[str, dict[str, Any]] | None = None,
+    lifecycle_timing_policies_by_case: dict[str, dict[str, Any]] | None = None,
     day_end_strict: bool = False,
     persistent_after_seconds: int = 300,
     next_authoritative_refresh_due_utc: str | None = None,
@@ -223,13 +344,36 @@ def build_position_dataset(
     )
     broker, broker_errors = normalize_opend_positions(snapshot.rows, market=market)
     normalization_errors = [*local_errors, *broker_errors]
-    comparison = {
+    raw_comparison = {
         key: {
             "local": format(local.get(key, Decimal(0)), "f"),
             "opend": format(broker.get(key, Decimal(0)), "f"),
         }
         for key in sorted(set(local) | set(broker))
         if local.get(key, Decimal(0)) != broker.get(key, Decimal(0))
+    }
+    lifecycle_coverage, lifecycle_case_ids = _pending_lifecycle_coverage(
+        cases=list(lifecycle_cases or []),
+        read_models_by_case=dict(lifecycle_read_models_by_case or {}),
+        timing_policies_by_case=dict(lifecycle_timing_policies_by_case or {}),
+        account=account,
+        market=market,
+        now=now,
+    )
+    expected_lifecycle_pending = {
+        key: {
+            **values,
+            "covered_quantity": format(lifecycle_coverage[key], "f"),
+            "lifecycle_case_count": len(lifecycle_case_ids.get(key) or []),
+        }
+        for key, values in raw_comparison.items()
+        if lifecycle_coverage.get(key)
+        == local.get(key, Decimal(0)) - broker.get(key, Decimal(0))
+    }
+    comparison = {
+        key: values
+        for key, values in raw_comparison.items()
+        if key not in expected_lifecycle_pending
     }
     local_fingerprint = sha256_json(
         {key: format(value, "f") for key, value in sorted(local.items())}
@@ -245,7 +389,9 @@ def build_position_dataset(
             "account": account,
             "local_contract_groups": len(local),
             "opend_contract_groups": len(broker),
+            "observed_mismatch_count": len(raw_comparison),
             "mismatch_count": len(comparison),
+            "expected_lifecycle_pending_count": len(expected_lifecycle_pending),
             "mismatch_fingerprint": mismatch_fingerprint,
             "normalization_error_count": len(normalization_errors),
             "local_normalization_error_count": len(local_errors),
@@ -275,6 +421,29 @@ def build_position_dataset(
             evidence_refs=[evidence],
         )
         verdict = "unavailable"
+    elif expected_lifecycle_pending and not comparison:
+        mismatches.pop(state_key, None)
+        convergence = check_result(
+            check_id="OM-POS-002",
+            status="warn",
+            scope=scope,
+            observed_at_utc=observed_at_utc,
+            reason_code="POSITIONS_PENDING_LIFECYCLE",
+            message=(
+                "Canonical-only option quantities are exactly covered by active "
+                "lifecycle cases within their immutable deadlines."
+            ),
+            observed={
+                "mismatch_count": 0,
+                "observed_mismatch_count": len(raw_comparison),
+                "expected_lifecycle_pending_count": len(
+                    expected_lifecycle_pending
+                ),
+            },
+            expected={"mismatch_count": 0},
+            evidence_refs=[evidence],
+        )
+        verdict = "partial"
     elif not comparison:
         mismatches.pop(state_key, None)
         convergence = check_result(
