@@ -5,6 +5,9 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+import pytest
+
+from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.source_consumption import build_source_consumption_claim
 from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
 from src.application.trades.state_reconcile import (
@@ -221,6 +224,199 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
         "pending_after_reconcile_count": 1,
         "actionable_pending_after_reconcile_count": 1,
     }
+    assert state_path.read_bytes() == original_state
+
+
+def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    source_key = "futu:lx:1001:deal-option-waiting"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                source_key: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                }
+            },
+        },
+    )
+    original_state = state_path.read_bytes()
+    ledger_path = tmp_path / "ledger.sqlite3"
+    SQLiteOptionPositionsRepository(ledger_path)
+    lifecycle_case = {
+        "schema_version": "lifecycle_case.v2",
+        "case_id": "lc_waiting",
+        "status": "waiting_settlement_evidence",
+        "decision_type": "needs_review",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "target_contracts_by_lot": {"lot-futu": 1},
+    }
+    lifecycle_evidence = {
+        "case_id": "lc_waiting",
+        "evidence_id": "ev-option-waiting",
+        "evidence_type": "option_zero_price_close",
+        "source_event_id": source_key,
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "contracts": 1,
+        "target_contracts_by_lot": {"lot-futu": 1},
+        "price": "0",
+        "event_time_ms": 1_700_000_000_100,
+    }
+    source_claim = build_source_consumption_claim(
+        source_key=source_key,
+        case_id="lc_waiting",
+        owner_evidence_id="ev-option-waiting",
+        source_role="option_anchor",
+        economic_payload=lifecycle_evidence,
+    )
+    with closing(sqlite3.connect(ledger_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO position_lots (
+                    record_id, fields_json, updated_at_ms
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    "lot-futu",
+                    json.dumps(
+                        {
+                            "account": "lx",
+                            "contracts": 1,
+                            "original_contracts": 1,
+                        }
+                    ),
+                    1_700_000_000_000,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_lifecycle_cases (
+                    case_id, case_key, account, symbol, option_type,
+                    position_side, strike, expiration_ymd, status,
+                    decision_type, target_lot_ids_json, created_at_ms,
+                    updated_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "lc_waiting",
+                    "case-key-waiting",
+                    "lx",
+                    "FUTU",
+                    "put",
+                    "short",
+                    100,
+                    "2026-08-21",
+                    "waiting_settlement_evidence",
+                    "needs_review",
+                    json.dumps(["lot-futu"]),
+                    1_700_000_000_000,
+                    1_700_000_000_000,
+                    json.dumps(lifecycle_case),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_lifecycle_evidence (
+                    evidence_id, case_id, source_type, source_event_id,
+                    evidence_type, account, symbol, raw_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ev-option-waiting",
+                    "lc_waiting",
+                    "futu",
+                    source_key,
+                    "option_zero_price_close",
+                    "lx",
+                    "FUTU",
+                    json.dumps(lifecycle_evidence),
+                    1_700_000_000_200,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_lifecycle_source_consumptions (
+                    source_key, case_id, owner_evidence_id, source_role,
+                    source_payload_hash, created_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_key,
+                    "lc_waiting",
+                    "ev-option-waiting",
+                    "option_anchor",
+                    source_claim["source_payload_hash"],
+                    1_700_000_000_200,
+                    json.dumps(source_claim),
+                ),
+            )
+
+    out = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path,
+        sqlite_path=ledger_path,
+    )
+
+    assert out["available"] is True
+    assert out["delegated_lifecycle_pending_count"] == 1
+    assert out["delegated_lifecycle_pending_deal_ids"] == [source_key]
+    assert out["pending_after_reconcile_count"] == 1
+    assert out["actionable_pending_after_reconcile_count"] == 0
+    assert state_path.read_bytes() == original_state
+
+    with closing(sqlite3.connect(ledger_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO trade_lifecycle_cases (
+                    case_id, case_key, account, symbol, option_type,
+                    position_side, strike, expiration_ymd, status,
+                    decision_type, target_lot_ids_json, created_at_ms,
+                    updated_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "lc_corrupt_competing",
+                    "case-key-corrupt-competing",
+                    "lx",
+                    "FUTU",
+                    "put",
+                    "short",
+                    100,
+                    "2026-08-21",
+                    "waiting_settlement_evidence",
+                    "needs_review",
+                    json.dumps(["lot-futu"]),
+                    1_700_000_000_300,
+                    1_700_000_000_300,
+                    "{",
+                ),
+            )
+
+    with pytest.raises(json.JSONDecodeError):
+        preview_trade_intake_reconciliation_from_sqlite(
+            state_path=state_path,
+            sqlite_path=ledger_path,
+        )
     assert state_path.read_bytes() == original_state
 
 
