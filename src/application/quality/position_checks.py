@@ -11,7 +11,7 @@ from domain.domain.ledger.position_fields import (
     effective_multiplier,
     effective_strike,
 )
-from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol
+from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import normalize_contract_expiration
 from src.application.quality.model import (
     check_result,
@@ -65,7 +65,12 @@ def _contract_key(
     )
 
 
-def normalize_local_positions(rows: list[dict[str, Any]], *, account: str) -> tuple[dict[str, Decimal], list[str]]:
+def normalize_local_positions(
+    rows: list[dict[str, Any]],
+    *,
+    account: str,
+    market: str | None = None,
+) -> tuple[dict[str, Decimal], list[str]]:
     quantities: dict[str, Decimal] = defaultdict(Decimal)
     errors: list[str] = []
     for row in rows:
@@ -76,6 +81,9 @@ def normalize_local_positions(rows: list[dict[str, Any]], *, account: str) -> tu
         if contracts is None or contracts == 0:
             continue
         symbol = canonical_symbol(fields.get("symbol"))
+        row_market = str(symbol_market(symbol) or "").lower()
+        if market and row_market and row_market != market.lower():
+            continue
         option_type = str(fields.get("option_type") or "").strip().lower()
         expiration = str(
             effective_expiration_ymd(fields)
@@ -99,11 +107,20 @@ def normalize_local_positions(rows: list[dict[str, Any]], *, account: str) -> tu
     return {key: value for key, value in quantities.items() if value != 0}, errors
 
 
-def normalize_opend_positions(rows: list[dict[str, Any]]) -> tuple[dict[str, Decimal], list[str]]:
+def normalize_opend_positions(
+    rows: list[dict[str, Any]],
+    *,
+    market: str | None = None,
+) -> tuple[dict[str, Decimal], list[str]]:
     quantities: dict[str, Decimal] = defaultdict(Decimal)
     errors: list[str] = []
     for index, row in enumerate(rows):
         code = str(row.get("code") or row.get("symbol") or row.get("stock_code") or "").strip().upper()
+        row_market = str(
+            code.split(".", 1)[0] if "." in code else symbol_market(code) or ""
+        ).lower()
+        if market and row_market and row_market != market.lower():
+            continue
         match = OPTION_CODE_RE.match(code)
         qty = _decimal(row.get("qty") if "qty" in row else row.get("quantity"))
         multiplier = _decimal(
@@ -199,8 +216,12 @@ def build_position_dataset(
             control_state,
         )
 
-    local, local_errors = normalize_local_positions(local_lots, account=account)
-    broker, broker_errors = normalize_opend_positions(snapshot.rows)
+    local, local_errors = normalize_local_positions(
+        local_lots,
+        account=account,
+        market=market,
+    )
+    broker, broker_errors = normalize_opend_positions(snapshot.rows, market=market)
     normalization_errors = [*local_errors, *broker_errors]
     comparison = {
         key: {
@@ -227,6 +248,8 @@ def build_position_dataset(
             "mismatch_count": len(comparison),
             "mismatch_fingerprint": mismatch_fingerprint,
             "normalization_error_count": len(normalization_errors),
+            "local_normalization_error_count": len(local_errors),
+            "opend_normalization_error_count": len(broker_errors),
         },
         artifact_ref=f"om-evidence:position-reconciliation:{account}",
     )
@@ -239,8 +262,16 @@ def build_position_dataset(
             observed_at_utc=observed_at_utc,
             reason_code="POSITION_IDENTITY_INCOMPLETE",
             message="Required option identity or multiplier evidence is missing.",
-            observed={"normalization_error_count": len(normalization_errors)},
-            expected={"normalization_error_count": 0},
+            observed={
+                "normalization_error_count": len(normalization_errors),
+                "local_normalization_error_count": len(local_errors),
+                "opend_normalization_error_count": len(broker_errors),
+            },
+            expected={
+                "normalization_error_count": 0,
+                "local_normalization_error_count": 0,
+                "opend_normalization_error_count": 0,
+            },
             evidence_refs=[evidence],
         )
         verdict = "unavailable"

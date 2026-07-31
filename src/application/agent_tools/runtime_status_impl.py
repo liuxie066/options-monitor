@@ -189,6 +189,7 @@ def _trade_intake_reconciliation_summary(
             "reconciliation_preview_reason": "ledger_sqlite_path_unavailable",
             "terminal_evidence_found": False,
             "terminal_evidence_count": 0,
+            "delegated_lifecycle_pending_count": 0,
             "stale_state_count": 0,
         }
     try:
@@ -203,6 +204,7 @@ def _trade_intake_reconciliation_summary(
             "reconciliation_preview_reason": f"{type(exc).__name__}: {exc}",
             "terminal_evidence_found": False,
             "terminal_evidence_count": 0,
+            "delegated_lifecycle_pending_count": 0,
             "stale_state_count": 0,
         }
     return {
@@ -211,9 +213,17 @@ def _trade_intake_reconciliation_summary(
         "terminal_evidence_found": bool(preview.get("terminal_evidence_found")),
         "terminal_evidence_count": int(preview.get("terminal_evidence_count") or 0),
         "ignored_non_option_count": int(preview.get("ignored_non_option_count") or 0),
+        "delegated_lifecycle_pending_count": int(
+            preview.get("delegated_lifecycle_pending_count") or 0
+        ),
         "stale_state_count": int(preview.get("stale_state_count") or 0),
         "pending_after_reconcile_count": (
             int(preview.get("pending_after_reconcile_count") or 0)
+            if preview.get("available")
+            else None
+        ),
+        "actionable_pending_after_reconcile_count": (
+            int(preview.get("actionable_pending_after_reconcile_count") or 0)
             if preview.get("available")
             else None
         ),
@@ -234,8 +244,10 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "receipt_failed_count",
         "terminal_evidence_count",
         "ignored_non_option_count",
+        "delegated_lifecycle_pending_count",
         "stale_state_count",
         "pending_after_reconcile_count",
+        "actionable_pending_after_reconcile_count",
         "last_backfill_deal_count",
         "last_backfill_applied_count",
         "last_backfill_skipped_duplicate_count",
