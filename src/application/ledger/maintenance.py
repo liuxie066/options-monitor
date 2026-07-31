@@ -612,13 +612,18 @@ def _lifecycle_case_broker(case: dict[str, Any]) -> str:
 
 
 def _lifecycle_evidence_broker(evidence: dict[str, Any]) -> str:
-    broker = normalize_broker(evidence.get("broker"))
-    if broker:
-        return broker
-    raw = evidence.get("raw_payload")
-    if not isinstance(raw, dict):
-        raw = evidence.get("raw_json")
-    return normalize_broker(raw.get("broker")) if isinstance(raw, dict) else ""
+    for payload in (evidence, evidence.get("raw_payload"), evidence.get("raw_json")):
+        if not isinstance(payload, dict):
+            continue
+        broker = normalize_broker(payload.get("broker"))
+        if broker:
+            return broker
+        raw = payload.get("raw")
+        if isinstance(raw, dict):
+            broker = normalize_broker(raw.get("broker"))
+            if broker:
+                return broker
+    return ""
 
 
 def _same_lifecycle_contract(fields: dict[str, Any], case: dict[str, Any]) -> bool:
