@@ -94,6 +94,10 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
     assert str(out["holdings_sync"]["state_dir"]).endswith(
         "output_shared/state/trade_intake/stock_holdings_sync"
     )
+    assert out["combo_reconciliation"] == {
+        "default_mode": "off",
+        "accounts": {},
+    }
 
 
 def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
@@ -263,6 +267,12 @@ def test_resolve_trade_intake_sources_uses_account_opend_settings_for_multiple_a
                 "futu": {"account_id": "222", "host": "127.0.0.1", "port": 11112},
             },
         },
+        "trade_intake": {
+            "combo_reconciliation": {
+                "default_mode": "off",
+                "accounts": {"lx": "observe", "sy": "confirm"},
+            }
+        },
     }
 
     out = resolve_trade_intake_sources(
@@ -283,6 +293,10 @@ def test_resolve_trade_intake_sources_uses_account_opend_settings_for_multiple_a
     assert out[1]["account_mapping"] == {"222": "sy"}
     assert str(out[0]["state_path"]) == "output_shared/state/trade_intake/lx/state.json"
     assert str(out[1]["status_path"]) == "output_shared/state/trade_intake/sy/status.json"
+    assert [item["combo_reconciliation_mode"] for item in out] == [
+        "observe",
+        "confirm",
+    ]
 
 
 def test_resolve_trade_intake_sources_keeps_legacy_paths_for_single_source() -> None:

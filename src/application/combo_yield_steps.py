@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +18,7 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
     resolve_event_risk_config,
 )
+from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
 from domain.domain.insurance_underwriting import evaluate_event_risk_candidate
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain.symbol_identity import symbol_market
@@ -62,6 +64,47 @@ class ComboYieldResult:
 
 def _atomic_write_dataframe(path: Path, df: pd.DataFrame) -> None:
     atomic_write_text(path, df.to_csv(index=False))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def attach_combo_candidate_occurrences(
+    df: pd.DataFrame,
+    *,
+    account: str,
+    market: str,
+    run_id: str,
+    generated_at_utc: datetime,
+) -> pd.DataFrame:
+    """Attach immutable occurrence metadata at the account/run publication boundary."""
+
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    rows: list[dict[str, Any]] = []
+    for raw in out.to_dict(orient="records"):
+        row = dict(raw)
+        data_as_of = (
+            row.get("data_as_of_utc")
+            or row.get("as_of_utc")
+            or generated_at_utc
+        )
+        try:
+            occurrence = build_combo_candidate_occurrence(
+                row,
+                account=account,
+                market=market,
+                run_id=run_id,
+                generated_at_utc=generated_at_utc,
+                data_as_of_utc=data_as_of,
+            )
+        except ValueError:
+            occurrence = {}
+        row.update(occurrence)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
@@ -171,6 +214,7 @@ def run_combo_yield_scan_and_summarize(
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = None,
     underwriting_filter_put_candidates_fn: Callable[..., pd.DataFrame] = enrich_and_filter_sell_put_underwriting,
+    now_utc_fn: Callable[[], datetime] = _utc_now,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -268,6 +312,17 @@ def run_combo_yield_scan_and_summarize(
         raise RuntimeError(f"failed to persist Combo Yield pair diagnostics: {pair_diagnostics_path}") from exc
 
     recommended_yield_pairs_df = select_pairs_fn(raw_yield_pairs_df)
+    occurrence_scope = infer_trace_scope_from_path(result.candidates_path)
+    occurrence_account = str(occurrence_scope.get("account") or "").strip().lower()
+    occurrence_run_id = str(occurrence_scope.get("run_id") or "").strip()
+    if occurrence_account and occurrence_run_id and not recommended_yield_pairs_df.empty:
+        recommended_yield_pairs_df = attach_combo_candidate_occurrences(
+            recommended_yield_pairs_df,
+            account=occurrence_account,
+            market=symbol_market(symbol),
+            run_id=occurrence_run_id,
+            generated_at_utc=now_utc_fn(),
+        )
     rank_shadow_path = (report_dir / f"{symbol_lower}_combo_yield_rank_shadow.csv").resolve()
     try:
         _atomic_write_dataframe(rank_shadow_path, build_yield_enhancement_rank_shadow(raw_yield_pairs_df))

@@ -28,6 +28,9 @@ from domain.domain.position_advice_promotion import (
     evaluate_promotion_gate,
     unique_decision_opportunity_key,
 )
+from src.application.ledger.api import (
+    validate_position_fact_snapshot_contract,
+)
 from src.application.position_advice_authority_service import (
     authority_policy_path,
     plan_authority_change,
@@ -1089,6 +1092,14 @@ def _read_bound_plan(
     immutable_input["input_hash"] = input_hash
     if immutable_input.get("schema_version") != POSITION_ADVICE_INPUT_SCHEMA:
         raise PositionAdvicePromotionError("position advice input schema is invalid")
+    position_fact_reasons = validate_position_fact_snapshot_contract(
+        dict(immutable_input.get("decision_state_snapshot") or {})
+    )
+    if position_fact_reasons:
+        raise PositionAdvicePromotionError(
+            "position advice input decision facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
     for field in (
         "account_run_id",
         "normalized_account",

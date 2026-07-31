@@ -21,36 +21,130 @@ def _parse_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _state_oldest_pending_age_seconds(path: Path, *, now: datetime) -> float | None:
+def _oldest_pending_age_seconds(
+    payload: Any,
+    *,
+    now: datetime,
+    excluded_deal_ids: set[str] | None = None,
+) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    excluded = excluded_deal_ids or set()
+    times: list[datetime] = []
+    for bucket in ("failed_deal_ids", "unresolved_deal_ids"):
+        rows = payload.get(bucket) if isinstance(payload.get(bucket), dict) else {}
+        for deal_id, item in rows.items():
+            if not isinstance(item, dict):
+                continue
+            if str(deal_id).strip() in excluded:
+                continue
+            parsed = _pending_item_timestamp(item)
+            if parsed:
+                times.append(parsed)
+    if not times:
+        return None
+    return max(0.0, (now.astimezone(timezone.utc) - min(times)).total_seconds())
+
+
+def _is_delegated_lifecycle_pending(item: dict[str, Any]) -> bool:
+    if str(item.get("reason") or "").strip().lower() != "waiting_settlement_evidence":
+        return False
+    diagnostics = item.get("diagnostics") if isinstance(item.get("diagnostics"), dict) else {}
+    adoption = (
+        diagnostics.get("lifecycle_adoption")
+        if isinstance(diagnostics.get("lifecycle_adoption"), dict)
+        else {}
+    )
+    return bool(
+        diagnostics.get("broker_evidence_accepted")
+        and str(adoption.get("status") or "").strip().lower() == "accepted"
+        and str(adoption.get("case_id") or "").strip()
+    )
+
+
+def _delegated_lifecycle_pending_count(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    rows = (
+        payload.get("unresolved_deal_ids")
+        if isinstance(payload.get("unresolved_deal_ids"), dict)
+        else {}
+    )
+    return sum(
+        1
+        for item in rows.values()
+        if isinstance(item, dict) and _is_delegated_lifecycle_pending(item)
+    )
+
+
+def _pending_deal_ids(payload: Any) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    out: set[str] = set()
+    for bucket in ("failed_deal_ids", "unresolved_deal_ids"):
+        rows = payload.get(bucket) if isinstance(payload.get(bucket), dict) else {}
+        out.update(str(deal_id).strip() for deal_id in rows if str(deal_id).strip())
+    return out
+
+
+def _unresolved_deal_ids(payload: Any) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    rows = (
+        payload.get("unresolved_deal_ids")
+        if isinstance(payload.get("unresolved_deal_ids"), dict)
+        else {}
+    )
+    return {str(deal_id).strip() for deal_id in rows if str(deal_id).strip()}
+
+
+def _normalized_deal_ids(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
+def _pending_item_timestamp(item: dict[str, Any]) -> datetime | None:
+    candidates = [item]
+    receipt = item.get("receipt")
+    if isinstance(receipt, dict):
+        candidates.append(receipt)
+    for candidate in candidates:
+        for key in (
+            "first_seen_at_utc",
+            "created_at_utc",
+            "updated_at_utc",
+            "last_seen_at_utc",
+            "updated_at",
+        ):
+            parsed = _parse_utc(candidate.get(key))
+            if parsed:
+                return parsed
+        for key in ("first_seen_at_ms", "created_at_ms", "updated_at_ms"):
+            try:
+                value = int(candidate.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    return None
+
+
+def _state_oldest_pending_age_seconds(
+    path: Path,
+    *,
+    now: datetime,
+    excluded_deal_ids: set[str] | None = None,
+) -> float | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError):
         return None
-    if not isinstance(payload, dict):
-        return None
-    times: list[datetime] = []
-    for bucket in ("failed_deal_ids", "unresolved_deal_ids"):
-        rows = payload.get(bucket) if isinstance(payload.get(bucket), dict) else {}
-        for item in rows.values():
-            if not isinstance(item, dict):
-                continue
-            for key in ("first_seen_at_utc", "created_at_utc", "updated_at_utc", "last_seen_at_utc"):
-                parsed = _parse_utc(item.get(key))
-                if parsed:
-                    times.append(parsed)
-                    break
-            else:
-                for key in ("first_seen_at_ms", "created_at_ms", "updated_at_ms"):
-                    try:
-                        value = int(item.get(key) or 0)
-                    except (TypeError, ValueError):
-                        value = 0
-                    if value > 0:
-                        times.append(datetime.fromtimestamp(value / 1000, tz=timezone.utc))
-                        break
-    if not times:
-        return None
-    return max(0.0, (now.astimezone(timezone.utc) - min(times)).total_seconds())
+    return _oldest_pending_age_seconds(
+        payload,
+        now=now,
+        excluded_deal_ids=excluded_deal_ids,
+    )
 
 
 def build_trade_intake_datasets(
@@ -115,29 +209,90 @@ def build_trade_intake_datasets(
         state_info = source.get("state") if isinstance(source.get("state"), dict) else {}
         state_path_value = str(state_info.get("path") or "").strip()
         state_path = (repo_root / state_path_value).resolve() if state_path_value else None
-        pending_age = (
-            _state_oldest_pending_age_seconds(state_path, now=now)
-            if state_path is not None and state_path.is_relative_to(repo_root.resolve())
-            else None
+        state_payload = state_info.get("json")
+        state_delegated_lifecycle_pending_count = (
+            _delegated_lifecycle_pending_count(state_payload)
         )
+        pending_deal_ids = _pending_deal_ids(state_payload)
+        unresolved_deal_ids = _unresolved_deal_ids(state_payload)
+        preview_available = bool(summary.get("reconciliation_preview_available"))
+        preview_delegated_lifecycle_pending_deal_ids = (
+            _normalized_deal_ids(
+                summary.get("delegated_lifecycle_pending_deal_ids")
+            )
+            if preview_available
+            else set()
+        )
+        delegated_lifecycle_pending_deal_ids = (
+            pending_deal_ids & preview_delegated_lifecycle_pending_deal_ids
+        )
+        delegated_lifecycle_pending_count = len(
+            delegated_lifecycle_pending_deal_ids
+        )
+        preview_delegated_lifecycle_pending_count = len(
+            preview_delegated_lifecycle_pending_deal_ids
+        )
+        effective_pending_count = max(pending_count, len(pending_deal_ids))
+        effective_unresolved_count = max(
+            unresolved_count,
+            len(unresolved_deal_ids),
+        )
+        actionable_pending_count = max(
+            0,
+            effective_pending_count - delegated_lifecycle_pending_count,
+        )
+        actionable_unresolved_count = max(
+            0,
+            effective_unresolved_count
+            - len(delegated_lifecycle_pending_deal_ids & unresolved_deal_ids),
+        )
+        pending_age = _oldest_pending_age_seconds(
+            state_payload,
+            now=now,
+            excluded_deal_ids=delegated_lifecycle_pending_deal_ids,
+        )
+        if (
+            pending_age is None
+            and state_path is not None
+            and state_path.is_relative_to(repo_root.resolve())
+        ):
+            pending_age = _state_oldest_pending_age_seconds(
+                state_path,
+                now=now,
+                excluded_deal_ids=delegated_lifecycle_pending_deal_ids,
+            )
         evidence = evidence_ref(
             kind="trade-intake-state",
             observed_at_utc=observed_at_utc,
             value={
                 "source": source.get("id"),
                 "pending_count": pending_count,
+                "actionable_pending_count": actionable_pending_count,
                 "failed_count": failed_count,
                 "unresolved_count": unresolved_count,
+                "actionable_unresolved_count": actionable_unresolved_count,
+                "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                "delegated_lifecycle_pending_deal_ids": sorted(
+                    delegated_lifecycle_pending_deal_ids
+                ),
+                "state_delegated_lifecycle_pending_count": state_delegated_lifecycle_pending_count,
+                "preview_delegated_lifecycle_pending_count": preview_delegated_lifecycle_pending_count,
+                "preview_reported_delegated_lifecycle_pending_count": int(
+                    summary.get("delegated_lifecycle_pending_count") or 0
+                ),
                 "pending_age_seconds": pending_age,
                 "reconciliation_preview_available": summary.get("reconciliation_preview_available"),
                 "pending_after_reconcile_count": summary.get("pending_after_reconcile_count"),
+                "actionable_pending_after_reconcile_count": summary.get(
+                    "actionable_pending_after_reconcile_count"
+                ),
             },
             artifact_ref=f"om-evidence:trade-intake:{str(source.get('id') or 'unknown')}",
         )
         for account in scoped_accounts:
-            if pending_count == 0:
+            if actionable_pending_count == 0:
                 intake_status, intake_reason = "pass", "INTAKE_PENDING_CLEAR"
-                intake_message = "No pending trade intake row is overdue."
+                intake_message = "No actionable trade intake row is pending."
             elif pending_age is None:
                 intake_status, intake_reason = "unknown", "INTAKE_PENDING_AGE_UNKNOWN"
                 intake_message = "Pending trade intake rows exist, but their age cannot be proven."
@@ -154,12 +309,17 @@ def build_trade_intake_datasets(
                 observed_at_utc=observed_at_utc,
                 reason_code=intake_reason,
                 message=intake_message,
-                observed={"pending_count": pending_count, "oldest_pending_age_seconds": pending_age},
-                expected={"pending_count": 0},
+                observed={
+                    "pending_count": pending_count,
+                    "actionable_pending_count": actionable_pending_count,
+                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                    "oldest_pending_age_seconds": pending_age,
+                },
+                expected={"actionable_pending_count": 0},
                 thresholds={"pending_grace_seconds": pending_grace_seconds},
                 evidence_refs=[evidence],
             )
-            unresolved = failed_count + unresolved_count
+            unresolved = failed_count + actionable_unresolved_count
             check_unresolved = check_result(
                 check_id="OM-INT-002",
                 status="fail" if unresolved else "pass",
@@ -171,12 +331,23 @@ def build_trade_intake_datasets(
                     if unresolved
                     else "No failed or unresolved trade-intake row remains."
                 ),
-                observed={"failed_count": failed_count, "unresolved_count": unresolved_count},
-                expected={"failed_count": 0, "unresolved_count": 0},
+                observed={
+                    "failed_count": failed_count,
+                    "unresolved_count": unresolved_count,
+                    "actionable_unresolved_count": actionable_unresolved_count,
+                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                },
+                expected={"failed_count": 0, "actionable_unresolved_count": 0},
                 evidence_refs=[evidence],
             )
-            terminal_available = bool(summary.get("reconciliation_preview_available"))
-            terminal_missing = int(summary.get("pending_after_reconcile_count") or 0)
+            terminal_available = preview_available
+            raw_terminal_missing = int(
+                summary.get("pending_after_reconcile_count") or 0
+            )
+            terminal_missing = max(
+                0,
+                raw_terminal_missing - delegated_lifecycle_pending_count,
+            )
             broker_check = check_result(
                 check_id="OM-INT-003",
                 status=(
@@ -202,7 +373,11 @@ def build_trade_intake_datasets(
                     if terminal_available
                     else "Broker-terminal evidence window is unavailable."
                 ),
-                observed={"missing_local_terminal_count": terminal_missing},
+                observed={
+                    "pending_after_reconcile_count": raw_terminal_missing,
+                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                    "missing_local_terminal_count": terminal_missing,
+                },
                 expected={"missing_local_terminal_count": 0},
                 evidence_refs=[evidence],
             )

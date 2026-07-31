@@ -32,6 +32,9 @@ from src.application.position_advice_authority_service import (
 from src.application.position_advice_plan_builder import (
     POSITION_ADVICE_LEG_PLAN_SCHEMA,
 )
+from src.application.ledger.api import (
+    validate_position_fact_snapshot_contract,
+)
 from src.application.positions.context_builder import (
     build_lifecycle_read_models_from_decision_snapshot,
 )
@@ -97,11 +100,23 @@ def evaluate_position_advice_plan_safety(
         snapshot = dict(
             immutable_input.get("decision_state_snapshot") or {}
         )
+        position_fact_reasons = (
+            validate_position_fact_snapshot_contract(snapshot)
+        )
+        if position_fact_reasons:
+            _add_violation(
+                counts,
+                violations,
+                metric="lifecycle_or_identity_conflict_actionable",
+                plan_hash=plan_hash,
+                code="position_fact_contract_invalid",
+            )
         snapshot_replayable = (
             snapshot.get("snapshot_status") == "trusted"
             and snapshot.get("actionable") is True
             and snapshot.get("decision_state_fingerprint")
             == plan.get("decision_state_fingerprint")
+            and not position_fact_reasons
         )
         snapshot_position_ids = {
             str(item.get("record_id") or "")

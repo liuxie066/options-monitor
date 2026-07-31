@@ -27,6 +27,13 @@ from src.application.position_advice_current_repository import (
     PositionAdviceCurrentError,
     collect_protected_current_runs_under_global_lock,
 )
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
 from src.application.service_cleanup import service_cleanup
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
@@ -38,7 +45,7 @@ from src.application.position_advice_source_receipts import (
 
 NOW = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
 IDENTITY = "a" * 64
-FINGERPRINT = "d" * 64
+FINGERPRINT_SEED = "d" * 64
 
 
 def _binding() -> dict[str, object]:
@@ -61,14 +68,52 @@ def _binding() -> dict[str, object]:
     )
 
 
-def _trusted_snapshot(fingerprint: str = FINGERPRINT) -> dict[str, object]:
-    return {
+def _trusted_snapshot(
+    fingerprint_seed: str = FINGERPRINT_SEED,
+) -> dict[str, object]:
+    snapshot = {
         "schema_version": "decision_state_snapshot.v2",
+        "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
         "snapshot_status": "trusted",
         "actionable": True,
-        "decision_state_fingerprint": fingerprint,
+        "decision_state_fingerprint": "",
+        "fixture_state_identity": fingerprint_seed,
         "position_lots": [],
+        "account_position_lots": [],
+        "account_lifecycle_cases": [],
+        "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
+        "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=[],
+            )
+        ),
+        "effective_void_event_ids": [],
+        "account_combo_identities": [],
+        "account_combo_group_memberships": [],
     }
+    snapshot["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(snapshot)
+    )
+    return snapshot
+
+
+FINGERPRINT = str(
+    _trusted_snapshot()["decision_state_fingerprint"]
+)
 
 
 def _prepare_run(tmp_path: Path) -> dict[str, object]:
@@ -228,7 +273,9 @@ def test_stable_build_retries_once_then_fails_closed() -> None:
         },
     )
     assert result["attempt"] == 2
-    assert result["artifact"]["fingerprint"] == "c" * 64
+    assert result["artifact"]["fingerprint"] == _trusted_snapshot(
+        "c" * 64
+    )["decision_state_fingerprint"]
 
     changing = iter(
         [

@@ -70,6 +70,13 @@ _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_CLOSE_ADVICE_NOTIFY_LEVELS = ("strong", "medium")
 _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
+_COMBO_OCCURRENCE_FIELDS = (
+    "candidate_occurrence_schema",
+    "candidate_occurrence_id",
+    "candidate_occurrence_generated_at_utc",
+    "candidate_occurrence_data_as_of_utc",
+    "candidate_row_content_hash",
+)
 
 
 def assemble_daily_decision_brief(
@@ -1679,6 +1686,9 @@ def _build_candidate_index(
                 capacity=capacity,
                 event_risk=event_risk,
             )
+            if family == "combo_yield":
+                for field in _COMBO_OCCURRENCE_FIELDS:
+                    representative.pop(field, None)
             canonical = canonical_symbol(row.get("symbol"))
             representative["symbol"] = canonical
             representative["strategy_family"] = family
@@ -1841,6 +1851,8 @@ def _candidate_view(
             "rank": rank,
             "symbol": _text(row.get("symbol")).upper(),
             "strategy_group_id": _text(row.get("strategy_group_id") or row.get("candidate_pair_id")),
+            "candidate_pair_id": _text(row.get("candidate_pair_id") or row.get("strategy_group_id")),
+            "structure_mode": _text(row.get("structure_mode")).lower(),
             "put_contract_symbol": _text(row.get("put_contract_symbol")).upper(),
             "call_contract_symbol": _text(row.get("call_contract_symbol")).upper(),
             "put_leg_role": _text(row.get("put_leg_role") or "funding_put"),
@@ -1849,6 +1861,8 @@ def _candidate_view(
             "call_expiration": _text(row.get("call_expiration") or row.get("expiration")),
             "put_strike": _number(row.get("put_strike")),
             "call_strike": _number(row.get("call_strike")),
+            "currency": _text(row.get("currency")).upper(),
+            "multiplier": _number(row.get("multiplier")),
             "put_sell_reference": put_sell_reference,
             "call_buy_reference": call_buy_reference,
             "priority": _priority_from_row(row, default="P1"),
@@ -1856,6 +1870,11 @@ def _candidate_view(
             "capacity": dict(capacity or {}),
             "event_risk": dict(event_risk or {}),
             "source": _source_view(row),
+            **{
+                field: row.get(field)
+                for field in _COMBO_OCCURRENCE_FIELDS
+                if row.get(field) not in (None, "")
+            },
         }
     return {
         "rank": rank,

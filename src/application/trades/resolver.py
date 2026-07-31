@@ -420,6 +420,11 @@ def resolve_trade_deal(
                     "combo_yield_enrichment": combo_enrichment.diagnostics,
                 },
             )
+        elif combo_enrichment.diagnostics:
+            position_effect_diagnostics = {
+                **position_effect_diagnostics,
+                "combo_yield_enrichment": combo_enrichment.diagnostics,
+            }
         if deal.side not in {"sell", "buy"}:
             return _failure(status="unresolved", action="open", reason="unsupported_open_side", deal=deal)
         missing = _required_open_missing(deal)
@@ -640,55 +645,28 @@ def _infer_missing_position_effect(
         )
 
     if deal.side == "buy" and deal.option_type == "call":
-        if _combo_yield_structure_mode(deal) == STAGGERED_EXPIRY_PAIR:
-            pair_intent_id = _combo_yield_pair_intent_id(deal)
-            inferred = replace(
-                deal,
-                position_effect="open",
-                raw_payload=_with_position_effect_inference_payload(
-                    deal.raw_payload,
-                    inferred_effect="open",
-                    reason="buy_call_without_close_target",
-                ),
-            )
-            return _PositionEffectInference(
-                deal=inferred,
-                reason="inferred_long_call_open",
-                diagnostics={
-                    **base_diagnostics,
-                    "decision": "open",
-                    "open_reason": "buy_call_without_close_target",
-                    "close_candidate_summary": close_candidate_summary,
-                    "structure_mode": STAGGERED_EXPIRY_PAIR,
-                    "pair_intent_id": pair_intent_id or None,
-                    "combination_relation_pending": not bool(pair_intent_id),
-                },
-            )
-
-        companion = _combo_yield_companion_short_put(repo, deal)
         inferred = replace(
             deal,
             position_effect="open",
-            raw_payload=_with_combo_yield_long_call_payload(
+            raw_payload=_with_position_effect_inference_payload(
                 deal.raw_payload,
-                deal=deal,
-                companion=companion,
-                inferred_position_effect=True,
+                inferred_effect="open",
+                reason="buy_call_without_close_target",
             ),
         )
         return _PositionEffectInference(
             deal=inferred,
-            reason="inferred_combo_yield_long_call_open",
+            reason="inferred_long_call_open",
             diagnostics={
                 **base_diagnostics,
                 "decision": "open",
-                "open_reason": (
-                    "buy_call_with_companion_short_put"
-                    if companion is not None
-                    else "buy_call_without_close_target"
-                ),
+                "open_reason": "buy_call_without_close_target",
                 "close_candidate_summary": close_candidate_summary,
-                "companion_short_put": companion,
+                "structure_mode": _combo_yield_structure_mode(deal) or None,
+                "pair_intent_id": _combo_yield_pair_intent_id(deal) or None,
+                "combination_relation_pending": not bool(
+                    _combo_yield_pair_intent_id(deal)
+                ),
             },
         )
 
@@ -726,45 +704,25 @@ def _enrich_combo_yield_open(
     *,
     repo: OptionPositionsRepoLike,
 ) -> _PositionEffectInference:
+    if not _combo_yield_pair_intent_id(deal):
+        return _PositionEffectInference(
+            deal=None,
+            reason="not_combo_yield_open",
+            diagnostics={
+                "decision": "defer_to_post_trade_reconciliation",
+                "combination_relation_pending": True,
+            },
+        )
     if _combo_yield_structure_mode(deal) == STAGGERED_EXPIRY_PAIR:
         return _enrich_staggered_combo_yield_open(deal, repo=repo)
-
-    if deal.side == "buy" and deal.option_type == "call":
-        companion = _combo_yield_companion_short_put(repo, deal)
-        return _PositionEffectInference(
-            deal=replace(
-                deal,
-                raw_payload=_with_combo_yield_long_call_payload(
-                    deal.raw_payload,
-                    deal=deal,
-                    companion=companion,
-                    inferred_position_effect=False,
-                ),
-            ),
-            reason="combo_yield_long_call",
-            diagnostics={
-                "decision": "tag_long_call",
-                "companion_short_put": companion,
-                "strategy_group_id": _stable_combo_yield_group_id(deal),
-            },
-        )
-    if deal.side == "sell" and deal.option_type == "put":
-        companion = _combo_yield_companion_long_call(repo, deal)
-        if companion is None:
-            return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
-        return _PositionEffectInference(
-            deal=replace(
-                deal,
-                raw_payload=_with_combo_yield_sell_put_payload(deal.raw_payload, deal=deal, companion=companion),
-            ),
-            reason="combo_yield_sell_put",
-            diagnostics={
-                "decision": "tag_sell_put",
-                "companion_long_call": companion,
-                "strategy_group_id": _stable_combo_yield_group_id(deal),
-            },
-        )
-    return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
+    return _PositionEffectInference(
+        deal=None,
+        reason="not_combo_yield_open",
+        diagnostics={
+            "decision": "explicit_pair_intent_structure_unsupported",
+            "pair_intent_id": _combo_yield_pair_intent_id(deal),
+        },
+    )
 
 
 def _enrich_staggered_combo_yield_open(

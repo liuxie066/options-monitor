@@ -36,6 +36,13 @@ from src.application.position_advice_promotion import (
 from src.application.position_advice_current_repository import (
     collect_protected_current_runs_under_global_lock,
 )
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
 
 
 NOW = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
@@ -92,7 +99,50 @@ def _plan(
     source_manifest_hash = canonical_sha256(
         {"source_manifest": source_manifest}
     )
-    fingerprint = decision_fingerprint or f"{index + 1:064x}"
+    fingerprint_seed = decision_fingerprint or f"{index + 1:064x}"
+    position_lots = [
+        {
+            "record_id": f"lot-{index}",
+            "fields": {"contracts_open": 1},
+        }
+    ]
+    decision_snapshot: dict[str, object] = {
+        "schema_version": "decision_state_snapshot.v2",
+        "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
+        "snapshot_status": "trusted",
+        "actionable": True,
+        "decision_state_fingerprint": "",
+        "fixture_state_identity": fingerprint_seed,
+        "account_position_lots": position_lots,
+        "account_lifecycle_cases": [],
+        "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
+        "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=position_lots,
+            )
+        ),
+        "effective_void_event_ids": [],
+        "account_combo_identities": [],
+        "account_combo_group_memberships": [],
+    }
+    fingerprint = decision_state_snapshot_fingerprint(
+        decision_snapshot
+    )
+    decision_snapshot["decision_state_fingerprint"] = fingerprint
     immutable_input: dict[str, object] = {
         "schema_version": "position_advice_input.v2",
         "account_run_id": run_id,
@@ -105,18 +155,7 @@ def _plan(
         "authority_policy_hash": authority_policy_hash,
         "decision_state_fingerprint": fingerprint,
         "source_manifest_hash": source_manifest_hash,
-        "decision_state_snapshot": {
-            "schema_version": "decision_state_snapshot.v2",
-            "snapshot_status": "trusted",
-            "actionable": True,
-            "decision_state_fingerprint": fingerprint,
-            "account_position_lots": [
-                {
-                    "record_id": f"lot-{index}",
-                    "fields": {"contracts_open": 1},
-                }
-            ],
-        },
+        "decision_state_snapshot": decision_snapshot,
         "economic_inputs": {"fees": "v1", "index": index},
     }
     immutable_input["input_hash"] = canonical_sha256(immutable_input)
@@ -305,6 +344,50 @@ def test_promotion_aggregator_builds_non_vacuous_passing_evidence(
     )
 
 
+def test_legacy_v2_position_fact_snapshot_is_promotion_ineligible(
+    tmp_path: Path,
+) -> None:
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+    )
+    input_path = path.parent / "state" / "position_advice_input.v2.json"
+    immutable_input = json.loads(input_path.read_text())
+    immutable_input["decision_state_snapshot"].pop(
+        "position_fact_contract_version"
+    )
+    immutable_input.pop("input_hash")
+    immutable_input["input_hash"] = canonical_sha256(immutable_input)
+    _write_json(input_path, immutable_input)
+    plan = json.loads(path.read_text())
+    plan["input_hash"] = immutable_input["input_hash"]
+    plan.pop("artifact_hash")
+    plan["artifact_hash"] = canonical_sha256(plan)
+    _write_json(path, plan)
+
+    with pytest.raises(
+        PositionAdvicePromotionError,
+        match="position_fact_contract_version_invalid",
+    ):
+        build_position_advice_promotion_evidence(
+            plan_paths=[path],
+            normalized_account="lx",
+            normalized_portfolio_source="futu",
+            portfolio_account_identity_hash=IDENTITY,
+            authority_generation=GENERATION,
+            authority_policy_hash=POLICY_HASH,
+            covered_strategy_families=None,
+            safety=None,
+            critical_replay_fixtures={
+                name: True
+                for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
+            },
+            generated_at=NOW,
+        )
+
+
 def test_promotion_aggregator_deduplicates_repeated_facts_and_rejects_drift(
     tmp_path: Path,
 ) -> None:
@@ -331,6 +414,19 @@ def test_promotion_aggregator_deduplicates_repeated_facts_and_rejects_drift(
         duplicate.parent / "state" / "position_advice_input.v2.json"
     )
     duplicate_input = json.loads(duplicate_input_path.read_text())
+    original_input_path = (
+        paths[0].parent / "state" / "position_advice_input.v2.json"
+    )
+    original_input = json.loads(original_input_path.read_text())
+    duplicate_input["decision_state_snapshot"] = original_input[
+        "decision_state_snapshot"
+    ]
+    duplicate_input["decision_state_fingerprint"] = original_input[
+        "decision_state_fingerprint"
+    ]
+    duplicate_payload["decision_state_fingerprint"] = original_input[
+        "decision_state_fingerprint"
+    ]
     duplicate_input["source_manifest_hash"] = duplicate_payload[
         "source_manifest_hash"
     ]
@@ -773,9 +869,10 @@ def test_automatic_safety_rejects_actionable_lifecycle_replay_mismatch(
     lot_id = "lot-0"
     snapshot["account_lifecycle_cases"] = [
         {
-            "schema_version": "lifecycle_case.v2",
-            "case_id": case_id,
-            "symbol": "NVDA",
+                "schema_version": "lifecycle_case.v2",
+                "case_id": case_id,
+                "account": "lx",
+                "symbol": "NVDA",
             "expiration_ymd": "2026-06-20",
             "market": "US",
             "status": "open",
@@ -785,6 +882,9 @@ def test_automatic_safety_rejects_actionable_lifecycle_replay_mismatch(
     snapshot["account_lifecycle_evidence"] = [
         {"case_id": case_id, "evidence_id": evidence_id}
     ]
+    snapshot["account_lifecycle_evidence_received_at_ms_by_id"] = {
+        evidence_id: 1
+    }
     snapshot["account_lifecycle_allocations"] = [
         {
             "allocation_id": allocation_id_for(
@@ -804,12 +904,27 @@ def test_automatic_safety_rejects_actionable_lifecycle_replay_mismatch(
                 terminal_type="assignment",
                 contracts_allocated=1,
             ),
-        }
-    ]
+            }
+        ]
+    snapshot["account_lifecycle_resolution"] = (
+        resolve_account_lifecycle_overlay(
+            account="lx",
+            cases=snapshot["account_lifecycle_cases"],
+            evidence=snapshot["account_lifecycle_evidence"],
+            allocations=snapshot["account_lifecycle_allocations"],
+            source_claims=[],
+            timing_policies=[],
+            position_lots=snapshot["account_position_lots"],
+        )
+    )
+    fingerprint = decision_state_snapshot_fingerprint(snapshot)
+    snapshot["decision_state_fingerprint"] = fingerprint
+    immutable_input["decision_state_fingerprint"] = fingerprint
     immutable_input.pop("input_hash")
     immutable_input["input_hash"] = canonical_sha256(immutable_input)
     _write_json(input_path, immutable_input)
     plan = json.loads(path.read_text())
+    plan["decision_state_fingerprint"] = fingerprint
     plan["input_hash"] = immutable_input["input_hash"]
     plan.pop("artifact_hash")
     plan["artifact_hash"] = canonical_sha256(plan)

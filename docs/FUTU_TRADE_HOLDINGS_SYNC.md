@@ -237,3 +237,10 @@ deal replay；已被有效 void 的 close 也不是迁移目标，两者均不�
 与 migration receipt；不会新增或改写经济 terminal event，也不会改动仓位。
 `bridge_to_v2` 只绑定 Futu account、timing policy、非 allocating bridge
 evidence 和 supersession；不会生成 terminal event。
+
+运行期 `reconcile-due` 只调度 active v2 case：superseded legacy case
+不会进入采集，单个 malformed active case 会按 case 返回人工复核原因，
+不会中断同批其它 case。v2 case 可以只读解析经过完整校验的 migration
+bridge 和 legacy zero-price broker anchor，用于采集一份新的、独立冻结的
+settlement observation；legacy source claim 始终保留原 owner，不得释放、
+转移或复制到 v2，bridge 本身也始终不参与 allocation。

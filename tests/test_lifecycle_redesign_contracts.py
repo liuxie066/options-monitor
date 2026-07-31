@@ -8,10 +8,20 @@ import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_lifecycle import expiration_observation_start_ms
+from src.application.ledger.api import (
+    lifecycle_option_close_anchor_facts,
+)
+from src.application.ledger.decision_snapshot import (
+    decision_state_snapshot,
+)
 from src.application.ledger.lifecycle_migration import (
     apply_lifecycle_migration_manifest,
     build_lifecycle_migration_inventory,
     select_lifecycle_migration_targets,
+)
+from src.application.ledger.lifecycle_overlay import (
+    lifecycle_case_resolution as resolved_lifecycle_case,
+    resolve_lifecycle_account_rows,
 )
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
@@ -28,7 +38,11 @@ from src.application.trades.auto_intake import (
 )
 from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
+    lifecycle_case_read_model,
     reconcile_lifecycle_evidence,
+)
+from src.application.positions.context_builder import (
+    build_lifecycle_read_models_from_decision_snapshot,
 )
 from src.application.trades.lifecycle_outbox import (
     CLAIM_LEASE_MS,
@@ -124,6 +138,7 @@ def _case_with_option_anchor(
         "strike": 100,
         "expiration_ymd": EXPIRATION_YMD,
         "contracts": 1,
+        "target_lot_id": "lot-1",
         "price": 0,
         "event_time_ms": observed_at_ms,
         "received_at_ms": observed_at_ms + 100,
@@ -168,6 +183,30 @@ def _case_with_option_anchor(
             )
         )
     return repo, case_id, observed_at_ms
+
+
+def test_coherent_lifecycle_reader_resolves_direct_anchor(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _observed_at_ms = _case_with_option_anchor(
+        tmp_path,
+    )
+
+    rows = repo.read_lifecycle_case_rows(case_id=case_id)
+    resolution = resolve_lifecycle_account_rows(rows)
+    case_resolution = resolved_lifecycle_case(
+        resolution,
+        case_id=case_id,
+    )
+
+    assert rows["requested_lifecycle_case_id"] == case_id
+    assert len(rows["account_lifecycle_source_consumptions"]) == 1
+    assert len(rows["account_lifecycle_timing_policies"]) == 1
+    assert case_resolution is not None
+    assert case_resolution["status"] == "direct"
+    assert case_resolution["effective_reservations_by_lot"] == {
+        "lot-1": 1
+    }
 
 
 def _legacy_terminal_mapping_fixture(
@@ -744,6 +783,23 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
     assert [item["evidence_type"] for item in bridges] == [
         "migration_bridge"
     ]
+    anchor_facts = lifecycle_option_close_anchor_facts(
+        repo,
+        case_id=canonical_case_id,
+    )
+    assert anchor_facts["status"] == "bridged"
+    assert anchor_facts["reason_codes"] == []
+    assert len(anchor_facts["anchors"]) == 1
+    assert anchor_facts["anchors"][0]["source_owner_case_id"] == legacy_id
+    assert anchor_facts["anchors"][0]["case_id"] == canonical_case_id
+    assert anchor_facts["anchors"][0]["target_contracts_by_lot"] == {"lot-1": 1}
+    model = lifecycle_case_read_model(
+        repo,
+        case_id=canonical_case_id,
+        now_ms=observed_at_ms,
+    )
+    assert model["reason_state"] == "cause_pending"
+    assert "evidence_without_allocation" not in model["lifecycle_reason_codes"]
 
 
 def test_explicit_terminal_frozen_mapping_only_links_existing_facts(
@@ -1202,6 +1258,41 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert repo.list_trade_lifecycle_allocations(
         case_id=canonical_case_id
     ) == []
+
+    now_ms = observed_at_ms + 1
+    live_model = lifecycle_case_read_model(
+        repo,
+        case_id=canonical_case_id,
+        now_ms=now_ms,
+    )
+    snapshot = decision_state_snapshot(
+        repo,
+        account="lx",
+        portfolio_scope_id="futu:lx",
+    )
+    frozen_models = (
+        build_lifecycle_read_models_from_decision_snapshot(
+            snapshot,
+            now_ms=now_ms,
+        )
+    )
+    frozen_model = frozen_models["lot-1"]
+    assert snapshot["snapshot_status"] == "trusted"
+    assert next(
+        item
+        for item in snapshot["account_lifecycle_resolution"][
+            "case_resolutions"
+        ]
+        if item["case_id"] == canonical_case_id
+    )["status"] == "bridged"
+    for field in (
+        "closure_fact",
+        "reason_state",
+        "reserved_contracts_by_lot",
+        "remaining_contracts_by_lot",
+        "lifecycle_generation_token",
+    ):
+        assert frozen_model[field] == live_model[field]
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(

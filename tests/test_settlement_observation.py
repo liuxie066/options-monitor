@@ -4,6 +4,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_lifecycle import (
     expiration_observation_start_ms,
@@ -20,11 +22,14 @@ from src.application.trades.close_reason_evidence import (
 )
 from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
+    lifecycle_case_read_model,
 )
 from src.application.trades.settlement_observation import (
+    SettlementObservationDataError,
     collect_broker_settlement_observation,
 )
 from src.application.trades.close_reason_reconciliation import (
+    reconcile_due_lifecycle_cases,
     reconcile_lifecycle_close_reason,
 )
 
@@ -275,9 +280,11 @@ def _collect(
     return collect_broker_settlement_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model={
-            "pending_until_ms": policy["settlement_deadline_ms"]
-        },
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=str(lifecycle_case["case_id"]),
+            now_ms=now_ms,
+        ),
         gateway=gateway,
         futu_account_id="1001",
         now_ms=now_ms,
@@ -383,9 +390,11 @@ def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
     observation = collect_broker_settlement_observation(
         repo,
         lifecycle_case=lifecycle_case,
-        read_model={
-            "pending_until_ms": policy["settlement_deadline_ms"]
-        },
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=str(lifecycle_case["case_id"]),
+            now_ms=now_ms,
+        ),
         gateway=gateway,
         futu_account_id="1001",
         now_ms=now_ms,
@@ -406,3 +415,534 @@ def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
         result["lifecycle_read_model"]["close_reason"]
         == "assignment"
     )
+
+
+def test_duplicate_polled_stock_settlement_is_applied_once(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = (
+        _repo_with_pending_case(tmp_path)
+    )
+    case_id = str(lifecycle_case["case_id"])
+    stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
+    stock_row = {
+        "deal_id": "stock-settlement-duplicate",
+        "acc_id": "1001",
+        "code": "US.NVDA",
+        "price": "100",
+        "qty": 100,
+        "trd_side": "BUY",
+        "trade_time_ms": stock_time_ms,
+        "order_id": "stock-order-duplicate",
+    }
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=_Gateway(
+            history_deals=[
+                {
+                    "deal_id": "option-close-1",
+                    "acc_id": "1001",
+                    "code": OPTION_CODE,
+                    "price": "0",
+                    "qty": 1,
+                },
+                stock_row,
+                dict(stock_row),
+            ]
+        ),
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+
+    assert len(observation["stock_settlement_candidates"]) == 2
+    result = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+        observation=observation,
+        apply_changes=True,
+    )
+
+    assert len(result["poll_settlement_results"]) == 1
+    assert result["poll_settlement_results"][0]["status"] == "applied"
+    assert len(repo.list_trade_lifecycle_allocations(case_id=case_id)) == 1
+    assert len(repo.list_trade_events()) == 2
+
+
+def test_multiple_polled_stock_settlements_require_review_before_writes(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = (
+        _repo_with_pending_case(tmp_path)
+    )
+    case_id = str(lifecycle_case["case_id"])
+    stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=_Gateway(
+            history_deals=[
+                {
+                    "deal_id": "option-close-1",
+                    "acc_id": "1001",
+                    "code": OPTION_CODE,
+                    "price": "0",
+                    "qty": 1,
+                },
+                {
+                    "deal_id": "stock-settlement-a",
+                    "acc_id": "1001",
+                    "code": "US.NVDA",
+                    "price": "100",
+                    "qty": 100,
+                    "trd_side": "BUY",
+                    "trade_time_ms": stock_time_ms,
+                },
+                {
+                    "deal_id": "stock-settlement-b",
+                    "acc_id": "1001",
+                    "code": "US.NVDA",
+                    "price": "100",
+                    "qty": 100,
+                    "trd_side": "BUY",
+                    "trade_time_ms": stock_time_ms,
+                },
+            ]
+        ),
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+
+    assert len(observation["stock_settlement_candidates"]) == 2
+    result = reconcile_lifecycle_close_reason(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+        observation=observation,
+        apply_changes=True,
+    )
+
+    assert result["decision"]["status"] == "needs_review"
+    assert result["decision"]["reason_codes"] == [
+        "stock_settlement_multiple_candidates_unresolved"
+    ]
+    assert result["write_status"] == "not_attempted"
+    assert result["poll_settlement_results"] == []
+    assert repo.list_trade_lifecycle_allocations(case_id=case_id) == []
+    assert len(repo.list_trade_events()) == 1
+    assert repo.list_trade_lifecycle_notifications() == []
+
+
+def test_polled_settlement_generation_drift_writes_no_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle as lifecycle_module
+
+    repo, lifecycle_case, policy, _anchor_ms = (
+        _repo_with_pending_case(tmp_path)
+    )
+    case_id = str(lifecycle_case["case_id"])
+    stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=_Gateway(
+            history_deals=[
+                {
+                    "deal_id": "option-close-1",
+                    "acc_id": "1001",
+                    "code": OPTION_CODE,
+                    "price": "0",
+                    "qty": 1,
+                },
+                {
+                    "deal_id": "stock-settlement-stale",
+                    "acc_id": "1001",
+                    "code": "US.NVDA",
+                    "price": "100",
+                    "qty": 100,
+                    "trd_side": "BUY",
+                    "trade_time_ms": stock_time_ms,
+                },
+            ]
+        ),
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+    candidate = observation["stock_settlement_candidates"][0]
+    original_find = lifecycle_module._find_matching_option_cases
+    changed = False
+
+    def _change_generation_then_find(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            current = repo.get_trade_lifecycle_case(case_id)
+            assert current is not None
+            assert repo.update_trade_lifecycle_case_derived_status(
+                case_id=case_id,
+                status=str(current["status"]),
+                derived_summary={"concurrent_marker": "changed"},
+            )
+            changed = True
+        return original_find(*args, **kwargs)
+
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_find_matching_option_cases",
+        _change_generation_then_find,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="lifecycle generation compare-and-set failed",
+    ):
+        reconcile_lifecycle_close_reason(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+            observation=observation,
+            apply_changes=True,
+        )
+
+    assert repo.get_trade_lifecycle_evidence(
+        str(candidate["evidence_id"])
+    ) is None
+    assert repo.list_trade_lifecycle_allocations(case_id=case_id) == []
+    assert len(repo.list_trade_events()) == 1
+    assert repo.list_trade_lifecycle_notifications() == []
+
+
+def test_due_reconciliation_skips_superseded_legacy_empty_case() -> None:
+    class _LegacyOnlyRepo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "case_id": "legacy-case",
+                    "account": "lx",
+                    "status": "superseded",
+                    "target_contracts_by_lot": {},
+                }
+            ]
+
+    result = reconcile_due_lifecycle_cases(
+        _LegacyOnlyRepo(),
+        account="lx",
+        now_ms=1_800_000_000_000,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("superseded case must not be observed")
+        ),
+    )
+
+    assert result["case_count"] == 0
+    assert result["results"] == []
+
+
+def test_due_reconciliation_reports_active_v2_empty_target() -> None:
+    class _InvalidV2Repo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "v2-empty",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {},
+                }
+            ]
+
+    result = reconcile_due_lifecycle_cases(
+        _InvalidV2Repo(),
+        account="lx",
+        now_ms=1_800_000_000_000,
+    )
+
+    assert result["case_count"] == 1
+    assert result["results"] == [
+        {
+            "case_id": "v2-empty",
+            "status": "needs_review",
+            "reason_codes": ["lifecycle_target_manifest_empty"],
+            "failure_class": "case_data",
+            "failure_stage": "case_validation",
+            "failure_field": "target_contracts_by_lot",
+            "write_status": "not_attempted",
+            "apply_changes": False,
+        }
+    ]
+
+
+def test_due_reconciliation_isolates_observation_collector_error(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    class _DueV2Repo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "v2-due",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {"lot-1": 1},
+                }
+            ]
+
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {
+            "pairing_until_ms": 100,
+            "pending_until_ms": 200,
+            "reason_state": "cause_pending",
+        },
+    )
+
+    result = reconcile_due_lifecycle_cases(
+        _DueV2Repo(),
+        account="lx",
+        now_ms=201,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            SettlementObservationDataError("malformed provider input")
+        ),
+    )
+
+    assert result["results"] == [
+        {
+            "case_id": "v2-due",
+            "status": "needs_review",
+            "reason_codes": [
+                "settlement_observation_data_invalid"
+            ],
+            "failure_class": "case_data",
+            "failure_stage": "provider_observation_input",
+            "failure_field": None,
+            "write_status": "not_attempted",
+            "apply_changes": False,
+            "error": (
+                "SettlementObservationDataError: "
+                "malformed provider input"
+            ),
+        }
+    ]
+
+
+def test_due_reconciliation_propagates_unclassified_provider_error(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    class _DueV2Repo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "v2-due",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {"lot-1": 1},
+                }
+            ]
+
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {
+            "pairing_until_ms": 100,
+            "pending_until_ms": 200,
+            "reason_state": "cause_pending",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        reconcile_due_lifecycle_cases(
+            _DueV2Repo(),
+            account="lx",
+            now_ms=201,
+            observation_collector=lambda *_args: (
+                _ for _ in ()
+            ).throw(RuntimeError("provider unavailable")),
+        )
+
+
+def test_due_reconciliation_continues_after_malformed_case(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    class _MixedV2Repo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "v2-empty",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {},
+                },
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "v2-valid",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {"lot-1": 1},
+                },
+            ]
+
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {
+            "pairing_until_ms": 100,
+            "pending_until_ms": 200,
+            "reason_state": "cause_pending",
+        },
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "reconcile_lifecycle_close_reason",
+        lambda *_args, **_kwargs: {
+            "case_id": "v2-valid",
+            "status": "dry_run",
+        },
+    )
+
+    result = reconcile_due_lifecycle_cases(
+        _MixedV2Repo(),
+        account="lx",
+        now_ms=201,
+        observation_collector=lambda *_args: {},
+    )
+
+    assert result["schema_version"] == "due_lifecycle_reconciliation.v2"
+    assert result["case_count"] == 2
+    assert result["results"][0]["case_id"] == "v2-empty"
+    assert result["results"][0]["failure_class"] == "case_data"
+    assert result["results"][1] == {
+        "case_id": "v2-valid",
+        "status": "dry_run",
+    }
+
+
+def test_settlement_observation_uses_validated_legacy_bridge_anchor(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(tmp_path)
+    case_id = str(lifecycle_case["case_id"])
+    direct = repo.get_trade_lifecycle_evidence("anchor-1")
+    assert direct is not None
+    with repo._connect() as conn:  # noqa: SLF001 - migration fixture
+        conn.execute(
+            "DELETE FROM trade_lifecycle_source_consumptions WHERE owner_evidence_id = ?",
+            ("anchor-1",),
+        )
+        conn.execute(
+            "DELETE FROM trade_lifecycle_evidence WHERE evidence_id = ?",
+            ("anchor-1",),
+        )
+        conn.commit()
+
+    legacy_case_id = "legacy-anchor-case"
+    assert repo.upsert_trade_lifecycle_case(
+        {
+            **lifecycle_case,
+            "schema_version": "lifecycle_case.v1",
+            "case_id": legacy_case_id,
+            "case_key": legacy_case_id,
+            "status": "superseded",
+            "superseded_by_case_id": case_id,
+        }
+    )
+    legacy_anchor = {
+        **direct,
+        "case_id": legacy_case_id,
+    }
+    assert repo.insert_trade_lifecycle_evidence_once(legacy_anchor)
+    assert repo.insert_trade_lifecycle_source_consumption_once(
+        build_source_consumption_claim(
+            source_key=str(direct["source_event_id"]),
+            case_id=legacy_case_id,
+            owner_evidence_id="anchor-1",
+            source_role="option_anchor",
+            economic_payload=legacy_anchor,
+        )
+    )
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "schema_version": "migration_bridge_evidence.v1",
+            "evidence_id": "bridge-anchor-1",
+            "case_id": case_id,
+            "source_type": "lifecycle_migration",
+            "source_event_id": None,
+            "evidence_type": "migration_bridge",
+            "account": "lx",
+            "symbol": "NVDA",
+            "referenced_legacy_case_id": legacy_case_id,
+            "referenced_legacy_evidence_id": "anchor-1",
+            "allocating": False,
+        }
+    )
+
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+        gateway=_Gateway(),
+        futu_account_id="1001",
+        now_ms=now_ms,
+    )
+
+    assert observation["complete"] is True
+    assert observation["anchor_option_deal_key"] == ("futu:lx:1001:option-close-1")
+    assert repo.list_trade_lifecycle_source_consumptions(case_id=case_id) == []
+    assert len(repo.list_trade_lifecycle_source_consumptions(case_id=legacy_case_id)) == 1
