@@ -121,6 +121,7 @@ from src.application.ledger.repository import (
     with_sqlite_repo_transaction,
 )
 from src.application.ledger.source_consumption import (
+    build_source_consumption_claim,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
 )
@@ -136,6 +137,7 @@ __all__ = [
     "broker_external_event_key",
     "build_lifecycle_migration_inventory",
     "build_notification_intent",
+    "build_source_consumption_claim",
     "canonical_payload_hash",
     "canonical_source_economic_payload",
     "canonical_source_payload_hash",

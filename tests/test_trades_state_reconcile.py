@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from src.application.ledger.source_consumption import build_source_consumption_claim
 from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
 from src.application.trades.state_reconcile import (
     preview_trade_intake_reconciliation_from_sqlite,
@@ -19,11 +20,15 @@ class FakeRepo:
         *,
         lifecycle_cases: list[dict] | None = None,
         lifecycle_evidence: list[dict] | None = None,
+        lifecycle_source_consumptions: list[dict] | None = None,
         assigned_stock_events: list[dict] | None = None,
     ) -> None:
         self.events = events
         self.lifecycle_cases = list(lifecycle_cases or [])
         self.lifecycle_evidence = list(lifecycle_evidence or [])
+        self.lifecycle_source_consumptions = list(
+            lifecycle_source_consumptions or []
+        )
         self.assigned_stock_events = list(assigned_stock_events or [])
 
     def list_trade_events(self) -> list[dict]:
@@ -50,6 +55,66 @@ class FakeRepo:
         if symbol:
             rows = [item for item in rows if str(item.get("symbol") or "") == str(symbol)]
         return rows
+
+    def list_trade_lifecycle_source_consumptions(
+        self,
+        *,
+        case_id: str | None = None,
+    ) -> list[dict]:
+        rows = list(self.lifecycle_source_consumptions)
+        if case_id:
+            rows = [
+                item
+                for item in rows
+                if str(item.get("case_id") or "") == str(case_id)
+            ]
+        return rows
+
+
+def _pending_option_anchor_fixture(
+    *,
+    source_key: str,
+    case_id: str,
+    futu_account_id: str,
+) -> tuple[dict, dict, dict]:
+    lifecycle_case = {
+        "schema_version": "lifecycle_case.v2",
+        "case_id": case_id,
+        "status": "waiting_settlement_evidence",
+        "account": "lx",
+        "futu_account_id": futu_account_id,
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+    }
+    evidence_id = f"evidence-{case_id}"
+    evidence = {
+        "case_id": case_id,
+        "evidence_id": evidence_id,
+        "evidence_type": "option_zero_price_close",
+        "source_event_id": source_key,
+        "account": "lx",
+        "futu_account_id": futu_account_id,
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "contracts": 1,
+        "price": "0",
+        "event_time_ms": 1_700_000_000_100,
+    }
+    claim = build_source_consumption_claim(
+        source_key=source_key,
+        case_id=case_id,
+        owner_evidence_id=evidence_id,
+        source_role="option_anchor",
+        economic_payload=evidence,
+    )
+    return lifecycle_case, evidence, claim
+
 
 
 def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state(
@@ -114,9 +179,11 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
         "terminal_evidence_found": True,
         "terminal_evidence_count": 1,
         "ignored_non_option_count": 0,
+        "delegated_lifecycle_pending_count": 0,
         "stale_state_count": 1,
         "pending_before_count": 2,
         "pending_after_reconcile_count": 1,
+        "actionable_pending_after_reconcile_count": 1,
     }
     assert state_path.read_bytes() == original_state
 
@@ -547,6 +614,46 @@ def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unc
 
 
 def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: Path) -> None:
+    source_key = "futu:lx:1001:deal-option-waiting"
+    lifecycle_case = {
+        "schema_version": "lifecycle_case.v2",
+        "case_id": "lc_waiting",
+        "status": "waiting_settlement_evidence",
+        "decision_type": "needs_review",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "target_contracts_by_lot": {"lot-futu": 1},
+    }
+    lifecycle_evidence = {
+        "case_id": "lc_waiting",
+        "evidence_id": "ev-option-waiting",
+        "evidence_type": "option_zero_price_close",
+        "source_event_id": source_key,
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "contracts": 1,
+        "target_contracts_by_lot": {"lot-futu": 1},
+        "price": "0",
+        "event_time_ms": 1_700_000_000_100,
+        "received_at_ms": 1_700_000_000_200,
+    }
+    source_claim = build_source_consumption_claim(
+        source_key=source_key,
+        case_id="lc_waiting",
+        owner_evidence_id="ev-option-waiting",
+        source_role="option_anchor",
+        economic_payload=lifecycle_evidence,
+    )
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(
         state_path,
@@ -554,7 +661,7 @@ def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: 
             "processed_deal_ids": {},
             "failed_deal_ids": {},
             "unresolved_deal_ids": {
-                "deal-option-waiting": {
+                source_key: {
                     "status": "unresolved",
                     "action": "lifecycle",
                     "account": "lx",
@@ -566,35 +673,342 @@ def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: 
     )
     repo = FakeRepo(
         [],
-        lifecycle_cases=[
-            {
-                "case_id": "lc_waiting",
-                "status": "waiting_settlement_evidence",
-                "decision_type": "needs_review",
-                "account": "lx",
-                "symbol": "FUTU",
-                "target_lot_ids": [],
-            }
-        ],
-        lifecycle_evidence=[
-            {
-                "case_id": "lc_waiting",
-                "evidence_id": "ev-option-waiting",
-                "evidence_type": "option_zero_price_close",
-                "source_event_id": "deal-option-waiting",
-                "account": "lx",
-                "symbol": "FUTU",
-            }
-        ],
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_evidence=[lifecycle_evidence],
+        lifecycle_source_consumptions=[source_claim],
     )
 
     out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
 
     assert out["planned_count"] == 0
     assert out["applied_count"] == 0
-    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+    assert out["actions"][0]["reason"] == "lifecycle_pending_delegated"
+    assert out["actions"][0]["lifecycle_case_id"] == "lc_waiting"
+    assert out["actions"][0]["lifecycle_anchor_kind"] == "direct"
     state = load_trade_intake_state(state_path)
-    assert "deal-option-waiting" in state["unresolved_deal_ids"]
+    assert source_key in state["unresolved_deal_ids"]
+
+
+def test_reconcile_trade_intake_state_rejects_ambiguous_numeric_delegation(
+    tmp_path: Path,
+) -> None:
+    deal_id = "deal-shared"
+    first = _pending_option_anchor_fixture(
+        source_key=f"futu:lx:1001:{deal_id}",
+        case_id="case-1001",
+        futu_account_id="1001",
+    )
+    second = _pending_option_anchor_fixture(
+        source_key=f"futu:lx:1002:{deal_id}",
+        case_id="case-1002",
+        futu_account_id="1002",
+    )
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                deal_id: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[first[0], second[0]],
+        lifecycle_evidence=[first[1], second[1]],
+        lifecycle_source_consumptions=[first[2], second[2]],
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=False,
+    )
+
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+
+
+def test_reconcile_trade_intake_state_requires_bound_source_event(
+    tmp_path: Path,
+) -> None:
+    source_key = "futu:lx:1001:deal-missing-source-event"
+    lifecycle_case, evidence, claim = _pending_option_anchor_fixture(
+        source_key=source_key,
+        case_id="case-missing-source-event",
+        futu_account_id="1001",
+    )
+    evidence["source_event_id"] = None
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                source_key: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[lifecycle_case],
+        lifecycle_evidence=[evidence],
+        lifecycle_source_consumptions=[claim],
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=False,
+    )
+
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+
+
+def test_reconcile_trade_intake_state_rejects_duplicate_owner_case(
+    tmp_path: Path,
+) -> None:
+    source_key = "futu:lx:1001:deal-duplicate-case"
+    lifecycle_case, evidence, claim = _pending_option_anchor_fixture(
+        source_key=source_key,
+        case_id="case-duplicate",
+        futu_account_id="1001",
+    )
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                source_key: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[lifecycle_case, dict(lifecycle_case)],
+        lifecycle_evidence=[evidence],
+        lifecycle_source_consumptions=[claim],
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=False,
+    )
+
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+
+
+def test_reconcile_trade_intake_state_delegates_valid_migration_bridge(
+    tmp_path: Path,
+) -> None:
+    source_key = "futu:lx:1001:deal-option-legacy"
+    legacy_case = {
+        "schema_version": "lifecycle_case.v1",
+        "case_id": "lc_legacy",
+        "status": "superseded",
+        "superseded_by_case_id": "lc_canonical",
+        "account": "lx",
+        "symbol": "FUTU",
+    }
+    canonical_case = {
+        "schema_version": "lifecycle_case.v2",
+        "case_id": "lc_canonical",
+        "status": "waiting_settlement_evidence",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "call",
+        "position_side": "short",
+        "strike": "550",
+        "expiration_ymd": "2026-08-21",
+        "target_contracts_by_lot": {"lot-futu": 1},
+    }
+    legacy_evidence = {
+        "case_id": "lc_legacy",
+        "evidence_id": "ev-legacy",
+        "evidence_type": "option_zero_price_close",
+        "source_event_id": "deal-option-legacy",
+        "account": "lx",
+        "symbol": "FUTU",
+        "raw": {"price": "0"},
+        "_ledger_created_at_ms": 1_700_000_000_200,
+    }
+    bridge = {
+        "schema_version": "migration_bridge_evidence.v1",
+        "case_id": "lc_canonical",
+        "evidence_id": "ev-bridge",
+        "evidence_type": "migration_bridge",
+        "account": "lx",
+        "symbol": "FUTU",
+        "referenced_legacy_case_id": "lc_legacy",
+        "referenced_legacy_evidence_id": "ev-legacy",
+        "allocating": False,
+    }
+    source_claim = build_source_consumption_claim(
+        source_key=source_key,
+        case_id="lc_legacy",
+        owner_evidence_id="ev-legacy",
+        source_role="option_anchor",
+        economic_payload={
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "FUTU",
+            "option_type": "call",
+            "position_side": "short",
+            "strike": "550",
+            "expiration_ymd": "2026-08-21",
+            "contracts": 1,
+            "price": "0",
+            "event_time_ms": 1_700_000_000_100,
+        },
+    )
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                source_key: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "lifecycle_case_futu_account_mismatch",
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[legacy_case, canonical_case],
+        lifecycle_evidence=[legacy_evidence, bridge],
+        lifecycle_source_consumptions=[source_claim],
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=False,
+    )
+
+    assert out["planned_count"] == 0
+    assert out["actions"][0]["reason"] == "lifecycle_pending_delegated"
+    assert out["actions"][0]["lifecycle_case_id"] == "lc_canonical"
+    assert out["actions"][0]["lifecycle_anchor_kind"] == "migration_bridge"
+
+
+def test_reconcile_trade_intake_state_rejects_invalid_migration_bridge(
+    tmp_path: Path,
+) -> None:
+    source_key = "futu:lx:1001:deal-option-legacy"
+    legacy_case = {
+        "case_id": "lc_legacy",
+        "status": "superseded",
+        "superseded_by_case_id": "lc_canonical",
+        "account": "lx",
+        "symbol": "FUTU",
+    }
+    canonical_case = {
+        "case_id": "lc_canonical",
+        "status": "waiting_settlement_evidence",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "FUTU",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "target_contracts_by_lot": {"lot-futu": 1},
+    }
+    legacy_evidence = {
+        "case_id": "lc_legacy",
+        "evidence_id": "ev-legacy",
+        "evidence_type": "option_zero_price_close",
+        "source_event_id": "deal-option-legacy",
+        "account": "lx",
+        "symbol": "FUTU",
+        "raw": {"price": "0"},
+        "_ledger_created_at_ms": 1_700_000_000_200,
+    }
+    invalid_bridge = {
+        "schema_version": "migration_bridge_evidence.v1",
+        "case_id": "lc_canonical",
+        "evidence_id": "ev-bridge",
+        "evidence_type": "migration_bridge",
+        "account": "lx",
+        "symbol": "FUTU",
+        "referenced_legacy_case_id": "lc_legacy",
+        "referenced_legacy_evidence_id": "ev-legacy",
+        "allocating": True,
+    }
+    source_claim = build_source_consumption_claim(
+        source_key=source_key,
+        case_id="lc_legacy",
+        owner_evidence_id="ev-legacy",
+        source_role="option_anchor",
+        economic_payload={
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "FUTU",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": "100",
+            "expiration_ymd": "2026-08-21",
+            "contracts": 1,
+            "price": "0",
+            "event_time_ms": 1_700_000_000_100,
+        },
+    )
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                source_key: {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "lifecycle_case_futu_account_mismatch",
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[legacy_case, canonical_case],
+        lifecycle_evidence=[legacy_evidence, invalid_bridge],
+        lifecycle_source_consumptions=[source_claim],
+    )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=False,
+    )
+
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
 
 
 def test_reconcile_trade_intake_state_keeps_pending_without_evidence(tmp_path: Path) -> None:

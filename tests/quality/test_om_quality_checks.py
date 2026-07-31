@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
 from src.application.quality.lifecycle_checks import build_lifecycle_datasets, lifecycle_deadline
 from src.application.quality.position_checks import build_position_dataset
@@ -109,6 +110,69 @@ def test_position_divergence_is_transient_then_persistent_without_rewrite() -> N
     assert dataset["status"] == "untrusted"
     assert dataset["checks"][1]["reason_code"] == "POSITION_DIVERGENCE_PERSISTENT"
     assert "close_advice" in dataset["blocked_consumers"]
+
+
+def test_position_identity_errors_report_local_and_opend_sources() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    local = _local_lot()
+    local["fields"].pop("multiplier")
+    snapshot = _snapshot()
+    snapshot.rows[0].pop("options_per_contract")
+    hk_local = _local_lot()
+    hk_local["record_id"] = "lot-hk"
+    hk_local["fields"]["symbol"] = "0700.HK"
+    hk_local["fields"].pop("multiplier")
+    snapshot.rows.append(
+        {
+            "code": "HK.12345",
+            "qty": 1,
+            "position_side": "SHORT",
+            "sec_type": "DRVT",
+        }
+    )
+    dataset, _state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[local, hk_local],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "unavailable"
+    assert convergence["reason_code"] == "POSITION_IDENTITY_INCOMPLETE"
+    assert convergence["observed"] == {
+        "normalization_error_count": 2,
+        "local_normalization_error_count": 1,
+        "opend_normalization_error_count": 1,
+    }
+
+
+def test_position_market_filter_keeps_unknown_market_identity_errors() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    local = _local_lot()
+    local["fields"]["symbol"] = ""
+    snapshot = _snapshot()
+    snapshot.rows[0]["code"] = ""
+    dataset, _state = build_position_dataset(
+        snapshot=snapshot,
+        local_lots=[local],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "unavailable"
+    assert convergence["observed"] == {
+        "normalization_error_count": 2,
+        "local_normalization_error_count": 1,
+        "opend_normalization_error_count": 1,
+    }
 
 
 def _open_event(*, event_id: str, deal_id: str, strike: float = 100) -> dict:
@@ -252,6 +316,44 @@ def test_lifecycle_external_adjustment_and_legacy_gap_are_separate() -> None:
     assert by_case["external"]["checks"][0]["check_id"] == "OM-LCY-002"
     assert by_case["legacy"]["dataset_id"] == "om.lifecycle_history"
     assert by_case["legacy"]["checks"][0]["check_id"] == "OM-LCY-003"
+
+
+def test_lifecycle_excludes_superseded_and_other_market_cases() -> None:
+    now = datetime(2026, 7, 8, 16, tzinfo=timezone.utc)
+    datasets = build_lifecycle_datasets(
+        cases=[
+            {
+                "case_id": "superseded-us",
+                "account": "lx",
+                "market": "US",
+                "symbol": "NVDA",
+                "status": "superseded",
+            },
+            {
+                "case_id": "pending-hk",
+                "account": "lx",
+                "market": "HK",
+                "symbol": "0700.HK",
+                "status": "waiting_settlement_evidence",
+            },
+            {
+                "case_id": "pending-us",
+                "account": "lx",
+                "market": "US",
+                "symbol": "NVDA",
+                "status": "waiting_settlement_evidence",
+            },
+        ],
+        evidence_rows=[],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-08T16:00:00Z",
+        now=now,
+        trading_days=[],
+        first_deep_by_case={},
+    )
+
+    assert [item["scope"]["lifecycle_case_id"] for item in datasets] == ["pending-us"]
 
 
 def test_runtime_service_and_timer_checks_require_checked_active_units() -> None:
@@ -415,3 +517,234 @@ def test_runtime_service_check_accepts_activating_timer_triggered_oneshot() -> N
     by_id = {item["check_id"]: item for item in checks}
     assert by_id["RT-OM-001"]["status"] == "pass"
     assert by_id["RT-OM-001"]["reason_code"] == "OM_SERVICES_ACTIVE"
+
+
+def test_runtime_strategy_lab_failure_degrades_without_failing_core_runtime() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    checks = build_runtime_checks(
+        runtime_statuses=[
+            {
+                "service_profile": {
+                    "loaded": True,
+                    "status_checked": True,
+                    "services": [
+                        {"name": "options-monitor.service", "status": "ok"},
+                        {
+                            "name": "options-monitor-strategy-lab-sample.service",
+                            "status": "warn",
+                            "stdout": "failed",
+                        },
+                        {"name": "options-monitor-us.timer", "status": "ok"},
+                        {
+                            "name": "options-monitor-strategy-lab-sample.timer",
+                            "status": "ok",
+                        },
+                    ],
+                },
+                "trade_intake": {"enabled": False},
+            }
+        ],
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    by_id = {item["check_id"]: item for item in checks}
+    assert by_id["RT-OM-001"]["status"] == "warn"
+    assert by_id["RT-OM-001"]["reason_code"] == "OM_AUXILIARY_SERVICE_DEGRADED"
+    assert by_id["RT-OM-001"]["observed"]["auxiliary_service_count"] == 1
+    assert by_id["RT-OM-003"]["status"] == "pass"
+
+
+def test_runtime_strategy_lab_timer_failure_degrades_without_failing_core_runtime() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    checks = build_runtime_checks(
+        runtime_statuses=[
+            {
+                "service_profile": {
+                    "loaded": True,
+                    "status_checked": True,
+                    "services": [
+                        {"name": "options-monitor.service", "status": "ok"},
+                        {"name": "options-monitor-us.timer", "status": "ok"},
+                        {
+                            "name": "options-monitor-strategy-lab-sample.timer",
+                            "status": "warn",
+                        },
+                    ],
+                },
+                "trade_intake": {"enabled": False},
+            }
+        ],
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    by_id = {item["check_id"]: item for item in checks}
+    assert by_id["RT-OM-001"]["status"] == "pass"
+    assert by_id["RT-OM-003"]["status"] == "warn"
+    assert by_id["RT-OM-003"]["reason_code"] == "AUXILIARY_TIMER_DEGRADED"
+    assert by_id["RT-OM-003"]["observed"]["auxiliary_timer_count"] == 1
+
+
+def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    datasets = build_trade_intake_datasets(
+        runtime_statuses=[
+            {
+                "trade_intake": {
+                    "enabled": True,
+                    "sources": [
+                        {
+                            "id": "lx",
+                            "account": "lx",
+                            "enabled": True,
+                            "state": {
+                                "path": ".../trade_intake_state.json",
+                                "json": {
+                                    "unresolved_deal_ids": {
+                                        "deal-1": {
+                                            "updated_at": "2026-07-13T09:50:00+00:00"
+                                        },
+                                        "legacy-deal": {
+                                            "receipt": {
+                                                "updated_at": "2026-07-13T09:55:00+00:00"
+                                            }
+                                        }
+                                    }
+                                },
+                            },
+                            "summary": {
+                                "pending_count": 2,
+                                "failed_count": 0,
+                                "unresolved_count": 2,
+                                "reconciliation_preview_available": True,
+                                "pending_after_reconcile_count": 0,
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        accounts=["lx"],
+        market="us",
+        repo_root=tmp_path,
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    pending = datasets[0]["checks"][0]
+    assert pending["status"] == "fail"
+    assert pending["reason_code"] == "INTAKE_PENDING_OVERDUE"
+    assert pending["observed"]["oldest_pending_age_seconds"] == 600
+
+
+def test_trade_intake_delegates_accepted_lifecycle_pending_rows(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    datasets = build_trade_intake_datasets(
+        runtime_statuses=[
+            {
+                "trade_intake": {
+                    "enabled": True,
+                    "sources": [
+                        {
+                            "id": "lx",
+                            "account": "lx",
+                            "enabled": True,
+                            "state": {
+                                "json": {
+                                    "unresolved_deal_ids": {
+                                        "deal-1": {
+                                            "reason": "waiting_settlement_evidence",
+                                            "updated_at": "2026-07-13T09:00:00+00:00",
+                                            "diagnostics": {
+                                                "broker_evidence_accepted": True,
+                                                "lifecycle_adoption": {
+                                                    "status": "accepted",
+                                                    "case_id": "case-1",
+                                                },
+                                            },
+                                        }
+                                    }
+                                }
+                            },
+                            "summary": {
+                                "pending_count": 1,
+                                "failed_count": 0,
+                                "unresolved_count": 1,
+                                "reconciliation_preview_available": True,
+                                "pending_after_reconcile_count": 1,
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        accounts=["lx"],
+        market="us",
+        repo_root=tmp_path,
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    dataset = datasets[0]
+    assert dataset["status"] == "trusted"
+    assert dataset["blocked_consumers"] == []
+    by_id = {item["check_id"]: item for item in dataset["checks"]}
+    assert by_id["OM-INT-001"]["reason_code"] == "INTAKE_PENDING_CLEAR"
+    assert by_id["OM-INT-001"]["observed"]["delegated_lifecycle_pending_count"] == 1
+    assert by_id["OM-INT-002"]["reason_code"] == "INTAKE_NO_UNRESOLVED_ROWS"
+    assert by_id["OM-INT-003"]["reason_code"] == "BROKER_TERMINAL_EVIDENCE_RECONCILED"
+
+
+def test_trade_intake_uses_bridge_aware_reconciliation_delegation(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    datasets = build_trade_intake_datasets(
+        runtime_statuses=[
+            {
+                "trade_intake": {
+                    "enabled": True,
+                    "sources": [
+                        {
+                            "id": "lx",
+                            "account": "lx",
+                            "enabled": True,
+                            "state": {
+                                "json": {
+                                    "unresolved_deal_ids": {
+                                        "futu:lx:1001:deal-legacy": {
+                                            "reason": "lifecycle_case_futu_account_mismatch",
+                                            "updated_at": "2026-07-13T09:00:00+00:00",
+                                        }
+                                    }
+                                }
+                            },
+                            "summary": {
+                                "pending_count": 1,
+                                "failed_count": 0,
+                                "unresolved_count": 1,
+                                "reconciliation_preview_available": True,
+                                "delegated_lifecycle_pending_count": 1,
+                                "pending_after_reconcile_count": 1,
+                                "actionable_pending_after_reconcile_count": 0,
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        accounts=["lx"],
+        market="us",
+        repo_root=tmp_path,
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+    )
+
+    dataset = datasets[0]
+    assert dataset["status"] == "trusted"
+    assert dataset["blocked_consumers"] == []
+    by_id = {item["check_id"]: item for item in dataset["checks"]}
+    assert by_id["OM-INT-001"]["observed"]["delegated_lifecycle_pending_count"] == 1
+    assert by_id["OM-INT-002"]["reason_code"] == "INTAKE_NO_UNRESOLVED_ROWS"
+    assert by_id["OM-INT-003"]["observed"]["missing_local_terminal_count"] == 0
