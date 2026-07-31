@@ -1,0 +1,43 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.1",
+  "base": {
+    "tag": "v1.8.0",
+    "commit": "3b9a31df95f172cb1f4bff423264e8752d57a2f2"
+  },
+  "reviewed_head": "af8d050d4f5bc0ec6cdaf719b846424bcea732dc",
+  "commits": [
+    {
+      "sha": "532f17e9953fc774bab3b92d4e596879d373fb68",
+      "subject": "fix: reconcile OpenD option position evidence"
+    },
+    {
+      "sha": "af8d050d4f5bc0ec6cdaf719b846424bcea732dc",
+      "subject": "fix: resolve nested lifecycle evidence broker"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored IQ option-position validation by enriching missing OpenD contract multipliers from authoritative market snapshots and treating only exact, in-deadline lifecycle-owned quantity differences as non-blocking partial evidence, while unresolved evidence and true divergences remain fail closed.",
+      "commits": [
+        "532f17e9953fc774bab3b92d4e596879d373fb68"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Canonicalized broker option roots when matching lifecycle contracts, preventing supported aliases such as `TCH` and `POP` from creating false contract conflicts.",
+      "commits": [
+        "532f17e9953fc774bab3b92d4e596879d373fb68"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Resolved broker identity from nested lifecycle evidence so unrelated historical stock-settlement facts no longer create false blockers for expired-position maintenance.",
+      "commits": [
+        "af8d050d4f5bc0ec6cdaf719b846424bcea732dc"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
