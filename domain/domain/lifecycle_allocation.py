@@ -7,7 +7,7 @@ from itertools import product
 from typing import Any, Iterable
 
 
-TERMINAL_TYPES = frozenset({"assignment", "exercise", "expire_close"})
+TERMINAL_TYPES = frozenset({"close", "assignment", "exercise", "expire_close"})
 
 
 @dataclass(frozen=True)

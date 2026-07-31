@@ -593,3 +593,174 @@ def test_save_outputs_preserves_existing_parsed_csv_on_nonempty_fetch_error() ->
         raw = json.loads((root / "raw" / "PDD_required_data.json").read_text(encoding="utf-8"))
         assert raw["rows"][0]["contract_symbol"] == "US.PDD.2026-05-15.P100"
         assert raw["meta"]["error_code"] == "RATE_LIMIT"
+
+
+def test_explicit_option_chain_all_empty_is_success_empty() -> None:
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            return []
+
+    with TemporaryDirectory() as td:
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-08-21", "2026-09-18"],
+                base_dir=Path(td),
+                chain_cache=False,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "ok"
+    assert result.source_outcome == "success_empty"
+    assert result.reason_code == "no_contract_rows"
+    assert result.errors == []
+    assert set(result.expiration_statuses.values()) == {"empty"}
+    assert len(result.diagnostics) == 2
+
+
+def test_explicit_option_chain_empty_plus_error_fails_closed() -> None:
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            if kwargs.get("start") == "2026-09-18":
+                raise RuntimeError("provider unavailable")
+            return []
+
+    with TemporaryDirectory() as td:
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-08-21", "2026-09-18"],
+                base_dir=Path(td),
+                chain_cache=False,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "error"
+    assert result.source_outcome == "provider_error"
+    assert result.expiration_statuses == {
+        "2026-08-21": "empty",
+        "2026-09-18": "error",
+    }
+
+
+def test_explicit_option_chain_rows_plus_error_fails_closed() -> None:
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            if kwargs.get("start") == "2026-09-18":
+                raise RuntimeError("provider unavailable")
+            return [
+                {
+                    "code": "US.NVDA.2026-08-21.P100",
+                    "strike_time": "2026-08-21",
+                    "strike_price": 100,
+                    "option_type": "PUT",
+                }
+            ]
+
+    with TemporaryDirectory() as td:
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-08-21", "2026-09-18"],
+                base_dir=Path(td),
+                chain_cache=False,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "partial"
+    assert result.rows
+    assert result.source_outcome == "provider_error"
+
+
+def test_explicit_option_chain_invalid_response_is_parse_error() -> None:
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            return None
+
+    with TemporaryDirectory() as td:
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-08-21"],
+                base_dir=Path(td),
+                chain_cache=False,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "error"
+    assert result.source_outcome == "parse_error"
+    assert result.reason_code == "chain_response_invalid"
+    assert result.error_code == "PARSE_ERROR"
+
+
+def test_save_outputs_marks_row_validation_exception_as_parse_error(
+    monkeypatch,
+) -> None:
+    import src.application.opend_symbol_outputs as outputs
+    import src.application.required_data_validation as validation
+
+    monkeypatch.setattr(
+        validation,
+        "validate_required_rows",
+        lambda rows: (_ for _ in ()).throw(ValueError("invalid row")),
+    )
+    payload = {
+        "rows": [{"symbol": "NVDA"}],
+        "meta": {
+            "status": "ok",
+            "source_outcome": "success_rows",
+        },
+    }
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        outputs.save_outputs(
+            Path(__file__).resolve().parents[1],
+            "NVDA",
+            payload,
+            output_root=root,
+        )
+        raw = json.loads(
+            (
+                root
+                / "raw"
+                / "NVDA_required_data.json"
+            ).read_text(encoding="utf-8")
+        )
+
+    assert raw["rows"] == []
+    assert raw["meta"]["status"] == "error"
+    assert raw["meta"]["source_outcome"] == "parse_error"
+    assert raw["meta"]["error_code"] == "ROW_VALIDATION_ERROR"

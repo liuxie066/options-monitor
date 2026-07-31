@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +113,17 @@ def _config(*, timezone_name: str = "America/New_York") -> dict:
     }
 
 
+def _live_window_config(now_utc: datetime) -> dict:
+    offset_hours = 12 - now_utc.hour
+    if offset_hours > 0:
+        timezone_name = f"Etc/GMT-{offset_hours}"
+    elif offset_hours < 0:
+        timezone_name = f"Etc/GMT+{abs(offset_hours)}"
+    else:
+        timezone_name = "Etc/GMT"
+    return _config(timezone_name=timezone_name)
+
+
 def _result(*, ran_scan: bool = True, reason: str = "ok") -> AccountResult:
     return AccountResult("lx", ran_scan, True, reason, "legacy markdown must not be parsed")
 
@@ -124,6 +135,7 @@ def _assemble(
     result: AccountResult | None = None,
     pipeline_succeeded: bool = True,
     config: dict | None = None,
+    now_utc: datetime | None = None,
 ):
     from src.application.daily_decision_brief_service import assemble_daily_decision_brief
 
@@ -136,7 +148,8 @@ def _assemble(
         account_result=result or _result(),
         pipeline_succeeded=pipeline_succeeded,
         config=config or _config(timezone_name="Asia/Hong_Kong" if market == "HK" else "America/New_York"),
-        now_utc=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+        now_utc=now_utc
+        or datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
     )
 
 
@@ -167,6 +180,374 @@ def _put_row(
     if priority is not None:
         row["tier"] = priority
     return row
+
+
+def _install_success_empty_strategy_evidence(
+    base: Path,
+    *,
+    reason_code: str = "no_expirations",
+) -> tuple[datetime, dict]:
+    from src.application.opend_symbol_outputs import (
+        publish_required_data_quote_snapshot,
+        save_outputs,
+    )
+    from src.application.position_advice_source_producers import (
+        publish_candidate_decisions_snapshot,
+    )
+    from src.application.position_advice_source_receipts import (
+        sha256_bytes,
+        source_dependency_from_receipt,
+    )
+    from src.application.required_data_plan_identity import (
+        required_data_plan_id,
+    )
+    from src.application.required_data_snapshot import (
+        resolve_frozen_required_data,
+        seal_required_data_snapshot,
+    )
+    from src.application.strategy_scan_status import (
+        publish_strategy_scan_status,
+        publish_strategy_scan_status_index,
+    )
+
+    account_dir = _account_dir(base)
+    state_dir = account_dir / "state"
+    pd.DataFrame(columns=("symbol", "contract_symbol")).to_csv(
+        account_dir / "nvda_sell_put_candidates.csv",
+        index=False,
+    )
+    pd.DataFrame(columns=("symbol", "contract_symbol")).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    completed_at = observed_at + timedelta(seconds=1)
+    run_root = base / "output_runs" / "run-1"
+    required_data_root = run_root / "required_data"
+    required_data_root.mkdir(parents=True, exist_ok=True)
+    raw_path, csv_path = save_outputs(
+        base,
+        "NVDA",
+        {
+            "meta": {
+                "status": "ok",
+                "source_outcome": "success_empty",
+                "reason_code": reason_code,
+                "source_observed_at": observed_at.isoformat(),
+            },
+            "rows": [],
+        },
+        output_root=required_data_root,
+    )
+    quote_receipt_path, _quote_receipt = (
+        publish_required_data_quote_snapshot(
+            producer_root=required_data_root,
+            producer_run_id="run-1",
+            symbol="NVDA",
+            raw_path=raw_path,
+            csv_path=csv_path,
+            fetch_plan={"symbol": "NVDA"},
+            fetch_policy={"source": "futu"},
+            source_observed_at=observed_at,
+            completed_at=completed_at,
+        )
+    )
+    plan_items = [
+        {
+            "symbol": "NVDA",
+            "source": "futu",
+            "fetch_plan": {"symbol": "NVDA"},
+            "discovery_status": "complete",
+        }
+    ]
+    plan_id = required_data_plan_id(plan_items)
+    manifest_path = (
+        run_root / "state" / "required_data_snapshot_manifest.json"
+    )
+    seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=required_data_root,
+        run_id="run-1",
+        prefetch_summary={
+            "schema_version": "1.0",
+            "errors": 0,
+            "global_required_data_plan": {
+                "plan_id": plan_id,
+                "symbols": plan_items,
+                "symbols_count": 1,
+                "discovery_complete": True,
+            },
+            "symbols": [],
+            "results": [],
+        },
+        sealed_at=completed_at,
+    )
+    evidence = resolve_frozen_required_data(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        symbol="NVDA",
+        required_data_root=required_data_root,
+        now=completed_at,
+    )
+    quote_dependency = source_dependency_from_receipt(
+        receipt_path=quote_receipt_path,
+        producer_root=required_data_root,
+        now=completed_at,
+        expected_source_kind="quotes",
+    )
+    candidate_receipt_path, candidate_receipt = (
+        publish_candidate_decisions_snapshot(
+            producer_root=state_dir,
+            account_run_id="run-1",
+            account="lx",
+            broker="futu",
+            portfolio_account_identity_hash="a" * 64,
+            included_markets=["US"],
+            decisions=[],
+            quote_dependencies=[quote_dependency],
+            source_observed_at=observed_at,
+            completed_at=completed_at,
+        )
+    )
+    (state_dir / "position_advice_sources.v2.json").write_text(
+        json.dumps(
+            {
+                "account": "lx",
+                "normalized_portfolio_source": "futu",
+                "portfolio_account_identity_hash": "a" * 64,
+                "source_receipts": [
+                    {
+                        "source_kind": "candidate_decisions",
+                        "producer_root": str(state_dir.resolve()),
+                        "receipt_path": str(
+                            candidate_receipt_path.resolve()
+                        ),
+                        "snapshot_id": candidate_receipt[
+                            "snapshot_id"
+                        ],
+                        "receipt_hash": sha256_bytes(
+                            candidate_receipt_path.read_bytes()
+                        ),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="sell_put",
+        status="completed",
+        candidate_count=0,
+        snapshot_id=evidence["snapshot_id"],
+        receipt_relpath=evidence["receipt_relpath"],
+        source_outcome="success_empty",
+        reason_code=reason_code,
+    )
+    publish_strategy_scan_status_index(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+            }
+        ],
+    )
+    return completed_at + timedelta(seconds=1), evidence
+
+
+def test_success_empty_strategy_is_a_local_degraded_warning(
+    tmp_path: Path,
+) -> None:
+    now_utc, _evidence = _install_success_empty_strategy_evidence(
+        tmp_path
+    )
+
+    brief = _assemble(
+        tmp_path,
+        now_utc=now_utc,
+        config=_live_window_config(now_utc),
+    )
+
+    assert brief["status"] == "degraded"
+    assert brief["actionability"] == "live_actionable"
+    assert brief["notification_authority"][
+        "normal_delivery_allowed"
+    ] is True
+    assert brief["notification_authority"][
+        "notification_allowed"
+    ] is True
+    assert any(
+        {
+            "scope": item.get("scope"),
+            "symbol": item.get("symbol"),
+            "strategy_family": item.get("strategy_family"),
+            "outcome": item.get("outcome"),
+            "reason": item.get("reason"),
+            "severity": item.get("severity"),
+            "actionable": item.get("actionable"),
+        }
+        == {
+            "scope": "strategy",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "outcome": "success_empty",
+            "reason": "no_expirations",
+            "severity": "warning",
+            "actionable": False,
+        }
+        for item in brief["data_gaps"]
+    )
+    assert not any(
+        item.get("reason")
+        == "strategy_status_projection_mismatch"
+        for item in brief["data_gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("snapshot_id", "f" * 64),
+        ("receipt_relpath", ""),
+        ("reason_code", "no_contract_rows"),
+        ("source_outcome", "provider_error"),
+        ("strategy_family", "unknown_family"),
+        ("candidate_count", 1),
+    ),
+)
+def test_success_empty_status_only_mismatch_remains_local(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    now_utc, _evidence = _install_success_empty_strategy_evidence(
+        tmp_path
+    )
+    index_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "strategy_scan_status_index.v1.json"
+    )
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    payload["items"][0][field] = value
+    index_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    brief = _assemble(
+        tmp_path,
+        now_utc=now_utc,
+        config=_live_window_config(now_utc),
+    )
+
+    assert brief["status"] == "degraded"
+    assert brief["actionability"] == "live_actionable"
+    assert brief["notification_authority"][
+        "normal_delivery_allowed"
+    ] is True
+    assert any(
+        item.get("reason")
+        == "strategy_status_projection_mismatch"
+        for item in brief["data_gaps"]
+    )
+    assert not any(
+        item.get("outcome") == "success_empty"
+        for item in brief["data_gaps"]
+    )
+
+
+def test_success_empty_frozen_source_corruption_uses_fixed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    now_utc, evidence = _install_success_empty_strategy_evidence(
+        tmp_path
+    )
+    monkeypatch.setattr(
+        service,
+        "read_position_advice_v2_from_ledger",
+        lambda **_kwargs: {
+            "availability_status": "available",
+            "freshness": {"status": "fresh", "reason_codes": []},
+            "authority_mode": "v2",
+            "portfolio_plan_id": "plan-v2",
+            "account_run_id": "run-1",
+            "row_count": 1,
+            "actionable_count": 1,
+            "model_actionable_count": 1,
+            "model_trade_actionable_count": 1,
+            "human_review_required_count": 0,
+            "rows": [
+                {
+                    "position_id": "v2-lot",
+                    "strategy_family": "short_put",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "expiration": "2026-08-21",
+                    "strike": 100,
+                    "contract_symbol": "NVDA260821P00100000",
+                    "lifecycle_state": "open",
+                    "group_structure_state": "standalone",
+                    "recommendation": "roll",
+                    "actionable": True,
+                    "action_scope": "position",
+                    "reason_codes": ["positive_carry_improvement"],
+                    "portfolio_plan_id": "plan-v2",
+                    "execution_order": 1,
+                    "depends_on": [],
+                }
+            ],
+        },
+    )
+    raw_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "required_data"
+        / evidence["raw_json_relpath"]
+    )
+    raw_path.write_bytes(raw_path.read_bytes() + b"\n")
+
+    brief = _assemble(
+        tmp_path,
+        now_utc=now_utc,
+        config=_live_window_config(now_utc),
+    )
+
+    assert brief["status"] == "blocked"
+    assert brief["actionability"] == "blocked"
+    assert brief["notification_authority"][
+        "normal_delivery_allowed"
+    ] is False
+    assert brief["notification_authority"][
+        "fixed_failure_delivery_allowed"
+    ] is True
+    assert brief["notification_authority"]["blocker"] == (
+        "position_advice_source_integrity_invalid"
+    )
+    assert brief["positions"] == []
+    assert not any(
+        str(item.get("action_type") or "").startswith("position_")
+        for item in brief["actions"]
+    )
+    assert any(
+        item.get("reason")
+        == "position_advice_source_integrity_invalid"
+        for item in brief["data_gaps"]
+    )
 
 
 def test_missing_success_summary_blocks_normal_delivery_but_current_run_identity_allows_failure(

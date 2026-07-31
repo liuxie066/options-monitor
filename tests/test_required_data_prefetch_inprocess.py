@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 import time
 
@@ -28,14 +29,27 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.required_data_planning as planning
 
     monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(planning, "list_option_expirations", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        planning,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2026-08-21", "2026-09-18"],
+    )
 
 
-def _patch_0700_plan_discovery(monkeypatch, expirations: list[str] | None = None) -> None:
+def _patch_0700_plan_discovery(
+    monkeypatch,
+    expirations: list[str] | None = None,
+    *,
+    spot: float | None = 444.8,
+) -> None:
     import src.application.opend_utils as opend_utils
     import src.application.required_data_planning as planning
 
-    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 444.8)
+    monkeypatch.setattr(
+        planning,
+        "get_underlier_spot",
+        lambda *args, **kwargs: spot,
+    )
     monkeypatch.setattr(
         planning,
         "list_option_expirations",
@@ -336,6 +350,139 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
         assert "--snapshot-fallback-batch-size" in cmd
 
 
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_prefetch_success_empty_uses_single_frozen_discovery_and_no_chain_fetch(
+    tmp_path: Path,
+    monkeypatch,
+    execution_mode: str,
+) -> None:
+    import src.application.opend_symbol_chain_fetching as chain_mod
+    import src.application.required_data_planning as planning
+    from src.application.opend_symbol_outputs import REQUIRED_DATA_COLUMNS
+
+    discovery_calls: list[str] = []
+    forbidden_calls: list[str] = []
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {
+                "source": "futu",
+                "host": "127.0.0.1",
+                "port": 11111,
+            },
+            "sell_put": {
+                "enabled": True,
+                "min_dte": 7,
+                "max_dte": 45,
+            },
+            "sell_call": {"enabled": False},
+        },
+        {
+            "symbol": "0700.HK",
+            "fetch": {
+                "source": "futu",
+                "host": "127.0.0.1",
+                "port": 11111,
+            },
+            "sell_put": {"enabled": False},
+            "sell_call": {
+                "enabled": True,
+                "min_dte": 7,
+                "max_dte": 45,
+            },
+        },
+    ]
+
+    def discover(symbol: str, **kwargs):
+        discovery_calls.append(symbol)
+        return []
+
+    def forbid(name: str):
+        def inner(*args, **kwargs):
+            forbidden_calls.append(name)
+            raise AssertionError(f"{name} must not run")
+
+        return inner
+
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(planning, "list_option_expirations", discover)
+    monkeypatch.setattr(
+        planning,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+    monkeypatch.setattr(
+        chain_mod,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "fetch_symbol", forbid("fetch_symbol"))
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
+        forbid("gateway"),
+    )
+    monkeypatch.setattr(mod.ToolExecutionService, "execute", forbid("execute"))
+    monkeypatch.setattr(
+        mod,
+        "adapt_opend_tool_payload",
+        lambda payload: {"source_name": "opend", "payload": payload},
+    )
+    monkeypatch.setattr(
+        mod.state_repo,
+        "append_source_snapshot_event",
+        lambda *args, **kwargs: None,
+    )
+    required_root = tmp_path / "shared_required"
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={
+            "runtime": {
+                "prefetch": {
+                    "execution_mode": execution_mode,
+                    "max_workers": 2,
+                }
+            }
+        },
+        shared_required=required_root,
+        producer_run_id="run-empty",
+    )
+
+    assert discovery_calls == ["0700.HK"]
+    assert forbidden_calls == []
+    assert result["fetched_ok"] == 1
+    assert result["errors"] == 0
+    assert result["prefetch_budget_plan"]["estimated_option_chain_calls"] == 0
+    plan_item = result["global_required_data_plan"]["symbols"][0]
+    assert plan_item["projection_outcome"] == "success_empty"
+    discovery = plan_item["fetch_plan"]["expiration_discovery"]
+    assert discovery["outcome"] == "success_empty"
+    assert discovery["reason_code"] == "no_expirations"
+    raw = json.loads(
+        (
+            required_root
+            / "raw"
+            / "0700.HK_required_data.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert raw["rows"] == []
+    assert raw["meta"]["status"] == "ok"
+    assert raw["meta"]["source_outcome"] == "success_empty"
+    assert raw["meta"]["reason_code"] == "no_expirations"
+    assert raw["meta"]["source_observed_at"] == discovery["observed_at_utc"]
+    csv_header = (
+        required_root
+        / "parsed"
+        / "0700.HK_required_data.csv"
+    ).read_text(encoding="utf-8").strip()
+    assert csv_header == ",".join(REQUIRED_DATA_COLUMNS)
+    receipt_path = required_root / result["quote_receipts"]["0700.HK"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["source_observed_at"] == discovery["observed_at_utc"]
+
+
 def test_prefetch_worker_count_defaults_to_two() -> None:
     assert mod._resolve_prefetch_max_workers({}) == 2
 
@@ -449,6 +596,7 @@ def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_underwriting() ->
 
 
 def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(monkeypatch, spot=None)
     watchlist = [
         {
             "symbol": "0700.HK",
@@ -555,6 +703,7 @@ def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_
 
 
 def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(monkeypatch, spot=None)
     watchlist = [
         {
             "symbol": "0700.HK",
@@ -857,6 +1006,10 @@ def test_inprocess_prefetch_waits_after_rate_limited_wave_before_next_wave(tmp_p
 
 
 def test_inprocess_prefetch_summary_records_partial_expiration_rate_limit_class(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(
+        monkeypatch,
+        ["2026-06-29", "2026-09-29"],
+    )
     watchlist = [
         {
             "symbol": "3690.HK",
@@ -922,6 +1075,11 @@ def test_inprocess_prefetch_summary_records_partial_expiration_rate_limit_class(
 
 
 def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(
+        monkeypatch,
+        ["2026-06-19", "2026-07-17"],
+        spot=None,
+    )
     shared_required = tmp_path / "shared_required"
     (shared_required / "raw").mkdir(parents=True)
     (shared_required / "parsed").mkdir(parents=True)
@@ -966,6 +1124,11 @@ def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tm
 
 
 def test_prefetch_cache_check_reads_required_data_csv_once(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(
+        monkeypatch,
+        ["2026-06-19", "2026-07-17"],
+        spot=None,
+    )
     import pandas as pd
 
     shared_required = tmp_path / "shared_required"
@@ -1014,6 +1177,10 @@ def test_prefetch_cache_check_reads_required_data_csv_once(tmp_path: Path, monke
 
 
 def test_prefetch_refetches_when_cached_required_data_misses_strategy_side(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(
+        monkeypatch,
+        ["2026-06-19", "2026-07-17"],
+    )
     shared_required = tmp_path / "shared_required"
     (shared_required / "raw").mkdir(parents=True)
     (shared_required / "parsed").mkdir(parents=True)

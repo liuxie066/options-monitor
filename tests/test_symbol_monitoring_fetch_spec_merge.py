@@ -359,6 +359,104 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     assert status["receipt_relpath"] == "quotes/receipt.json"
 
 
+def test_frozen_success_empty_publishes_completed_zero_status_evidence(
+    tmp_path: Path,
+) -> None:
+    import src.application.symbol_monitoring as mod
+
+    report_dir = tmp_path / "reports"
+
+    def run_sell_put(**kwargs):
+        report_dir.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "nvda_sell_put_candidates.csv",
+            "nvda_sell_put_candidates_labeled.csv",
+        ):
+            (report_dir / name).write_text(
+                "symbol\n",
+                encoding="utf-8",
+            )
+        kwargs["all_decisions_sink_fn"]([])
+        return {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 0,
+        }
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **_kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **_kwargs: None,
+        ensure_required_data_fn=lambda **_kwargs: {
+            "snapshot_id": "snapshot-empty",
+            "receipt_relpath": "quotes/empty/receipt.json",
+            "source_outcome": "success_empty",
+            "reason_code": "no_expirations",
+        },
+        run_sell_put_scan_fn=run_sell_put,
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {},
+        run_sell_call_scan_fn=lambda **_kwargs: {},
+        materialize_empty_sell_call_artifacts_fn=lambda **_kwargs: None,
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
+        run_combo_yield_scan_fn=lambda **_kwargs: None,
+        empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {},
+        materialize_empty_sell_put_artifacts_fn=lambda **_kwargs: None,
+        materialize_empty_combo_yield_artifacts_fn=lambda **_kwargs: None,
+    )
+
+    rows = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=report_dir,
+            state_dir=tmp_path / "state",
+            is_scheduled=True,
+            runtime_config={"portfolio": {"account": "lx"}},
+            risk_policy_version="risk.v1",
+            all_decisions_sink_fn=lambda rows: None,
+            position_advice_producer_run_id="run-1",
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            required_data_snapshot_run_id="run-1",
+        ),
+        deps=deps,
+    )
+
+    assert rows[0]["candidate_count"] == 0
+    status = json.loads(
+        (
+            report_dir
+            / "nvda_sell_put_scan_status.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert status["status"] == "completed"
+    assert status["candidate_count"] == 0
+    assert status["source_outcome"] == "success_empty"
+    assert status["reason_code"] == "no_expirations"
+    assert status["snapshot_id"] == "snapshot-empty"
+    assert status["receipt_relpath"] == "quotes/empty/receipt.json"
+
+
 def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, MutableMapping
 
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
@@ -13,7 +13,12 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from src.application.opend_market_snapshot_fetching import get_underlier_spot
-from src.application.opend_symbol_chain_fetching import list_option_expirations
+from src.application.opend_symbol_chain_fetching import (
+    OptionExpirationDiscoveryResult,
+    discover_option_expirations,
+    list_option_expirations,
+)
+from src.application.opend_utils import get_trading_date, normalize_underlier
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_staggered_expiry_gap_days,
@@ -27,6 +32,14 @@ from src.application.strategy_policy import (
 
 
 OptionSide = Literal["put", "call"]
+FetchPlanOutcome = Literal[
+    "success_rows",
+    "success_empty",
+    "projection_empty",
+    "provider_error",
+    "parse_error",
+]
+ExpirationDiscoveryCacheKey = tuple[str, str, str, int, str]
 
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
@@ -112,6 +125,9 @@ class RequiredDataFetchPlanBundle:
     merged_specs: list[RequiredDataFetchSpec]
     expiration_discovery_complete: bool = True
     expiration_discovery_error: str | None = None
+    expiration_discovery: OptionExpirationDiscoveryResult | None = None
+    projection_outcome: FetchPlanOutcome | None = None
+    projected_expirations: list[str] = field(default_factory=list)
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +137,13 @@ class RequiredDataFetchPlanBundle:
             "merged_requests": [spec.to_debug_dict() for spec in self.merged_specs],
             "expiration_discovery_complete": bool(self.expiration_discovery_complete),
             "expiration_discovery_error": self.expiration_discovery_error,
+            "expiration_discovery": (
+                self.expiration_discovery.to_debug_dict()
+                if self.expiration_discovery is not None
+                else None
+            ),
+            "projection_outcome": self.projection_outcome,
+            "projected_expirations": list(self.projected_expirations),
         }
 
 
@@ -495,6 +518,25 @@ def _unique_preserve_order(values: list[str]) -> list[str]:
     return out
 
 
+def _expiration_discovery_cache_key(
+    *,
+    base: Path,
+    symbol: str,
+    source: str,
+    host: str,
+    port: int,
+) -> ExpirationDiscoveryCacheKey:
+    underlier = normalize_underlier(symbol, base_dir=base)
+    trading_date = get_trading_date(underlier.market).isoformat()
+    return (
+        str(symbol or "").strip().upper(),
+        str(source or "").strip().lower(),
+        str(host),
+        int(port),
+        trading_date,
+    )
+
+
 def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[OptionSideFetchPlan]:
     grouped: dict[OptionSide, list[OptionSideFetchPlan]] = {"put": [], "call": []}
     for plan in side_plans:
@@ -647,6 +689,14 @@ def build_required_data_fetch_plan(
     symbol_cfg: dict[str, Any] | None = None,
     fetch_host: str = "127.0.0.1",
     fetch_port: int = 11111,
+    fetch_source: str = "futu",
+    expiration_discovery_cache: (
+        MutableMapping[
+            ExpirationDiscoveryCacheKey,
+            OptionExpirationDiscoveryResult,
+        ]
+        | None
+    ) = None,
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
@@ -670,22 +720,42 @@ def build_required_data_fetch_plan(
         snapshot_window_sec=snapshot_window_sec,
         snapshot_max_calls=snapshot_max_calls,
     )
-    expiration_discovery_complete = True
-    expiration_discovery_error: str | None = None
     try:
-        available_expirations = list_option_expirations(
+        discovery_cache_key = _expiration_discovery_cache_key(
+            base=base,
+            symbol=symbol,
+            source=fetch_source,
+            host=fetch_host,
+            port=fetch_port,
+        )
+    except Exception:
+        discovery_cache_key = None
+    expiration_discovery = (
+        expiration_discovery_cache.get(discovery_cache_key)
+        if expiration_discovery_cache is not None
+        and discovery_cache_key is not None
+        else None
+    )
+    if expiration_discovery is None:
+        expiration_discovery = discover_option_expirations(
             symbol,
+            source=fetch_source,
             host=fetch_host,
             port=fetch_port,
             base_dir=base,
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
+            list_expirations_fn=list_option_expirations,
         )
-    except Exception as exc:
-        available_expirations = []
-        expiration_discovery_complete = False
-        expiration_discovery_error = str(exc or "option expiration discovery failed")
+        if (
+            expiration_discovery_cache is not None
+            and discovery_cache_key is not None
+        ):
+            expiration_discovery_cache[discovery_cache_key] = (
+                expiration_discovery
+            )
+    available_expirations = list(expiration_discovery.expirations)
 
     side_plans: list[OptionSideFetchPlan] = []
     yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg)
@@ -725,6 +795,23 @@ def build_required_data_fetch_plan(
         _position_requirement_side_plans(position_requirements)
     )
     side_plans = _merge_same_side_plans(side_plans)
+    projected_expirations = _unique_preserve_order(
+        [
+            expiration
+            for side_plan in side_plans
+            for expiration in side_plan.explicit_expirations
+        ]
+    )
+    if not side_plans and expiration_discovery.outcome == "success_rows":
+        projected_expirations = list(expiration_discovery.expirations)
+    if expiration_discovery.outcome == "success_empty":
+        projection_outcome: FetchPlanOutcome = "success_empty"
+    elif expiration_discovery.outcome in {"provider_error", "parse_error"}:
+        projection_outcome = expiration_discovery.outcome
+    elif side_plans and not projected_expirations:
+        projection_outcome = "projection_empty"
+    else:
+        projection_outcome = "success_rows"
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
         spot_reference=spot_reference,
@@ -747,6 +834,9 @@ def build_required_data_fetch_plan(
                 )
             ),
         ),
-        expiration_discovery_complete=expiration_discovery_complete,
-        expiration_discovery_error=expiration_discovery_error,
+        expiration_discovery_complete=expiration_discovery.complete,
+        expiration_discovery_error=expiration_discovery.error,
+        expiration_discovery=expiration_discovery,
+        projection_outcome=projection_outcome,
+        projected_expirations=projected_expirations,
     )

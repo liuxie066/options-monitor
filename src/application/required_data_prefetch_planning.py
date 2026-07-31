@@ -586,15 +586,40 @@ def estimate_prefetch_option_chain_calls(
         return 0
     if fetch_plan is not None:
         side_plans = list(getattr(fetch_plan, "side_plans", []) or [])
-        if not side_plans:
-            return _limit_expirations(symbol_cfg)
+        projection_outcome = str(
+            getattr(fetch_plan, "projection_outcome", "") or ""
+        ).strip()
+        if projection_outcome in {
+            "success_empty",
+            "projection_empty",
+            "provider_error",
+            "parse_error",
+        }:
+            return 0
+        if projection_outcome != "success_rows":
+            raise ValueError(
+                "scheduled fetch plan lacks typed discovery evidence"
+            )
         expirations = {
             str(expiration)
             for side_plan in side_plans
             for expiration in getattr(side_plan, "explicit_expirations", []) or []
             if str(expiration).strip()
+        } or {
+            str(expiration)
+            for expiration in getattr(
+                fetch_plan,
+                "projected_expirations",
+                [],
+            )
+            or []
+            if str(expiration).strip()
         }
-        return max(1, len(expirations))
+        if not expirations:
+            raise ValueError(
+                "success-rows fetch plan lacks exact projected targets"
+            )
+        return len(expirations)
     return _limit_expirations(symbol_cfg)
 
 

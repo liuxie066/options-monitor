@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Callable, Mapping, Protocol, cast
 
 from src.application.positions.context_cache import invalidate_option_positions_context_cache
 from src.application.trades.deal_identity import broker_deal_key
+from src.application.trades.lifecycle import (
+    lifecycle_deal_economic_hash,
+)
 from src.infrastructure.io_utils import utc_now
 
 
@@ -13,6 +16,8 @@ class TradePayloadEnrichmentResult(Protocol):
 
 
 TradePayloadEnrichmentReturn = dict[str, Any] | TradePayloadEnrichmentResult
+TRADE_INTAKE_SOURCE_CONTEXT_KEY = "_trade_intake_source"
+TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA = "trade_intake_source.v1"
 
 
 def _payload_deal_id(payload: dict[str, Any] | None) -> str | None:
@@ -24,6 +29,54 @@ def _payload_deal_id(payload: dict[str, Any] | None) -> str | None:
         if value:
             return value
     return None
+
+
+def _trusted_push_source_context(
+    *,
+    source: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if source.lower() != "push":
+        return {}
+    raw_context = payload.get(TRADE_INTAKE_SOURCE_CONTEXT_KEY)
+    if not isinstance(raw_context, Mapping):
+        return {}
+    context = dict(raw_context)
+    if (
+        str(context.get("schema_version") or "").strip()
+        != TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA
+        or str(context.get("transport") or "").strip().lower() != "push"
+    ):
+        return {}
+    required_text = (
+        "source_id",
+        "account",
+        "futu_account_id",
+        "opend_process",
+        "opend_host",
+        "received_at_utc",
+    )
+    if any(not str(context.get(key) or "").strip() for key in required_text):
+        return {}
+    opend_port = context.get("opend_port")
+    if (
+        isinstance(opend_port, bool)
+        or not isinstance(opend_port, int)
+        or opend_port <= 0
+    ):
+        return {}
+
+    context_account = str(context["account"]).strip().lower()
+    for key in ("internal_account", "account"):
+        payload_account = str(payload.get(key) or "").strip().lower()
+        if payload_account and payload_account != context_account:
+            return {}
+    context_futu_account_id = str(context["futu_account_id"]).strip()
+    for key in ("futu_account_id", "trd_acc_id", "trade_acc_id"):
+        payload_account_id = str(payload.get(key) or "").strip()
+        if payload_account_id and payload_account_id != context_futu_account_id:
+            return {}
+    return context
 
 
 def _exception_result_dict(
@@ -373,6 +426,22 @@ def build_trade_intake_audit_event(
         out["source"] = source_text
     if isinstance(payload, dict):
         out["payload"] = payload
+        source_context = _trusted_push_source_context(
+            source=source_text,
+            payload=payload,
+        )
+        for key in (
+            "source_id",
+            "account",
+            "futu_account_id",
+            "opend_process",
+            "opend_host",
+            "opend_port",
+            "received_at_utc",
+        ):
+            value = source_context.get(key)
+            if value not in (None, ""):
+                out[key] = value
     to_dict = getattr(deal, "to_dict", None)
     if callable(to_dict):
         raw_deal_dict = to_dict()
@@ -564,6 +633,7 @@ def process_trade_payload(
         )
 
     deal_key = broker_deal_key(deal)
+    economic_payload_hash = lifecycle_deal_economic_hash(deal)
     if apply_changes and deal_key:
         if result.status == "applied" or _is_terminal_ledger_result(result_dict):
             reconciled_terminal = result.status != "applied"
@@ -578,6 +648,7 @@ def process_trade_payload(
                     "source_deal_id": deal.deal_id,
                     "futu_account_id": deal.futu_account_id,
                     "broker_deal_key": deal_key,
+                    "economic_payload_hash": economic_payload_hash,
                     "applied_record_ids": [op.record_id for op in result.operations if op.record_id],
                     "reason": result.reason,
                     "diagnostics": (
@@ -615,6 +686,7 @@ def process_trade_payload(
                 "source_deal_id": deal.deal_id,
                 "futu_account_id": deal.futu_account_id,
                 "broker_deal_key": deal_key,
+                "economic_payload_hash": economic_payload_hash,
                 "applied_record_ids": [],
                 "reason": result.reason,
                 "retryable": retryable,
@@ -640,6 +712,7 @@ def process_trade_payload(
                 "source_deal_id": deal.deal_id,
                 "futu_account_id": deal.futu_account_id,
                 "broker_deal_key": deal_key,
+                "economic_payload_hash": economic_payload_hash,
                 "applied_record_ids": [],
                 "reason": result.reason,
                 "diagnostics": dict(result_dict.get("diagnostics") or {}),

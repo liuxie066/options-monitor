@@ -172,7 +172,7 @@ def test_fallback_disabled_when_max_codes_zero(monkeypatch, tmp_path: Path) -> N
 
 def test_fallback_uses_same_rate_limiter(monkeypatch, tmp_path: Path) -> None:
     chain_rows = _chain_rows(3)
-    limiter_calls: list[tuple[str, int]] = []
+    limiter_calls: list[str] = []
 
     def _snapshot_handler(codes: list[str]):
         if len(codes) > 1:
@@ -187,7 +187,7 @@ def test_fallback_uses_same_rate_limiter(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_symbol_fetching as mod
 
     def _fake_rate_limited_opend_call(**kwargs):  # type: ignore[no-untyped-def]
-        limiter_calls.append((str(kwargs["endpoint"]), len(kwargs["call"].__closure__[0].cell_contents)))
+        limiter_calls.append(str(kwargs["endpoint"]))
         return kwargs["call"]()
 
     monkeypatch.setattr(mod, "rate_limited_opend_call", _fake_rate_limited_opend_call)
@@ -202,6 +202,5 @@ def test_fallback_uses_same_rate_limiter(monkeypatch, tmp_path: Path) -> None:
     ))
 
     assert payload["meta"]["snapshot_fallback_filled"] == 3
-    assert limiter_calls[0][0] == "market_snapshot"
-    assert all(endpoint == "market_snapshot" for endpoint, _ in limiter_calls)
-    assert len(limiter_calls) == 4
+    assert limiter_calls[0] == "option_expiration"
+    assert limiter_calls[1:] == ["market_snapshot"] * 4

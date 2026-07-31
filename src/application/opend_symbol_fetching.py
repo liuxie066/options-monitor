@@ -317,7 +317,15 @@ def fetch_symbol_request(
         if chain.empty:
             fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
-            error_code = str(fetch_meta.get('error_code') or 'EMPTY_CHAIN')
+            source_outcome = str(
+                fetch_meta.get('source_outcome') or 'provider_error'
+            )
+            reason_code = (
+                str(fetch_meta.get('reason_code') or '').strip() or None
+            )
+            error_code = (
+                str(fetch_meta.get('error_code') or '').strip() or None
+            )
             raw_fetch_errors = fetch_meta.get('errors')
             fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
             error_message = next(
@@ -326,7 +334,7 @@ def fetch_symbol_request(
                     for item in fetch_errors
                     if isinstance(item, dict) and str(item.get('message') or '').strip()
                 ),
-                error_code.lower() if error_code else 'empty_chain',
+                error_code.lower() if error_code else None,
             )
             return {
                 'symbol': symbol,
@@ -342,8 +350,11 @@ def fetch_symbol_request(
                     'status': status,
                     'error_code': error_code,
                     'error': error_message,
+                    'source_outcome': source_outcome,
+                    'reason_code': reason_code,
                     'expiration_statuses': fetch_meta.get('expiration_statuses') or {},
                     'errors': fetch_errors,
+                    'diagnostics': fetch_meta.get('diagnostics') or [],
                     'spot_errors': spot_errors,
                     'from_cache_expirations': fetch_meta.get('from_cache_expirations') or [],
                     'fetched_expirations': fetch_meta.get('fetched_expirations') or [],
@@ -355,6 +366,8 @@ def fetch_symbol_request(
                     'rate_gate_wait_sec': float(fetch_meta.get('rate_gate_wait_sec') or 0.0),
                     'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
                     'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
+                    'source_observed_at': fetch_meta.get('source_observed_at'),
+                    'completed_at_utc': fetch_meta.get('completed_at_utc'),
                 },
             }
 
@@ -583,8 +596,11 @@ def fetch_symbol_request(
                 'status': status,
                 'error_code': error_code,
                 'error': fetch_error_message,
+                'source_outcome': fetch_result_meta.get('source_outcome'),
+                'reason_code': fetch_result_meta.get('reason_code'),
                 'expiration_statuses': fetch_result_meta.get('expiration_statuses') or {},
                 'errors': combined_errors,
+                'diagnostics': fetch_result_meta.get('diagnostics') or [],
                 'from_cache_expirations': fetch_result_meta.get('from_cache_expirations') or [],
                 'fetched_expirations': fetch_result_meta.get('fetched_expirations') or [],
                 'stale_cache_expirations': fetch_result_meta.get('stale_cache_expirations') or [],
@@ -605,6 +621,8 @@ def fetch_symbol_request(
                 'spot_errors': spot_errors,
                 'realized_volatility': rv_snapshot.to_meta(),
                 'side_strike_windows': side_strike_windows or {},
+                'source_observed_at': fetch_result_meta.get('source_observed_at'),
+                'completed_at_utc': fetch_result_meta.get('completed_at_utc'),
             },
         }
     except Exception as e:

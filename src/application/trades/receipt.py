@@ -120,6 +120,152 @@ def send_trade_intake_receipt(
     }
 
 
+def build_trade_lifecycle_notification_message(
+    payload: dict[str, Any],
+) -> str:
+    frozen = dict(payload or {})
+    transition = str(
+        frozen.get("transition_type") or ""
+    ).strip().lower()
+    reason = str(frozen.get("close_reason") or "").strip().lower()
+    reason_text = {
+        "trade_close": "主动交易平仓",
+        "assignment": "被指派",
+        "exercise": "已行权",
+        "expiration_no_settlement": "到期未行权",
+        "expire_close": "到期未行权",
+    }.get(reason, reason or "待确认")
+    status_text = {
+        "option_leg_closed": "⏳ 期权腿已平仓",
+        "resolution_confirmed": "✅ 平仓结果已确认",
+        "needs_review": "⚠️ 平仓原因待复核",
+        "conflict": "⚠️ 平仓证据冲突",
+        "resolution_corrected": "✅ 平仓结果已更正",
+    }.get(transition, "期权平仓状态更新")
+    fields: list[tuple[str, object]] = [
+        ("状态", status_text),
+        ("标的", frozen.get("symbol") or "-"),
+    ]
+    contract = " ".join(
+        str(item)
+        for item in (
+            frozen.get("expiration_ymd"),
+            frozen.get("strike"),
+            _option_type_text(_optional_str(frozen.get("option_type"))),
+        )
+        if item not in (None, "")
+    )
+    if contract:
+        fields.append(("合约", contract))
+    if transition == "resolution_confirmed":
+        fields.append(("原因", reason_text))
+    total_contracts = frozen.get("total_contracts")
+    if total_contracts is None:
+        total_contracts = sum(
+            int(item.get("contracts") or 0)
+            for item in list(frozen.get("allocations") or [])
+            if isinstance(item, dict)
+        )
+    if total_contracts:
+        fields.append(("数量", f"{total_contracts} 张"))
+    reason_codes = [
+        str(item)
+        for item in list(frozen.get("reason_codes") or [])
+        if str(item or "").strip()
+    ]
+    if reason_codes:
+        fields.append(("诊断", ", ".join(reason_codes)))
+    fields.append(
+        (
+            "案件",
+            f"`{str(frozen.get('case_id') or '').strip()}`",
+        )
+    )
+    return render_receipt(
+        account=str(frozen.get("account") or "-"),
+        receipt_type="期权平仓",
+        status=status_text,
+        fields=fields,
+    )
+
+
+def send_trade_lifecycle_outbox_payload(
+    *,
+    base: Path,
+    config: dict[str, Any] | None,
+    receipt_config: dict[str, Any] | None,
+    payload: dict[str, Any],
+    send_fn: Callable[..., Any] | None = None,
+    normalize_fn: Callable[..., dict[str, Any]] | None = None,
+    route_resolver: Callable[..., dict[str, Any]] = (
+        resolve_notification_route_from_config
+    ),
+    adapter_selector: Callable[[Any], Any] = (
+        select_notification_delivery_adapter
+    ),
+) -> dict[str, Any]:
+    cfg = dict(receipt_config or {})
+    if cfg.get("enabled", True) is False:
+        return {
+            "status": "explicit_failed",
+            "explicit_pre_acceptance_failure": True,
+            "error": "trade receipt delivery is disabled",
+        }
+    route = resolve_notification_delivery_route(
+        config=config or {},
+        route_resolver=route_resolver,
+    )
+    target = route.get("target")
+    if not str(target or "").strip():
+        return {
+            "status": "explicit_failed",
+            "explicit_pre_acceptance_failure": True,
+            "error": "notification route is unavailable",
+        }
+    if send_fn is None or normalize_fn is None:
+        adapter = adapter_selector(route.get("provider"))
+        resolved_send_fn = send_fn or adapter.send_fn
+        resolved_normalize_fn = normalize_fn or adapter.normalize_fn
+    else:
+        resolved_send_fn = send_fn
+        resolved_normalize_fn = normalize_fn
+    message = build_trade_lifecycle_notification_message(payload)
+    send_result = resolved_send_fn(
+        base=base,
+        channel=str(route.get("channel") or ""),
+        target=str(target),
+        message=message,
+        notifications=route.get("notifications") or {},
+    )
+    normalized = normalize_notification_delivery_result(
+        send_result,
+        normalize_fn=resolved_normalize_fn,
+    )
+    message_id = _optional_str(normalized.get("message_id"))
+    delivery_confirmed = bool(
+        normalized.get("delivery_confirmed")
+        or (normalized.get("ok") and message_id)
+    )
+    command_ok = bool(
+        normalized.get("command_ok") or normalized.get("ok")
+    )
+    return {
+        "status": (
+            "confirmed"
+            if delivery_confirmed
+            else "accepted"
+            if command_ok
+            else "unknown"
+        ),
+        "delivery_confirmed": delivery_confirmed,
+        "message_id": message_id,
+        "command_ok": command_ok,
+        "error_code": normalized.get("error_code"),
+        "send_message": _optional_str(normalized.get("message")),
+        "message_len": len(message),
+    }
+
+
 def decide_trade_intake_receipt(
     *,
     receipt_config: dict[str, Any] | None,

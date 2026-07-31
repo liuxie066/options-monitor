@@ -56,6 +56,56 @@ def test_completed_zero_candidates_is_available_and_bound_to_artifacts(
     assert index["items"][0]["candidate_count"] == 0
 
 
+def test_completed_zero_success_empty_preserves_quote_outcome(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "nvda_sell_put_candidates.csv").write_text(
+        "symbol\n",
+        encoding="utf-8",
+    )
+    (report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        "symbol\n",
+        encoding="utf-8",
+    )
+    publish_strategy_scan_status(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="sell_put",
+        status="completed",
+        candidate_count=0,
+        snapshot_id="snapshot-empty",
+        receipt_relpath="quotes/empty/receipt.json",
+        source_outcome="success_empty",
+        reason_code="no_contract_rows",
+    )
+
+    index = publish_strategy_scan_status_index(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="lx",
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "sell_put",
+            }
+        ],
+    )
+
+    item = index["items"][0]
+    assert item["status"] == "completed"
+    assert item["candidate_count"] == 0
+    assert item["source_outcome"] == "success_empty"
+    assert item["reason_code"] == "no_contract_rows"
+    assert item["snapshot_id"] == "snapshot-empty"
+    assert item["receipt_relpath"] == "quotes/empty/receipt.json"
+
+
 def test_index_synthesizes_missing_and_invalid_statuses(tmp_path: Path) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()

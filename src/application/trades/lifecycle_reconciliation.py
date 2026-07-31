@@ -7,6 +7,7 @@ from typing import Any
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.lifecycle_allocation import (
     AllocationPlan,
+    TERMINAL_TYPES,
     plan_evidence_allocation,
     resolve_allocations,
 )
@@ -14,14 +15,18 @@ from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
+    lifecycle_evidence_facts,
     lifecycle_reconciliation_facts,
     record_lifecycle_allocation,
     record_lifecycle_evidence_issue,
 )
+from src.application.trades.close_reason_evidence import (
+    canonical_hash,
+    derive_effective_lifecycle_timing,
+)
 
 
 EARLY_SETTLEMENT_TOLERANCE_MS = 5 * 60 * 1000
-TERMINAL_TYPES = frozenset({"assignment", "exercise", "expire_close"})
 
 
 @dataclass(frozen=True)
@@ -86,23 +91,18 @@ def lifecycle_case_read_model(
         raise ValueError(f"lifecycle case not found: {case_id}")
     allocations = list(facts["allocations"])
     evidence = list(facts["evidence"])
+    void_event_ids = tuple(facts.get("effective_void_event_ids") or ())
     lot_fields_by_id = dict(facts["position_lot_fields_by_id"])
-    allocation_evidence_ids = {
-        str(item.get("evidence_id") or "").strip()
-        for item in allocations
-        if str(item.get("evidence_id") or "").strip()
-    }
-    orphan_evidence_ids = sorted(
-        {
-            str(item.get("evidence_id") or "").strip()
-            for item in evidence
-            if str(item.get("evidence_id") or "").strip()
-        }
-        - allocation_evidence_ids
+    evidence_facts = lifecycle_evidence_facts(
+        evidence=evidence,
+        allocations=allocations,
+        void_event_ids=void_event_ids,
     )
+    orphan_evidence_ids = list(evidence_facts.orphan_evidence_ids)
     resolution = resolve_allocations(
         dict(lifecycle_case.get("target_contracts_by_lot") or {}),
         allocations,
+        void_event_ids=void_event_ids,
     )
     quantity_drift = False
     for lot_id, expected_remaining in resolution.remaining_contracts_by_lot.items():
@@ -117,6 +117,17 @@ def lifecycle_case_read_model(
             break
     persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
     derived_summary = dict(lifecycle_case.get("derived_summary") or {})
+    timing_policy = repo.get_trade_lifecycle_timing_policy(case_id)
+    effective_timing: dict[str, Any] | None = None
+    timing_error: str | None = None
+    if isinstance(timing_policy, dict):
+        try:
+            effective_timing = derive_effective_lifecycle_timing(
+                policy=timing_policy,
+                option_close_evidence=evidence,
+            )
+        except ValueError as exc:
+            timing_error = str(exc)
     conflict_reasons = (
         tuple(str(item) for item in derived_summary.get("lifecycle_reason_codes") or ())
         if persisted_status == "conflict"
@@ -133,14 +144,39 @@ def lifecycle_case_read_model(
             lifecycle_case.get("target_contracts_by_lot") or {}
         ),
         allocations=allocations,
+        void_event_ids=void_event_ids,
+        accepted_option_close_contracts_by_lot=(
+            evidence_facts.reservation_contracts_by_lot
+        ),
         now_ms=now_ms,
         conflict_reason_codes=conflict_reasons,
         orphan_evidence=bool(orphan_evidence_ids),
         quantity_drift=quantity_drift,
+        observation_start_ms_override=(
+            int(lifecycle_case["observation_start_ms"])
+            if lifecycle_case.get("observation_start_ms") is not None
+            else None
+        ),
+        pending_until_ms_override=(
+            int(
+                (
+                    effective_timing
+                    or timing_policy
+                    or {}
+                ).get("settlement_deadline_ms")
+            )
+            if (
+                effective_timing
+                or timing_policy
+                or {}
+            ).get("settlement_deadline_ms")
+            is not None
+            else None
+        ),
     )
     terminal_event_ids = sorted(
         str(item.get("canonical_terminal_event_id") or "").strip()
-        for item in allocations
+        for item in evidence_facts.effective_allocations
         if str(item.get("canonical_terminal_event_id") or "").strip()
     )
     if persisted_status == "conflict":
@@ -149,20 +185,76 @@ def lifecycle_case_read_model(
         evidence_status = "evidence_without_allocation"
     elif not evidence:
         evidence_status = "missing"
+    elif evidence_facts.reservation_evidence_ids:
+        evidence_status = "closure_observed_cause_pending"
     elif read_model.remaining_contracts_by_lot and any(
         read_model.remaining_contracts_by_lot.values()
     ):
         evidence_status = "partial"
     else:
         evidence_status = "complete"
+    persisted_reason_state = str(
+        derived_summary.get("reason_state") or ""
+    ).strip().lower()
+    effective_reason_state = (
+        persisted_reason_state
+        if persisted_status in {"needs_review", "conflict"}
+        and persisted_reason_state
+        in {"needs_review", "conflict"}
+        else read_model.reason_state
+    )
+    effective_reason_codes = sorted(
+        {
+            *read_model.lifecycle_reason_codes,
+            *(
+                str(item)
+                for item in (
+                    derived_summary.get(
+                        "lifecycle_reason_codes"
+                    )
+                    or []
+                )
+                if str(item or "").strip()
+            ),
+        }
+    )
+    effective_close_reason = (
+        str(derived_summary.get("close_reason") or "").strip()
+        if effective_reason_state in {"needs_review", "conflict"}
+        else ""
+    ) or read_model.close_reason
     return {
-        "schema_version": "option_lifecycle_read_model.v2",
+        "schema_version": "option_lifecycle_read_model.v3",
         "lifecycle_state": read_model.lifecycle_state,
         "lifecycle_case_id": str(lifecycle_case.get("case_id") or ""),
         "lifecycle_evidence_status": evidence_status,
-        "lifecycle_reason_codes": list(read_model.lifecycle_reason_codes),
+        "lifecycle_reason_codes": effective_reason_codes,
         "observation_start_ms": read_model.observation_start_ms,
         "pending_until_ms": read_model.pending_until_ms,
+        "pairing_until_ms": (
+            int(effective_timing["pairing_until_ms"])
+            if effective_timing is not None
+            else None
+        ),
+        "first_option_close_received_at_ms": (
+            int(
+                effective_timing[
+                    "first_option_close_received_at_ms"
+                ]
+            )
+            if effective_timing is not None
+            else None
+        ),
+        "timing_policy_hash": (
+            str(effective_timing["timing_policy_hash"])
+            if effective_timing is not None
+            else (
+                canonical_hash(timing_policy)
+                if isinstance(timing_policy, dict)
+                else None
+            )
+        ),
+        "timing_error": timing_error,
         "terminal_event_ids": terminal_event_ids,
         "target_contracts_by_lot": dict(
             lifecycle_case.get("target_contracts_by_lot") or {}
@@ -172,13 +264,37 @@ def lifecycle_case_read_model(
         "resolved_contracts_by_terminal_type": (
             read_model.resolved_contracts_by_terminal_type
         ),
+        "reserved_contracts_by_lot": read_model.reserved_contracts_by_lot,
+        "closure_fact": read_model.closure_fact,
+        "reason_state": effective_reason_state,
+        "close_reason": effective_close_reason,
         "allocation_ids": sorted(
             str(item.get("allocation_id") or "").strip()
-            for item in allocations
+            for item in evidence_facts.effective_allocations
             if str(item.get("allocation_id") or "").strip()
         ),
+        "voided_terminal_event_ids": sorted(
+            {
+                str(item.get("canonical_terminal_event_id") or "").strip()
+                for item in allocations
+                if str(item.get("canonical_terminal_event_id") or "").strip()
+                in set(void_event_ids)
+            }
+        ),
+        "reservation_evidence_ids": list(
+            evidence_facts.reservation_evidence_ids
+        ),
         "orphan_evidence_ids": orphan_evidence_ids,
-        "actionable": read_model.actionable,
+        "actionable": (
+            read_model.actionable
+            and effective_reason_state
+            not in {
+                "cause_pending",
+                "partially_resolved",
+                "needs_review",
+                "conflict",
+            }
+        ),
     }
 
 
@@ -190,6 +306,9 @@ def reconcile_lifecycle_evidence(
     target_lot_id: str | None = None,
     apply_changes: bool = False,
     now_ms: int | None = None,
+    expected_resolution_revision: int | None = None,
+    correction_void_events: tuple[Any, ...] = (),
+    notification_transition_type: str | None = None,
 ) -> LifecycleReconciliationResult:
     try:
         normalized = _normalize_evidence(evidence)
@@ -204,13 +323,18 @@ def reconcile_lifecycle_evidence(
         )
     facts = lifecycle_reconciliation_facts(
         repo,
-        case_id=case_id,
         evidence_id=str(normalized["evidence_id"]),
+    )
+    broker_settlement_pair = (
+        str(normalized.get("source_type") or "").strip().lower()
+        == "broker_settlement_pair"
+        and str(normalized.get("terminal_type") or "")
+        in {"assignment", "exercise"}
     )
     matches = _matching_cases(
         list(facts["cases"]),
         evidence=normalized,
-        case_id=case_id,
+        case_id=None if broker_settlement_pair else case_id,
         target_lot_id=target_lot_id or normalized.get("target_lot_id"),
     )
     if not matches:
@@ -233,16 +357,28 @@ def reconcile_lifecycle_evidence(
         )
     lifecycle_case = matches[0]
     matched_case_id = str(lifecycle_case.get("case_id") or "")
-    if str(case_id or "").strip() != matched_case_id:
-        facts = lifecycle_reconciliation_facts(
-            repo,
-            case_id=matched_case_id,
-            evidence_id=str(normalized["evidence_id"]),
-        )
+    facts = lifecycle_reconciliation_facts(
+        repo,
+        case_id=matched_case_id,
+        evidence_id=str(normalized["evidence_id"]),
+    )
     lot_fields_by_id = dict(facts["position_lot_fields_by_id"])
     validation_reasons = _validate_evidence_for_case(
         normalized,
         lifecycle_case=lifecycle_case,
+        timing_policy=(
+            repo.get_trade_lifecycle_timing_policy(
+                matched_case_id
+            )
+            if callable(
+                getattr(
+                    repo,
+                    "get_trade_lifecycle_timing_policy",
+                    None,
+                )
+            )
+            else None
+        ),
     )
     if validation_reasons:
         return _record_issue_result(
@@ -256,6 +392,39 @@ def reconcile_lifecycle_evidence(
         )
 
     allocations = list(facts["allocations"])
+    void_event_ids = tuple(
+        sorted(
+            {
+                *(
+                    str(item)
+                    for item in (
+                        facts.get("effective_void_event_ids")
+                        or ()
+                    )
+                    if str(item or "").strip()
+                ),
+                *(
+                    str(
+                        getattr(
+                            item,
+                            "target_event_id",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    for item in correction_void_events
+                    if str(
+                        getattr(
+                            item,
+                            "target_event_id",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                ),
+            }
+        )
+    )
     evidence_id = str(normalized["evidence_id"])
     evidence_allocations = [
         item
@@ -277,6 +446,7 @@ def reconcile_lifecycle_evidence(
     resolution = resolve_allocations(
         dict(lifecycle_case.get("target_contracts_by_lot") or {}),
         allocations,
+        void_event_ids=void_event_ids,
     )
     terminal_type = str(normalized["terminal_type"])
     if evidence_allocations:
@@ -321,6 +491,12 @@ def reconcile_lifecycle_evidence(
             "resolved_contracts_by_terminal_type": (
                 resolution.resolved_contracts_by_terminal_type
             ),
+            "reason_state": (
+                "resolved"
+                if replay_status == "ledger_written"
+                else "partially_resolved"
+            ),
+            "close_reason": _public_close_reason(terminal_type),
         }
         ledger_result = None
         if apply_changes:
@@ -332,6 +508,15 @@ def reconcile_lifecycle_evidence(
                 allocations=evidence_allocations,
                 derived_status=replay_status,
                 derived_summary=replay_summary,
+                expected_resolution_revision=(
+                    expected_resolution_revision
+                ),
+                correction_void_events=list(
+                    correction_void_events
+                ),
+                notification_transition_type=(
+                    notification_transition_type
+                ),
             )
         return LifecycleReconciliationResult(
             status="idempotent" if apply_changes else "dry_run",
@@ -395,6 +580,7 @@ def reconcile_lifecycle_evidence(
     combined_resolution = resolve_allocations(
         dict(lifecycle_case.get("target_contracts_by_lot") or {}),
         [*allocations, *plan.allocations],
+        void_event_ids=void_event_ids,
     )
     derived_status = (
         "ledger_written"
@@ -408,6 +594,12 @@ def reconcile_lifecycle_evidence(
         "resolved_contracts_by_terminal_type": (
             combined_resolution.resolved_contracts_by_terminal_type
         ),
+        "reason_state": (
+            "resolved"
+            if derived_status == "ledger_written"
+            else "partially_resolved"
+        ),
+        "close_reason": _public_close_reason(terminal_type),
     }
     if not apply_changes:
         return LifecycleReconciliationResult(
@@ -432,6 +624,9 @@ def reconcile_lifecycle_evidence(
         allocations=[dict(item) for item in plan.allocations],
         derived_status=derived_status,
         derived_summary=derived_summary,
+        expected_resolution_revision=expected_resolution_revision,
+        correction_void_events=list(correction_void_events),
+        notification_transition_type=notification_transition_type,
     )
     return LifecycleReconciliationResult(
         status="applied",
@@ -547,7 +742,7 @@ def _case_matches_evidence(
     evidence: dict[str, Any],
 ) -> bool:
     try:
-        return (
+        matches = (
             str(lifecycle_case.get("account") or "").strip().lower()
             == evidence["account"]
             and canonical_symbol(lifecycle_case.get("symbol")) == evidence["symbol"]
@@ -559,6 +754,21 @@ def _case_matches_evidence(
             == Decimal(str(evidence["strike"]))
             and str(lifecycle_case.get("expiration_ymd") or "").strip()
             == evidence["expiration_ymd"]
+        )
+        if not matches:
+            return False
+        if (
+            str(evidence.get("source_type") or "").strip().lower()
+            != "broker_settlement_pair"
+        ):
+            return True
+        stock = dict(evidence.get("stock_settlement") or {})
+        return (
+            bool(str(lifecycle_case.get("futu_account_id") or "").strip())
+            and str(
+                lifecycle_case.get("futu_account_id") or ""
+            ).strip()
+            == str(stock.get("futu_account_id") or "").strip()
         )
     except (InvalidOperation, TypeError, ValueError):
         return False
@@ -642,6 +852,7 @@ def _validate_evidence_for_case(
     evidence: dict[str, Any],
     *,
     lifecycle_case: dict[str, Any],
+    timing_policy: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
     reasons: set[str] = set()
     if not _case_matches_evidence(lifecycle_case, evidence):
@@ -655,6 +866,28 @@ def _validate_evidence_for_case(
         reasons.add("exercise_requires_long_option")
     if terminal_type in {"assignment", "exercise"}:
         stock = dict(evidence.get("stock_settlement") or {})
+        broker_pair = (
+            str(
+                evidence.get("source_type") or ""
+            ).strip().lower()
+            == "broker_settlement_pair"
+        )
+        if broker_pair:
+            case_futu_account_id = str(
+                lifecycle_case.get("futu_account_id") or ""
+            ).strip()
+            stock_futu_account_id = str(
+                stock.get("futu_account_id") or ""
+            ).strip()
+            if (
+                not case_futu_account_id
+                or not stock_futu_account_id
+                or case_futu_account_id
+                != stock_futu_account_id
+            ):
+                reasons.add(
+                    "stock_settlement_futu_account_mismatch"
+                )
         stock_side = _stock_side(stock.get("side"))
         expected_side = {
             ("assignment", "put", "short"): "buy",
@@ -682,6 +915,23 @@ def _validate_evidence_for_case(
             lifecycle_case.get("symbol")
         ):
             reasons.add("stock_settlement_symbol_mismatch")
+        if broker_pair:
+            try:
+                stock_price = Decimal(str(stock.get("price")))
+                strike = Decimal(
+                    str(lifecycle_case.get("strike"))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                reasons.add("stock_settlement_price_invalid")
+            else:
+                if (
+                    not stock_price.is_finite()
+                    or not strike.is_finite()
+                    or stock_price != strike
+                ):
+                    reasons.add(
+                        "stock_settlement_price_mismatch"
+                    )
         try:
             settlement_time_ms = int(
                 stock.get("event_time_ms")
@@ -692,14 +942,52 @@ def _validate_evidence_for_case(
         except (TypeError, ValueError, OverflowError):
             settlement_time_ms = 0
         observation_start = lifecycle_case.get("observation_start_ms")
+        try:
+            option_event_time_ms = int(
+                evidence.get("option_event_time_ms") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            option_event_time_ms = 0
         if settlement_time_ms <= 0:
             reasons.add("stock_settlement_time_missing")
         elif (
             observation_start is not None
             and settlement_time_ms
             < int(observation_start) - EARLY_SETTLEMENT_TOLERANCE_MS
+            and (
+                option_event_time_ms <= 0
+                or abs(settlement_time_ms - option_event_time_ms)
+                > EARLY_SETTLEMENT_TOLERANCE_MS
+            )
         ):
             reasons.add("stock_settlement_before_lifecycle_window")
+        if broker_pair:
+            deadline_ms = 0
+            if isinstance(timing_policy, dict):
+                try:
+                    deadline_ms = int(
+                        timing_policy.get(
+                            "settlement_deadline_ms"
+                        )
+                        or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    deadline_ms = 0
+            near_option_event = (
+                option_event_time_ms > 0
+                and abs(
+                    settlement_time_ms
+                    - option_event_time_ms
+                )
+                <= EARLY_SETTLEMENT_TOLERANCE_MS
+            )
+            if deadline_ms <= 0 and not near_option_event:
+                reasons.add("settlement_deadline_unavailable")
+            elif (
+                deadline_ms > 0
+                and settlement_time_ms > deadline_ms
+            ):
+                reasons.add("stock_settlement_after_deadline")
     return tuple(sorted(reasons))
 
 
@@ -735,13 +1023,22 @@ def _terminal_event(
         ),
     )
     contracts = int(allocation.get("contracts_allocated") or 0)
+    event_price = (
+        float(evidence.get("price") or 0)
+        if terminal_type == "close"
+        else 0.0
+    )
+    if terminal_type == "close" and event_price <= 0:
+        raise ValueError(
+            "trade_close requires a positive broker execution price"
+        )
     return TradeEvent(
         event_id=str(allocation.get("canonical_terminal_event_id") or ""),
         event_type=terminal_type,
         event_time_ms=int(evidence.get("event_time_ms") or 0),
         contract_key=contract_key,
         contracts=contracts,
-        price=0,
+        price=event_price,
         currency=str(evidence.get("currency") or fields.get("currency") or ""),
         source="lifecycle_reconciliation",
         multiplier=float(
@@ -779,6 +1076,15 @@ def _stock_side(value: Any) -> str:
     if raw in {"sell", "sold", "sell_to_open", "sell_to_close", "卖出", "賣出"}:
         return "sell"
     return raw
+
+
+def _public_close_reason(terminal_type: str) -> str:
+    return {
+        "close": "trade_close",
+        "assignment": "assignment",
+        "exercise": "exercise",
+        "expire_close": "expiration_no_settlement",
+    }.get(str(terminal_type or "").strip().lower(), "")
 
 
 __all__ = [
