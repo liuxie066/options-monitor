@@ -1434,6 +1434,243 @@ def test_historical_split_normal_close_seeds_one_final_slot(
     )
 
 
+def test_historical_broker_close_recovers_one_consistent_account(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    contract = _open_event().contract_key
+    assert repo.upsert_trade_event(
+        TradeEvent(
+            event_id="historical-close-with-null-account",
+            event_type="close",
+            event_time_ms=1_800_000_000_000,
+            contract_key=contract,
+            contracts=1,
+            price=1,
+            currency="USD",
+            source="history",
+            multiplier=100,
+            target_lot_id="lot-a",
+            raw_payload={
+                "futu_account_id": "1001",
+                "source_deal_id": "legacy-close-1",
+                "close_target_account": "lx",
+            },
+        )
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("historical-close-with-null-account",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        payload["account"] = None
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "historical-close-with-null-account",
+            ),
+        )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+
+    assert inventory["review_count"] == 0
+    assert inventory["exact_count"] == 1
+    assert inventory["rows"][0]["target_key"] == (
+        "close:futu:lx:1001:legacy-close-1"
+    )
+
+
+def test_historical_broker_close_keeps_account_conflict_in_review(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    contract = _open_event().contract_key
+    assert repo.upsert_trade_event(
+        TradeEvent(
+            event_id="historical-close-with-account-conflict",
+            event_type="close",
+            event_time_ms=1_800_000_000_000,
+            contract_key=contract,
+            contracts=1,
+            price=1,
+            currency="USD",
+            source="history",
+            multiplier=100,
+            target_lot_id="lot-a",
+            raw_payload={
+                "futu_account_id": "1001",
+                "source_deal_id": "legacy-close-2",
+                "close_target_account": "lx",
+            },
+        )
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("historical-close-with-account-conflict",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        payload["account"] = "sy"
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "historical-close-with-account-conflict",
+            ),
+        )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+
+    assert inventory["exact_count"] == 0
+    assert inventory["review_count"] == 1
+    assert inventory["rows"][0]["review_reason_codes"] == [
+        "canonical_broker_deal_key_missing"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("event_id", "source_type"),
+    [
+        ("manual-close-history", "manual_trade_event"),
+        ("manual-repair-history", "system_trade_event"),
+    ],
+)
+def test_internal_non_broker_close_is_not_a_migration_target(
+    tmp_path: Path,
+    event_id: str,
+    source_type: str,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    assert repo.upsert_trade_event(
+        TradeEvent(
+            event_id=event_id,
+            event_type="close",
+            event_time_ms=1_800_000_000_000,
+            contract_key=_open_event().contract_key,
+            contracts=1,
+            price=1,
+            currency="USD",
+            source="history",
+            multiplier=100,
+            target_lot_id="lot-a",
+            raw_payload={"source_type": source_type},
+        )
+    )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+
+    assert inventory["row_count"] == 0
+    assert inventory["review_count"] == 0
+
+
+def test_partial_or_unknown_broker_close_stays_in_review(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    contract = _open_event().contract_key
+    for event_id, raw_payload in (
+        (
+            "manual-close-with-partial-broker-identity",
+            {
+                "source_type": "manual_trade_event",
+                "futu_account_id": "1001",
+            },
+        ),
+        ("unknown-close", {"source_type": "unknown_history"}),
+    ):
+        assert repo.upsert_trade_event(
+            TradeEvent(
+                event_id=event_id,
+                event_type="close",
+                event_time_ms=1_800_000_000_000,
+                contract_key=contract,
+                contracts=1,
+                price=1,
+                currency="USD",
+                source="history",
+                multiplier=100,
+                target_lot_id=f"lot-{event_id}",
+                raw_payload=raw_payload,
+            )
+        )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+
+    assert inventory["exact_count"] == 0
+    assert inventory["review_count"] == 2
+    assert {
+        item["target_key"] for item in inventory["rows"]
+    } == {
+        "normal-close-review:"
+        "manual-close-with-partial-broker-identity",
+        "normal-close-review:unknown-close",
+    }
+
+
+def test_voided_historical_broker_close_is_not_a_migration_target(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    contract = _open_event().contract_key
+    assert repo.upsert_trade_event(
+        TradeEvent(
+            event_id="voided-broker-close",
+            event_type="close",
+            event_time_ms=1_800_000_000_000,
+            contract_key=contract,
+            contracts=1,
+            price=1,
+            currency="USD",
+            source="history",
+            multiplier=100,
+            target_lot_id="lot-a",
+            raw_payload={
+                "futu_account_id": "1001",
+                "source_deal_id": "voided-close-1",
+            },
+        )
+    )
+    assert repo.upsert_trade_event(
+        TradeEvent(
+            event_id="void-broker-close",
+            event_type="void",
+            event_time_ms=1_800_000_000_001,
+            contract_key=contract,
+            contracts=0,
+            price=0,
+            currency="USD",
+            source="history",
+            multiplier=100,
+            target_event_id="voided-broker-close",
+        )
+    )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+
+    assert inventory["row_count"] == 0
+    assert inventory["review_count"] == 0
+
+
 def test_migration_inventory_blocks_cross_case_source_owner_ambiguity(
     tmp_path: Path,
 ) -> None:

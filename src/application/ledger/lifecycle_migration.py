@@ -401,7 +401,13 @@ def build_lifecycle_migration_inventory(
         rows,
         existing_claims=claims,
     )
-    rows.extend(_normal_close_inventory_rows(events, notifications))
+    rows.extend(
+        _normal_close_inventory_rows(
+            events,
+            notifications,
+            void_event_ids=set(void_ids),
+        )
+    )
     manifest_body = {
         "schema_version": MIGRATION_SCHEMA,
         "rows": sorted(
@@ -2497,22 +2503,33 @@ def _final_intent(row: dict[str, Any]) -> dict[str, Any]:
 def _normal_close_inventory_rows(
     events: list[dict[str, Any]],
     notifications: list[dict[str, Any]],
+    *,
+    void_event_ids: set[str],
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     review: list[dict[str, Any]] = []
     for event in events:
         if str(event.get("event_type") or "").strip().lower() != "close":
             continue
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id in void_event_ids:
+            continue
         raw = (
             dict(event.get("raw_payload") or {})
             if isinstance(event.get("raw_payload"), dict)
             else {}
         )
-        account = str(event.get("account") or "").strip().lower()
+        account = _unique_normal_close_account(event, raw)
         futu_account_id = str(
             raw.get("futu_account_id") or ""
         ).strip()
         deal_id = str(raw.get("source_deal_id") or "").strip()
+        if (
+            not futu_account_id
+            and not deal_id
+            and _is_internal_non_broker_close(event, raw)
+        ):
+            continue
         if not account or not futu_account_id or not deal_id:
             review.append(event)
             continue
@@ -2593,6 +2610,46 @@ def _normal_close_inventory_rows(
             }
         )
     return rows
+
+
+def _unique_normal_close_account(
+    event: dict[str, Any],
+    raw: dict[str, Any],
+) -> str:
+    contract_key = (
+        dict(event.get("contract_key") or {})
+        if isinstance(event.get("contract_key"), dict)
+        else {}
+    )
+    candidates = {
+        value
+        for item in (
+            event.get("account"),
+            contract_key.get("account"),
+            raw.get("close_target_account"),
+            raw.get("internal_account"),
+        )
+        for value in [str(item or "").strip().lower()]
+        if value
+    }
+    if len(candidates) != 1:
+        return ""
+    return next(iter(candidates))
+
+
+def _is_internal_non_broker_close(
+    event: dict[str, Any],
+    raw: dict[str, Any],
+) -> bool:
+    source_type = str(
+        raw.get("source_type")
+        or event.get("source_type")
+        or ""
+    ).strip().lower()
+    return source_type in {
+        "manual_trade_event",
+        "system_trade_event",
+    }
 
 
 def _mark_source_claim_ambiguities(
