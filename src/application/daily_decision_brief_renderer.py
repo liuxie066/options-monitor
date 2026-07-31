@@ -143,6 +143,7 @@ def build_daily_brief_user_view(
     strategy_failure_labels = _strategy_failure_labels(brief)
     if strategy_failure_labels:
         reminders.append(f"{'、'.join(strategy_failure_labels)} 扫描异常，本轮结果不完整")
+    reminders.extend(_strategy_data_gap_reminders(brief))
     evidence_holds = [
         item
         for item in brief.get("actions") or []
@@ -1213,6 +1214,44 @@ def _strategy_failure_labels(brief: Mapping[str, Any]) -> list[str]:
         if isinstance(item, Mapping) and _lower(item.get("reason")) == "strategy_step_failed"
     }
     return [label for family, label in _STRATEGY_LABELS.items() if family in failed]
+
+
+def _strategy_data_gap_reminders(
+    brief: Mapping[str, Any],
+) -> list[str]:
+    reminders: list[str] = []
+    for item in brief.get("data_gaps") or []:
+        if not isinstance(item, Mapping):
+            continue
+        reason = _lower(item.get("reason"))
+        if (
+            _lower(item.get("scope")) != "strategy"
+            or _lower(item.get("severity")) != "warning"
+            or item.get("actionable") is not False
+        ):
+            continue
+        symbol = _upper(item.get("symbol")) or "相关标的"
+        family = _STRATEGY_LABELS.get(
+            _lower(item.get("strategy_family")),
+            "策略",
+        )
+        if (
+            _lower(item.get("outcome")) == "success_empty"
+            and reason in {"no_expirations", "no_contract_rows"}
+        ):
+            detail = (
+                "本轮未发现可用到期日"
+                if reason == "no_expirations"
+                else "本轮未找到可扫描合约"
+            )
+            reminders.append(
+                f"{symbol} {family}：{detail}，已按零候选完成（非操作建议）"
+            )
+        elif reason == "strategy_status_projection_mismatch":
+            reminders.append(
+                f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
+            )
+    return reminders
 
 
 def _capacity_views(

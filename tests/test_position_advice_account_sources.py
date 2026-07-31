@@ -234,6 +234,57 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
     )
 
 
+def test_account_run_publishes_completed_zero_candidate_source_with_quote_dependency(
+    tmp_path: Path,
+) -> None:
+    state, quotes, quote, snapshot = _account_run_inputs(tmp_path)
+    capture_path = (
+        state
+        / "position_advice_candidate_all_decisions.raw.json"
+    )
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["candidate_decisions"] = []
+    capture["capture_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in capture.items()
+            if key != "capture_hash"
+        }
+    )
+    capture_path.write_text(json.dumps(capture), encoding="utf-8")
+
+    result = publish_account_run_sources(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        required_data_root=quotes,
+        decision_snapshot_reader=lambda: snapshot,
+        completed_at=NOW + timedelta(seconds=3),
+    )
+
+    candidate = next(
+        item
+        for item in result["receipts"]
+        if item["source_kind"] == "candidate_decisions"
+    )
+    validated = validate_source_receipt(
+        candidate["receipt"],
+        producer_root=state,
+        now=NOW + timedelta(seconds=4),
+        expected_source_kind="candidate_decisions",
+    )
+    payload = json.loads(
+        validated["payload_path"].read_text(encoding="utf-8")
+    )
+    assert payload["candidate_decisions"] == []
+    assert payload["candidate_count"] == 0
+    assert payload["quote_snapshot_ids"] == [quote["snapshot_id"]]
+    assert len(validated["dependencies"]) == 1
+    assert validated["dependencies"][0]["source_kind"] == "quotes"
+
+
 def test_default_completion_timestamp_is_captured_after_ledger_observation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

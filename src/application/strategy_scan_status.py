@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.position_advice_source_receipts import sha256_bytes
 from src.infrastructure.io_utils import atomic_write_json
 
@@ -65,6 +66,8 @@ def publish_strategy_scan_status(
     reason: str | None = None,
     snapshot_id: str | None = None,
     receipt_relpath: str | None = None,
+    source_outcome: str | None = None,
+    reason_code: str | None = None,
 ) -> dict[str, Any]:
     status_norm = str(status or "").strip().lower()
     if status_norm not in _TERMINAL:
@@ -73,6 +76,20 @@ def publish_strategy_scan_status(
         raise StrategyScanStatusError("completed status requires candidate_count")
     if status_norm != "completed" and not str(reason or "").strip():
         raise StrategyScanStatusError("non-completed status requires reason")
+    source_outcome_norm = str(source_outcome or "").strip()
+    reason_code_norm = str(reason_code or "").strip()
+    if source_outcome_norm or reason_code_norm:
+        if (
+            status_norm != "completed"
+            or int(candidate_count or 0) != 0
+            or source_outcome_norm != "success_empty"
+            or reason_code_norm not in SUCCESS_EMPTY_REASON_CODES
+            or not str(snapshot_id or "").strip()
+            or not str(receipt_relpath or "").strip()
+        ):
+            raise StrategyScanStatusError(
+                "success-empty strategy status evidence is invalid"
+            )
 
     root = Path(report_dir).resolve()
     artifacts = canonical_strategy_artifacts(
@@ -114,6 +131,9 @@ def publish_strategy_scan_status(
         payload["snapshot_id"] = str(snapshot_id).strip()
     if str(receipt_relpath or "").strip():
         payload["receipt_relpath"] = str(receipt_relpath).strip()
+    if source_outcome_norm:
+        payload["source_outcome"] = source_outcome_norm
+        payload["reason_code"] = reason_code_norm
     path = strategy_status_path(
         report_dir=root,
         symbol=symbol,
@@ -250,6 +270,20 @@ def _validate_status(
         raise StrategyScanStatusError("strategy status identity mismatch")
     if payload.get("status") not in _TERMINAL:
         raise StrategyScanStatusError("strategy status is not terminal")
+    source_outcome = str(payload.get("source_outcome") or "").strip()
+    reason_code = str(payload.get("reason_code") or "").strip()
+    if source_outcome or reason_code:
+        if (
+            payload.get("status") != "completed"
+            or int(payload.get("candidate_count") or 0) != 0
+            or source_outcome != "success_empty"
+            or reason_code not in SUCCESS_EMPTY_REASON_CODES
+            or not str(payload.get("snapshot_id") or "").strip()
+            or not str(payload.get("receipt_relpath") or "").strip()
+        ):
+            raise StrategyScanStatusError(
+                "strategy success-empty evidence is invalid"
+            )
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise StrategyScanStatusError("strategy status artifacts are invalid")

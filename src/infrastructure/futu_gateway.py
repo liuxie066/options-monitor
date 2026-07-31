@@ -75,6 +75,92 @@ class _FutuAPIClient:
             return data
         return result
 
+    @staticmethod
+    def _rows(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                rows = to_dict(orient="records")
+            except TypeError:
+                rows = to_dict()
+            if isinstance(rows, list):
+                return [
+                    dict(item)
+                    for item in rows
+                    if isinstance(item, dict)
+                ]
+            if isinstance(rows, dict):
+                return [dict(rows)]
+        if isinstance(value, list):
+            return [
+                dict(item)
+                for item in value
+                if isinstance(item, dict)
+            ]
+        if isinstance(value, tuple):
+            return [
+                dict(item)
+                for item in value
+                if isinstance(item, dict)
+            ]
+        if isinstance(value, dict):
+            return [dict(value)]
+        return []
+
+    def _query_with_coverage(
+        self,
+        method: Any,
+        *,
+        paginated: bool,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return rows plus explicit coverage evidence for settlement checks."""
+
+        try:
+            import futu
+            ret_ok = futu.RET_OK
+        except Exception:
+            ret_ok = 0
+        query = {
+            key: value
+            for key, value in dict(kwargs or {}).items()
+            if value is not None
+        }
+        rows: list[dict[str, Any]] = []
+        pages = 0
+        page_req_key = query.pop("page_req_key", None)
+        while True:
+            call_kwargs = dict(query)
+            if page_req_key not in (None, ""):
+                call_kwargs["page_req_key"] = page_req_key
+            result = method(**call_kwargs)
+            pages += 1
+            if isinstance(result, tuple) and len(result) >= 2:
+                ret, data = result[0], result[1]
+                if ret not in (ret_ok, 0, None):
+                    raise RuntimeError(data)
+                rows.extend(self._rows(data))
+                next_key = result[2] if len(result) >= 3 else None
+            else:
+                rows.extend(self._rows(result))
+                next_key = None
+            if not paginated or next_key in (None, ""):
+                break
+            if pages >= 100:
+                raise RuntimeError(
+                    "Futu query pagination exceeded 100 pages"
+                )
+            page_req_key = next_key
+        return {
+            "retcode": 0,
+            "rows": rows,
+            "coverage_complete": True,
+            "pagination_complete": True,
+            "page_count": pages,
+        }
+
     def get_option_chain(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().get_option_chain(**kwargs))
 
@@ -105,8 +191,52 @@ class _FutuAPIClient:
             return self._unwrap(trade.deal_list_query(**kwargs))
         raise AttributeError("deal_list_query unavailable")
 
+    def get_history_orders(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "history_order_list_query"):
+            return self._query_with_coverage(
+                trade.history_order_list_query,
+                paginated=True,
+                kwargs=kwargs,
+            )
+        raise AttributeError("history_order_list_query unavailable")
+
+    def get_history_deals(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "history_deal_list_query"):
+            return self._query_with_coverage(
+                trade.history_deal_list_query,
+                paginated=True,
+                kwargs=kwargs,
+            )
+        raise AttributeError("history_deal_list_query unavailable")
+
+    def get_account_cash_flows(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "cash_flow_query"):
+            return self._query_with_coverage(
+                trade.cash_flow_query,
+                paginated=False,
+                kwargs=kwargs,
+            )
+        raise AttributeError("cash_flow_query unavailable")
+
     def get_trading_days(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().request_trading_days(**kwargs))
+
+    def get_positions_with_receipt(self, **kwargs: Any) -> Any:
+        return self._query_with_coverage(
+            self._trade().position_list_query,
+            paginated=False,
+            kwargs=kwargs,
+        )
+
+    def get_trading_days_with_receipt(self, **kwargs: Any) -> Any:
+        return self._query_with_coverage(
+            self._quote().request_trading_days,
+            paginated=False,
+            kwargs=kwargs,
+        )
 
     def get_financials_earnings_price_history(self, **kwargs: Any) -> Any:
         quote = self._quote()
@@ -284,11 +414,57 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_deal_list")
         raise AssertionError("unreachable")
 
+    def get_history_orders(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_history_orders(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_history_orders")
+        raise AssertionError("unreachable")
+
+    def get_history_deals(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_history_deals(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_history_deals")
+        raise AssertionError("unreachable")
+
+    def get_account_cash_flows(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_account_cash_flows(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_account_cash_flows")
+        raise AssertionError("unreachable")
+
     def get_trading_days(self, **kwargs: Any) -> Any:
         try:
             return self.client.get_trading_days(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_trading_days")
+        raise AssertionError("unreachable")
+
+    def get_positions_with_receipt(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_positions_with_receipt(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(
+                exc,
+                action="get_positions_with_receipt",
+            )
+        raise AssertionError("unreachable")
+
+    def get_trading_days_with_receipt(
+        self,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            return self.client.get_trading_days_with_receipt(
+                **kwargs
+            )
+        except Exception as exc:
+            self._raise_mapped(
+                exc,
+                action="get_trading_days_with_receipt",
+            )
         raise AssertionError("unreachable")
 
     def request_history_kline(self, **kwargs: Any) -> dict[str, Any]:

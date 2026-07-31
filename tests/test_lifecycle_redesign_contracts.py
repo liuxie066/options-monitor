@@ -1,0 +1,985 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.option_lifecycle import expiration_observation_start_ms
+from src.application.ledger.lifecycle_migration import (
+    apply_lifecycle_migration_manifest,
+    build_lifecycle_migration_inventory,
+    select_lifecycle_migration_targets,
+)
+from src.application.ledger.notification_outbox import (
+    build_notification_intent,
+)
+from src.application.ledger.repository import (
+    SQLiteOptionPositionsRepository,
+)
+from src.application.ledger.source_consumption import (
+    build_source_consumption_claim,
+)
+from src.application.ledger.writer import persist_trade_event_object
+from src.application.trades.auto_intake import (
+    _lifecycle_delivery_status,
+)
+from src.application.trades.lifecycle_reconciliation import (
+    discover_lifecycle_cases,
+    reconcile_lifecycle_evidence,
+)
+from src.application.trades.lifecycle_outbox import (
+    CLAIM_LEASE_MS,
+    claim_next_notification,
+    complete_notification_attempt,
+    enqueue_notification_intent,
+    mark_notification_send_started,
+    reconcile_unknown_notification,
+    recover_stale_notifications,
+)
+from src.application.trades.close_reason_evidence import (
+    build_lifecycle_timing_policy,
+)
+from src.application.trades.manual_lifecycle_resolution import (
+    resolve_lifecycle_manually,
+)
+
+
+EXPIRATION_YMD = "2026-08-21"
+
+
+def _open_event() -> TradeEvent:
+    contract = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd=EXPIRATION_YMD,
+    )
+    return TradeEvent(
+        event_id="open-1",
+        event_type="open",
+        event_time_ms=1_700_000_000_000,
+        contract_key=contract,
+        contracts=1,
+        price=2,
+        currency="USD",
+        source="test",
+        multiplier=100,
+        lot_id="lot-1",
+        raw_payload={
+            "fields": {
+                "broker": "futu",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "contracts": 1,
+                "contracts_open": 1,
+                "contracts_closed": 0,
+                "currency": "USD",
+                "strike": 100,
+                "expiration_ymd": EXPIRATION_YMD,
+                "multiplier": 100,
+            }
+        },
+    )
+
+
+def _case_with_option_anchor(
+    tmp_path: Path,
+    *,
+    bind_timing: bool = True,
+) -> tuple[SQLiteOptionPositionsRepository, str, int]:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    persist_trade_event_object(repo, _open_event())
+    observed_at_ms = expiration_observation_start_ms(
+        EXPIRATION_YMD,
+        "US",
+    )
+    assert observed_at_ms is not None
+    case_id = discover_lifecycle_cases(
+        repo,
+        account="lx",
+        observed_at_ms=observed_at_ms,
+    )["created_case_ids"][0]
+    option_source = "futu:lx:1001:option-close-1"
+    option_evidence = {
+        "evidence_id": "option-anchor-1",
+        "case_id": case_id,
+        "source_type": "futu_broker_deal",
+        "source_event_id": option_source,
+        "evidence_type": "option_zero_price_close",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "price": 0,
+        "event_time_ms": observed_at_ms,
+        "received_at_ms": observed_at_ms + 100,
+    }
+    assert repo.insert_trade_lifecycle_evidence_once(
+        option_evidence
+    )
+    assert repo.bind_trade_lifecycle_case_futu_account_once(
+        case_id=case_id,
+        futu_account_id="1001",
+    )
+    assert repo.insert_trade_lifecycle_source_consumption_once(
+        build_source_consumption_claim(
+            source_key=option_source,
+            case_id=case_id,
+            owner_evidence_id="option-anchor-1",
+            source_role="option_anchor",
+            economic_payload=option_evidence,
+        )
+    )
+    if bind_timing:
+        assert repo.insert_trade_lifecycle_timing_policy_once(
+            build_lifecycle_timing_policy(
+            case_id=case_id,
+            market="US",
+            expiration_ymd=EXPIRATION_YMD,
+            contract_metadata={
+                "settlement_style": "physical",
+                "underlying_security_type": "equity",
+                "last_trade_cutoff_ms": observed_at_ms - 1,
+                "last_trade_cutoff_source": (
+                    "instrument_policy_registry"
+                ),
+            },
+            trading_days=[
+                {"date": "2026-08-21", "type": "TRADING"},
+                {"date": "2026-08-24", "type": "TRADING"},
+                {"date": "2026-08-25", "type": "TRADING"},
+            ],
+            calendar_source="test_calendar",
+            calendar_observed_at_ms=observed_at_ms,
+            )
+        )
+    return repo, case_id, observed_at_ms
+
+
+def test_source_claim_hash_ignores_push_poll_transport() -> None:
+    base = {
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "price": 0,
+        "event_time_ms": 1_800_000_000_000,
+    }
+    push = build_source_consumption_claim(
+        source_key="futu:lx:1001:deal-1",
+        case_id="case-1",
+        owner_evidence_id="evidence-1",
+        source_role="option_anchor",
+        economic_payload={
+            **base,
+            "_trade_intake_source": {"transport": "push"},
+        },
+    )
+    poll = build_source_consumption_claim(
+        source_key="futu:lx:1001:deal-1",
+        case_id="case-1",
+        owner_evidence_id="evidence-1",
+        source_role="option_anchor",
+        economic_payload={
+            **base,
+            "_trade_intake_source": {"transport": "poll"},
+        },
+    )
+    changed = build_source_consumption_claim(
+        source_key="futu:lx:1001:deal-1",
+        case_id="case-1",
+        owner_evidence_id="evidence-1",
+        source_role="option_anchor",
+        economic_payload={**base, "price": 1},
+    )
+
+    assert push == poll
+    assert (
+        push["source_payload_hash"]
+        != changed["source_payload_hash"]
+    )
+
+
+def test_manual_correction_is_atomic_void_aware_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, observed_at_ms = _case_with_option_anchor(
+        tmp_path
+    )
+    expiry = reconcile_lifecycle_evidence(
+        repo,
+        evidence={
+            "evidence_id": "expiry-1",
+            "source_type": "broker_settlement_observation",
+            "source_event_id": "observation-1",
+            "evidence_type": "expire_close",
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 100,
+            "expiration_ymd": EXPIRATION_YMD,
+            "contracts": 1,
+            "event_time_ms": observed_at_ms + 1,
+            "target_lot_id": "lot-1",
+        },
+        case_id=case_id,
+        apply_changes=True,
+        now_ms=observed_at_ms + 1,
+    )
+    assert expiry.status == "applied"
+    expire_event_id = str(
+        expiry.allocation_plan[0]["canonical_terminal_event_id"]
+    )
+    stock_source = "futu:lx:1001:stock-deal-1"
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "stock-evidence-1",
+            "case_id": None,
+            "source_type": "futu_broker_deal",
+            "source_event_id": stock_source,
+            "evidence_type": "stock_settlement_leg",
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "NVDA",
+            "side": "buy",
+            "stock_qty": 100,
+            "stock_price": 100,
+            "trade_time_ms": observed_at_ms + 2,
+            "order_id": "order-stock-1",
+            "raw": {
+                "futu_account_id": "1001",
+                "symbol": "NVDA",
+                "side": "buy",
+                "contracts": 100,
+                "price": 100,
+                "trade_time_ms": observed_at_ms + 2,
+            },
+        }
+    )
+    current_revision = int(
+        (
+            repo.get_trade_lifecycle_case(case_id)[
+                "derived_summary"
+            ]
+        )["resolution_revision"]
+    )
+
+    preview = resolve_lifecycle_manually(
+        repo,
+        case_id=case_id,
+        expected_revision=current_revision,
+        reason="assignment",
+        broker_ref=stock_source,
+        note="late broker assignment evidence",
+        void_terminal_event_id=expire_event_id,
+        apply_changes=False,
+        now_ms=observed_at_ms + 3,
+    )
+    assert preview["status"] == "dry_run"
+    assert repo.get_position_lot_fields("lot-1")[
+        "contracts_open"
+    ] == 0
+
+    applied = resolve_lifecycle_manually(
+        repo,
+        case_id=case_id,
+        expected_revision=current_revision,
+        reason="assignment",
+        broker_ref=stock_source,
+        note="late broker assignment evidence",
+        void_terminal_event_id=expire_event_id,
+        apply_changes=True,
+        now_ms=observed_at_ms + 3,
+    )
+    assert applied["status"] == "applied"
+    assert applied["next_revision"] == current_revision + 1
+    assert repo.get_position_lot_fields("lot-1")[
+        "contracts_open"
+    ] == 0
+    allocations = repo.list_trade_lifecycle_allocations(
+        case_id=case_id
+    )
+    assert {item["terminal_type"] for item in allocations} == {
+        "expire_close",
+        "assignment",
+    }
+    void_targets = {
+        str(item.get("target_event_id") or "")
+        for item in repo.list_trade_events()
+        if item.get("event_type") == "void"
+    }
+    assert expire_event_id in void_targets
+    correction_rows = [
+        item
+        for item in repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        )
+        if item["transition_type"] == "resolution_corrected"
+    ]
+    assert len(correction_rows) == 1
+    notification_count = len(
+        repo.list_trade_lifecycle_notifications(case_id=case_id)
+    )
+
+    repeated = resolve_lifecycle_manually(
+        repo,
+        case_id=case_id,
+        expected_revision=current_revision,
+        reason="assignment",
+        broker_ref=stock_source,
+        note="late broker assignment evidence",
+        void_terminal_event_id=expire_event_id,
+        apply_changes=True,
+        now_ms=observed_at_ms + 3,
+    )
+    assert repeated["status"] == "idempotent"
+    assert len(
+        repo.list_trade_lifecycle_notifications(case_id=case_id)
+    ) == notification_count
+
+
+def test_migration_manifest_requires_explicit_selection_and_replays_noop(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _observed_at_ms = _case_with_option_anchor(
+        tmp_path
+    )
+    inventory = build_lifecycle_migration_inventory(repo)
+    target_key = f"lifecycle:{case_id}"
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[target_key],
+    )
+
+    dry_run = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=False,
+    )
+    assert dry_run["would_apply_target_keys"] == [target_key]
+    assert repo.list_trade_lifecycle_migration_receipts() == []
+
+    applied = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+    assert applied["applied_count"] == 1
+    suppressed = [
+        item
+        for item in repo.list_trade_lifecycle_notifications(
+            case_id=case_id
+        )
+        if item["status"] == "suppressed"
+    ]
+    assert len(suppressed) == 1
+
+    replay = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+    assert replay["applied_count"] == 0
+    assert replay["existing_count"] == 1
+    assert len(
+        repo.list_trade_lifecycle_migration_receipts()
+    ) == 1
+
+
+def test_migration_inventory_blocks_v2_without_timing_policy(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _observed_at_ms = _case_with_option_anchor(
+        tmp_path,
+        bind_timing=False,
+    )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+
+    assert row["mapping_status"] == "needs_review"
+    assert (
+        "lifecycle_timing_policy_missing"
+        in row["review_reason_codes"]
+    )
+
+
+def test_migration_upgrades_unique_legacy_case_with_bridge(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    persist_trade_event_object(repo, _open_event())
+    observed_at_ms = expiration_observation_start_ms(
+        EXPIRATION_YMD,
+        "US",
+    )
+    assert observed_at_ms is not None
+    contract = ContractKey.from_values(
+        broker="futu",
+        account="lx",
+        underlying_symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100,
+        expiration_ymd=EXPIRATION_YMD,
+    )
+    legacy_id = "legacy-case-1"
+    assert repo.upsert_trade_lifecycle_case(
+        {
+            "schema_version": "lifecycle_case.v1",
+            "case_id": legacy_id,
+            "case_key": legacy_id,
+            "account": "lx",
+            "broker": "futu",
+            "contract_key": contract.position_key,
+            "position_side": "short",
+            "expiration_ymd": EXPIRATION_YMD,
+            "market": "US",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "strike": 100,
+            "currency": "USD",
+            "multiplier": 100,
+            "target_contracts_by_lot": {"lot-1": 1},
+            "status": "waiting_settlement_evidence",
+        }
+    )
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "legacy-anchor-1",
+            "case_id": legacy_id,
+            "source_type": "futu_broker_deal",
+            "source_event_id": (
+                "futu:lx:1001:legacy-option-close-1"
+            ),
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 100,
+            "expiration_ymd": EXPIRATION_YMD,
+            "contracts": 1,
+            "price": 0,
+            "event_time_ms": observed_at_ms,
+        }
+    )
+    legacy_policy = build_lifecycle_timing_policy(
+        case_id=legacy_id,
+        market="US",
+        expiration_ymd=EXPIRATION_YMD,
+        contract_metadata={
+            "settlement_style": "physical",
+            "underlying_security_type": "equity",
+            "last_trade_cutoff_ms": observed_at_ms - 1,
+            "last_trade_cutoff_source": (
+                "instrument_policy_registry"
+            ),
+        },
+        trading_days=[
+            {"date": "2026-08-21", "type": "TRADING"},
+            {"date": "2026-08-24", "type": "TRADING"},
+            {"date": "2026-08-25", "type": "TRADING"},
+        ],
+        calendar_source="test_calendar",
+        calendar_observed_at_ms=observed_at_ms,
+    )
+    assert repo.insert_trade_lifecycle_timing_policy_once(
+        legacy_policy
+    )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+    target_key = f"lifecycle:{legacy_id}"
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == target_key
+    )
+    assert row["mapping_status"] == "exact"
+    canonical_case_id = row["legacy_upgrade"][
+        "canonical_case"
+    ]["case_id"]
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[target_key],
+    )
+    applied = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+
+    assert applied["applied_count"] == 1
+    legacy = repo.get_trade_lifecycle_case(legacy_id)
+    assert legacy is not None
+    assert legacy["status"] == "superseded"
+    assert legacy["superseded_by_case_id"] == canonical_case_id
+    canonical = repo.get_trade_lifecycle_case(
+        canonical_case_id
+    )
+    assert canonical is not None
+    assert canonical["schema_version"] == "lifecycle_case.v2"
+    assert canonical["futu_account_id"] == "1001"
+    assert repo.get_trade_lifecycle_timing_policy(
+        canonical_case_id
+    ) is not None
+    bridges = repo.list_trade_lifecycle_evidence(
+        case_id=canonical_case_id
+    )
+    assert [item["evidence_type"] for item in bridges] == [
+        "migration_bridge"
+    ]
+
+
+def test_outbox_stale_boundaries_and_resend_revision_split(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+
+    def _intent(suffix: str) -> dict:
+        return build_notification_intent(
+            case_id=f"case-{suffix}",
+            transition_type="resolution_confirmed",
+            resolution_revision=7,
+            transition_key=f"lifecycle:case-{suffix}:final",
+            state_fingerprint=f"state-{suffix}",
+            payload={
+                "account": "lx",
+                "case_id": f"case-{suffix}",
+            },
+        )
+
+    first = _intent("claimed")
+    enqueue_notification_intent(repo, first)
+    first_due_at = int(
+        repo.get_trade_lifecycle_notification(
+            first["outbox_id"]
+        )["next_attempt_at_ms"]
+    )
+    claimed = claim_next_notification(
+        repo,
+        now_ms=first_due_at,
+        claim_id="claim-1",
+    )
+    assert claimed is not None
+    recovered = recover_stale_notifications(
+        repo,
+        now_ms=first_due_at + CLAIM_LEASE_MS + 1,
+    )
+    assert recovered["reclaimed_claimed_count"] == 1
+    assert repo.get_trade_lifecycle_notification(
+        first["outbox_id"]
+    )["status"] == "pending"
+
+    second_claim_at = first_due_at + CLAIM_LEASE_MS + 2
+    claimed_second = claim_next_notification(
+        repo,
+        now_ms=second_claim_at,
+        claim_id="claim-2",
+        account="lx",
+    )
+    assert claimed_second is not None
+    mark_notification_send_started(
+        repo,
+        outbox_id=claimed_second["outbox_id"],
+        claim_id="claim-2",
+        now_ms=second_claim_at,
+    )
+    frozen = recover_stale_notifications(
+        repo,
+        now_ms=second_claim_at + CLAIM_LEASE_MS + 1,
+    )
+    assert frozen["frozen_unknown_count"] == 1
+    unknown = repo.get_trade_lifecycle_notification(
+        claimed_second["outbox_id"]
+    )
+    assert unknown["status"] == "unknown"
+
+    resend = reconcile_unknown_notification(
+        repo,
+        outbox_id=unknown["outbox_id"],
+        action="resend",
+        broker_ref="operator-check-1",
+        note="provider acceptance could not be proven",
+        apply_changes=True,
+        now_ms=3_000,
+    )
+    compensating = resend["compensating_outbox"]
+    assert compensating["resolution_revision"] == 7
+    assert compensating["delivery_revision"] == 1
+    assert (
+        compensating["state_fingerprint"]
+        == unknown["state_fingerprint"]
+    )
+    assert repo.get_trade_lifecycle_notification(
+        unknown["outbox_id"]
+    )["status"] == "unknown"
+
+
+def test_accepted_outbox_must_become_unknown_before_resend(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    intent = build_notification_intent(
+        case_id="case-accepted",
+        transition_type="resolution_confirmed",
+        resolution_revision=4,
+        transition_key="lifecycle:case-accepted:final",
+        state_fingerprint="state-accepted",
+        payload={"account": "lx", "case_id": "case-accepted"},
+    )
+    enqueue_notification_intent(repo, intent)
+    due_at = int(
+        repo.get_trade_lifecycle_notification(
+            intent["outbox_id"]
+        )["next_attempt_at_ms"]
+    )
+    claimed = claim_next_notification(
+        repo,
+        now_ms=due_at,
+        claim_id="accepted-claim",
+    )
+    assert claimed is not None
+    mark_notification_send_started(
+        repo,
+        outbox_id=intent["outbox_id"],
+        claim_id="accepted-claim",
+        now_ms=due_at,
+    )
+    complete_notification_attempt(
+        repo,
+        outbox_id=intent["outbox_id"],
+        claim_id="accepted-claim",
+        outcome="accepted",
+        now_ms=due_at + 1,
+        provider_message_id="provider-message-1",
+        provider_receipt={
+            "status": "accepted",
+            "request_id": "request-1",
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="notification reconciliation action is invalid",
+    ):
+        reconcile_unknown_notification(
+            repo,
+            outbox_id=intent["outbox_id"],
+            action="resend",
+            broker_ref="provider-check-1",
+            note="accepted is not eligible for direct resend",
+            apply_changes=True,
+            now_ms=due_at + 2,
+        )
+
+    reconciled = reconcile_unknown_notification(
+        repo,
+        outbox_id=intent["outbox_id"],
+        action="unknown",
+        broker_ref="provider-check-2",
+        note="provider could not confirm final delivery",
+        apply_changes=True,
+        now_ms=due_at + 3,
+    )
+    row = reconciled["outbox"]
+    assert row["status"] == "unknown"
+    assert row["provider_message_id"] == "provider-message-1"
+    assert row["provider_receipt"]["action"] == "unknown"
+    assert row["provider_receipt"][
+        "original_provider_receipt"
+    ] == {
+        "status": "accepted",
+        "request_id": "request-1",
+    }
+
+
+def test_historical_split_normal_close_seeds_one_final_slot(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    contract = _open_event().contract_key
+    for suffix, lot_id in (("a", "lot-a"), ("b", "lot-b")):
+        assert repo.upsert_trade_event(
+            TradeEvent(
+                event_id=f"historical-close-{suffix}",
+                event_type="close",
+                event_time_ms=1_800_000_000_000,
+                contract_key=contract,
+                contracts=1,
+                price=1,
+                currency="USD",
+                source="history",
+                multiplier=100,
+                target_lot_id=lot_id,
+                raw_payload={
+                    "futu_account_id": "1001",
+                    "source_deal_id": "split-close-1",
+                    "target_lot_id": lot_id,
+                },
+            )
+        )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+    target_key = "close:futu:lx:1001:split-close-1"
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == target_key
+    )
+    assert row["mapping_status"] == "exact"
+    assert row["split_event_count"] == 2
+    assert (
+        row["transition_key"]
+        == f"{target_key}:resolution_confirmed"
+    )
+
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[target_key],
+    )
+    applied = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+    assert applied["applied_count"] == 1
+    rows = repo.list_trade_lifecycle_notifications(
+        case_id=target_key
+    )
+    assert len(rows) == 1
+    assert rows[0]["status"] == "suppressed"
+    assert rows[0]["transition_type"] == "resolution_confirmed"
+    assert rows[0]["transition_key"] == (
+        f"{target_key}:resolution_confirmed"
+    )
+
+
+def test_migration_inventory_blocks_cross_case_source_owner_ambiguity(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    source_key = "futu:lx:1001:ambiguous-deal-1"
+    for suffix, strike in (("a", 100), ("b", 101)):
+        case_id = f"case-{suffix}"
+        assert repo.insert_trade_lifecycle_case_once(
+            {
+                "schema_version": "lifecycle_case.v2",
+                "case_id": case_id,
+                "case_key": f"case-key-{suffix}",
+                "account": "lx",
+                "broker": "futu",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "position_side": "short",
+                "strike": strike,
+                "expiration_ymd": EXPIRATION_YMD,
+                "contract_key": f"contract-{suffix}",
+                "status": "closure_observed",
+                "decision_type": "option_expiry",
+                "target_lot_ids": [f"lot-{suffix}"],
+                "target_contracts_by_lot": {
+                    f"lot-{suffix}": 1
+                },
+                "observation_start_ms": 1,
+                "pending_until_ms": None,
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+            }
+        )
+        evidence_type = (
+            "option_zero_price_close"
+            if suffix == "a"
+            else "stock_settlement_leg"
+        )
+        assert repo.insert_trade_lifecycle_evidence_once(
+            {
+                "evidence_id": f"evidence-{suffix}",
+                "case_id": case_id,
+                "source_type": "futu_broker_deal",
+                "source_event_id": source_key,
+                "evidence_type": evidence_type,
+                "account": "lx",
+                "futu_account_id": "1001",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "position_side": "short",
+                "strike": strike,
+                "expiration_ymd": EXPIRATION_YMD,
+                "contracts": 1,
+                "shares": 100,
+                "price": 0,
+                "event_time_ms": 1,
+                "target_contracts_by_lot": {
+                    f"lot-{suffix}": 1
+                },
+            }
+        )
+
+    inventory = build_lifecycle_migration_inventory(repo)
+    lifecycle_rows = [
+        item
+        for item in inventory["rows"]
+        if item["target_key"] in {
+            "lifecycle:case-a",
+            "lifecycle:case-b",
+        }
+    ]
+    assert len(lifecycle_rows) == 2
+    assert all(
+        item["mapping_status"] == "needs_review"
+        for item in lifecycle_rows
+    )
+    assert all(
+        "source_claim_owner_ambiguous"
+        in item["review_reason_codes"]
+        for item in lifecycle_rows
+    )
+
+
+def test_outbox_v1_schema_upgrade_preserves_delivery_state(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE trade_lifecycle_notification_outbox (
+              outbox_id TEXT PRIMARY KEY,
+              case_id TEXT NOT NULL,
+              transition_type TEXT NOT NULL,
+              resolution_revision INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              payload_hash TEXT NOT NULL,
+              provider_message_id TEXT,
+              claim_id TEXT,
+              claimed_at_ms INTEGER,
+              send_started_at_ms INTEGER,
+              attempt_count INTEGER NOT NULL DEFAULT 0,
+              next_attempt_at_ms INTEGER,
+              last_error TEXT,
+              provider_receipt_json TEXT,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              confirmed_at_ms INTEGER,
+              UNIQUE(case_id, transition_type, resolution_revision)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_lifecycle_notification_outbox (
+              outbox_id, case_id, transition_type,
+              resolution_revision, status, payload_json,
+              payload_hash, provider_message_id, claim_id,
+              claimed_at_ms, send_started_at_ms, attempt_count,
+              next_attempt_at_ms, last_error,
+              provider_receipt_json, created_at_ms,
+              updated_at_ms, confirmed_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-outbox-1",
+                "case-legacy",
+                "resolution_confirmed",
+                3,
+                "accepted",
+                json.dumps({"account": "lx"}),
+                "legacy-payload-hash",
+                "provider-1",
+                "claim-1",
+                10,
+                11,
+                2,
+                None,
+                None,
+                json.dumps({"accepted": True}),
+                12,
+                13,
+                None,
+            ),
+        )
+
+    repo = SQLiteOptionPositionsRepository(db_path)
+    row = repo.get_trade_lifecycle_notification(
+        "legacy-outbox-1"
+    )
+    assert row is not None
+    assert row["status"] == "accepted"
+    assert row["attempt_count"] == 2
+    assert row["provider_message_id"] == "provider-1"
+    assert row["provider_receipt"] == {"accepted": True}
+    assert row["delivery_revision"] == 0
+    assert row["transition_key"] == "legacy:legacy-outbox-1"
+    assert row["state_fingerprint"] == "legacy-payload-hash"
+
+
+def test_lifecycle_delivery_status_separates_case_and_outbox_states(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, observed_at_ms = _case_with_option_anchor(
+        tmp_path
+    )
+    lifecycle_case = repo.get_trade_lifecycle_case(case_id)
+    assert lifecycle_case is not None
+    lifecycle_case["status"] = "waiting_settlement_evidence"
+    lifecycle_case["derived_summary"] = {
+        "reason_state": "cause_pending",
+        "settlement_deadline_ms": observed_at_ms + 500,
+    }
+    assert repo.upsert_trade_lifecycle_case(lifecycle_case)
+    intent = build_notification_intent(
+        case_id=case_id,
+        transition_type="option_leg_closed",
+        resolution_revision=1,
+        transition_key=f"lifecycle:{case_id}:option_leg_closed",
+        state_fingerprint="status-test-state",
+        payload={"account": "lx", "case_id": case_id},
+    )
+    assert repo.insert_trade_lifecycle_notification_once(intent)
+
+    status = _lifecycle_delivery_status(
+        repo,
+        account="lx",
+        now_ms=observed_at_ms + 1_000,
+    )
+    assert status["reason_state_counts"]["cause_pending"] == 1
+    assert status["overdue_pending_count"] == 1
+    assert status["oldest_pending_case"]["case_id"] == case_id
+    assert status["outbox_status_counts"]["pending"] == 1
+    assert status["oldest_unknown_outbox"] is None

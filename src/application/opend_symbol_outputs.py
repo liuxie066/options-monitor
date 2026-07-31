@@ -25,6 +25,9 @@ from src.application.close_advice_quote_cache import publish_quote_cache_metadat
 
 
 REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v1"
+SUCCESS_EMPTY_REASON_CODES = frozenset(
+    {"no_expirations", "no_contract_rows"}
+)
 
 
 REQUIRED_DATA_COLUMNS = [
@@ -54,6 +57,30 @@ REQUIRED_DATA_COLUMNS = [
 ]
 
 
+def validate_required_data_source_outcome(
+    *,
+    rows: list[Any],
+    source_outcome: object,
+    reason_code: object,
+    subject: str,
+) -> tuple[str, str | None]:
+    """Normalize one complete required-data result or reject contradictory evidence."""
+
+    outcome = str(source_outcome or "").strip().lower()
+    reason = str(reason_code or "").strip().lower() or None
+    if rows:
+        if outcome not in {"", "success_rows"} or reason is not None:
+            raise PositionAdviceSourceError(
+                f"non-success required-data {subject} contains rows"
+            )
+        return outcome or "success_rows", None
+    if outcome != "success_empty" or reason not in SUCCESS_EMPTY_REASON_CODES:
+        raise PositionAdviceSourceError(
+            f"zero-row required-data {subject} lacks success-empty evidence"
+        )
+    return outcome, reason
+
+
 def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries: int = 400) -> None:
     """Append payload into a bounded JSON list file. Keeps last max_entries records."""
     try:
@@ -70,7 +97,7 @@ def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries
         if len(arr) > int(max_entries):
             arr = arr[-int(max_entries) :]
         metrics_path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception:
+    except Exception as exc:
         pass
 
 
@@ -103,8 +130,20 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
             "missing_option_type": int(st.missing_option_type),
         }
         payload["meta"] = meta
-    except Exception:
-        pass
+    except Exception as exc:
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.update(
+            {
+                "status": "error",
+                "source_outcome": "parse_error",
+                "error_code": "ROW_VALIDATION_ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        payload["meta"] = meta
+        payload["rows"] = []
 
     atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
 
@@ -188,6 +227,17 @@ def publish_required_data_quote_snapshot(
         raise PositionAdviceSourceError(
             "incomplete required-data payload cannot produce a quote receipt"
         )
+    rows = raw_payload.get("rows") if isinstance(raw_payload, dict) else None
+    if not isinstance(rows, list):
+        raise PositionAdviceSourceError(
+            "required-data rows are invalid"
+        )
+    validate_required_data_source_outcome(
+        rows=rows,
+        source_outcome=(meta or {}).get("source_outcome"),
+        reason_code=(meta or {}).get("reason_code"),
+        subject="payload",
+    )
 
     symbol_norm = str(symbol or "").strip().upper()
     run_id = str(producer_run_id or "").strip()
@@ -437,9 +487,11 @@ def resolve_exact_fresh_required_data_quote_receipt(
 __all__ = [
     "REQUIRED_DATA_COLUMNS",
     "REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA",
+    "SUCCESS_EMPTY_REASON_CODES",
     "append_metrics_json",
     "find_fresh_required_data_quote_receipts",
     "publish_required_data_quote_snapshot",
     "resolve_exact_fresh_required_data_quote_receipt",
     "save_outputs",
+    "validate_required_data_source_outcome",
 ]

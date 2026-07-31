@@ -890,6 +890,15 @@ def _tcom_required_rows() -> list[dict[str, object]]:
     return rows
 
 
+def _plan_semantics(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    payload = plan.to_debug_dict()
+    discovery = payload.get("expiration_discovery")
+    if isinstance(discovery, dict):
+        discovery.pop("observed_at_utc", None)
+        discovery.pop("completed_at_utc", None)
+    return payload
+
+
 @pytest.mark.parametrize("account_order", [("lx", "sy"), ("sy", "lx")])
 def test_tcom_shared_required_data_is_account_order_invariant(
     monkeypatch: pytest.MonkeyPatch,
@@ -926,7 +935,7 @@ def test_tcom_shared_required_data_is_account_order_invariant(
 
     for account in account_order:
         plan = _build_tcom_put_plan(required_data_dir=shared_required, account=account)
-        plans[account] = plan.to_debug_dict()
+        plans[account] = _plan_semantics(plan)
         steps.ensure_required_data(
             py="python3.12",
             base=tmp_path,
@@ -989,12 +998,13 @@ def test_tcom_concurrent_plan_construction_is_account_invariant(
         run_account_fn=lambda account: _build_tcom_put_plan(
             required_data_dir=tmp_path / "shared_required_data",
             account=account,
-        ).to_debug_dict(),
+        ),
     )
 
-    assert plans[0] == plans[1]
-    assert plans[0]["side_plans"][0]["min_strike"] == 34.456
-    assert plans[0]["side_plans"][0]["max_strike"] == 43.07
+    plan_semantics = [_plan_semantics(plan) for plan in plans]
+    assert plan_semantics[0] == plan_semantics[1]
+    assert plan_semantics[0]["side_plans"][0]["min_strike"] == 34.456
+    assert plan_semantics[0]["side_plans"][0]["max_strike"] == 43.07
 
 
 def main() -> None:
