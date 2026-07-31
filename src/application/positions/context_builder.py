@@ -27,6 +27,7 @@ from domain.domain.risk_capacity import (
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.ledger.api import (
     RiskPositionView,
+    lifecycle_evidence_facts,
     position_lot_risk_view,
     position_lot_snapshot,
     resolve_position_lot_snapshots,
@@ -367,6 +368,7 @@ def build_lifecycle_read_models_from_decision_snapshot(
         for item in list(snapshot.get("account_lifecycle_allocations") or [])
         if isinstance(item, dict)
     ]
+    void_event_ids = tuple(snapshot.get("effective_void_event_ids") or ())
     lots_by_id = {
         str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
         for item in list(snapshot.get("account_position_lots") or [])
@@ -388,23 +390,17 @@ def build_lifecycle_read_models_from_decision_snapshot(
         case_id = str(lifecycle_case.get("case_id") or "").strip()
         case_allocations = allocations_by_case.get(case_id, [])
         case_evidence = evidence_by_case.get(case_id, [])
+        evidence_facts = lifecycle_evidence_facts(
+            evidence=case_evidence,
+            allocations=case_allocations,
+            void_event_ids=void_event_ids,
+        )
         resolution = resolve_allocations(
             dict(lifecycle_case.get("target_contracts_by_lot") or {}),
             case_allocations,
+            void_event_ids=void_event_ids,
         )
-        allocated_evidence_ids = {
-            str(item.get("evidence_id") or "").strip()
-            for item in case_allocations
-            if str(item.get("evidence_id") or "").strip()
-        }
-        orphan_evidence_ids = sorted(
-            {
-                str(item.get("evidence_id") or "").strip()
-                for item in case_evidence
-                if str(item.get("evidence_id") or "").strip()
-            }
-            - allocated_evidence_ids
-        )
+        orphan_evidence_ids = list(evidence_facts.orphan_evidence_ids)
         quantity_drift = any(
             lot_id not in lots_by_id
             or int(lots_by_id[lot_id].get("contracts_open") or 0)
@@ -433,6 +429,10 @@ def build_lifecycle_read_models_from_decision_snapshot(
                 lifecycle_case.get("target_contracts_by_lot") or {}
             ),
             allocations=case_allocations,
+            void_event_ids=void_event_ids,
+            accepted_option_close_contracts_by_lot=(
+                evidence_facts.reservation_contracts_by_lot
+            ),
             now_ms=now_ms,
             conflict_reason_codes=conflict_reasons,
             orphan_evidence=bool(orphan_evidence_ids),
@@ -448,6 +448,8 @@ def build_lifecycle_read_models_from_decision_snapshot(
                 if orphan_evidence_ids
                 else "missing"
                 if not case_evidence
+                else "closure_observed_cause_pending"
+                if evidence_facts.reservation_evidence_ids
                 else "partial"
                 if any(read_model.remaining_contracts_by_lot.values())
                 else "complete"
@@ -456,7 +458,7 @@ def build_lifecycle_read_models_from_decision_snapshot(
             "pending_until_ms": read_model.pending_until_ms,
             "terminal_event_ids": sorted(
                 str(item.get("canonical_terminal_event_id") or "").strip()
-                for item in case_allocations
+                for item in evidence_facts.effective_allocations
                 if str(item.get("canonical_terminal_event_id") or "").strip()
             ),
             "target_contracts_by_lot": dict(
@@ -467,10 +469,27 @@ def build_lifecycle_read_models_from_decision_snapshot(
             "resolved_contracts_by_terminal_type": (
                 read_model.resolved_contracts_by_terminal_type
             ),
+            "reserved_contracts_by_lot": read_model.reserved_contracts_by_lot,
+            "closure_fact": read_model.closure_fact,
+            "reason_state": read_model.reason_state,
+            "close_reason": read_model.close_reason,
             "allocation_ids": sorted(
                 str(item.get("allocation_id") or "").strip()
-                for item in case_allocations
+                for item in evidence_facts.effective_allocations
                 if str(item.get("allocation_id") or "").strip()
+            ),
+            "voided_terminal_event_ids": sorted(
+                {
+                    str(item.get("canonical_terminal_event_id") or "").strip()
+                    for item in case_allocations
+                    if str(
+                        item.get("canonical_terminal_event_id") or ""
+                    ).strip()
+                    in set(void_event_ids)
+                }
+            ),
+            "reservation_evidence_ids": list(
+                evidence_facts.reservation_evidence_ids
             ),
             "actionable": False,
         }

@@ -7,6 +7,7 @@ from typing import Any
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.bootstrap import load_option_positions_repo
+from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
     require_option_positions_event_write_repo,
@@ -337,6 +338,16 @@ def lifecycle_reconciliation_facts(
         repo,
         case_id=requested_case_id or None,
     )
+    list_events = getattr(candidate, "list_trade_events", None)
+    trade_events = list(list_events() or []) if callable(list_events) else []
+    effective_void_event_ids = sorted(
+        {
+            target
+            for item in trade_events
+            for target in [valid_void_target_event_id(item)]
+            if target
+        }
+    )
     requested_evidence = None
     requested_evidence_id = str(evidence_id or "").strip()
     if requested_evidence_id:
@@ -367,7 +378,7 @@ def lifecycle_reconciliation_facts(
             if isinstance(fields, dict):
                 lot_fields_by_id[lot_id] = dict(fields)
     return {
-        "schema_version": "lifecycle_reconciliation_facts.v2",
+        "schema_version": "lifecycle_reconciliation_facts.v3",
         "cases": [dict(item) for item in cases if isinstance(item, dict)],
         "evidence": [
             dict(item) for item in evidence if isinstance(item, dict)
@@ -377,6 +388,7 @@ def lifecycle_reconciliation_facts(
         ],
         "requested_evidence": requested_evidence,
         "position_lot_fields_by_id": lot_fields_by_id,
+        "effective_void_event_ids": effective_void_event_ids,
     }
 
 

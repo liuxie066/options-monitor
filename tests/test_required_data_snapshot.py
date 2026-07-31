@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -14,10 +15,14 @@ from src.application.opend_symbol_outputs import (
 from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
+    _validate_complete_required_data_bundle,
     resolve_frozen_required_data,
     seal_required_data_snapshot,
 )
 from src.application.required_data_plan_identity import required_data_plan_id
+from src.application.position_advice_source_receipts import (
+    PositionAdviceSourceError,
+)
 
 
 def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
@@ -61,6 +66,45 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
         fetch_policy={"source": "futu"},
         source_observed_at=datetime.now(timezone.utc),
     )
+
+
+def _publish_empty_quote(
+    root: Path,
+    *,
+    run_id: str,
+    symbol: str = "3690.HK",
+) -> str:
+    source_observed_at = (
+        datetime.now(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    payload = {
+        "meta": {
+            "status": "ok",
+            "source_outcome": "success_empty",
+            "reason_code": "no_expirations",
+            "source_observed_at": source_observed_at,
+        },
+        "rows": [],
+    }
+    raw_path, csv_path = save_outputs(
+        root.parent.parent.parent,
+        symbol,
+        payload,
+        output_root=root,
+    )
+    publish_required_data_quote_snapshot(
+        producer_root=root,
+        producer_run_id=run_id,
+        symbol=symbol,
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan={"symbol": symbol},
+        fetch_policy={"source": "futu"},
+        source_observed_at=source_observed_at,
+    )
+    return source_observed_at
 
 
 def _summary(*symbols: str) -> dict:
@@ -128,6 +172,63 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
         path: (path.read_bytes(), path.stat().st_mtime_ns)
         for path in tracked_paths
     } == before
+
+
+def test_sealed_snapshot_accepts_positive_success_empty_evidence(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    observed_at = _publish_empty_quote(root, run_id="run-1")
+
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+
+    assert manifest["status"] == "complete"
+    entry = manifest["symbols"]["3690.HK"]
+    assert entry["status"] == "ready"
+    assert entry["source_outcome"] == "success_empty"
+    assert entry["reason_code"] == "no_expirations"
+    evidence = resolve_frozen_required_data(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        symbol="3690.HK",
+        required_data_root=root,
+    )
+    assert evidence["source_outcome"] == "success_empty"
+    assert evidence["reason_code"] == "no_expirations"
+    assert evidence["source_observed_at"] == observed_at
+
+
+@pytest.mark.parametrize(
+    "source_outcome",
+    ("provider_error", "parse_error", "not_attempted"),
+)
+def test_frozen_bundle_rejects_rows_with_non_success_source_outcome(
+    source_outcome: str,
+) -> None:
+    raw_payload = {
+        "meta": {
+            "status": "ok",
+            "source_outcome": source_outcome,
+            "reason_code": "UPSTREAM_FAILURE",
+        },
+        "rows": [{"symbol": "3690.HK"}],
+    }
+    bundle = {
+        "raw_json_base64": base64.b64encode(
+            json.dumps(raw_payload).encode("utf-8")
+        ).decode("ascii"),
+    }
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match="non-success required-data bundle contains rows",
+    ):
+        _validate_complete_required_data_bundle(bundle)
 
 
 def test_sealed_snapshot_rejects_tampered_csv_and_other_run_receipt(tmp_path: Path) -> None:

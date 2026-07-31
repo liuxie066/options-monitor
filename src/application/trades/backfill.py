@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from src.application.trades.deal_identity import (
     broker_deal_key_from_payload,
+    completed_ledger_deal_ids,
     completed_ledger_deal_keys,
 )
 from src.application.trades.history_backfill import fetch_opend_history_deals
@@ -151,6 +152,15 @@ def run_history_backfill(
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
+        payload = _bind_backfill_payload_to_source(
+            payload,
+            futu_account_ids=futu_account_ids,
+            account_mapping=account_mapping,
+            host=host,
+            port=port,
+            observed_at_utc=started_at,
+            diagnostics=diagnostics,
+        )
         deal_id = payload_deal_id(payload)
         deal_key = broker_deal_key_from_payload(
             payload,
@@ -188,11 +198,47 @@ def run_history_backfill(
                 "payload": payload,
             },
         )
+        if not deal_key:
+            unresolved_count += 1
+            last_result = {
+                "status": "unresolved",
+                "action": None,
+                "reason": "identity_needs_review",
+                "deal_id": deal_id or None,
+                "account": None,
+                "diagnostics": {
+                    "retryable": False,
+                    "identity_status": "identity_needs_review",
+                },
+            }
+            append_trade_intake_audit(
+                audit_path,
+                {
+                    "phase": "backfill_identity_needs_review",
+                    "source": "backfill",
+                    "deal_id": deal_id or None,
+                    "inbox_id": inbox_id,
+                    "reason": "canonical_broker_identity_missing",
+                },
+            )
+            continue
         with lock_context:
             state = load_trade_intake_state(state_path)
-            duplicate_reason = _state_duplicate_reason(state, deal_key)
-            ledger_ids = _ledger_recorded_deal_ids(repo)
-            if duplicate_reason is None and deal_key and deal_key in ledger_ids:
+            duplicate_reason = _state_duplicate_reason(
+                state,
+                deal_key,
+                legacy_deal_id=deal_id,
+            )
+            ledger_keys = _ledger_recorded_deal_keys(repo)
+            legacy_ledger_ids = _ledger_recorded_deal_ids(repo)
+            if (
+                duplicate_reason is None
+                and deal_key
+                and (
+                    deal_key in ledger_keys
+                    or deal_id in legacy_ledger_ids
+                )
+            ):
                 duplicate_reason = "ledger_event_already_recorded"
                 state = _record_ledger_duplicate_state(
                     state=state,
@@ -469,10 +515,20 @@ def _history_query_complete(
     return not expected or expected.issubset(successful)
 
 
-def _state_duplicate_reason(state: dict[str, Any], deal_id: str) -> str | None:
+def _state_duplicate_reason(
+    state: dict[str, Any],
+    deal_id: str,
+    *,
+    legacy_deal_id: str | None = None,
+) -> str | None:
     if is_retryable_unresolved_deal(state, deal_id):
         return None
     entry = lookup_deal_state_entry(state, deal_id)
+    legacy_key = str(legacy_deal_id or "").strip()
+    if entry is None and legacy_key and legacy_key != deal_id:
+        if is_retryable_unresolved_deal(state, legacy_key):
+            return None
+        entry = lookup_deal_state_entry(state, legacy_key)
     if entry is None:
         return None
     bucket, _payload = entry
@@ -505,13 +561,91 @@ def _record_ledger_duplicate_state(
     return state
 
 
-def _ledger_recorded_deal_ids(repo: Any) -> set[str]:
+def _ledger_recorded_deal_keys(repo: Any) -> set[str]:
     list_trade_events = getattr(repo, "list_trade_events", None)
     if not callable(list_trade_events):
         return set()
     return completed_ledger_deal_keys(
         item for item in list_trade_events() if isinstance(item, dict)
     )
+
+
+def _ledger_recorded_deal_ids(repo: Any) -> set[str]:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_trade_events):
+        return set()
+    return completed_ledger_deal_ids(
+        item
+        for item in list_trade_events()
+        if isinstance(item, dict) and not _has_canonical_broker_identity(item)
+    )
+
+
+def _has_canonical_broker_identity(event: dict[str, Any]) -> bool:
+    raw = event.get("raw_payload")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    if str(raw_payload.get("external_event_key") or "").strip():
+        return True
+    account = str(
+        event.get("account")
+        or raw_payload.get("internal_account")
+        or raw_payload.get("account")
+        or ""
+    ).strip()
+    futu_account_id = str(
+        raw_payload.get("futu_account_id") or ""
+    ).strip()
+    return bool(account and futu_account_id)
+
+
+def _bind_backfill_payload_to_source(
+    payload: dict[str, Any],
+    *,
+    futu_account_ids: list[str],
+    account_mapping: dict[str, str],
+    host: str,
+    port: int,
+    observed_at_utc: str,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(payload)
+    visible_account_ids = {
+        str(out.get(key) or "").strip()
+        for key in ("futu_account_id", "trd_acc_id", "trade_acc_id")
+        if str(out.get(key) or "").strip()
+    }
+    configured_ids = {
+        str(item or "").strip()
+        for item in futu_account_ids
+        if str(item or "").strip()
+    }
+    if not visible_account_ids and len(configured_ids) == 1:
+        visible_account_ids = set(configured_ids)
+    if len(visible_account_ids) != 1:
+        return out
+    futu_account_id = next(iter(visible_account_ids))
+    if configured_ids and futu_account_id not in configured_ids:
+        return out
+    account = str(account_mapping.get(futu_account_id) or "").strip().lower()
+    if not account:
+        return out
+    out["futu_account_id"] = futu_account_id
+    out.setdefault("trd_acc_id", futu_account_id)
+    out.setdefault("internal_account", account)
+    out["_trade_intake_source"] = {
+        "schema_version": "trade_intake_source.v1",
+        "transport": "poll",
+        "source_id": account,
+        "account": account,
+        "futu_account_id": futu_account_id,
+        "opend_process": "FutuOpenD",
+        "opend_host": str(host),
+        "opend_port": int(port),
+        "received_at_utc": str(observed_at_utc),
+        "query_start_utc": diagnostics.get("window_start_utc"),
+        "query_end_utc": diagnostics.get("window_end_utc"),
+    }
+    return out
 
 
 def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:

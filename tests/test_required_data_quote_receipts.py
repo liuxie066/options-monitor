@@ -116,6 +116,49 @@ def test_quote_receipt_rejects_partial_required_data_payload(
         )
 
 
+@pytest.mark.parametrize(
+    ("source_outcome", "reason_code"),
+    (
+        ("provider_error", "RATE_LIMIT"),
+        ("parse_error", "INVALID_RESPONSE"),
+        ("not_attempted", "BUDGET_EXHAUSTED"),
+        ("success_rows", "RATE_LIMIT"),
+    ),
+)
+def test_quote_receipt_rejects_rows_with_non_success_source_evidence(
+    tmp_path: Path,
+    source_outcome: str,
+    reason_code: str,
+) -> None:
+    payload = _required_payload()
+    payload["meta"] = {
+        "status": "ok",
+        "source_outcome": source_outcome,
+        "reason_code": reason_code,
+    }
+    raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        payload,
+        output_root=tmp_path,
+    )
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match="non-success required-data payload contains rows",
+    ):
+        publish_required_data_quote_snapshot(
+            producer_root=tmp_path,
+            producer_run_id="run-1",
+            symbol="NVDA",
+            raw_path=raw_path,
+            csv_path=csv_path,
+            fetch_plan={"symbol": "NVDA"},
+            fetch_policy={"source": "opend"},
+            source_observed_at=NOW,
+        )
+
+
 def test_cache_discovery_reuses_receipt_observation_after_shared_files_change(
     tmp_path: Path,
 ) -> None:

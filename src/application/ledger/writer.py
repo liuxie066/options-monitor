@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
 from domain.domain.combo_identity import identity_from_intent
@@ -27,7 +27,7 @@ from domain.domain.option_lifecycle import (
     expiration_observation_start_ms,
 )
 from domain.domain.performance.models import canonical_decimal_text, quantize_money, to_decimal
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,
@@ -35,7 +35,19 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
-from src.application.ledger.event_codec import encode_trade_event_for_storage
+from src.application.ledger.lifecycle_overlay import lifecycle_evidence_facts
+from src.application.ledger.notification_outbox import (
+    build_notification_intent,
+    canonical_payload_hash,
+    canonical_state_fingerprint,
+)
+from src.application.ledger.source_consumption import (
+    build_source_consumption_claim,
+)
+from src.application.ledger.event_codec import (
+    encode_trade_event_for_storage,
+    valid_void_target_event_id,
+)
 from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.publisher import (
     ensure_projection_publishable,
@@ -289,6 +301,273 @@ def _combo_leg_from_projected_record(
     }
 
 
+def _lifecycle_evidence_business_fact(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(evidence or {})
+    stock = (
+        dict(payload.get("stock_settlement") or {})
+        if isinstance(payload.get("stock_settlement"), dict)
+        else {}
+    )
+    fact = {
+        "evidence_id": str(payload.get("evidence_id") or "").strip(),
+        "source_type": str(payload.get("source_type") or "").strip(),
+        "source_event_id": str(
+            payload.get("source_event_id") or ""
+        ).strip(),
+        "evidence_type": str(
+            payload.get("terminal_type")
+            or payload.get("evidence_type")
+            or ""
+        ).strip().lower(),
+        "account": str(payload.get("account") or "").strip().lower(),
+        "symbol": str(payload.get("symbol") or "").strip().upper(),
+        "option_type": str(
+            payload.get("option_type") or ""
+        ).strip().lower(),
+        "position_side": str(
+            payload.get("position_side") or ""
+        ).strip().lower(),
+        "strike": (
+            canonical_decimal_text(payload.get("strike"))
+            if payload.get("strike") is not None
+            else None
+        ),
+        "expiration_ymd": str(
+            payload.get("expiration_ymd") or ""
+        ).strip(),
+        "contracts": int(payload.get("contracts") or 0),
+        "event_time_ms": int(
+            payload.get("event_time_ms")
+            or payload.get("observed_at_ms")
+            or 0
+        ),
+        "option_event_time_ms": int(
+            payload.get("option_event_time_ms") or 0
+        ),
+        "target_contracts_by_lot": {
+            str(key): int(value)
+            for key, value in sorted(
+                dict(payload.get("target_contracts_by_lot") or {}).items()
+            )
+        },
+        "stock_settlement": {
+            "source_event_id": str(
+                stock.get("source_event_id") or ""
+            ).strip(),
+            "symbol": str(stock.get("symbol") or "").strip().upper(),
+            "side": str(stock.get("side") or "").strip().lower(),
+            "shares": (
+                canonical_decimal_text(stock.get("shares"))
+                if stock.get("shares") is not None
+                else None
+            ),
+            "price": (
+                canonical_decimal_text(stock.get("price"))
+                if stock.get("price") is not None
+                else None
+            ),
+            "event_time_ms": int(stock.get("event_time_ms") or 0),
+            "order_id": str(stock.get("order_id") or "").strip() or None,
+            "clearing_date": (
+                str(stock.get("clearing_date") or "").strip() or None
+            ),
+        },
+        "observation_hashes": sorted(
+            {
+                str(value).strip()
+                for key, value in payload.items()
+                if (
+                    key.endswith("_hash")
+                    or key in {"observation_hash", "calendar_hash"}
+                )
+                and str(value or "").strip()
+            }
+        ),
+    }
+    return {
+        "evidence_id": fact["evidence_id"],
+        "evidence_hash": canonical_payload_hash(fact),
+    }
+
+
+def _projected_remaining_by_lot(
+    projection_lots: Sequence[Any],
+    *,
+    target_lot_ids: Sequence[str],
+) -> dict[str, int]:
+    wanted = {str(item or "").strip() for item in target_lot_ids}
+    remaining: dict[str, int] = {}
+    for record in projection_lots:
+        record_id = str(getattr(record, "record_id", "") or "").strip()
+        if record_id not in wanted:
+            continue
+        fields = dict(getattr(record, "fields", {}) or {})
+        remaining[record_id] = int(fields.get("contracts_open") or 0)
+    missing = sorted(wanted - set(remaining))
+    if missing:
+        raise ValueError(
+            "lifecycle target projection missing: " + ",".join(missing)
+        )
+    return dict(sorted(remaining.items()))
+
+
+def _lifecycle_state_payload(
+    *,
+    lifecycle_case: dict[str, Any],
+    evidence_rows: Sequence[dict[str, Any]],
+    source_claims: Sequence[dict[str, Any]],
+    allocations: Sequence[dict[str, Any]],
+    void_event_ids: Sequence[str],
+    projected_remaining_by_lot: dict[str, int],
+    status: str,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    void_ids = {
+        str(item or "").strip()
+        for item in void_event_ids
+        if str(item or "").strip()
+    }
+    effective_allocations = [
+        {
+            "allocation_id": str(
+                item.get("allocation_id") or ""
+            ).strip(),
+            "evidence_id": str(item.get("evidence_id") or "").strip(),
+            "target_lot_id": str(
+                item.get("target_lot_id") or ""
+            ).strip(),
+            "terminal_event_id": str(
+                item.get("canonical_terminal_event_id") or ""
+            ).strip(),
+            "terminal_type": str(
+                item.get("terminal_type") or ""
+            ).strip().lower(),
+            "contracts": int(item.get("contracts_allocated") or 0),
+        }
+        for item in allocations
+        if str(
+            item.get("canonical_terminal_event_id") or ""
+        ).strip()
+        not in void_ids
+    ]
+    claims = [
+        {
+            "source_key": str(item.get("source_key") or "").strip(),
+            "owner_evidence_id": str(
+                item.get("owner_evidence_id") or ""
+            ).strip(),
+            "source_role": str(
+                item.get("source_role") or ""
+            ).strip().lower(),
+            "source_payload_hash": str(
+                item.get("source_payload_hash") or ""
+            ).strip(),
+        }
+        for item in source_claims
+    ]
+    reasons = sorted(
+        {
+            str(item or "").strip()
+            for item in (
+                summary.get("lifecycle_reason_codes")
+                or summary.get("reason_codes")
+                or []
+            )
+            if str(item or "").strip()
+        }
+    )
+    return {
+        "case": {
+            "case_id": str(lifecycle_case.get("case_id") or "").strip(),
+            "schema_version": str(
+                lifecycle_case.get("schema_version") or ""
+            ).strip(),
+            "target_contracts_by_lot": {
+                str(key): int(value)
+                for key, value in sorted(
+                    dict(
+                        lifecycle_case.get("target_contracts_by_lot")
+                        or {}
+                    ).items()
+                )
+            },
+        },
+        "evidence": sorted(
+            (
+                _lifecycle_evidence_business_fact(item)
+                for item in evidence_rows
+            ),
+            key=lambda item: item["evidence_id"],
+        ),
+        "source_claims": sorted(
+            claims,
+            key=lambda item: (
+                item["source_key"],
+                item["source_role"],
+                item["owner_evidence_id"],
+            ),
+        ),
+        "effective_allocations": sorted(
+            effective_allocations,
+            key=lambda item: (
+                item["target_lot_id"],
+                item["terminal_event_id"],
+            ),
+        ),
+        "effective_void_event_ids": sorted(void_ids),
+        "projected_remaining_by_lot": dict(
+            sorted(projected_remaining_by_lot.items())
+        ),
+        "reason_state": str(status or "").strip().lower(),
+        "close_reason": str(
+            summary.get("close_reason")
+            or summary.get("decision_type")
+            or ""
+        ).strip().lower(),
+        "reason_codes": reasons,
+        "pairing_until_ms": (
+            int(summary["pairing_until_ms"])
+            if summary.get("pairing_until_ms") is not None
+            else None
+        ),
+        "timing_policy_hash": str(
+            summary.get("timing_policy_hash") or ""
+        ).strip()
+        or None,
+        "observation_hashes": sorted(
+            {
+                str(value).strip()
+                for key, value in summary.items()
+                if (
+                    key.endswith("_hash")
+                    or key == "observation_hash"
+                )
+                and str(value or "").strip()
+            }
+        ),
+    }
+
+
+def _lifecycle_notification_transition(
+    *,
+    case_id: str,
+    status: str,
+) -> tuple[str, str]:
+    status_value = str(status or "").strip().lower()
+    if status_value == "ledger_written":
+        transition_type = "resolution_confirmed"
+    elif status_value in {"needs_review", "conflict"}:
+        transition_type = status_value
+    else:
+        transition_type = "option_leg_closed"
+    return (
+        transition_type,
+        f"lifecycle:{case_id}:{transition_type}",
+    )
+
+
 def apply_lifecycle_allocation_atomically(
     repo: Any,
     *,
@@ -298,6 +577,9 @@ def apply_lifecycle_allocation_atomically(
     allocations: Sequence[dict[str, Any]],
     derived_status: str,
     derived_summary: dict[str, Any],
+    expected_resolution_revision: int | None = None,
+    correction_void_events: Sequence[Any] = (),
+    notification_transition_type: str | None = None,
 ) -> dict[str, Any]:
     """Adopt evidence, terminal events, projection and allocations as one fact."""
 
@@ -305,6 +587,10 @@ def apply_lifecycle_allocation_atomically(
     evidence_payload = dict(evidence or {})
     allocation_rows = [dict(item or {}) for item in allocations]
     event_rows = [_canonical_storage_event(item) for item in terminal_events]
+    correction_void_rows = [
+        _canonical_storage_event(item)
+        for item in correction_void_events
+    ]
 
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
@@ -313,12 +599,40 @@ def apply_lifecycle_allocation_atomically(
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
             raise ValueError(f"lifecycle case not found: {case_id_value}")
+        _validate_broker_settlement_pair_for_write(
+            sqlite_repo,
+            conn=conn,
+            lifecycle_case=lifecycle_case,
+            evidence=evidence_payload,
+        )
+        current_summary_for_cas = (
+            dict(lifecycle_case.get("derived_summary") or {})
+            if isinstance(
+                lifecycle_case.get("derived_summary"),
+                dict,
+            )
+            else {}
+        )
+        if (
+            expected_resolution_revision is not None
+            and int(
+                current_summary_for_cas.get(
+                    "resolution_revision"
+                )
+                or 0
+            )
+            != int(expected_resolution_revision)
+        ):
+            raise ValueError(
+                "lifecycle resolution revision compare-and-set failed"
+            )
         evidence_id = str(evidence_payload.get("evidence_id") or "").strip()
         if not evidence_id:
             raise ValueError("lifecycle evidence_id is required")
         if evidence_payload.get("case_id") not in (None, "", case_id_value):
             raise ValueError("lifecycle evidence is bound to another case")
         existing_evidence = sqlite_repo.get_trade_lifecycle_evidence(evidence_id, conn=conn)
+        void_event_ids = _effective_void_target_ids(sqlite_repo, conn=conn)
         case_allocations = list(
             sqlite_repo.list_trade_lifecycle_allocations(
                 case_id=case_id_value,
@@ -342,6 +656,7 @@ def apply_lifecycle_allocation_atomically(
         existing_resolution = resolve_allocations(
             lifecycle_case.get("target_contracts_by_lot"),
             case_allocations,
+            void_event_ids=void_event_ids,
         )
         if existing_resolution.status != "ok":
             raise ValueError(
@@ -359,6 +674,57 @@ def apply_lifecycle_allocation_atomically(
             if actual_remaining != expected_remaining:
                 raise ValueError("target_lot_quantity_drift")
 
+        correction_void_created: list[bool] = []
+        if correction_void_rows:
+            effective_allocated_event_ids = {
+                str(
+                    item.get("canonical_terminal_event_id")
+                    or ""
+                ).strip()
+                for item in case_allocations
+                if str(
+                    item.get("canonical_terminal_event_id")
+                    or ""
+                ).strip()
+                and str(
+                    item.get("canonical_terminal_event_id")
+                    or ""
+                ).strip()
+                not in set(void_event_ids)
+            }
+            seen_targets: set[str] = set()
+            for void_event in correction_void_rows:
+                target_event_id = str(
+                    void_event.target_event_id or ""
+                ).strip()
+                if (
+                    void_event.event_type != "void"
+                    or not target_event_id
+                ):
+                    raise ValueError(
+                        "lifecycle correction requires canonical void events"
+                    )
+                if target_event_id in seen_targets:
+                    raise ValueError(
+                        "lifecycle correction void target is duplicated"
+                    )
+                seen_targets.add(target_event_id)
+                if target_event_id not in effective_allocated_event_ids:
+                    raise ValueError(
+                        "lifecycle correction target is not an "
+                        "effective allocation event"
+                    )
+                correction_void_created.append(
+                    sqlite_repo.upsert_trade_event(
+                        void_event,
+                        conn=conn,
+                    )
+                )
+            void_event_ids = _effective_void_target_ids(
+                sqlite_repo,
+                conn=conn,
+            )
+
         canonical_summary, canonical_status = _validate_lifecycle_event_allocation_plan(
             case_id=case_id_value,
             lifecycle_case=lifecycle_case,
@@ -366,6 +732,7 @@ def apply_lifecycle_allocation_atomically(
             terminal_events=event_rows,
             allocations=allocation_rows,
             existing_allocations=case_allocations,
+            void_event_ids=void_event_ids,
         )
         requested_status = str(derived_status or "").strip().lower()
         if requested_status != canonical_status:
@@ -374,6 +741,117 @@ def apply_lifecycle_allocation_atomically(
         for field, expected in canonical_summary.items():
             if field in incoming_summary and incoming_summary[field] != expected:
                 raise ValueError(f"lifecycle derived summary mismatch: {field}")
+        existing_source_claims = list(
+            sqlite_repo.list_trade_lifecycle_source_consumptions(
+                case_id=case_id_value,
+                conn=conn,
+            )
+        )
+        option_anchor_claims = [
+            item
+            for item in existing_source_claims
+            if str(item.get("source_role") or "").strip().lower()
+            == "option_anchor"
+        ]
+        requires_broker_claims = (
+            str(
+                evidence_payload.get("source_type") or ""
+            ).strip().lower()
+            == "broker_settlement_pair"
+            or bool(evidence_payload.get("source_evidence_ids"))
+        )
+        if requires_broker_claims and not option_anchor_claims:
+            raise ValueError("lifecycle_option_anchor_claim_missing")
+        terminal_type = str(
+            evidence_payload.get("terminal_type")
+            or evidence_payload.get("evidence_type")
+            or ""
+        ).strip().lower()
+        stock_claim: dict[str, Any] | None = None
+        close_claim: dict[str, Any] | None = None
+        if (
+            terminal_type in {"assignment", "exercise"}
+            and requires_broker_claims
+        ):
+            stock = (
+                dict(evidence_payload.get("stock_settlement") or {})
+                if isinstance(
+                    evidence_payload.get("stock_settlement"),
+                    dict,
+                )
+                else {}
+            )
+            stock_source_key = str(
+                stock.get("source_event_id") or ""
+            ).strip()
+            stock_claim = build_source_consumption_claim(
+                source_key=stock_source_key,
+                case_id=case_id_value,
+                owner_evidence_id=evidence_id,
+                source_role="stock_settlement",
+                economic_payload={
+                    "account": lifecycle_case.get("account"),
+                    "futu_account_id": stock.get("futu_account_id"),
+                    "symbol": stock.get("symbol")
+                    or lifecycle_case.get("symbol"),
+                    "side": stock.get("side"),
+                    "shares": stock.get("shares"),
+                    "price": stock.get("price"),
+                    "execution_time_ms": stock.get("event_time_ms"),
+                    "order_id": stock.get("order_id"),
+                    "clearing_date": stock.get("clearing_date"),
+                },
+            )
+        if terminal_type == "close" and requires_broker_claims:
+            broker_close = (
+                dict(evidence_payload.get("broker_close") or {})
+                if isinstance(
+                    evidence_payload.get("broker_close"),
+                    dict,
+                )
+                else {}
+            )
+            close_source_key = str(
+                broker_close.get("source_event_id") or ""
+            ).strip()
+            close_claim = build_source_consumption_claim(
+                source_key=close_source_key,
+                case_id=case_id_value,
+                owner_evidence_id=evidence_id,
+                source_role="option_anchor",
+                economic_payload={
+                    "account": lifecycle_case.get("account"),
+                    "futu_account_id": broker_close.get(
+                        "futu_account_id"
+                    ),
+                    "symbol": lifecycle_case.get("symbol"),
+                    "option_type": lifecycle_case.get(
+                        "option_type"
+                    ),
+                    "position_side": lifecycle_case.get(
+                        "position_side"
+                    ),
+                    "strike": lifecycle_case.get("strike"),
+                    "expiration_ymd": lifecycle_case.get(
+                        "expiration_ymd"
+                    ),
+                    "multiplier": lifecycle_case.get(
+                        "multiplier"
+                    ),
+                    "side": broker_close.get("side"),
+                    "contracts": evidence_payload.get(
+                        "contracts"
+                    ),
+                    "price": evidence_payload.get("price"),
+                    "execution_time_ms": evidence_payload.get(
+                        "event_time_ms"
+                    ),
+                    "order_id": broker_close.get("order_id"),
+                    "clearing_date": broker_close.get(
+                        "clearing_date"
+                    ),
+                },
+            )
         if existing_evidence is None:
             evidence_created = sqlite_repo.insert_trade_lifecycle_evidence_once(
                 evidence_payload,
@@ -391,7 +869,23 @@ def apply_lifecycle_allocation_atomically(
             case_id=case_id_value,
             conn=conn,
         )
-        event_created = [
+        stock_claim_created = (
+            sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+                stock_claim,
+                conn=conn,
+            )
+            if stock_claim is not None
+            else False
+        )
+        close_claim_created = (
+            sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+                close_claim,
+                conn=conn,
+            )
+            if close_claim is not None
+            else False
+        )
+        terminal_event_created = [
             sqlite_repo.upsert_trade_event(item, conn=conn)
             for item in event_rows
         ]
@@ -408,10 +902,208 @@ def apply_lifecycle_allocation_atomically(
             sqlite_repo.insert_trade_lifecycle_allocation(item, conn=conn)
             for item in allocation_rows
         ]
+        current_summary = (
+            dict(lifecycle_case.get("derived_summary") or {})
+            if isinstance(lifecycle_case.get("derived_summary"), dict)
+            else {}
+        )
+        current_revision = int(
+            current_summary.get("resolution_revision") or 0
+        )
+        current_state_fingerprint = str(
+            current_summary.get("state_fingerprint") or ""
+        ).strip()
+        post_allocations = list(
+            sqlite_repo.list_trade_lifecycle_allocations(
+                case_id=case_id_value,
+                conn=conn,
+            )
+        )
+        post_evidence = list(
+            sqlite_repo.list_trade_lifecycle_evidence(
+                case_id=case_id_value,
+                conn=conn,
+            )
+        )
+        post_source_claims = list(
+            sqlite_repo.list_trade_lifecycle_source_consumptions(
+                case_id=case_id_value,
+                conn=conn,
+            )
+        )
+        canonical_summary = {
+            **{
+                key: value
+                for key, value in incoming_summary.items()
+                if key
+                not in {
+                    "resolution_revision",
+                    "state_fingerprint",
+                    "notification_audit_codes",
+                }
+            },
+            **canonical_summary,
+        }
+        projected_remaining = _projected_remaining_by_lot(
+            projection.lots,
+            target_lot_ids=list(
+                dict(
+                    lifecycle_case.get("target_contracts_by_lot") or {}
+                )
+            ),
+        )
+        state_fingerprint = canonical_state_fingerprint(
+            _lifecycle_state_payload(
+                lifecycle_case=lifecycle_case,
+                evidence_rows=post_evidence,
+                source_claims=post_source_claims,
+                allocations=post_allocations,
+                void_event_ids=void_event_ids,
+                projected_remaining_by_lot=projected_remaining,
+                status=canonical_status,
+                summary=canonical_summary,
+            )
+        )
+        business_state_changed = (
+            state_fingerprint != current_state_fingerprint
+        )
+        resolution_revision = (
+            current_revision + 1
+            if business_state_changed
+            else current_revision
+        )
+        if resolution_revision <= 0:
+            raise ValueError("lifecycle resolution revision is invalid")
+        requested_transition_type = str(
+            notification_transition_type or ""
+        ).strip().lower()
+        if requested_transition_type:
+            if requested_transition_type != "resolution_corrected":
+                raise ValueError(
+                    "unsupported lifecycle notification transition"
+                )
+            if not correction_void_rows:
+                raise ValueError(
+                    "resolution_corrected requires a correction void"
+                )
+            transition_type = requested_transition_type
+            transition_key = (
+                f"lifecycle:{case_id_value}:"
+                f"{transition_type}:{resolution_revision}"
+            )
+        else:
+            transition_type, transition_key = (
+                _lifecycle_notification_transition(
+                    case_id=case_id_value,
+                    status=canonical_status,
+                )
+            )
+        notification_intent = build_notification_intent(
+            case_id=case_id_value,
+            transition_type=transition_type,
+            resolution_revision=resolution_revision,
+            delivery_revision=0,
+            transition_key=transition_key,
+            state_fingerprint=state_fingerprint,
+            payload={
+                "schema_version": "trade_lifecycle_notification.v1",
+                "case_id": case_id_value,
+                "transition_type": transition_type,
+                "resolution_revision": resolution_revision,
+                "state_fingerprint": state_fingerprint,
+                "account": lifecycle_case.get("account"),
+                "symbol": lifecycle_case.get("symbol"),
+                "option_type": lifecycle_case.get("option_type"),
+                "position_side": lifecycle_case.get("position_side"),
+                "strike": lifecycle_case.get("strike"),
+                "expiration_ymd": lifecycle_case.get("expiration_ymd"),
+                "close_reason": str(
+                    canonical_summary.get("close_reason")
+                    or evidence_payload.get("terminal_type")
+                    or evidence_payload.get("evidence_type")
+                    or ""
+                ).strip().lower(),
+                "terminal_event_ids": sorted(
+                    item.event_id for item in event_rows
+                ),
+                "void_event_ids": sorted(
+                    item.event_id
+                    for item in correction_void_rows
+                ),
+                "void_target_event_ids": sorted(
+                    str(item.target_event_id or "")
+                    for item in correction_void_rows
+                ),
+                "allocations": sorted(
+                    [
+                        {
+                            "allocation_id": item.get("allocation_id"),
+                            "target_lot_id": item.get("target_lot_id"),
+                            "contracts": int(
+                                item.get("contracts_allocated") or 0
+                            ),
+                            "terminal_event_id": item.get(
+                                "canonical_terminal_event_id"
+                            ),
+                        }
+                        for item in allocation_rows
+                    ],
+                    key=lambda item: (
+                        str(item["target_lot_id"] or ""),
+                        str(item["terminal_event_id"] or ""),
+                    ),
+                ),
+            },
+        )
+        notification_audit_codes = list(
+            current_summary.get("notification_audit_codes") or []
+        )
+        existing_transition = (
+            sqlite_repo.get_trade_lifecycle_notification_by_transition(
+                transition_key=transition_key,
+                delivery_revision=0,
+                conn=conn,
+            )
+        )
+        outbox_created = False
+        if business_state_changed:
+            if (
+                existing_transition is not None
+                and (
+                    str(
+                        existing_transition.get("state_fingerprint")
+                        or ""
+                    )
+                    != state_fingerprint
+                    or str(existing_transition.get("payload_hash") or "")
+                    != str(notification_intent.get("payload_hash") or "")
+                )
+            ):
+                notification_audit_codes = sorted(
+                    set(
+                        notification_audit_codes
+                        + ["notification_transition_conflict"]
+                    )
+                )
+            else:
+                outbox_created = (
+                    sqlite_repo.insert_trade_lifecycle_notification_once(
+                        notification_intent,
+                        conn=conn,
+                    )
+                )
+        canonical_summary = {
+            **current_summary,
+            **canonical_summary,
+            "resolution_revision": resolution_revision,
+            "state_fingerprint": state_fingerprint,
+            "notification_audit_codes": notification_audit_codes,
+        }
         status_changed = sqlite_repo.update_trade_lifecycle_case_derived_status(
             case_id=case_id_value,
             status=canonical_status,
             derived_summary=canonical_summary,
+            expected_state_fingerprint=current_state_fingerprint,
             conn=conn,
         )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
@@ -420,12 +1112,359 @@ def apply_lifecycle_allocation_atomically(
             "evidence_id": evidence_id,
             "evidence_created": evidence_created,
             "evidence_bound": evidence_bound,
+            "stock_source_claim_created": stock_claim_created,
+            "close_source_claim_created": close_claim_created,
             "terminal_event_ids": [item.event_id for item in event_rows],
-            "terminal_events_created": event_created,
+            "terminal_events_created": terminal_event_created,
+            "correction_void_event_ids": [
+                item.event_id for item in correction_void_rows
+            ],
+            "correction_void_events_created": correction_void_created,
             "allocation_ids": [str(item.get("allocation_id") or "") for item in allocation_rows],
             "allocations_created": allocation_created,
             "status_changed": status_changed,
+            "resolution_revision": resolution_revision,
+            "state_fingerprint": state_fingerprint,
+            "business_state_changed": business_state_changed,
+            "notification_outbox_id": notification_intent["outbox_id"],
+            "notification_outbox_created": outbox_created,
+            "notification_audit_codes": notification_audit_codes,
             "position_lot_count": len(projection.lots),
+        }
+
+    return with_sqlite_repo_transaction(repo, _run)
+
+
+def accept_option_close_evidence_atomically(
+    repo: Any,
+    *,
+    contract_identity: dict[str, Any],
+    evidence: dict[str, Any],
+    apply_changes: bool = True,
+) -> dict[str, Any]:
+    """Create/reuse one lifecycle_case.v2 and accept zero-price close evidence."""
+
+    identity = dict(contract_identity or {})
+    evidence_payload = dict(evidence or {})
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError(
+                "option close evidence acceptance requires SQLite transaction authority"
+            )
+        account = str(identity.get("account") or "").strip().lower()
+        futu_account_id = str(
+            identity.get("futu_account_id") or ""
+        ).strip()
+        source_event_id = str(
+            evidence_payload.get("source_event_id") or ""
+        ).strip()
+        evidence_id = str(evidence_payload.get("evidence_id") or "").strip()
+        contracts = _positive_lifecycle_contracts(
+            evidence_payload.get("contracts")
+        )
+        expected_source_prefix = f"futu:{account}:{futu_account_id}:"
+        if (
+            not account
+            or not futu_account_id
+            or not evidence_id
+            or not source_event_id.startswith(expected_source_prefix)
+            or source_event_id == expected_source_prefix
+        ):
+            raise ValueError("canonical_broker_identity_missing")
+        if (
+            str(evidence_payload.get("evidence_type") or "").strip().lower()
+            != "option_zero_price_close"
+        ):
+            raise ValueError("option close evidence type is invalid")
+        try:
+            price = Decimal(str(evidence_payload.get("price")))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("option close evidence price is invalid") from exc
+        if not price.is_finite() or price != 0:
+            raise ValueError("option close evidence must have exact zero price")
+
+        contract_key = ContractKey.from_values(
+            broker=identity.get("broker"),
+            account=account,
+            underlying_symbol=identity.get("symbol"),
+            option_type=identity.get("option_type"),
+            position_side=identity.get("position_side"),
+            strike=identity.get("strike"),
+            expiration_ymd=identity.get("expiration_ymd"),
+        )
+        existing_evidence = sqlite_repo.get_trade_lifecycle_evidence(
+            evidence_id,
+            conn=conn,
+        )
+        existing_source_claim = (
+            sqlite_repo.get_trade_lifecycle_source_consumption(
+                source_event_id,
+                conn=conn,
+            )
+        )
+        if (
+            existing_source_claim is not None
+            and str(
+                existing_source_claim.get("owner_evidence_id") or ""
+            ).strip()
+            != evidence_id
+        ):
+            raise ValueError("lifecycle_source_event_already_consumed")
+        if existing_evidence is not None:
+            existing_case_id = str(
+                existing_evidence.get("case_id") or ""
+            ).strip()
+            lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
+                existing_case_id,
+                conn=conn,
+            )
+            if lifecycle_case is None:
+                raise ValueError("lifecycle evidence case is missing")
+            bound_futu_account_id = str(
+                lifecycle_case.get("futu_account_id") or ""
+            ).strip()
+            if (
+                not bound_futu_account_id
+                or bound_futu_account_id != futu_account_id
+            ):
+                raise ValueError(
+                    "lifecycle_case_futu_account_mismatch"
+                )
+            _validate_existing_zero_price_evidence(
+                existing=existing_evidence,
+                incoming=evidence_payload,
+                contract_key=contract_key,
+                contracts=contracts,
+            )
+            expected_claim = build_source_consumption_claim(
+                source_key=source_event_id,
+                case_id=existing_case_id,
+                owner_evidence_id=evidence_id,
+                source_role="option_anchor",
+                economic_payload={
+                    **identity,
+                    **existing_evidence,
+                    "account": account,
+                    "futu_account_id": futu_account_id,
+                },
+            )
+            if existing_source_claim is None:
+                raise ValueError(
+                    "lifecycle_source_claim_history_unseeded"
+                )
+            sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+                expected_claim,
+                conn=conn,
+            )
+            return {
+                "status": "existing",
+                "case_id": existing_case_id,
+                "case_created": False,
+                "evidence_id": evidence_id,
+                "evidence_created": False,
+                "broker_evidence_accepted": True,
+                "lifecycle_case": lifecycle_case,
+                "lifecycle_evidence": existing_evidence,
+                "source_claim": expected_claim,
+                "source_claim_created": False,
+            }
+
+        cases = [
+            item
+            for item in sqlite_repo.list_trade_lifecycle_cases(
+                account=account,
+                conn=conn,
+            )
+            if str(item.get("schema_version") or "").strip()
+            == "lifecycle_case.v2"
+            and str(item.get("contract_key") or "").strip()
+            == contract_key.position_key
+        ]
+        if len(cases) > 1:
+            raise ValueError("multiple_lifecycle_cases_for_contract")
+        lifecycle_case = dict(cases[0]) if cases else None
+        case_preexisting = lifecycle_case is not None
+        position_lots = list(sqlite_repo.list_position_lots(conn=conn))
+        matching_lots = _matching_lifecycle_lots(
+            position_lots,
+            contract_key=contract_key,
+        )
+        if lifecycle_case is None:
+            if not matching_lots:
+                raise ValueError("lifecycle_close_target_not_found")
+            target_contracts_by_lot = {
+                lot_id: remaining
+                for lot_id, remaining, _opened_at in matching_lots
+            }
+            lifecycle_case = {
+                **build_lifecycle_case(
+                    account=account,
+                    broker=contract_key.broker,
+                    contract_key=contract_key.position_key,
+                    position_side=contract_key.position_side,
+                    expiration_ymd=contract_key.expiration_ymd,
+                    market=str(identity.get("market") or ""),
+                    target_contracts_by_lot=target_contracts_by_lot,
+                    futu_account_id=futu_account_id,
+                ),
+                "market": str(identity.get("market") or "").strip().upper(),
+                "symbol": contract_key.underlying_symbol,
+                "option_type": contract_key.option_type,
+                "strike": contract_key.strike,
+                "currency": normalize_currency(identity.get("currency")),
+                "multiplier": float(identity.get("multiplier") or 100),
+            }
+        else:
+            bound_futu_account_id = str(
+                lifecycle_case.get("futu_account_id") or ""
+            ).strip()
+            if (
+                bound_futu_account_id
+                and bound_futu_account_id != futu_account_id
+            ):
+                raise ValueError(
+                    "lifecycle_case_futu_account_mismatch"
+                )
+            lifecycle_case["futu_account_id"] = futu_account_id
+        target_contracts_by_lot = dict(
+            lifecycle_case.get("target_contracts_by_lot") or {}
+        )
+        void_event_ids = _effective_void_target_ids(sqlite_repo, conn=conn)
+        allocations = list(
+            sqlite_repo.list_trade_lifecycle_allocations(
+                case_id=str(lifecycle_case.get("case_id") or ""),
+                conn=conn,
+            )
+        )
+        case_evidence = list(
+            sqlite_repo.list_trade_lifecycle_evidence(
+                case_id=str(lifecycle_case.get("case_id") or ""),
+                conn=conn,
+            )
+        )
+        resolution = resolve_allocations(
+            target_contracts_by_lot,
+            allocations,
+            void_event_ids=void_event_ids,
+        )
+        if resolution.status != "ok":
+            raise ValueError(
+                "existing lifecycle allocations conflict: "
+                + ",".join(resolution.reason_codes)
+            )
+        evidence_facts = lifecycle_evidence_facts(
+            evidence=case_evidence,
+            allocations=allocations,
+            void_event_ids=void_event_ids,
+        )
+        for lot_id, expected_remaining in (
+            resolution.remaining_contracts_by_lot.items()
+        ):
+            fields = sqlite_repo.get_position_lot_fields(lot_id, conn=conn)
+            if int(fields.get("contracts_open") or 0) != expected_remaining:
+                raise ValueError("target_lot_quantity_drift")
+        available_by_lot = {
+            lot_id: max(
+                int(remaining)
+                - int(
+                    evidence_facts.reservation_contracts_by_lot.get(
+                        lot_id,
+                        0,
+                    )
+                ),
+                0,
+            )
+            for lot_id, remaining in resolution.remaining_contracts_by_lot.items()
+        }
+        evidence_target_manifest = _allocate_lifecycle_reservation(
+            contracts=contracts,
+            available_by_lot=available_by_lot,
+            matching_lots=matching_lots,
+        )
+        accepted_evidence = {
+            **evidence_payload,
+            "case_id": str(lifecycle_case.get("case_id") or ""),
+            "account": account,
+            "symbol": contract_key.underlying_symbol,
+            "option_type": contract_key.option_type,
+            "position_side": contract_key.position_side,
+            "strike": contract_key.strike,
+            "expiration_ymd": contract_key.expiration_ymd,
+            "contracts": contracts,
+            "price": "0",
+            "target_contracts_by_lot": evidence_target_manifest,
+            "target_lot_id": (
+                next(iter(evidence_target_manifest))
+                if len(evidence_target_manifest) == 1
+                else None
+            ),
+        }
+        case_created = False
+        evidence_created = False
+        source_claim = build_source_consumption_claim(
+            source_key=source_event_id,
+            case_id=str(lifecycle_case.get("case_id") or ""),
+            owner_evidence_id=evidence_id,
+            source_role="option_anchor",
+            economic_payload={
+                **identity,
+                **accepted_evidence,
+                "account": account,
+                "futu_account_id": futu_account_id,
+            },
+        )
+        source_claim_created = False
+        if apply_changes:
+            if case_preexisting:
+                sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
+                    case_id=str(
+                        lifecycle_case.get("case_id") or ""
+                    ),
+                    futu_account_id=futu_account_id,
+                    conn=conn,
+                )
+                lifecycle_case = (
+                    sqlite_repo.get_trade_lifecycle_case(
+                        str(lifecycle_case.get("case_id") or ""),
+                        conn=conn,
+                    )
+                    or lifecycle_case
+                )
+            case_created = sqlite_repo.insert_trade_lifecycle_case_once(
+                lifecycle_case,
+                conn=conn,
+            )
+            if not case_preexisting:
+                sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
+                    case_id=str(
+                        lifecycle_case.get("case_id") or ""
+                    ),
+                    futu_account_id=futu_account_id,
+                    conn=conn,
+                )
+            evidence_created = sqlite_repo.insert_trade_lifecycle_evidence_once(
+                accepted_evidence,
+                conn=conn,
+            )
+            source_claim_created = (
+                sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+                    source_claim,
+                    conn=conn,
+                )
+            )
+            sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        return {
+            "status": "accepted" if apply_changes else "dry_run",
+            "case_id": str(lifecycle_case.get("case_id") or ""),
+            "case_created": case_created,
+            "evidence_id": evidence_id,
+            "evidence_created": evidence_created,
+            "broker_evidence_accepted": bool(apply_changes),
+            "lifecycle_case": lifecycle_case,
+            "lifecycle_evidence": accepted_evidence,
+            "source_claim": source_claim,
+            "source_claim_created": source_claim_created,
         }
 
     return with_sqlite_repo_transaction(repo, _run)
@@ -452,6 +1491,7 @@ def discover_expired_lifecycle_cases_atomically(
             raise TypeError("lifecycle discovery requires SQLite transaction authority")
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         position_lots = list(sqlite_repo.list_position_lots(conn=conn))
+        void_event_ids = _effective_void_target_ids(sqlite_repo, conn=conn)
         existing_cases = list(
             sqlite_repo.list_trade_lifecycle_cases(
                 account=account_value or None,
@@ -575,7 +1615,7 @@ def discover_expired_lifecycle_cases_atomically(
             ):
                 continue
             persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
-            if persisted_status in {"ledger_written", "conflict"}:
+            if persisted_status == "conflict":
                 continue
             allocations = list(
                 sqlite_repo.list_trade_lifecycle_allocations(
@@ -594,6 +1634,7 @@ def discover_expired_lifecycle_cases_atomically(
                     lifecycle_case.get("target_contracts_by_lot") or {}
                 ),
                 allocations=allocations,
+                void_event_ids=void_event_ids,
                 now_ms=current_ms,
             )
             next_status = {
@@ -603,6 +1644,7 @@ def discover_expired_lifecycle_cases_atomically(
                 "assigned": "ledger_written",
                 "exercised": "ledger_written",
                 "expired_unassigned": "ledger_written",
+                "closed": "ledger_written",
                 "resolved_mixed": "ledger_written",
                 "conflict": "conflict",
             }.get(read_model.lifecycle_state, persisted_status)
@@ -716,27 +1758,221 @@ def record_lifecycle_evidence_issue_atomically(
             case_id=case_id_value,
             conn=conn,
         )
+        requires_broker_claims = (
+            str(
+                evidence_payload.get("source_type") or ""
+            ).strip().lower()
+            == "broker_settlement_pair"
+            or bool(evidence_payload.get("source_evidence_ids"))
+        )
+        source_claim_created = False
+        if requires_broker_claims:
+            existing_claims = list(
+                sqlite_repo.list_trade_lifecycle_source_consumptions(
+                    case_id=case_id_value,
+                    conn=conn,
+                )
+            )
+            if not any(
+                str(item.get("source_role") or "").strip().lower()
+                == "option_anchor"
+                for item in existing_claims
+            ):
+                raise ValueError(
+                    "lifecycle_option_anchor_claim_missing"
+                )
+            stock = (
+                dict(evidence_payload.get("stock_settlement") or {})
+                if isinstance(
+                    evidence_payload.get("stock_settlement"),
+                    dict,
+                )
+                else {}
+            )
+            if str(stock.get("source_event_id") or "").strip():
+                claim = build_source_consumption_claim(
+                    source_key=str(stock["source_event_id"]),
+                    case_id=case_id_value,
+                    owner_evidence_id=evidence_id,
+                    source_role="stock_settlement",
+                    economic_payload={
+                        "account": lifecycle_case.get("account"),
+                        "futu_account_id": stock.get(
+                            "futu_account_id"
+                        ),
+                        "symbol": stock.get("symbol")
+                        or lifecycle_case.get("symbol"),
+                        "side": stock.get("side"),
+                        "shares": stock.get("shares"),
+                        "price": stock.get("price"),
+                        "execution_time_ms": stock.get(
+                            "event_time_ms"
+                        ),
+                        "order_id": stock.get("order_id"),
+                        "clearing_date": stock.get("clearing_date"),
+                    },
+                )
+                source_claim_created = (
+                    sqlite_repo.insert_trade_lifecycle_source_consumption_once(
+                        claim,
+                        conn=conn,
+                    )
+                )
         resolution = resolve_allocations(
             lifecycle_case.get("target_contracts_by_lot"),
             allocations,
+            void_event_ids=_effective_void_target_ids(sqlite_repo, conn=conn),
         )
         prior_summary = dict(lifecycle_case.get("derived_summary") or {})
         prior_conflicts = list(prior_summary.get("conflict_evidence_ids") or [])
+        void_event_ids = _effective_void_target_ids(
+            sqlite_repo,
+            conn=conn,
+        )
+        new_summary = {
+            **prior_summary,
+            "target_contracts_by_lot": resolution.target_contracts_by_lot,
+            "resolved_contracts_by_lot": resolution.resolved_contracts_by_lot,
+            "remaining_contracts_by_lot": (
+                resolution.remaining_contracts_by_lot
+            ),
+            "resolved_contracts_by_terminal_type": (
+                resolution.resolved_contracts_by_terminal_type
+            ),
+            "lifecycle_reason_codes": reasons,
+            "conflict_evidence_ids": sorted(
+                set(prior_conflicts + [evidence_id])
+            ),
+        }
+        projected_remaining = {
+            lot_id: int(
+                sqlite_repo.get_position_lot_fields(
+                    lot_id,
+                    conn=conn,
+                ).get("contracts_open")
+                or 0
+            )
+            for lot_id in sorted(
+                dict(
+                    lifecycle_case.get("target_contracts_by_lot") or {}
+                )
+            )
+        }
+        state_fingerprint = canonical_state_fingerprint(
+            _lifecycle_state_payload(
+                lifecycle_case=lifecycle_case,
+                evidence_rows=(
+                    sqlite_repo.list_trade_lifecycle_evidence(
+                        case_id=case_id_value,
+                        conn=conn,
+                    )
+                ),
+                source_claims=(
+                    sqlite_repo.list_trade_lifecycle_source_consumptions(
+                        case_id=case_id_value,
+                        conn=conn,
+                    )
+                ),
+                allocations=allocations,
+                void_event_ids=void_event_ids,
+                projected_remaining_by_lot=projected_remaining,
+                status=status_value,
+                summary=new_summary,
+            )
+        )
+        prior_fingerprint = str(
+            prior_summary.get("state_fingerprint") or ""
+        ).strip()
+        business_state_changed = (
+            state_fingerprint != prior_fingerprint
+        )
+        resolution_revision = int(
+            prior_summary.get("resolution_revision") or 0
+        ) + int(business_state_changed)
+        if resolution_revision <= 0:
+            raise ValueError("lifecycle resolution revision is invalid")
+        transition_type, transition_key = (
+            _lifecycle_notification_transition(
+                case_id=case_id_value,
+                status=status_value,
+            )
+        )
+        notification_intent = build_notification_intent(
+            case_id=case_id_value,
+            transition_type=transition_type,
+            resolution_revision=resolution_revision,
+            delivery_revision=0,
+            transition_key=transition_key,
+            state_fingerprint=state_fingerprint,
+            payload={
+                "schema_version": "trade_lifecycle_notification.v1",
+                "case_id": case_id_value,
+                "transition_type": transition_type,
+                "resolution_revision": resolution_revision,
+                "state_fingerprint": state_fingerprint,
+                "account": lifecycle_case.get("account"),
+                "symbol": lifecycle_case.get("symbol"),
+                "option_type": lifecycle_case.get("option_type"),
+                "position_side": lifecycle_case.get("position_side"),
+                "strike": lifecycle_case.get("strike"),
+                "expiration_ymd": lifecycle_case.get(
+                    "expiration_ymd"
+                ),
+                "reason_codes": reasons,
+                "evidence_id": evidence_id,
+            },
+        )
+        notification_audit_codes = list(
+            prior_summary.get("notification_audit_codes") or []
+        )
+        existing_transition = (
+            sqlite_repo.get_trade_lifecycle_notification_by_transition(
+                transition_key=transition_key,
+                delivery_revision=0,
+                conn=conn,
+            )
+        )
+        outbox_created = False
+        if business_state_changed:
+            if (
+                existing_transition is not None
+                and (
+                    str(
+                        existing_transition.get("state_fingerprint")
+                        or ""
+                    )
+                    != state_fingerprint
+                    or str(existing_transition.get("payload_hash") or "")
+                    != str(notification_intent.get("payload_hash") or "")
+                )
+            ):
+                notification_audit_codes = sorted(
+                    set(
+                        notification_audit_codes
+                        + ["notification_transition_conflict"]
+                    )
+                )
+            else:
+                outbox_created = (
+                    sqlite_repo.insert_trade_lifecycle_notification_once(
+                        notification_intent,
+                        conn=conn,
+                    )
+                )
+        new_summary.update(
+            {
+                "resolution_revision": resolution_revision,
+                "state_fingerprint": state_fingerprint,
+                "notification_audit_codes": (
+                    notification_audit_codes
+                ),
+            }
+        )
         status_changed = sqlite_repo.update_trade_lifecycle_case_derived_status(
             case_id=case_id_value,
             status=status_value,
-            derived_summary={
-                "target_contracts_by_lot": resolution.target_contracts_by_lot,
-                "resolved_contracts_by_lot": resolution.resolved_contracts_by_lot,
-                "remaining_contracts_by_lot": resolution.remaining_contracts_by_lot,
-                "resolved_contracts_by_terminal_type": (
-                    resolution.resolved_contracts_by_terminal_type
-                ),
-                "lifecycle_reason_codes": reasons,
-                "conflict_evidence_ids": sorted(
-                    set(prior_conflicts + [evidence_id])
-                ),
-            },
+            derived_summary=new_summary,
+            expected_state_fingerprint=prior_fingerprint,
             conn=conn,
         )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
@@ -748,8 +1984,269 @@ def record_lifecycle_evidence_issue_atomically(
             "status": status_value,
             "reason_codes": reasons,
             "status_changed": status_changed,
+            "source_claim_created": source_claim_created,
+            "resolution_revision": resolution_revision,
+            "state_fingerprint": state_fingerprint,
+            "business_state_changed": business_state_changed,
+            "notification_outbox_id": notification_intent["outbox_id"],
+            "notification_outbox_created": outbox_created,
+            "notification_audit_codes": notification_audit_codes,
             "terminal_event_ids": [],
             "allocation_ids": [],
+        }
+
+    return with_sqlite_repo_transaction(repo, _run)
+
+
+def advance_lifecycle_case_state_atomically(
+    repo: Any,
+    *,
+    case_id: str,
+    status: str,
+    derived_summary: dict[str, Any],
+    public_transition: str | None,
+) -> dict[str, Any]:
+    """Advance a derived lifecycle state and optional fixed Outbox slot."""
+
+    case_id_value = str(case_id or "").strip()
+    status_value = str(status or "").strip().lower()
+    summary_input = dict(derived_summary or {})
+    transition_value = str(public_transition or "").strip().lower()
+    if not case_id_value or not status_value:
+        raise ValueError("lifecycle state identity is incomplete")
+    if transition_value and transition_value not in {
+        "option_leg_closed",
+        "resolution_confirmed",
+        "needs_review",
+        "conflict",
+    }:
+        raise ValueError("lifecycle public transition is invalid")
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError(
+                "lifecycle state advance requires SQLite authority"
+            )
+        lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
+            case_id_value,
+            conn=conn,
+        )
+        if lifecycle_case is None:
+            raise ValueError(
+                f"lifecycle case not found: {case_id_value}"
+            )
+        prior_summary = (
+            dict(lifecycle_case.get("derived_summary") or {})
+            if isinstance(lifecycle_case.get("derived_summary"), dict)
+            else {}
+        )
+        void_event_ids = _effective_void_target_ids(
+            sqlite_repo,
+            conn=conn,
+        )
+        allocations = list(
+            sqlite_repo.list_trade_lifecycle_allocations(
+                case_id=case_id_value,
+                conn=conn,
+            )
+        )
+        resolution = resolve_allocations(
+            lifecycle_case.get("target_contracts_by_lot"),
+            allocations,
+            void_event_ids=void_event_ids,
+        )
+        if resolution.status != "ok":
+            raise ValueError(
+                "existing lifecycle allocations conflict: "
+                + ",".join(resolution.reason_codes)
+            )
+        new_summary = {
+            **prior_summary,
+            **{
+                key: value
+                for key, value in summary_input.items()
+                if key
+                not in {
+                    "resolution_revision",
+                    "state_fingerprint",
+                    "notification_audit_codes",
+                }
+            },
+            "target_contracts_by_lot": (
+                resolution.target_contracts_by_lot
+            ),
+            "resolved_contracts_by_lot": (
+                resolution.resolved_contracts_by_lot
+            ),
+            "remaining_contracts_by_lot": (
+                resolution.remaining_contracts_by_lot
+            ),
+            "resolved_contracts_by_terminal_type": (
+                resolution.resolved_contracts_by_terminal_type
+            ),
+        }
+        projected_remaining = {
+            lot_id: int(
+                sqlite_repo.get_position_lot_fields(
+                    lot_id,
+                    conn=conn,
+                ).get("contracts_open")
+                or 0
+            )
+            for lot_id in sorted(
+                dict(
+                    lifecycle_case.get("target_contracts_by_lot") or {}
+                )
+            )
+        }
+        state_fingerprint = canonical_state_fingerprint(
+            _lifecycle_state_payload(
+                lifecycle_case=lifecycle_case,
+                evidence_rows=(
+                    sqlite_repo.list_trade_lifecycle_evidence(
+                        case_id=case_id_value,
+                        conn=conn,
+                    )
+                ),
+                source_claims=(
+                    sqlite_repo.list_trade_lifecycle_source_consumptions(
+                        case_id=case_id_value,
+                        conn=conn,
+                    )
+                ),
+                allocations=allocations,
+                void_event_ids=void_event_ids,
+                projected_remaining_by_lot=projected_remaining,
+                status=status_value,
+                summary=new_summary,
+            )
+        )
+        prior_fingerprint = str(
+            prior_summary.get("state_fingerprint") or ""
+        ).strip()
+        business_state_changed = (
+            state_fingerprint != prior_fingerprint
+        )
+        resolution_revision = int(
+            prior_summary.get("resolution_revision") or 0
+        ) + int(business_state_changed)
+        if resolution_revision <= 0:
+            raise ValueError("lifecycle resolution revision is invalid")
+        notification_audit_codes = list(
+            prior_summary.get("notification_audit_codes") or []
+        )
+        notification_intent: dict[str, Any] | None = None
+        outbox_created = False
+        if transition_value:
+            transition_key = (
+                f"lifecycle:{case_id_value}:{transition_value}"
+            )
+            notification_intent = build_notification_intent(
+                case_id=case_id_value,
+                transition_type=transition_value,
+                resolution_revision=resolution_revision,
+                delivery_revision=0,
+                transition_key=transition_key,
+                state_fingerprint=state_fingerprint,
+                payload={
+                    "schema_version": (
+                        "trade_lifecycle_notification.v1"
+                    ),
+                    "case_id": case_id_value,
+                    "transition_type": transition_value,
+                    "resolution_revision": resolution_revision,
+                    "state_fingerprint": state_fingerprint,
+                    "account": lifecycle_case.get("account"),
+                    "symbol": lifecycle_case.get("symbol"),
+                    "option_type": lifecycle_case.get("option_type"),
+                    "position_side": lifecycle_case.get(
+                        "position_side"
+                    ),
+                    "strike": lifecycle_case.get("strike"),
+                    "expiration_ymd": lifecycle_case.get(
+                        "expiration_ymd"
+                    ),
+                    "close_reason": new_summary.get("close_reason"),
+                    "reason_codes": sorted(
+                        {
+                            str(item)
+                            for item in (
+                                new_summary.get(
+                                    "lifecycle_reason_codes"
+                                )
+                                or []
+                            )
+                            if str(item or "").strip()
+                        }
+                    ),
+                },
+            )
+            existing_transition = (
+                sqlite_repo.get_trade_lifecycle_notification_by_transition(
+                    transition_key=transition_key,
+                    delivery_revision=0,
+                    conn=conn,
+                )
+            )
+            if (
+                business_state_changed
+                and existing_transition is not None
+                and (
+                    str(
+                        existing_transition.get("state_fingerprint")
+                        or ""
+                    )
+                    != state_fingerprint
+                    or str(existing_transition.get("payload_hash") or "")
+                    != str(notification_intent.get("payload_hash") or "")
+                )
+            ):
+                notification_audit_codes = sorted(
+                    set(
+                        notification_audit_codes
+                        + ["notification_transition_conflict"]
+                    )
+                )
+            elif business_state_changed:
+                outbox_created = (
+                    sqlite_repo.insert_trade_lifecycle_notification_once(
+                        notification_intent,
+                        conn=conn,
+                    )
+                )
+        new_summary.update(
+            {
+                "resolution_revision": resolution_revision,
+                "state_fingerprint": state_fingerprint,
+                "notification_audit_codes": (
+                    notification_audit_codes
+                ),
+            }
+        )
+        status_changed = (
+            sqlite_repo.update_trade_lifecycle_case_derived_status(
+                case_id=case_id_value,
+                status=status_value,
+                derived_summary=new_summary,
+                expected_state_fingerprint=prior_fingerprint,
+                conn=conn,
+            )
+        )
+        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        return {
+            "case_id": case_id_value,
+            "status": status_value,
+            "status_changed": status_changed,
+            "business_state_changed": business_state_changed,
+            "resolution_revision": resolution_revision,
+            "state_fingerprint": state_fingerprint,
+            "notification_outbox_id": (
+                notification_intent.get("outbox_id")
+                if notification_intent is not None
+                else None
+            ),
+            "notification_outbox_created": outbox_created,
+            "notification_audit_codes": notification_audit_codes,
         }
 
     return with_sqlite_repo_transaction(repo, _run)
@@ -776,6 +2273,128 @@ def _validate_existing_lifecycle_evidence(
         raise ValueError("lifecycle evidence is already bound to another case")
 
 
+def _effective_void_target_ids(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                target
+                for item in sqlite_repo.list_trade_events(conn=conn)
+                for target in [valid_void_target_event_id(item)]
+                if target
+            }
+        )
+    )
+
+
+def _positive_lifecycle_contracts(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("lifecycle evidence contracts must be positive")
+    try:
+        numeric = Decimal(str(value))
+        parsed = int(numeric)
+    except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("lifecycle evidence contracts must be positive") from exc
+    if not numeric.is_finite() or parsed <= 0 or numeric != parsed:
+        raise ValueError("lifecycle evidence contracts must be positive")
+    return parsed
+
+
+def _matching_lifecycle_lots(
+    position_lots: Sequence[dict[str, Any]],
+    *,
+    contract_key: ContractKey,
+) -> list[tuple[str, int, int]]:
+    matches: list[tuple[str, int, int]] = []
+    for item in position_lots:
+        if not isinstance(item, dict):
+            continue
+        lot_id = str(item.get("record_id") or "").strip()
+        fields = dict(item.get("fields") or {})
+        remaining = effective_contracts_open(fields)
+        if not lot_id or remaining <= 0:
+            continue
+        try:
+            candidate_key = ContractKey.from_values(
+                broker=fields.get("broker"),
+                account=fields.get("account"),
+                underlying_symbol=fields.get("symbol"),
+                option_type=fields.get("option_type"),
+                position_side=fields.get("side"),
+                strike=effective_strike(fields),
+                expiration_ymd=effective_expiration_ymd(fields),
+            )
+        except (TypeError, ValueError):
+            continue
+        if candidate_key.position_key != contract_key.position_key:
+            continue
+        try:
+            opened_at = int(fields.get("opened_at") or 0)
+        except (TypeError, ValueError):
+            opened_at = 0
+        matches.append((lot_id, remaining, opened_at))
+    return sorted(matches, key=lambda item: (item[2], item[0]))
+
+
+def _allocate_lifecycle_reservation(
+    *,
+    contracts: int,
+    available_by_lot: dict[str, int],
+    matching_lots: Sequence[tuple[str, int, int]],
+) -> dict[str, int]:
+    remaining = int(contracts)
+    allocation: dict[str, int] = {}
+    lot_order = [lot_id for lot_id, _contracts, _opened_at in matching_lots]
+    lot_order.extend(
+        lot_id
+        for lot_id in sorted(available_by_lot)
+        if lot_id not in lot_order
+    )
+    for lot_id in lot_order:
+        available = int(available_by_lot.get(lot_id, 0))
+        if available <= 0 or remaining <= 0:
+            continue
+        allocated = min(available, remaining)
+        allocation[lot_id] = allocated
+        remaining -= allocated
+    if remaining:
+        raise ValueError("lifecycle_reservation_exceeds_available_target")
+    return allocation
+
+
+def _validate_existing_zero_price_evidence(
+    *,
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    contract_key: ContractKey,
+    contracts: int,
+) -> None:
+    for field in ("evidence_id", "source_type", "source_event_id", "evidence_type"):
+        if str(existing.get(field) or "").strip() != str(
+            incoming.get(field) or ""
+        ).strip():
+            raise ValueError(f"lifecycle evidence immutable conflict: {field}")
+    if int(existing.get("contracts") or 0) != contracts:
+        raise ValueError("lifecycle evidence immutable conflict: contracts")
+    if (
+        str(existing.get("account") or "").strip().lower()
+        != contract_key.account
+        or str(existing.get("symbol") or "").strip().upper()
+        != contract_key.underlying_symbol
+        or str(existing.get("option_type") or "").strip().lower()
+        != contract_key.option_type
+        or str(existing.get("position_side") or "").strip().lower()
+        != contract_key.position_side
+        or Decimal(str(existing.get("strike"))) != Decimal(contract_key.strike)
+        or str(existing.get("expiration_ymd") or "").strip()
+        != contract_key.expiration_ymd
+    ):
+        raise ValueError("lifecycle evidence immutable conflict: contract_identity")
+
+
 def _validate_lifecycle_event_allocation_plan(
     *,
     case_id: str,
@@ -784,6 +2403,7 @@ def _validate_lifecycle_event_allocation_plan(
     terminal_events: Sequence[TradeEvent],
     allocations: Sequence[dict[str, Any]],
     existing_allocations: Sequence[dict[str, Any]],
+    void_event_ids: Sequence[str] = (),
 ) -> tuple[dict[str, Any], str]:
     evidence_id = str(evidence.get("evidence_id") or "").strip()
     if not terminal_events or len(terminal_events) != len(allocations):
@@ -857,6 +2477,7 @@ def _validate_lifecycle_event_allocation_plan(
     resolution = resolve_allocations(
         target_contracts,
         [*existing_allocations, *allocations],
+        void_event_ids=void_event_ids,
     )
     if resolution.status != "ok":
         raise ValueError(
@@ -877,6 +2498,209 @@ def _validate_lifecycle_event_allocation_plan(
         ),
     }
     return summary, status
+
+
+def _validate_broker_settlement_pair_for_write(
+    repo: Any,
+    *,
+    conn: Any,
+    lifecycle_case: dict[str, Any],
+    evidence: dict[str, Any],
+) -> None:
+    if (
+        str(evidence.get("source_type") or "").strip().lower()
+        != "broker_settlement_pair"
+        or str(
+            evidence.get("terminal_type")
+            or evidence.get("evidence_type")
+            or ""
+        ).strip().lower()
+        not in {"assignment", "exercise"}
+    ):
+        return
+
+    case_id = str(lifecycle_case.get("case_id") or "").strip()
+    stock = (
+        dict(evidence.get("stock_settlement") or {})
+        if isinstance(evidence.get("stock_settlement"), dict)
+        else {}
+    )
+    case_futu_account_id = str(
+        lifecycle_case.get("futu_account_id") or ""
+    ).strip()
+    stock_futu_account_id = str(
+        stock.get("futu_account_id") or ""
+    ).strip()
+    if (
+        not case_futu_account_id
+        or not stock_futu_account_id
+        or case_futu_account_id != stock_futu_account_id
+    ):
+        raise ValueError("stock_settlement_futu_account_mismatch")
+
+    case_symbol = canonical_symbol(lifecycle_case.get("symbol"))
+    stock_symbol = canonical_symbol(stock.get("symbol"))
+    if not case_symbol or stock_symbol != case_symbol:
+        raise ValueError("stock_settlement_symbol_mismatch")
+
+    try:
+        strike = Decimal(str(lifecycle_case.get("strike")))
+        stock_price = Decimal(str(stock.get("price")))
+        shares = Decimal(str(stock.get("shares")))
+        multiplier = Decimal(
+            str(lifecycle_case.get("multiplier") or 100)
+        )
+        contracts = int(evidence.get("contracts") or 0)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(
+            "stock_settlement_economic_fields_invalid"
+        ) from exc
+    if (
+        not strike.is_finite()
+        or not stock_price.is_finite()
+        or stock_price != strike
+    ):
+        raise ValueError("stock_settlement_price_mismatch")
+    if (
+        contracts <= 0
+        or not shares.is_finite()
+        or not multiplier.is_finite()
+        or multiplier <= 0
+        or shares != multiplier * contracts
+    ):
+        raise ValueError("stock_settlement_quantity_mismatch")
+
+    terminal_type = str(
+        evidence.get("terminal_type")
+        or evidence.get("evidence_type")
+        or ""
+    ).strip().lower()
+    option_type = str(
+        lifecycle_case.get("option_type") or ""
+    ).strip().lower()
+    position_side = str(
+        lifecycle_case.get("position_side") or ""
+    ).strip().lower()
+    expected_side = {
+        ("assignment", "put", "short"): "buy",
+        ("assignment", "call", "short"): "sell",
+        ("exercise", "call", "long"): "buy",
+        ("exercise", "put", "long"): "sell",
+    }.get((terminal_type, option_type, position_side))
+    actual_side = str(stock.get("side") or "").strip().lower()
+    if expected_side is None or actual_side != expected_side:
+        raise ValueError("stock_settlement_side_mismatch")
+
+    try:
+        settlement_time_ms = int(
+            stock.get("event_time_ms")
+            or evidence.get("event_time_ms")
+            or 0
+        )
+        option_event_time_ms = int(
+            evidence.get("option_event_time_ms") or 0
+        )
+        observation_start_ms = int(
+            lifecycle_case.get("observation_start_ms") or 0
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("stock_settlement_time_invalid") from exc
+    if settlement_time_ms <= 0:
+        raise ValueError("stock_settlement_time_invalid")
+    early_tolerance_ms = 5 * 60 * 1000
+    near_option_event = (
+        option_event_time_ms > 0
+        and abs(settlement_time_ms - option_event_time_ms)
+        <= early_tolerance_ms
+    )
+    if (
+        observation_start_ms > 0
+        and settlement_time_ms
+        < observation_start_ms - early_tolerance_ms
+        and not near_option_event
+    ):
+        raise ValueError("stock_settlement_before_lifecycle_window")
+    timing_policy = repo.get_trade_lifecycle_timing_policy(
+        case_id,
+        conn=conn,
+    )
+    try:
+        settlement_deadline_ms = int(
+            (timing_policy or {}).get("settlement_deadline_ms")
+            or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        settlement_deadline_ms = 0
+    if settlement_deadline_ms <= 0 and not near_option_event:
+        raise ValueError("settlement_deadline_unavailable")
+    if (
+        settlement_deadline_ms > 0
+        and settlement_time_ms > settlement_deadline_ms
+    ):
+        raise ValueError("stock_settlement_after_deadline")
+
+    candidates = [
+        item
+        for item in repo.list_trade_lifecycle_cases(conn=conn)
+        if _broker_settlement_case_identity_matches(
+            item,
+            lifecycle_case=lifecycle_case,
+            stock_futu_account_id=stock_futu_account_id,
+        )
+    ]
+    candidate_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in candidates
+    }
+    if candidate_ids != {case_id}:
+        raise ValueError("ambiguous_lifecycle_case_match")
+
+
+def _broker_settlement_case_identity_matches(
+    candidate: dict[str, Any],
+    *,
+    lifecycle_case: dict[str, Any],
+    stock_futu_account_id: str,
+) -> bool:
+    if (
+        str(candidate.get("schema_version") or "").strip()
+        != "lifecycle_case.v2"
+        or str(candidate.get("superseded_by_case_id") or "").strip()
+    ):
+        return False
+    try:
+        return (
+            str(candidate.get("account") or "").strip().lower()
+            == str(lifecycle_case.get("account") or "").strip().lower()
+            and str(
+                candidate.get("futu_account_id") or ""
+            ).strip()
+            == stock_futu_account_id
+            and canonical_symbol(candidate.get("symbol"))
+            == canonical_symbol(lifecycle_case.get("symbol"))
+            and str(
+                candidate.get("option_type") or ""
+            ).strip().lower()
+            == str(
+                lifecycle_case.get("option_type") or ""
+            ).strip().lower()
+            and str(
+                candidate.get("position_side") or ""
+            ).strip().lower()
+            == str(
+                lifecycle_case.get("position_side") or ""
+            ).strip().lower()
+            and Decimal(str(candidate.get("strike")))
+            == Decimal(str(lifecycle_case.get("strike")))
+            and str(
+                candidate.get("expiration_ymd") or ""
+            ).strip()
+            == str(
+                lifecycle_case.get("expiration_ymd") or ""
+            ).strip()
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return False
 
 
 def _canonical_rows(rows: Sequence[dict[str, Any]]) -> list[str]:
@@ -905,6 +2729,87 @@ def _event_with_existing_cash_conversions(event: TradeEvent, existing: dict[str,
     return replace(event, raw_payload=raw_payload)
 
 
+def _normal_close_notification_intent(
+    events: Sequence[TradeEvent],
+) -> dict[str, Any] | None:
+    rows = list(events)
+    if not rows or any(item.event_type != "close" for item in rows):
+        return None
+    first = rows[0]
+    raw = dict(first.raw_payload or {})
+    source_deal_id = str(raw.get("source_deal_id") or "").strip()
+    futu_account_id = str(raw.get("futu_account_id") or "").strip()
+    account = str(first.contract_key.account or "").strip().lower()
+    if not source_deal_id or not futu_account_id or not account:
+        return None
+    broker_deal_key = (
+        f"futu:{account}:{futu_account_id}:{source_deal_id}"
+    )
+    case_id = f"close:{broker_deal_key}"
+    ordered = sorted(
+        rows,
+        key=lambda item: (
+            str(item.target_lot_id or ""),
+            str(item.event_id or ""),
+        ),
+    )
+    payload = {
+        "schema_version": "broker_close_notification.v1",
+        "case_id": case_id,
+        "transition_type": "resolution_confirmed",
+        "resolution_revision": 1,
+        "broker_deal_key": broker_deal_key,
+        "account": account,
+        "futu_account_id": futu_account_id,
+        "symbol": first.contract_key.underlying_symbol,
+        "option_type": first.contract_key.option_type,
+        "position_side": first.contract_key.position_side,
+        "strike": first.contract_key.strike,
+        "expiration_ymd": first.contract_key.expiration_ymd,
+        "execution_time_ms": int(first.event_time_ms or 0),
+        "currency": first.currency,
+        "total_contracts": sum(int(item.contracts) for item in ordered),
+        "events": [
+            {
+                "event_id": item.event_id,
+                "target_lot_id": item.target_lot_id,
+                "contracts": int(item.contracts),
+            }
+            for item in ordered
+        ],
+    }
+    state_fingerprint = canonical_state_fingerprint(
+        {
+            "schema_version": "broker_close_split_state.v1",
+            "broker_deal_key": broker_deal_key,
+            "account": account,
+            "futu_account_id": futu_account_id,
+            "contract": {
+                "symbol": first.contract_key.underlying_symbol,
+                "option_type": first.contract_key.option_type,
+                "position_side": first.contract_key.position_side,
+                "strike": canonical_decimal_text(
+                    first.contract_key.strike
+                ),
+                "expiration_ymd": first.contract_key.expiration_ymd,
+            },
+            "execution_time_ms": int(first.event_time_ms or 0),
+            "events": payload["events"],
+            "total_contracts": payload["total_contracts"],
+        }
+    )
+    payload["state_fingerprint"] = state_fingerprint
+    return build_notification_intent(
+        case_id=case_id,
+        transition_type="resolution_confirmed",
+        resolution_revision=1,
+        delivery_revision=0,
+        transition_key=f"{case_id}:resolution_confirmed",
+        state_fingerprint=state_fingerprint,
+        payload=payload,
+    )
+
+
 def persist_trade_event(repo: Any, deal: Any) -> LedgerWriteResult:
     return persist_trade_event_object(repo, _trade_event_from_normalized_deal(deal))
 
@@ -915,10 +2820,8 @@ def persist_normalized_trade_events_atomically(
 ) -> list[LedgerWriteResult]:
     """Persist explicitly targeted broker-event splits in one transaction."""
 
-    return persist_trade_event_objects_atomically(
-        repo,
-        [_trade_event_from_normalized_deal(deal) for deal in deals],
-    )
+    events = [_trade_event_from_normalized_deal(deal) for deal in deals]
+    return persist_trade_event_objects_atomically(repo, events)
 
 
 def persist_trade_event_objects_atomically(
@@ -997,6 +2900,36 @@ def persist_trade_event_objects_atomically(
             if conn is not None
             else sqlite_repo.replace_position_lots(projection.lots)
         )
+        notification_intent = _normal_close_notification_intent(
+            storage_events
+        )
+        outbox_created = False
+        notification_history_unseeded = False
+        if notification_intent is not None:
+            if any(created_flags) and not all(created_flags):
+                raise ValueError(
+                    "broker close split replay is only partially present"
+                )
+            if all(created_flags):
+                outbox_created = (
+                    sqlite_repo.insert_trade_lifecycle_notification_once(
+                        notification_intent,
+                        conn=conn,
+                    )
+                )
+            elif not any(created_flags):
+                existing_transition = (
+                    sqlite_repo.get_trade_lifecycle_notification_by_transition(
+                        transition_key=str(
+                            notification_intent["transition_key"]
+                        ),
+                        delivery_revision=0,
+                        conn=conn,
+                    )
+                )
+                notification_history_unseeded = (
+                    existing_transition is None
+                )
         if case_update:
             upsert_case = getattr(sqlite_repo, "upsert_trade_lifecycle_case", None)
             if not callable(upsert_case):
@@ -1049,6 +2982,19 @@ def persist_trade_event_objects_atomically(
                     "created": bool(created),
                     "position_lot_count": int(lot_count),
                     **diagnostics,
+                    **(
+                        {
+                            "notification_outbox_id": notification_intent[
+                                "outbox_id"
+                            ],
+                            "notification_outbox_created": outbox_created,
+                            "notification_history_unseeded": (
+                                notification_history_unseeded
+                            ),
+                        }
+                        if notification_intent is not None
+                        else {}
+                    ),
                 }
             )
             for event, created in zip(storage_events, created_flags, strict=True)

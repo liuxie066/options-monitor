@@ -51,6 +51,19 @@ from src.application.position_advice_notification_authority import (
     build_fixed_failure_notification_authority_token,
     build_notification_authority_token,
 )
+from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
+from src.application.position_advice_source_receipts import (
+    PositionAdviceSourceError,
+    safe_existing_relative_path,
+    sha256_bytes,
+    validate_source_receipt,
+)
+from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable,
+    RequiredDataSnapshotError,
+    load_required_data_snapshot_manifest,
+    resolve_frozen_required_data,
+)
 
 
 _DEFAULT_MAX_CANDIDATES = 3
@@ -189,6 +202,69 @@ def assemble_daily_decision_brief(
             source_artifacts=source_artifacts,
             data_gaps=data_gaps,
         )
+
+    strategy_status_index = _load_json_artifact(
+        path=run_account_dir / "strategy_scan_status_index.v1.json",
+        run_account_dir=run_account_dir,
+        source_kind="strategy_scan_status_index",
+        source_artifacts=source_artifacts,
+        data_gaps=data_gaps,
+        required=False,
+    )
+    indexed_strategy_statuses = _append_strategy_status_gaps(
+        strategy_status_index,
+        run_id=run_id_norm,
+        account=account_norm,
+        market=market_norm,
+        data_gaps=data_gaps,
+    )
+    success_empty_authority_blocker = (
+        _append_success_empty_strategy_gaps(
+            statuses=indexed_strategy_statuses,
+            base=base_path,
+            run_id=run_id_norm,
+            account=account_norm,
+            market=market_norm,
+            account_state_dir=state_dir,
+            advice_authority=advice_authority,
+            now_utc=effective_now,
+            data_gaps=data_gaps,
+        )
+    )
+    if success_empty_authority_blocker:
+        advice_authority = {
+            **advice_authority,
+            "mode": "authority_conflict",
+            "available": False,
+            "blocker": success_empty_authority_blocker,
+            "rows": [],
+            "human_review_rows": [],
+        }
+        position_advice_rows = []
+        close_rows = []
+        close_available = False
+        data_gaps.append(
+            {
+                "scope": "authority",
+                "strategy_family": "position_advice",
+                "reason": success_empty_authority_blocker,
+            }
+        )
+    indexed_expected_families = {
+        str(item.get("strategy_family") or "").strip().lower()
+        for item in indexed_strategy_statuses
+    }
+    indexed_completed_families = {
+        str(item.get("strategy_family") or "").strip().lower()
+        for item in indexed_strategy_statuses
+        if str(item.get("status") or "").strip().lower() == "completed"
+    }
+    if "sell_put" in indexed_expected_families:
+        put_available = "sell_put" in indexed_completed_families
+    if "covered_call" in indexed_expected_families:
+        call_available = "covered_call" in indexed_completed_families
+    if "combo_yield" in indexed_expected_families:
+        combo_available = "combo_yield" in indexed_completed_families
 
     put_rows = _dedupe_rows(put_rows, family="sell_put")
     call_rows = _dedupe_rows(call_rows, family="covered_call")
@@ -424,36 +500,6 @@ def assemble_daily_decision_brief(
         required=False,
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
-    strategy_status_index = _load_json_artifact(
-        path=run_account_dir / "strategy_scan_status_index.v1.json",
-        run_account_dir=run_account_dir,
-        source_kind="strategy_scan_status_index",
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-        required=False,
-    )
-    indexed_strategy_statuses = _append_strategy_status_gaps(
-        strategy_status_index,
-        run_id=run_id_norm,
-        account=account_norm,
-        market=market_norm,
-        data_gaps=data_gaps,
-    )
-    indexed_expected_families = {
-        str(item.get("strategy_family") or "").strip().lower()
-        for item in indexed_strategy_statuses
-    }
-    indexed_completed_families = {
-        str(item.get("strategy_family") or "").strip().lower()
-        for item in indexed_strategy_statuses
-        if str(item.get("status") or "").strip().lower() == "completed"
-    }
-    if "sell_put" in indexed_expected_families:
-        put_available = "sell_put" in indexed_completed_families
-    if "covered_call" in indexed_expected_families:
-        call_available = "covered_call" in indexed_completed_families
-    if "combo_yield" in indexed_expected_families:
-        combo_available = "combo_yield" in indexed_completed_families
 
     reject_logs = sorted(run_account_dir.glob("*_reject_log.csv"))
     rejections = _build_market_rejection_summary(
@@ -2361,6 +2407,276 @@ def _append_strategy_status_gaps(
             }
         )
     return relevant
+
+
+def _append_success_empty_strategy_gaps(
+    *,
+    statuses: list[dict[str, Any]],
+    base: Path,
+    run_id: str,
+    account: str,
+    market: str,
+    account_state_dir: Path,
+    advice_authority: Mapping[str, Any],
+    now_utc: datetime,
+    data_gaps: list[dict[str, Any]],
+) -> str | None:
+    annotated = [
+        item
+        for item in statuses
+        if _text(item.get("source_outcome"))
+        or _text(item.get("reason_code"))
+    ]
+    if not annotated:
+        return None
+    if (
+        advice_authority.get("mode") == "authority_conflict"
+        or not bool(advice_authority.get("available"))
+    ):
+        return str(
+            advice_authority.get("blocker")
+            or "position_advice_authority_conflict"
+        )
+    try:
+        candidate_source = _load_adopted_candidate_source(
+            account_state_dir=account_state_dir,
+            account=account,
+            run_id=run_id,
+            now_utc=now_utc,
+        )
+        manifest_path = (
+            paths.run_state_dir(base, run_id)
+            / "required_data_snapshot_manifest.json"
+        )
+        _manifest, required_data_root = (
+            load_required_data_snapshot_manifest(
+                manifest_path=manifest_path,
+                expected_run_id=run_id,
+            )
+        )
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+        PositionAdviceSourceError,
+        RequiredDataSnapshotError,
+    ):
+        return "position_advice_source_integrity_invalid"
+
+    evidence_by_symbol: dict[str, dict[str, Any]] = {}
+    for item in annotated:
+        symbol = _text(item.get("symbol")).upper()
+        family = _text(item.get("strategy_family")).lower()
+        try:
+            evidence = evidence_by_symbol.get(symbol)
+            if evidence is None:
+                evidence = resolve_frozen_required_data(
+                    manifest_path=manifest_path,
+                    expected_run_id=run_id,
+                    symbol=symbol,
+                    required_data_root=required_data_root,
+                    now=now_utc,
+                )
+                evidence_by_symbol[symbol] = evidence
+        except FrozenRequiredDataUnavailable:
+            return "position_advice_source_integrity_invalid"
+
+        projection_matches = _success_empty_projection_matches(
+            status=item,
+            evidence=evidence,
+            candidate_source=candidate_source,
+        )
+        if projection_matches:
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "market": market,
+                    "symbol": symbol,
+                    "strategy_family": family,
+                    "outcome": "success_empty",
+                    "reason": _text(item.get("reason_code")),
+                    "severity": "warning",
+                    "actionable": False,
+                }
+            )
+        else:
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "market": market,
+                    "symbol": symbol,
+                    "strategy_family": family,
+                    "reason": "strategy_status_projection_mismatch",
+                    "severity": "warning",
+                    "actionable": False,
+                }
+            )
+    return None
+
+
+def _load_adopted_candidate_source(
+    *,
+    account_state_dir: Path,
+    account: str,
+    run_id: str,
+    now_utc: datetime,
+) -> dict[str, Any]:
+    root = Path(account_state_dir).resolve()
+    summary = json.loads(
+        (root / "position_advice_sources.v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    records = summary.get("source_receipts")
+    if not isinstance(records, list):
+        raise PositionAdviceSourceError(
+            "candidate source receipt index is unavailable"
+        )
+    record = next(
+        (
+            dict(item)
+            for item in records
+            if isinstance(item, Mapping)
+            and _text(item.get("source_kind")) == "candidate_decisions"
+        ),
+        None,
+    )
+    if record is None:
+        raise PositionAdviceSourceError(
+            "candidate source receipt is unavailable"
+        )
+    producer_root = Path(
+        _text(record.get("producer_root"))
+    ).resolve()
+    if producer_root != root:
+        raise PositionAdviceSourceError(
+            "candidate source producer root mismatch"
+        )
+    receipt_input = Path(
+        _text(record.get("receipt_path"))
+    ).resolve()
+    try:
+        receipt_relpath = receipt_input.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise PositionAdviceSourceError(
+            "candidate source receipt escapes account state"
+        ) from exc
+    receipt_path = safe_existing_relative_path(root, receipt_relpath)
+    receipt_bytes = receipt_path.read_bytes()
+    if sha256_bytes(receipt_bytes) != _text(
+        record.get("receipt_hash")
+    ):
+        raise PositionAdviceSourceError(
+            "candidate source receipt hash mismatch"
+        )
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    validated = validate_source_receipt(
+        receipt,
+        producer_root=root,
+        now=now_utc,
+        expected_source_kind="candidate_decisions",
+        expected_account=account,
+        expected_producer_account_run_id=run_id,
+    )
+    payload = json.loads(
+        validated["payload_path"].read_text(encoding="utf-8")
+    )
+    decisions = payload.get("candidate_decisions")
+    quote_snapshot_ids = payload.get("quote_snapshot_ids")
+    if (
+        payload.get("schema_version")
+        != "position_advice_candidate_all_decisions.v1"
+        or not isinstance(decisions, list)
+        or int(payload.get("candidate_count") or 0) != len(decisions)
+        or not isinstance(quote_snapshot_ids, list)
+        or not quote_snapshot_ids
+    ):
+        raise PositionAdviceSourceError(
+            "candidate source payload is invalid"
+        )
+    return {
+        "candidate_decisions": [
+            dict(item)
+            for item in decisions
+            if isinstance(item, Mapping)
+        ],
+        "quote_snapshot_ids": {
+            _text(item)
+            for item in quote_snapshot_ids
+            if _text(item)
+        },
+        "quote_dependencies": {
+            _text(item.get("snapshot_id")): dict(item)
+            for item in validated.get("dependencies") or []
+            if isinstance(item, Mapping)
+            and _text(item.get("source_kind")) == "quotes"
+        },
+    }
+
+
+def _success_empty_projection_matches(
+    *,
+    status: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    candidate_source: Mapping[str, Any],
+) -> bool:
+    family = _text(status.get("strategy_family")).lower()
+    if family not in {"sell_put", "covered_call", "combo_yield"}:
+        return False
+    try:
+        candidate_count = int(status.get("candidate_count"))
+    except (TypeError, ValueError):
+        return False
+    snapshot_id = _text(status.get("snapshot_id"))
+    receipt_relpath = _text(status.get("receipt_relpath"))
+    reason_code = _text(status.get("reason_code"))
+    if (
+        _text(status.get("status")).lower() != "completed"
+        or candidate_count != 0
+        or _text(status.get("source_outcome")) != "success_empty"
+        or reason_code not in SUCCESS_EMPTY_REASON_CODES
+        or not snapshot_id
+        or not receipt_relpath
+        or snapshot_id != _text(evidence.get("snapshot_id"))
+        or receipt_relpath != _text(evidence.get("receipt_relpath"))
+        or _text(evidence.get("source_outcome")) != "success_empty"
+        or reason_code != _text(evidence.get("reason_code"))
+        or snapshot_id
+        not in set(candidate_source.get("quote_snapshot_ids") or set())
+    ):
+        return False
+    dependency = dict(
+        (candidate_source.get("quote_dependencies") or {}).get(
+            snapshot_id
+        )
+        or {}
+    )
+    if (
+        not dependency
+        or _text(dependency.get("receipt_hash"))
+        != _text(evidence.get("receipt_hash"))
+        or _text(dependency.get("payload_sha256"))
+        != _text(evidence.get("payload_sha256"))
+    ):
+        return False
+    expected_mode = {
+        "sell_put": "put",
+        "covered_call": "call",
+    }.get(family)
+    for decision in candidate_source.get("candidate_decisions") or []:
+        if not isinstance(decision, Mapping):
+            continue
+        if _text(decision.get("symbol")).upper() != _text(
+            status.get("symbol")
+        ).upper():
+            continue
+        if expected_mode is None:
+            if _text(decision.get("strategy_family")).lower() == family:
+                return False
+        elif _text(decision.get("strategy_mode")).lower() == expected_mode:
+            return False
+    return True
 
 
 def _account_result_view(result: AccountResult | Mapping[str, Any]) -> dict[str, Any]:

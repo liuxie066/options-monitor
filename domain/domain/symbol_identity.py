@@ -7,7 +7,7 @@ from typing import Any
 
 
 OPTION_CODE_RE = re.compile(
-    r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
+    r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z0-9]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
 )
 OPTION_COMPACT_RE = re.compile(r"\d{6}[CP]\d{5,}")
 OPTION_DISPLAY_RE = re.compile(

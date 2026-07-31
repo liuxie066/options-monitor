@@ -181,6 +181,8 @@ def run_symbol_monitoring(
         reason: str | None = None,
         snapshot_id: str | None = None,
         receipt_relpath: str | None = None,
+        source_outcome: str | None = None,
+        reason_code: str | None = None,
     ) -> None:
         if not frozen_status_enabled:
             return
@@ -197,6 +199,8 @@ def run_symbol_monitoring(
                 reason=reason,
                 snapshot_id=snapshot_id,
                 receipt_relpath=receipt_relpath,
+                source_outcome=source_outcome,
+                reason_code=reason_code,
             )
         except Exception:
             log.exception(
@@ -234,6 +238,7 @@ def run_symbol_monitoring(
             symbol_cfg=symbol_cfg,
             fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
             fetch_port=int(fetch_cfg.get("port") or 11111),
+            fetch_source=str(fetch_cfg.get("source") or "futu"),
             snapshot_max_wait_sec=float(discovery_fetch_kwargs["snapshot_max_wait_sec"]),
             snapshot_window_sec=float(discovery_fetch_kwargs["snapshot_window_sec"]),
             snapshot_max_calls=int(discovery_fetch_kwargs["snapshot_max_calls"]),
@@ -381,6 +386,35 @@ def run_symbol_monitoring(
         )
         or ""
     ).strip()
+    quote_source_outcome = str(
+        (
+            quote_evidence.get("source_outcome")
+            if isinstance(quote_evidence, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    quote_reason_code = str(
+        (
+            quote_evidence.get("reason_code")
+            if isinstance(quote_evidence, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+
+    def _completed_empty_evidence(
+        candidate_count: int,
+    ) -> dict[str, str | None]:
+        if (
+            candidate_count == 0
+            and quote_source_outcome == "success_empty"
+        ):
+            return {
+                "source_outcome": quote_source_outcome,
+                "reason_code": quote_reason_code or None,
+            }
+        return {"source_outcome": None, "reason_code": None}
     capture_enabled = bool(
         inputs.all_decisions_sink_fn is not None
         and str(inputs.risk_policy_version or "").strip()
@@ -452,12 +486,14 @@ def run_symbol_monitoring(
                 summary_rows,
                 put_result,
             )
+            put_candidate_count = _summary_candidate_count(put_result)
             _publish_status(
                 family="sell_put",
                 status="completed",
-                candidate_count=_summary_candidate_count(put_result),
+                candidate_count=put_candidate_count,
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
+                **_completed_empty_evidence(put_candidate_count),
             )
             if configured_put:
                 _report_capture(
@@ -534,12 +570,14 @@ def run_symbol_monitoring(
                 summary_rows,
                 combo_result,
             )
+            combo_candidate_count = _summary_candidate_count(combo_result)
             _publish_status(
                 family="combo_yield",
                 status="completed",
-                candidate_count=_summary_candidate_count(combo_result),
+                candidate_count=combo_candidate_count,
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
+                **_completed_empty_evidence(combo_candidate_count),
             )
         except Exception as exc:
             log.exception("symbol_monitoring: combo_yield step failed for %s", symbol)
@@ -606,13 +644,19 @@ def run_symbol_monitoring(
                 summary_rows,
                 call_result,
             )
+            call_candidate_count = _summary_candidate_count(call_result)
             _publish_status(
                 family="covered_call",
                 status=call_status,
                 reason=(str(call_reason) if call_reason else None),
-                candidate_count=_summary_candidate_count(call_result),
+                candidate_count=call_candidate_count,
                 snapshot_id=resolved_quote_snapshot_id,
                 receipt_relpath=quote_receipt_relpath,
+                **(
+                    _completed_empty_evidence(call_candidate_count)
+                    if call_status == "completed"
+                    else {}
+                ),
             )
             if configured_call:
                 _report_capture(

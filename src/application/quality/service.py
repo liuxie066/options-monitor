@@ -13,7 +13,10 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.ledger.api import open_trade_reconciliation_evidence_repo
 from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
-from src.application.quality.lifecycle_checks import build_lifecycle_datasets, next_trading_day
+from src.application.quality.lifecycle_checks import build_lifecycle_datasets
+from src.application.trades.lifecycle_reconciliation import (
+    lifecycle_case_read_model,
+)
 from src.application.quality.model import (
     POLICY_VERSION,
     SCHEMA_VERSION,
@@ -177,6 +180,36 @@ class OMQualityService:
 
             cases = repo.list_trade_lifecycle_cases() if repo is not None else []
             evidence_rows = repo.list_trade_lifecycle_evidence() if repo is not None else []
+            timing_policies_by_case = (
+                {
+                    str(item.get("case_id") or ""): dict(item)
+                    for item in (
+                        repo.list_trade_lifecycle_timing_policies()
+                    )
+                    if isinstance(item, dict)
+                    and str(item.get("case_id") or "").strip()
+                }
+                if repo is not None
+                else {}
+            )
+            read_models_by_case: dict[str, dict[str, Any]] = {}
+            if repo is not None:
+                for item in cases:
+                    case_id = str(
+                        item.get("case_id") or ""
+                    ).strip()
+                    if not case_id:
+                        continue
+                    try:
+                        read_models_by_case[case_id] = (
+                            lifecycle_case_read_model(
+                                repo,
+                                case_id=case_id,
+                                now_ms=int(now.timestamp() * 1000),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
             local_lots = repo.list_position_lots() if repo is not None else []
             calendar_start = self._calendar_start(cases, now=now)
             for account in accounts:
@@ -238,13 +271,6 @@ class OMQualityService:
                             utc_iso(next_due) if next_due is not None else None
                         ),
                     )
-                    self._record_first_deep_reconcile(
-                        control_state=control_state,
-                        cases=cases,
-                        account=account,
-                        snapshot=snapshot,
-                        now=now,
-                    )
                     trading_days = snapshot.trading_days
                 else:
                     position_dataset = self._carry_position_dataset(
@@ -275,6 +301,10 @@ class OMQualityService:
                         first_deep_by_case=dict(
                             control_state.get("lifecycle_first_deep_reconcile") or {}
                         ),
+                        timing_policies_by_case=(
+                            timing_policies_by_case
+                        ),
+                        read_models_by_case=read_models_by_case,
                     )
                 )
                 datasets.append(
@@ -771,31 +801,6 @@ class OMQualityService:
             error_code=reason,
             error_message=reason,
         )
-
-    @staticmethod
-    def _record_first_deep_reconcile(
-        *,
-        control_state: dict[str, Any],
-        cases: list[dict[str, Any]],
-        account: str,
-        snapshot: OpenDOptionSnapshot,
-        now: datetime,
-    ) -> None:
-        if not snapshot.complete:
-            return
-        first_deep = control_state.setdefault("lifecycle_first_deep_reconcile", {})
-        for case in cases:
-            if str(case.get("account") or "").strip().lower() != account:
-                continue
-            case_id = str(case.get("case_id") or "").strip()
-            status = str(case.get("status") or "").strip().lower()
-            try:
-                expiration = date.fromisoformat(str(case.get("expiration_ymd") or "")[:10])
-            except ValueError:
-                continue
-            next_day = next_trading_day(expiration, snapshot.trading_days)
-            if case_id and status not in {"ledger_written"} and next_day and now.date() >= next_day:
-                first_deep.setdefault(case_id, utc_iso(now))
 
     @staticmethod
     def _unavailable_ledger_datasets(

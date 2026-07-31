@@ -31,6 +31,11 @@ from src.application.ledger.api import (
     preview_trade_event_void,
     verify_position_lot_projection,
 )
+from src.application.ledger.api import (
+    apply_lifecycle_migration_manifest,
+    build_lifecycle_migration_inventory,
+    select_lifecycle_migration_targets,
+)
 from src.application.positions.auto_close import main as run_option_positions_auto_close
 from src.application.positions.combo_pairing import execute_staggered_combo_yield_pairing
 from src.application.positions.workflows import (
@@ -45,12 +50,29 @@ from src.application.positions.workflows import (
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.trade_time_format import add_trade_time_beijing
-from src.application.trades.lifecycle import resolve_lifecycle_expired_unassigned
 from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
     lifecycle_case_read_model,
     reconcile_lifecycle_evidence,
 )
+from src.application.trades.account_mapping import (
+    resolve_trade_intake_config,
+)
+from src.application.trades.lifecycle_runtime import (
+    reconcile_due_lifecycle_cases_for_source,
+)
+from src.application.trades.lifecycle_outbox import (
+    dispatch_notifications_once,
+    reconcile_unknown_notification,
+)
+from src.application.trades.manual_lifecycle_resolution import (
+    resolve_lifecycle_manually,
+)
+from src.application.trades.receipt import (
+    send_trade_lifecycle_outbox_payload,
+)
+from src.application.cash_conversion import utc_now_ms
+from src.infrastructure.futu_gateway import build_futu_gateway
 from src.application.trades.review import replay_trade_events
 from src.application.write_contract import attach_write_contract
 from src.interfaces.cli.ledger_write_safety import add_write_flags as _add_local_write_flags
@@ -354,6 +376,146 @@ def main(argv: list[str] | None = None) -> int:
     _add_runtime_root_arg(p_lifecycle_confirm_expired)
     p_lifecycle_confirm_expired.add_argument('--format', default='json', choices=['json', 'text'])
     _add_local_write_flags(p_lifecycle_confirm_expired, high_risk=True)
+    p_lifecycle_due = lifecycle_sub.add_parser(
+        'reconcile-due',
+        help='advance lifecycle cases whose pairing/deadline is due',
+    )
+    _add_runtime_root_arg(p_lifecycle_due)
+    p_lifecycle_due.add_argument('--account', required=True)
+    p_lifecycle_due.add_argument(
+        '--config',
+        required=True,
+        help='runtime config used to bind the account to one OpenD source',
+    )
+    p_lifecycle_due.add_argument('--observed-at-ms', type=int, default=None)
+    p_lifecycle_due.add_argument('--format', default='json', choices=['json', 'text'])
+    _add_local_write_flags(p_lifecycle_due, high_risk=True)
+    for command_name, help_text in (
+        (
+            'resolve',
+            'resolve one lifecycle case with persisted broker evidence',
+        ),
+        (
+            'correct',
+            'atomically void and replace one lifecycle terminal result',
+        ),
+    ):
+        command = lifecycle_sub.add_parser(
+            command_name,
+            help=help_text,
+        )
+        _add_runtime_root_arg(command)
+        command.add_argument('--case-id', required=True)
+        command.add_argument(
+            '--expected-revision',
+            required=True,
+            type=int,
+        )
+        command.add_argument(
+            '--reason',
+            required=True,
+            choices=[
+                'assignment',
+                'exercise',
+                'expiration-no-settlement',
+                'trade-close',
+            ],
+        )
+        command.add_argument('--broker-ref', default=None)
+        command.add_argument('--note', default=None)
+        if command_name == 'correct':
+            command.add_argument(
+                '--void-terminal-event-id',
+                required=True,
+            )
+        command.add_argument(
+            '--observed-at-ms',
+            type=int,
+            default=None,
+        )
+        command.add_argument(
+            '--format',
+            default='json',
+            choices=['json'],
+        )
+        _add_local_write_flags(command, high_risk=True)
+    p_lifecycle_receipts = lifecycle_sub.add_parser(
+        'receipts',
+        help='inspect, dispatch, or reconcile lifecycle notification Outbox rows',
+    )
+    receipt_sub = p_lifecycle_receipts.add_subparsers(
+        dest='receipt_cmd',
+        required=True,
+    )
+    p_receipt_inspect = receipt_sub.add_parser(
+        'inspect',
+        help='inspect one Outbox row',
+    )
+    _add_runtime_root_arg(p_receipt_inspect)
+    p_receipt_inspect.add_argument('--outbox-id', required=True)
+    p_receipt_inspect.add_argument('--format', default='json', choices=['json'])
+    p_receipt_reconcile = receipt_sub.add_parser(
+        'reconcile',
+        help='reconcile accepted/unknown delivery or create an explicit resend',
+    )
+    _add_runtime_root_arg(p_receipt_reconcile)
+    p_receipt_reconcile.add_argument('--outbox-id', required=True)
+    p_receipt_reconcile.add_argument(
+        '--mark',
+        '--action',
+        dest='action',
+        required=True,
+        choices=['confirmed', 'unknown', 'resend'],
+    )
+    p_receipt_reconcile.add_argument('--broker-ref', required=True)
+    p_receipt_reconcile.add_argument('--note', required=True)
+    p_receipt_reconcile.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_receipt_reconcile, high_risk=True)
+    p_receipt_dispatch = receipt_sub.add_parser(
+        'dispatch',
+        help='dispatch at most one due Outbox row',
+    )
+    _add_runtime_root_arg(p_receipt_dispatch)
+    p_receipt_dispatch.add_argument('--once', action='store_true', required=True)
+    p_receipt_dispatch.add_argument('--account', default=None)
+    p_receipt_dispatch.add_argument('--config', required=True)
+    p_receipt_dispatch.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_receipt_dispatch, high_risk=True)
+    p_lifecycle_migration = lifecycle_sub.add_parser(
+        'migration',
+        help='inventory and apply explicit lifecycle cutover manifests',
+    )
+    migration_sub = p_lifecycle_migration.add_subparsers(
+        dest='migration_cmd',
+        required=True,
+    )
+    p_migration_inventory = migration_sub.add_parser(
+        'inventory',
+        help='build a read-only explicit migration manifest',
+    )
+    _add_runtime_root_arg(p_migration_inventory)
+    p_migration_inventory.add_argument(
+        '--select-target',
+        action='append',
+        default=[],
+    )
+    p_migration_inventory.add_argument(
+        '--format',
+        default='json',
+        choices=['json'],
+    )
+    p_migration_apply = migration_sub.add_parser(
+        'apply',
+        help='apply selected exact rows from a frozen manifest',
+    )
+    _add_runtime_root_arg(p_migration_apply)
+    p_migration_apply.add_argument('--manifest', required=True)
+    p_migration_apply.add_argument(
+        '--format',
+        default='json',
+        choices=['json'],
+    )
+    _add_local_write_flags(p_migration_apply, high_risk=True)
 
     p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
     store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
@@ -478,15 +640,54 @@ def main(argv: list[str] | None = None) -> int:
 
     write_controls: dict[str, dict[str, bool]] = {}
     write_control_key = str(args.cmd)
-    if args.cmd == "lifecycle" and getattr(args, "lifecycle_cmd", None) in {
-        "confirm-expired",
-        "reconcile",
-    }:
+    if args.cmd == "lifecycle" and (
+        getattr(args, "lifecycle_cmd", None)
+        in {
+            "confirm-expired",
+            "reconcile",
+            "reconcile-due",
+            "resolve",
+            "correct",
+        }
+        or (
+            getattr(args, "lifecycle_cmd", None) == "receipts"
+            and getattr(args, "receipt_cmd", None)
+            in {"reconcile", "dispatch"}
+        )
+        or (
+            getattr(args, "lifecycle_cmd", None) == "migration"
+            and getattr(args, "migration_cmd", None) == "apply"
+        )
+    ):
         lifecycle_command = str(args.lifecycle_cmd)
+        if lifecycle_command == "receipts":
+            lifecycle_command = (
+                f"receipts:{str(args.receipt_cmd)}"
+            )
+        if lifecycle_command == "migration":
+            lifecycle_command = (
+                f"migration:{str(args.migration_cmd)}"
+            )
         write_control_key = f"lifecycle:{lifecycle_command}"
+        if (
+            lifecycle_command != "confirm-expired"
+            and (
+                bool(getattr(args, "confirm", False))
+                or bool(getattr(args, "yes", False))
+            )
+            and not bool(getattr(args, "apply", False))
+        ):
+            raise SystemExit(
+                "option-positions lifecycle "
+                + lifecycle_command.replace(":", " ")
+                + " requires --apply together with --confirm or --yes"
+            )
         write_controls[write_control_key] = _resolve_write_control(
             args,
-            command_name=f"option-positions lifecycle {lifecycle_command}",
+            command_name=(
+                "option-positions lifecycle "
+                + lifecycle_command.replace(":", " ")
+            ),
             high_risk=True,
         )
     elif args.cmd in {
@@ -1064,44 +1265,400 @@ def main(argv: list[str] | None = None) -> int:
                         f"reasons={','.join(reconciliation.get('reason_codes') or []) or '-'}"
                     )
             return 0
-        if args.lifecycle_cmd == 'confirm-expired':
-            if not str(args.case_id or '').strip() and not str(args.deal_id or '').strip():
-                raise SystemExit("lifecycle confirm-expired requires --case-id or --deal-id")
-            control = write_controls["lifecycle:confirm-expired"]
+        if args.lifecycle_cmd in {'resolve', 'correct'}:
+            command_name = str(args.lifecycle_cmd)
+            control = write_controls[
+                f"lifecycle:{command_name}"
+            ]
             dry_run = not bool(control["write_requested"])
-            result = resolve_lifecycle_expired_unassigned(
+            observed_at_ms = int(
+                args.observed_at_ms
+                if args.observed_at_ms is not None
+                else utc_now_ms()
+            )
+            result = resolve_lifecycle_manually(
                 repo,
-                case_id=args.case_id,
-                deal_id=args.deal_id,
+                case_id=str(args.case_id),
+                expected_revision=int(args.expected_revision),
+                reason=str(args.reason),
+                broker_ref=str(args.broker_ref or ""),
+                note=str(args.note or ""),
+                void_terminal_event_id=(
+                    str(args.void_terminal_event_id)
+                    if command_name == 'correct'
+                    else None
+                ),
                 apply_changes=not dry_run,
+                now_ms=observed_at_ms,
             )
-            result_payload = {
-                "mode": "dry_run" if dry_run else "applied" if result.status == "applied" else "not_applied",
-                "status": result.status,
-                "action": result.action,
-                "reason": result.reason,
-                "operations": [item.to_payload() for item in result.operations],
-                "diagnostics": dict(result.diagnostics),
-            }
             payload = attach_write_contract(
-                {"operation": "lifecycle_confirm_expired", **result_payload, "ledger_store": ledger_store},
+                {
+                    "operation": (
+                        f"lifecycle_{command_name}"
+                    ),
+                    **result,
+                    "ledger_store": ledger_store,
+                },
                 dry_run=dry_run,
-                write_applied=not dry_run and result.status == "applied",
-                rollback_hint="void the created expire_close trade event(s) with option-positions void-event --confirm",
+                write_applied=bool(
+                    not dry_run
+                    and result.get("status") == "applied"
+                ),
+                rollback_hint=(
+                    "lifecycle corrections are append-only; correct "
+                    "again with the new revision instead of deleting "
+                    "events, evidence, or allocations"
+                ),
             )
-            if _json_or_text_format(args) == "json":
-                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-                return 0
-            prefix = "[DRY_RUN]" if dry_run else "[DONE]" if result.status == "applied" else "[NOT_APPLIED]"
-            print(f"{prefix} lifecycle confirm-expired status={result.status} reason={result.reason}")
-            for operation in result.operations:
-                item = operation.to_payload()
-                result_data = item.get("result") if isinstance(item.get("result"), dict) else {}
-                print(
-                    f"- {item.get('record_id') or '-'} contracts={item.get('contracts_to_close') or '-'} "
-                    f"event_id={result_data.get('event_id') or item.get('event_id') or '-'}"
+            print(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
                 )
+            )
             return 0
+        if args.lifecycle_cmd == 'reconcile-due':
+            control = write_controls["lifecycle:reconcile-due"]
+            dry_run = not bool(control["write_requested"])
+            observed_at_ms = int(
+                args.observed_at_ms
+                if args.observed_at_ms is not None
+                else utc_now_ms()
+            )
+            config_path = _resolve_path_under(
+                str(args.config),
+                base=base,
+            )
+            cfg = _load_json_object(config_path)
+            intake_cfg = resolve_trade_intake_config(cfg)
+            account_value = str(args.account).strip().lower()
+            sources = [
+                dict(item)
+                for item in intake_cfg.get("sources") or []
+                if isinstance(item, dict)
+                and (
+                    str(
+                        item.get("account") or ""
+                    ).strip().lower()
+                    == account_value
+                    or account_value
+                    in {
+                        str(value or "").strip().lower()
+                        for value in dict(
+                            item.get("account_mapping") or {}
+                        ).values()
+                    }
+                )
+            ]
+            if len(sources) != 1:
+                raise SystemExit(
+                    "lifecycle reconcile-due requires exactly one "
+                    "configured OpenD source for account="
+                    f"{account_value}; matched={len(sources)}"
+                )
+            source = sources[0]
+            if not str(source.get("account") or "").strip():
+                source["account"] = account_value
+            gateway = build_futu_gateway(
+                host=str(source.get("host") or "127.0.0.1"),
+                port=int(source.get("port") or 11111),
+                is_option_chain_cache_enabled=False,
+            )
+            try:
+                result = (
+                    reconcile_due_lifecycle_cases_for_source(
+                        repo,
+                        source=source,
+                        gateway=gateway,
+                        now_ms=observed_at_ms,
+                        apply_changes=not dry_run,
+                    )
+                )
+            finally:
+                gateway.close()
+            payload = attach_write_contract(
+                {
+                    "operation": "lifecycle_reconcile_due",
+                    **result,
+                    "ledger_store": ledger_store,
+                },
+                dry_run=dry_run,
+                write_applied=bool(
+                    not dry_run
+                    and any(
+                        isinstance(item, dict)
+                        and isinstance(
+                            item.get("write_result"),
+                            dict,
+                        )
+                        and bool(
+                            item["write_result"].get(
+                                "business_state_changed"
+                            )
+                            or item["write_result"].get(
+                                "status_changed"
+                            )
+                            or item["write_result"].get(
+                                "notification_outbox_created"
+                            )
+                        )
+                        for item in result.get("results") or []
+                    )
+                ),
+                rollback_hint=(
+                    "lifecycle derived state and notifications are "
+                    "append-only/CAS controlled; reconcile corrections "
+                    "through lifecycle correct"
+                ),
+            )
+            print(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+            )
+            return 0
+        if args.lifecycle_cmd == 'migration':
+            if args.migration_cmd == 'inventory':
+                manifest = build_lifecycle_migration_inventory(
+                    repo
+                )
+                selected_targets = [
+                    str(item)
+                    for item in args.select_target or []
+                ]
+                if selected_targets:
+                    manifest = select_lifecycle_migration_targets(
+                        manifest,
+                        target_keys=selected_targets,
+                    )
+                print(
+                    json.dumps(
+                        {
+                            "operation": (
+                                "lifecycle_migration_inventory"
+                            ),
+                            "mode": "dry_run",
+                            "manifest": manifest,
+                            "ledger_store": ledger_store,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                )
+                return 0
+            if args.migration_cmd == 'apply':
+                control = write_controls[
+                    "lifecycle:migration:apply"
+                ]
+                dry_run = not bool(control["write_requested"])
+                manifest = _load_json_object(
+                    _resolve_path_under(
+                        str(args.manifest),
+                        base=base,
+                    )
+                )
+                if isinstance(manifest.get("manifest"), dict):
+                    manifest = dict(manifest["manifest"])
+                result = apply_lifecycle_migration_manifest(
+                    repo,
+                    manifest=manifest,
+                    apply_changes=not dry_run,
+                )
+                payload = attach_write_contract(
+                    {
+                        "operation": (
+                            "lifecycle_migration_apply"
+                        ),
+                        **result,
+                        "ledger_store": ledger_store,
+                    },
+                    dry_run=dry_run,
+                    write_applied=bool(
+                        not dry_run
+                        and int(result.get("applied_count") or 0)
+                        > 0
+                    ),
+                    rollback_hint=(
+                        "keep trade-intake stopped; restore the "
+                        "WAL-safe ledger snapshot or repair forward"
+                    ),
+                )
+                print(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                )
+                return 0
+        if args.lifecycle_cmd == 'receipts':
+            if args.receipt_cmd == 'inspect':
+                row = repo.get_trade_lifecycle_notification(
+                    str(args.outbox_id)
+                )
+                if not isinstance(row, dict):
+                    raise SystemExit(
+                        "notification outbox row not found: "
+                        f"{args.outbox_id}"
+                    )
+                print(
+                    json.dumps(
+                        {
+                            "operation": (
+                                "lifecycle_receipt_inspect"
+                            ),
+                            "outbox": row,
+                            "ledger_store": ledger_store,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                )
+                return 0
+            if args.receipt_cmd == 'reconcile':
+                control = write_controls[
+                    "lifecycle:receipts:reconcile"
+                ]
+                dry_run = not bool(control["write_requested"])
+                result = reconcile_unknown_notification(
+                    repo,
+                    outbox_id=str(args.outbox_id),
+                    action=str(args.action),
+                    broker_ref=str(args.broker_ref),
+                    note=str(args.note),
+                    apply_changes=not dry_run,
+                    now_ms=utc_now_ms(),
+                )
+                payload = attach_write_contract(
+                    {
+                        "operation": (
+                            "lifecycle_receipt_reconcile"
+                        ),
+                        **result,
+                        "ledger_store": ledger_store,
+                    },
+                    dry_run=dry_run,
+                    write_applied=not dry_run,
+                    rollback_hint=(
+                        "manual confirmation is append-only audit "
+                        "metadata; resend creates a compensating intent "
+                        "and never reopens the original row"
+                    ),
+                )
+                print(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                )
+                return 0
+            if args.receipt_cmd == 'dispatch':
+                control = write_controls[
+                    "lifecycle:receipts:dispatch"
+                ]
+                dry_run = not bool(control["write_requested"])
+                account_value = str(
+                    args.account or ""
+                ).strip().lower()
+                if dry_run:
+                    rows = [
+                        row
+                        for row in (
+                            repo.list_trade_lifecycle_notifications()
+                        )
+                        if str(row.get("status") or "")
+                        in {"pending", "explicit_failed"}
+                        and (
+                            not account_value
+                            or str(
+                                (
+                                    row.get("payload")
+                                    or {}
+                                ).get("account")
+                                or ""
+                            ).strip().lower()
+                            == account_value
+                        )
+                    ]
+                    result = {
+                        "status": "dry_run",
+                        "candidate": rows[0] if rows else None,
+                    }
+                else:
+                    config_path = _resolve_path_under(
+                        str(args.config),
+                        base=base,
+                    )
+                    cfg = _load_json_object(config_path)
+                    trade_intake = (
+                        dict(cfg.get("trade_intake") or {})
+                        if isinstance(
+                            cfg.get("trade_intake"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    receipt_config = (
+                        dict(trade_intake.get("receipt") or {})
+                        if isinstance(
+                            trade_intake.get("receipt"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    result = dispatch_notifications_once(
+                        repo,
+                        send_fn=lambda frozen_payload: (
+                            send_trade_lifecycle_outbox_payload(
+                                base=base,
+                                config=cfg,
+                                receipt_config=receipt_config,
+                                payload=frozen_payload,
+                            )
+                        ),
+                        now_ms=utc_now_ms(),
+                        account=account_value or None,
+                    )
+                payload = attach_write_contract(
+                    {
+                        "operation": (
+                            "lifecycle_receipt_dispatch_once"
+                        ),
+                        **result,
+                        "ledger_store": ledger_store,
+                    },
+                    dry_run=dry_run,
+                    write_applied=not dry_run,
+                    rollback_hint=(
+                        "delivery state is durable; unknown must be "
+                        "reconciled manually and is never auto-retried"
+                    ),
+                )
+                print(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                )
+                return 0
+        if args.lifecycle_cmd == 'confirm-expired':
+            raise SystemExit(
+                "lifecycle confirm-expired is retired: expiration without "
+                "settlement requires a complete broker settlement "
+                "observation via lifecycle reconcile-due"
+            )
 
     if args.cmd == 'verify-projection':
         try:

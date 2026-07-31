@@ -159,3 +159,66 @@ def test_account_pipeline_marks_missing_scan_completion_incomplete(
     )
     assert capture["complete"] is False
     assert capture["missing_scan_scopes"] == ["NVDA:put"]
+
+
+def test_account_pipeline_keeps_completed_zero_capture_complete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def _process_symbol(*args, **kwargs):
+        kwargs["all_decisions_sink_fn"]([])
+        kwargs["candidate_capture_status_sink_fn"](
+            {
+                "symbol": "NVDA",
+                "strategy_mode": "put",
+                "status": "completed",
+                "reason": "all_decisions_captured",
+                "quote_snapshot_id": "a" * 64,
+                "quote_receipt_relpath": "quotes/nvda/receipt.json",
+            }
+        )
+        return [
+            {
+                "symbol": str(args[2]["symbol"]),
+                "strategy": "sell_put",
+                "candidate_count": 0,
+            }
+        ]
+
+    _patch_pipeline_dependencies(monkeypatch, _process_symbol)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    run_watchlist_pipeline_default(
+        py="python",
+        base=tmp_path,
+        cfg=_config(),
+        report_dir=tmp_path / "reports",
+        state_dir=state_dir,
+        shared_state_dir=None,
+        required_data_dir=tmp_path / "required_data",
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=False,
+        symbols_arg=None,
+        log=lambda _message: None,
+        want_fn=lambda _step: True,
+        position_advice_account_run_id="run-1",
+    )
+
+    capture = json.loads(
+        (
+            state_dir
+            / "position_advice_candidate_all_decisions.raw.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert capture["complete"] is True
+    assert capture["candidate_count"] == 0
+    assert capture["candidate_decisions"] == []
+    assert capture["missing_scan_scopes"] == []
+    assert capture["quote_receipt_relpaths"] == {
+        "NVDA": "quotes/nvda/receipt.json"
+    }

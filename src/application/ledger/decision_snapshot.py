@@ -10,6 +10,7 @@ from domain.domain.decision_state_fingerprint import (
     canonical_sha256,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
+from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 
 
@@ -59,6 +60,19 @@ def decision_state_snapshot(
             if status != "matched"
         )
         account_value = str(account or "").strip().lower()
+        account_terminal_event_ids = {
+            str(item.get("canonical_terminal_event_id") or "").strip()
+            for item in rows["account_lifecycle_allocations"]
+            if str(item.get("canonical_terminal_event_id") or "").strip()
+        }
+        effective_void_event_ids = sorted(
+            {
+                target
+                for item in events
+                for target in [valid_void_target_event_id(item)]
+                if target and target in account_terminal_event_ids
+            }
+        )
         reprojected_account_lots = [
             row
             for row in projected_lots
@@ -76,6 +90,7 @@ def decision_state_snapshot(
             "account_lifecycle_cases": rows["account_lifecycle_cases"],
             "account_lifecycle_evidence": rows["account_lifecycle_evidence"],
             "account_lifecycle_allocations": rows["account_lifecycle_allocations"],
+            "effective_void_event_ids": effective_void_event_ids,
             "account_assigned_stock_events": rows["account_assigned_stock_events"],
             "account_combo_identities": rows["account_combo_identities"],
         }

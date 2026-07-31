@@ -43,6 +43,37 @@ CLI、服务定义和环境文件控制。
   进程重启或回补再次看到该成交时不会重复同步。
 - PM 的既有早晚全量同步仍是最终对账兜底。
 
+## Push 来源身份
+
+Futu deal push 通过 OM 主动连接的 OpenD TCP 端口进入，不是独立 webhook。
+每个 push 必须在写入 durable inbox 之前绑定可信的 source 配置，并记录：
+
+```text
+source_id
+account
+futu_account_id
+opend_process=FutuOpenD
+opend_host
+opend_port
+received_at_utc
+deal_id
+```
+
+`source_id + opend_host + opend_port` 是稳定的逻辑进程身份；操作系统 PID
+会在 OpenD 重启后变化，只用于实时诊断，不进入业务幂等键。若 push payload
+缺少账户 ID，只允许从绑定到单一 Futu 账户的 source 补齐；若 payload 身份
+与 source 配置冲突，必须在入箱前拒绝并写
+`push_source_identity_rejected` 审计，不能退化为裸 `deal_id`。
+
+Push 与 history backfill 随后统一使用账户级 broker deal key：
+
+```text
+futu:<account>:<futu_account_id>:<deal_id>
+```
+
+因此无论 push 或 backfill 谁先到，后到者都只能命中同一业务成交，不能因
+传输顺序生成第二条 inbox 记录。
+
 ## 审计
 
 每个账户独立保存：
@@ -56,3 +87,118 @@ CLI、服务定义和环境文件控制。
 记录 started、attempt_failed、succeeded、failed。trade-intake 自身
 audit 另外记录 `stock_holdings_sync_intent`，用于证明成交是否成功入队、
 被合并、拒绝或已同步。
+
+## 期权平仓两阶段状态
+
+期权生命周期不再用一条状态同时表达“已经平仓”和“为什么平仓”：
+
+1. 第一阶段确认平仓事实。Futu 零价期权成交进入 durable Inbox，以
+   `futu:<account>:<futu_account_id>:<deal_id>` 占用唯一 broker source，
+   冻结受影响 lot 和合约数量，并生成一次 `option_leg_closed` Outbox 意图。
+2. 第二阶段确认平仓原因。原因未确认时为 `cause_pending`；证据完整后写入
+   canonical terminal event 和 allocation，成为 `resolved`；缺证、来源冲突、
+   数量冲突或投影漂移进入 `needs_review` 或 `conflict`，不得猜测原因。
+
+平仓事实不会因为原因尚未确认而消失；原因确认也不能再次消费同一 broker
+成交。`resolution_revision` 只随业务结论变化，通知重发只增加
+`delivery_revision`。
+
+## 平仓原因判定
+
+按冻结的合约截止时间先分流：
+
+- 截止时间前，正价格且存在同一正常订单成交，判定 `trade_close`。
+- 截止时间前，零价格并有唯一、数量匹配的股票交收，short option 判定
+  `assignment`，long option 判定 `exercise`。
+- 截止时间后，存在唯一、数量匹配的股票交收，short option 判定
+  `assignment`，long option 判定 `exercise`。
+- 截止时间后，只有在第二个后续 broker business day 结束后，完整观察同时
+  证明期权仓位已消失、没有股票交收、没有现金交收、没有正常平仓订单、
+  projection 与冻结余量一致、source reservation 唯一时，才判定
+  `expiration_no_settlement`。
+
+结算观察必须冻结并校验历史成交、历史订单、fresh positions、逐 clearing
+date cash flow、交易日历和合约元数据的查询输入、返回码、覆盖范围、行及
+payload hash。任一来源不完整、日历 hash 变化、零价锚点无法在历史成交中
+唯一复核、source claim 不匹配或数量超出冻结余量，统一进入人工复核。
+
+## 通知 Outbox
+
+业务事务只写冻结的通知意图，不在 ledger 事务内调用飞书。dispatcher 使用
+CAS 状态流转：
+
+```text
+pending -> claimed -> send_started
+send_started -> confirmed | accepted | explicit_failed | unknown
+```
+
+- `claimed` 在发送前租约过期可安全退回 `pending`。
+- `send_started` 后进程失联必须冻结为 `unknown`，不能自动重发。
+- `explicit_failed` 只按有限退避重试，达到上限后保持可观测。
+- `accepted` 表示 provider 已接受但尚无强确认；不能伪装成 `confirmed`。
+- `unknown` 只能由操作员依据 provider 证据标记确认，或创建增加
+  `delivery_revision` 的补偿发送；原记录不重开。
+
+trade-intake status 将 Inbox、生命周期原因状态和 Outbox 状态分开显示，并
+保留 source 的 `pid`、`source_id`、OpenD host/port、账户以及启动时间。
+
+## 运维命令
+
+以下命令均以 dry-run 为默认。这里只列只读或预览形式；实际写入必须同时给出
+`--apply` 和 `--confirm`（或 `--yes`），发送通知还需要明确授权真实发送。
+
+```bash
+# 查看 case、证据和当前 revision
+./om option-positions lifecycle list --account lx --include-evidence
+./om option-positions lifecycle inspect --case-id <case-id>
+
+# 到期结算观察与原因 reconciliation 预览
+./om option-positions lifecycle reconcile-due \
+  --account lx --config config.us.json --dry-run
+
+# 使用已持久化 broker 证据人工确认；先预览
+./om option-positions lifecycle resolve \
+  --case-id <case-id> --expected-revision <revision> \
+  --reason assignment --broker-ref <canonical-broker-ref> \
+  --note "<operator evidence>" --dry-run
+
+# 更正既有终态；只追加 void 与 replacement，不删除历史
+./om option-positions lifecycle correct \
+  --case-id <case-id> --expected-revision <revision> \
+  --void-terminal-event-id <event-id> --reason assignment \
+  --broker-ref <canonical-broker-ref> \
+  --note "<correction evidence>" --dry-run
+
+# 查看或预览处理通知
+./om option-positions lifecycle receipts inspect \
+  --outbox-id <outbox-id>
+./om option-positions lifecycle receipts dispatch \
+  --once --account lx --config config.us.json --dry-run
+./om option-positions lifecycle receipts reconcile \
+  --outbox-id <outbox-id> --mark confirmed \
+  --broker-ref <provider-ref> --note "<verification>" --dry-run
+
+# 历史切换：先 inventory，再显式选择 exact target
+./om option-positions lifecycle migration inventory
+./om option-positions lifecycle migration inventory \
+  --select-target <target-key>
+./om option-positions lifecycle migration apply \
+  --manifest <frozen-manifest.json> --dry-run
+```
+
+`accepted` 只能人工收敛为 `confirmed` 或 `unknown`，不能直接 resend；
+进入 `unknown` 后才允许显式 `--mark resend`。人工收敛会保留原始
+provider receipt。
+
+`lifecycle confirm-expired` 已退役。禁止用人工按钮直接制造
+`expiration_no_settlement`；该结论必须来自完整且冻结的 broker settlement
+observation。
+
+## 历史切换安全顺序
+
+保持 trade-intake 停止，先做 WAL-safe ledger 快照，再生成 inventory。
+`needs_review` 行不得 apply；只显式选择 `exact` 行，核对 manifest hash 和
+数量后先 dry-run。apply 每行在单事务内写 source claim、历史通知 suppression
+和 migration receipt；重复 apply 相同 manifest 为 no-op，源状态漂移或 claim
+owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
+和重复消息计数；启动服务与真实发送属于另一次明确授权。

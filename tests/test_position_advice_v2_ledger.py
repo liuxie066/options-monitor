@@ -24,6 +24,9 @@ from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     initialize_ledger_connection,
 )
+from src.application.ledger.source_consumption import (
+    build_source_consumption_claim,
+)
 from src.application.ledger.writer import persist_trade_event_object
 
 
@@ -472,6 +475,159 @@ def test_lifecycle_evidence_event_projection_and_allocation_are_atomic(tmp_path:
     assert len(
         repo.list_trade_lifecycle_allocations(case_id=lifecycle_case["case_id"])
     ) == 2
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_error"),
+    (
+        ("price", "stock_settlement_price_mismatch"),
+        ("futu_account", "stock_settlement_futu_account_mismatch"),
+        ("ambiguous", "ambiguous_lifecycle_case_match"),
+    ),
+)
+def test_lifecycle_writer_revalidates_broker_settlement_pair(
+    tmp_path: Path,
+    variant: str,
+    expected_error: str,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    open_event = _open_event(event_id="put-open")
+    persist_trade_event_object(repo, open_event)
+    lifecycle_case = {
+        **build_lifecycle_case(
+            account="lx",
+            futu_account_id="1001",
+            broker="futu",
+            contract_key=open_event.contract_key.position_key,
+            position_side="short",
+            expiration_ymd="2026-08-21",
+            market="US",
+            target_contracts_by_lot={"lot-put-open": 2},
+        ),
+        "symbol": "NVDA",
+        "option_type": "put",
+        "strike": 100,
+    }
+    assert repo.insert_trade_lifecycle_case_once(lifecycle_case)
+    if variant == "ambiguous":
+        assert repo.insert_trade_lifecycle_case_once(
+            {
+                **lifecycle_case,
+                "case_id": "duplicate-case",
+                "case_key": "duplicate-case",
+            }
+        )
+
+    anchor_source = "futu:lx:1001:option-anchor"
+    anchor = {
+        "evidence_id": "option-anchor",
+        "case_id": lifecycle_case["case_id"],
+        "source_type": "futu_broker_deal",
+        "source_event_id": anchor_source,
+        "evidence_type": "option_zero_price_close",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": "2026-08-21",
+        "contracts": 1,
+        "price": 0,
+        "event_time_ms": 1_800_000_000_000,
+    }
+    assert repo.insert_trade_lifecycle_evidence_once(anchor)
+    assert repo.insert_trade_lifecycle_source_consumption_once(
+        build_source_consumption_claim(
+            source_key=anchor_source,
+            case_id=lifecycle_case["case_id"],
+            owner_evidence_id=anchor["evidence_id"],
+            source_role="option_anchor",
+            economic_payload=anchor,
+        )
+    )
+
+    stock_futu_account_id = (
+        "2002" if variant == "futu_account" else "1001"
+    )
+    evidence = {
+        "evidence_id": "settlement-pair",
+        "case_id": lifecycle_case["case_id"],
+        "source_type": "broker_settlement_pair",
+        "source_event_id": (
+            "futu:lx:1001:option-anchor|"
+            f"futu:lx:{stock_futu_account_id}:stock-settlement"
+        ),
+        "evidence_type": "assignment",
+        "terminal_type": "assignment",
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": "2026-08-21",
+        "contracts": 1,
+        "event_time_ms": 1_800_000_000_001,
+        "option_event_time_ms": 1_800_000_000_000,
+        "stock_settlement": {
+            "source_event_id": (
+                f"futu:lx:{stock_futu_account_id}:stock-settlement"
+            ),
+            "futu_account_id": stock_futu_account_id,
+            "symbol": "NVDA",
+            "side": "buy",
+            "shares": 100,
+            "price": 100.01 if variant == "price" else 100,
+            "event_time_ms": 1_800_000_000_001,
+        },
+    }
+    plan = plan_evidence_allocation(
+        case_id=lifecycle_case["case_id"],
+        evidence_id=evidence["evidence_id"],
+        terminal_type="assignment",
+        contracts=1,
+        remaining_contracts_by_lot={"lot-put-open": 2},
+        target_lot_id="lot-put-open",
+    )
+    allocation = dict(plan.allocations[0])
+    event = TradeEvent(
+        event_id=allocation["canonical_terminal_event_id"],
+        event_type="assignment",
+        event_time_ms=1_800_000_000_001,
+        contract_key=open_event.contract_key,
+        contracts=1,
+        price=0,
+        currency="USD",
+        source="lifecycle_reconciliation",
+        target_lot_id="lot-put-open",
+        raw_payload={
+            "case_id": lifecycle_case["case_id"],
+            "evidence_id": evidence["evidence_id"],
+            "allocation_id": allocation["allocation_id"],
+            "contracts": 1,
+        },
+    )
+
+    with pytest.raises(ValueError, match=expected_error):
+        record_lifecycle_allocation(
+            repo,
+            case_id=lifecycle_case["case_id"],
+            evidence=evidence,
+            terminal_events=[event],
+            allocations=[allocation],
+            derived_status="partially_resolved",
+            derived_summary={},
+        )
+
+    assert repo.get_trade_lifecycle_evidence(
+        evidence["evidence_id"]
+    ) is None
+    assert repo.list_trade_lifecycle_allocations(
+        case_id=lifecycle_case["case_id"]
+    ) == []
+    assert repo.get_position_lot_fields(
+        "lot-put-open"
+    )["contracts_open"] == 2
 
 
 def test_lifecycle_atomic_validation_failure_rolls_back_every_fact(tmp_path: Path) -> None:
