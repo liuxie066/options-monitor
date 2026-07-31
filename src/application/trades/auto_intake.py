@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import contextlib
 import json
 import os
@@ -37,7 +38,16 @@ from src.application.trades.push_listener import (
     TradeIntakeAuthRequired,
     TradeIntakeStartCancelled,
 )
-from src.application.trades.receipt import send_trade_intake_receipt
+from src.application.trades.lifecycle_outbox import (
+    dispatch_notifications_once,
+)
+from src.application.trades.lifecycle_runtime import (
+    ensure_lifecycle_timing_after_intake,
+    reconcile_due_lifecycle_cases_for_source,
+)
+from src.application.trades.receipt import (
+    send_trade_lifecycle_outbox_payload,
+)
 from src.application.trades.inbox import (
     enqueue_trade_payload,
     list_retryable_trade_payloads,
@@ -48,11 +58,16 @@ from src.application.trades.inbox import (
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.trades.intake import process_trade_payload
+from src.application.trades.intake import (
+    TRADE_INTAKE_SOURCE_CONTEXT_KEY,
+    TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA,
+    process_trade_payload,
+)
 from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
 from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import atomic_write_json, utc_now
 from src.infrastructure.portfolio_holdings_sync_client import sync_portfolio_holdings
+from src.infrastructure.futu_gateway import build_futu_gateway
 
 
 TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE = 78
@@ -148,6 +163,86 @@ def _process_payload(
         retry_failed_deal=retry_failed_deal,
         source=source,
     )
+
+
+def _bind_push_payload_to_source(
+    payload: dict[str, Any],
+    *,
+    source: dict[str, Any],
+    received_at_utc: str,
+) -> dict[str, Any]:
+    """Bind a raw push to its trusted OpenD source before durable identity is built."""
+
+    out = dict(payload)
+    source_id = str(source.get("id") or "").strip()
+    source_account = str(source.get("account") or "").strip().lower()
+    host = str(source.get("host") or "127.0.0.1").strip()
+    port = int(source.get("port") or 11111)
+    account_mapping = {
+        str(key or "").strip(): str(value or "").strip().lower()
+        for key, value in dict(source.get("account_mapping") or {}).items()
+        if str(key or "").strip() and str(value or "").strip()
+    }
+    configured_account_ids = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in list(source.get("futu_account_ids") or [])
+            if str(value or "").strip()
+        )
+    )
+    futu_account_id = str(extract_primary_account_id(out) or "").strip()
+    if futu_account_id:
+        if configured_account_ids and futu_account_id not in configured_account_ids:
+            raise ValueError(
+                "push futu_account_id conflicts with OpenD source binding: "
+                f"source_id={source_id or '-'} port={port} "
+                f"payload={futu_account_id} configured={','.join(configured_account_ids)}"
+            )
+    elif len(configured_account_ids) == 1:
+        futu_account_id = configured_account_ids[0]
+        out["futu_account_id"] = futu_account_id
+    else:
+        raise ValueError(
+            "push OpenD source binding requires exactly one futu_account_id when "
+            f"the payload omits account identity: source_id={source_id or '-'} "
+            f"port={port} configured_count={len(configured_account_ids)}"
+        )
+
+    mapped_account = str(account_mapping.get(futu_account_id) or "").strip().lower()
+    if source_account and mapped_account and source_account != mapped_account:
+        raise ValueError(
+            "push OpenD source account conflicts with account mapping: "
+            f"source_id={source_id or '-'} port={port} "
+            f"source_account={source_account} mapped_account={mapped_account}"
+        )
+    account = source_account or mapped_account
+    if not account:
+        raise ValueError(
+            "push OpenD source binding cannot resolve internal account: "
+            f"source_id={source_id or '-'} port={port} futu_account_id={futu_account_id}"
+        )
+    for key in ("internal_account", "account"):
+        payload_account = str(out.get(key) or "").strip().lower()
+        if payload_account and payload_account != account:
+            raise ValueError(
+                "push payload account conflicts with OpenD source binding: "
+                f"source_id={source_id or '-'} port={port} "
+                f"payload_account={payload_account} source_account={account}"
+            )
+
+    out["futu_account_id"] = futu_account_id
+    out[TRADE_INTAKE_SOURCE_CONTEXT_KEY] = {
+        "schema_version": TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA,
+        "transport": "push",
+        "source_id": source_id or account,
+        "account": account,
+        "futu_account_id": futu_account_id,
+        "opend_process": "FutuOpenD",
+        "opend_host": host,
+        "opend_port": port,
+        "received_at_utc": str(received_at_utc),
+    }
+    return out
 
 
 class _ReplayRepo:
@@ -491,16 +586,13 @@ def _build_receipt_callback(
     receipt_config: dict[str, Any],
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def _callback(context: dict[str, Any]) -> dict[str, Any]:
-        return send_trade_intake_receipt(
-            base=base,
-            config=cfg,
-            receipt_config=receipt_config,
-            apply_changes=bool(context.get("apply_changes")),
-            state=context.get("state") if isinstance(context.get("state"), dict) else {},
-            deal=context.get("deal"),
-            result=dict(context.get("result") or {}),
-            payload=context.get("effective_payload") if isinstance(context.get("effective_payload"), dict) else {},
-        )
+        return {
+            "enabled": bool(receipt_config.get("enabled", True)),
+            "status": "outbox_managed",
+            "reason": "transactional_outbox",
+            "delivery_confirmed": False,
+            "message_id": None,
+        }
 
     return _callback
 
@@ -807,7 +899,45 @@ def _run_listener_source_loop(
         runtime_root=runtime_root,
         runtime_root_source=runtime_root_source,
     )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account=str(source.get("account") or ""),
+    )
     stop = stop_event or threading.Event()
+    settlement_gateway = build_futu_gateway(
+        host=host,
+        port=port,
+        is_option_chain_cache_enabled=False,
+    )
+
+    def _process_payload_with_lifecycle_runtime(
+        payload: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        result = _process_payload(payload, **kwargs)
+        if not apply_changes:
+            return result
+        try:
+            timing = ensure_lifecycle_timing_after_intake(
+                repo,
+                payload=payload,
+                result=result,
+                gateway=settlement_gateway,
+                now_ms=int(time.time() * 1000),
+                apply_changes=True,
+            )
+            if timing is not None:
+                result["lifecycle_timing"] = timing
+        except Exception as exc:
+            result["lifecycle_timing"] = {
+                "status": "needs_review",
+                "reason_codes": [
+                    "lifecycle_timing_runtime_error"
+                ],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return result
 
     def _process_inbox_payload(
         payload: dict[str, Any],
@@ -817,7 +947,7 @@ def _run_listener_source_loop(
     ) -> dict[str, Any]:
         try:
             with process_lock:
-                result = _process_payload(
+                result = _process_payload_with_lifecycle_runtime(
                     payload,
                     repo=repo,
                     state_path=state_path,
@@ -851,15 +981,90 @@ def _run_listener_source_loop(
 
     def _on_deal(payload: dict[str, Any]) -> None:
         push_received_at = utc_now()
+        try:
+            payload = _bind_push_payload_to_source(
+                payload,
+                source=source,
+                received_at_utc=push_received_at,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            append_trade_intake_audit(
+                audit_path,
+                {
+                    "phase": "push_source_identity_rejected",
+                    "source": "push",
+                    "source_id": source.get("id"),
+                    "account": source.get("account"),
+                    "opend_process": "FutuOpenD",
+                    "opend_host": host,
+                    "opend_port": port,
+                    "received_at_utc": push_received_at,
+                    "deal_id": payload_deal_id(payload) or None,
+                    "error": error,
+                    "payload": payload,
+                },
+            )
+            status_state.update(
+                {
+                    "last_error": error,
+                    "last_error_at": utc_now(),
+                    "last_push_received_utc": push_received_at,
+                    "last_push_deal_id": payload_deal_id(payload) or None,
+                }
+            )
+            _write_listener_status(
+                status_path,
+                status_state,
+                status="listening",
+                stage="push_source_identity_rejected",
+            )
+            _log(
+                f"[WARN] trade push rejected before inbox source={source.get('id')} "
+                f"deal_id={payload_deal_id(payload) or '-'} error={error}"
+            )
+            return
+        canonical_deal_key = broker_deal_key_from_payload(
+            payload,
+            account_mapping=account_mapping,
+        )
         inbox_id = enqueue_trade_payload(
             inbox_path,
             payload=payload,
             source="push",
-            broker_deal_key=broker_deal_key_from_payload(
-                payload,
-                account_mapping=account_mapping,
-            ),
+            broker_deal_key=canonical_deal_key,
         )
+        if not canonical_deal_key:
+            append_trade_intake_audit(
+                audit_path,
+                {
+                    "phase": "push_identity_needs_review",
+                    "source": "push",
+                    "source_id": source.get("id"),
+                    "account": source.get("account"),
+                    "opend_process": "FutuOpenD",
+                    "opend_host": host,
+                    "opend_port": port,
+                    "received_at_utc": push_received_at,
+                    "deal_id": payload_deal_id(payload) or None,
+                    "inbox_id": inbox_id,
+                    "reason": "canonical_broker_identity_missing",
+                },
+            )
+            status_state.update(
+                {
+                    "last_push_received_utc": push_received_at,
+                    "last_push_deal_id": payload_deal_id(payload) or None,
+                    "inbox": trade_inbox_summary(inbox_path),
+                }
+            )
+            _write_listener_status(
+                status_path,
+                status_state,
+                status="listening",
+                stage="push_identity_needs_review",
+            )
+            return
         try:
             result = _process_inbox_payload(
                 payload,
@@ -902,6 +1107,11 @@ def _run_listener_source_loop(
                 "inbox": trade_inbox_summary(inbox_path),
             }
         )
+        _refresh_lifecycle_delivery_status(
+            status_state,
+            repo=repo,
+            account=str(source.get("account") or ""),
+        )
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
 
@@ -911,6 +1121,8 @@ def _run_listener_source_loop(
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
     last_inbox_retry_monotonic: float | None = None
+    last_outbox_dispatch_monotonic: float | None = None
+    last_lifecycle_due_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
@@ -960,6 +1172,88 @@ def _run_listener_source_loop(
                         status_state.pop("last_error", None)
                     if int(status_state["inbox"].get("pending_count") or 0) == 0:
                         status_state.pop("last_inbox_retry_error", None)
+                outbox_dispatch_due = (
+                    bool(apply_changes)
+                    and bool(
+                        (
+                            source.get("receipt")
+                            or intake_cfg.get("receipt")
+                            or {}
+                        ).get("enabled", True)
+                    )
+                    and (
+                        last_outbox_dispatch_monotonic is None
+                        or now_mono - last_outbox_dispatch_monotonic >= 5
+                    )
+                )
+                if outbox_dispatch_due:
+                    try:
+                        with process_lock:
+                            outbox_dispatch = dispatch_notifications_once(
+                                repo,
+                                send_fn=lambda frozen_payload: (
+                                    send_trade_lifecycle_outbox_payload(
+                                        base=repo_base,
+                                        config=cfg,
+                                        receipt_config=(
+                                            source.get("receipt")
+                                            or intake_cfg.get("receipt")
+                                            or {}
+                                        ),
+                                        payload=frozen_payload,
+                                    )
+                                ),
+                                now_ms=int(time.time() * 1000),
+                                account=str(
+                                    source.get("account") or ""
+                                ).strip().lower()
+                                or None,
+                            )
+                        status_state[
+                            "last_outbox_dispatch"
+                        ] = outbox_dispatch
+                        status_state.pop(
+                            "last_outbox_dispatch_error",
+                            None,
+                        )
+                    except Exception as exc:
+                        status_state[
+                            "last_outbox_dispatch_error"
+                        ] = f"{type(exc).__name__}: {exc}"
+                    last_outbox_dispatch_monotonic = now_mono
+                lifecycle_due = (
+                    bool(apply_changes)
+                    and (
+                        last_lifecycle_due_monotonic is None
+                        or now_mono
+                        - last_lifecycle_due_monotonic
+                        >= 60
+                    )
+                )
+                if lifecycle_due:
+                    try:
+                        with process_lock:
+                            due_result = (
+                                reconcile_due_lifecycle_cases_for_source(
+                                    repo,
+                                    source=source,
+                                    gateway=settlement_gateway,
+                                    now_ms=int(time.time() * 1000),
+                                    apply_changes=True,
+                                )
+                            )
+                        status_state[
+                            "last_lifecycle_due_reconciliation"
+                        ] = due_result
+                        status_state.pop(
+                            "last_lifecycle_due_error",
+                            None,
+                        )
+                    except Exception as exc:
+                        status_state[
+                            "last_lifecycle_due_error"
+                        ] = f"{type(exc).__name__}: {exc}"
+                    last_lifecycle_due_monotonic = now_mono
                 should_backfill = bool(backfill_cfg.get("enabled", True))
                 if should_backfill:
                     interval_sec = int(backfill_cfg.get("interval_sec") or 300)
@@ -983,7 +1277,9 @@ def _run_listener_source_loop(
                                 runtime_root=runtime_root,
                                 backfill_config=backfill_cfg,
                                 on_result_fn=receipt_callback,
-                                process_payload_fn=_process_payload,
+                                process_payload_fn=(
+                                    _process_payload_with_lifecycle_runtime
+                                ),
                                 on_stock_holdings_sync_fn=stock_holdings_sync_callback,
                                 process_lock=process_lock,
                                 inbox_path=inbox_path,
@@ -1014,6 +1310,11 @@ def _run_listener_source_loop(
                         status_state.update(_update_status_from_backfill(status_state, result))
                         _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
                 if last_heartbeat_monotonic is None or now_mono - last_heartbeat_monotonic >= 60:
+                    _refresh_lifecycle_delivery_status(
+                        status_state,
+                        repo=repo,
+                        account=str(source.get("account") or ""),
+                    )
                     _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                     last_heartbeat_monotonic = now_mono
                 if stop.wait(5):
@@ -1022,11 +1323,13 @@ def _run_listener_source_loop(
             stop.set()
             listener.close()
             history_client.close()
+            settlement_gateway.close()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
         except TradeIntakeStartCancelled:
             listener.close()
             history_client.close()
+            settlement_gateway.close()
             _write_listener_status(
                 status_path,
                 status_state,
@@ -1038,6 +1341,7 @@ def _run_listener_source_loop(
         except TradeIntakeAuthRequired as exc:
             listener.close()
             history_client.close()
+            settlement_gateway.close()
             stop.set()
             status_state["last_error"] = str(exc)
             status_state["last_error_at"] = utc_now()
@@ -1073,6 +1377,7 @@ def _run_listener_source_loop(
             reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()
     history_client.close()
+    settlement_gateway.close()
     _write_listener_status(status_path, status_state, status="stopped", stage="stop_event", restart_count=restart_count)
     return 0
 
@@ -1109,6 +1414,275 @@ def _status_base_payload(
         ),
         "started_at_utc": utc_now(),
     }
+
+
+def _lifecycle_delivery_status(
+    repo: Any,
+    *,
+    account: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    account_value = str(account or "").strip().lower()
+    if not account_value:
+        raise ValueError("lifecycle delivery status requires account")
+    cases = [
+        dict(item)
+        for item in repo.list_trade_lifecycle_cases(
+            account=account_value
+        )
+        if isinstance(item, dict)
+    ]
+    case_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in cases
+        if str(item.get("case_id") or "").strip()
+    }
+    reason_states: Counter[str] = Counter()
+    pending_cases: list[dict[str, Any]] = []
+    for lifecycle_case in cases:
+        summary = (
+            dict(lifecycle_case.get("derived_summary") or {})
+            if isinstance(
+                lifecycle_case.get("derived_summary"),
+                dict,
+            )
+            else {}
+        )
+        persisted_status = str(
+            lifecycle_case.get("status") or ""
+        ).strip().lower()
+        reason_state = str(
+            summary.get("reason_state") or ""
+        ).strip().lower()
+        if not reason_state:
+            reason_state = {
+                "waiting_settlement_evidence": "cause_pending",
+                "closure_observed": "cause_pending",
+                "needs_review": "needs_review",
+                "conflict": "conflict",
+                "ledger_written": "resolved",
+            }.get(persisted_status, persisted_status or "unknown")
+        reason_states[reason_state] += 1
+        if reason_state == "cause_pending":
+            case_id = str(
+                lifecycle_case.get("case_id") or ""
+            ).strip()
+            timing_policy = (
+                repo.get_trade_lifecycle_timing_policy(case_id)
+                if case_id
+                else None
+            )
+            deadline_ms = int(
+                summary.get("settlement_deadline_ms")
+                or (
+                    timing_policy.get("settlement_deadline_ms")
+                    if isinstance(timing_policy, dict)
+                    else 0
+                )
+                or 0
+            )
+            pending_cases.append(
+                {
+                    "case_id": case_id,
+                    "symbol": lifecycle_case.get("symbol"),
+                    "expiration_ymd": lifecycle_case.get(
+                        "expiration_ymd"
+                    ),
+                    "settlement_deadline_ms": deadline_ms or None,
+                    "overdue": bool(
+                        deadline_ms and int(now_ms) >= deadline_ms
+                    ),
+                }
+            )
+
+    evidence = [
+        dict(item)
+        for item in repo.list_trade_lifecycle_evidence(
+            account=account_value
+        )
+        if isinstance(item, dict)
+    ]
+    source_key_counts = Counter(
+        source_key
+        for item in evidence
+        for source_key in [
+            str(item.get("source_event_id") or "").strip()
+        ]
+        if _is_canonical_broker_source_key(source_key)
+    )
+    observation_incomplete_reasons: Counter[str] = Counter()
+    for item in evidence:
+        observation = item.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        for reason in observation.get("incomplete_reason_codes") or []:
+            reason_value = str(reason or "").strip()
+            if reason_value:
+                observation_incomplete_reasons[reason_value] += 1
+
+    notifications = [
+        dict(item)
+        for item in repo.list_trade_lifecycle_notifications()
+        if isinstance(item, dict)
+        and (
+            str(item.get("case_id") or "").strip() in case_ids
+            or str(
+                (item.get("payload") or {}).get("account") or ""
+            ).strip().lower()
+            == account_value
+        )
+    ]
+    outbox_states = Counter(
+        str(item.get("status") or "").strip().lower() or "unknown"
+        for item in notifications
+    )
+    unknown_rows = [
+        item
+        for item in notifications
+        if str(item.get("status") or "").strip().lower()
+        == "unknown"
+    ]
+    receipts = (
+        repo.list_trade_lifecycle_migration_receipts()
+        if callable(
+            getattr(
+                repo,
+                "list_trade_lifecycle_migration_receipts",
+                None,
+            )
+        )
+        else []
+    )
+    account_receipts = [
+        item
+        for item in receipts
+        if isinstance(item, dict)
+        and (
+            str(item.get("target_key") or "").strip()
+            in {f"lifecycle:{case_id}" for case_id in case_ids}
+            or str(item.get("target_key") or "").strip().startswith(
+                f"close:futu:{account_value}:"
+            )
+        )
+    ]
+    reason_state_counts = {
+        name: int(reason_states.get(name, 0))
+        for name in (
+            "not_started",
+            "cause_pending",
+            "partially_resolved",
+            "resolved",
+            "needs_review",
+            "conflict",
+        )
+    }
+    reason_state_counts.update(
+        {
+            name: int(count)
+            for name, count in reason_states.items()
+            if name not in reason_state_counts
+        }
+    )
+    outbox_status_counts = {
+        name: int(outbox_states.get(name, 0))
+        for name in (
+            "pending",
+            "claimed",
+            "send_started",
+            "accepted",
+            "confirmed",
+            "explicit_failed",
+            "unknown",
+            "suppressed",
+        )
+    }
+    pending_cases.sort(
+        key=lambda item: (
+            int(item.get("settlement_deadline_ms") or 2**63 - 1),
+            str(item.get("case_id") or ""),
+        )
+    )
+    unknown_rows.sort(
+        key=lambda item: (
+            int(item.get("created_at_ms") or 0),
+            str(item.get("outbox_id") or ""),
+        )
+    )
+    return {
+        "schema_version": "trade_lifecycle_delivery_status.v1",
+        "status": "ok",
+        "account": account_value,
+        "observed_at_ms": int(now_ms),
+        "lifecycle_case_count": len(cases),
+        "reason_state_counts": reason_state_counts,
+        "oldest_pending_case": (
+            pending_cases[0] if pending_cases else None
+        ),
+        "overdue_pending_count": sum(
+            1 for item in pending_cases if item["overdue"]
+        ),
+        "observation_incomplete_reason_counts": dict(
+            sorted(observation_incomplete_reasons.items())
+        ),
+        "duplicate_canonical_broker_evidence_count": sum(
+            count - 1
+            for count in source_key_counts.values()
+            if count > 1
+        ),
+        "outbox_status_counts": outbox_status_counts,
+        "oldest_unknown_outbox": (
+            {
+                "outbox_id": unknown_rows[0].get("outbox_id"),
+                "case_id": unknown_rows[0].get("case_id"),
+                "created_at_ms": unknown_rows[0].get(
+                    "created_at_ms"
+                ),
+            }
+            if unknown_rows
+            else None
+        ),
+        "migration_receipt_count": len(account_receipts),
+        "last_migration_receipt_target": (
+            sorted(
+                str(item.get("target_key") or "")
+                for item in account_receipts
+            )[-1]
+            if account_receipts
+            else None
+        ),
+    }
+
+
+def _refresh_lifecycle_delivery_status(
+    status_state: dict[str, Any],
+    *,
+    repo: Any,
+    account: str,
+) -> None:
+    try:
+        status_state["lifecycle_delivery"] = (
+            _lifecycle_delivery_status(
+                repo,
+                account=account,
+                now_ms=int(time.time() * 1000),
+            )
+        )
+    except Exception as exc:
+        status_state["lifecycle_delivery"] = {
+            "schema_version": "trade_lifecycle_delivery_status.v1",
+            "status": "unavailable",
+            "account": str(account or "").strip().lower() or None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _is_canonical_broker_source_key(value: str) -> bool:
+    parts = str(value or "").split(":", 3)
+    return (
+        len(parts) == 4
+        and parts[0].lower() == "futu"
+        and all(parts[1:])
+    )
 
 
 def _holdings_sync_status_payload(value: object) -> dict[str, Any]:

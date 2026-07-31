@@ -690,6 +690,35 @@ def test_option_positions_cli_add_apply_alone_requires_confirm() -> None:
         ])
 
 
+def test_lifecycle_write_requires_apply_and_confirmation_together() -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    common = [
+        "lifecycle",
+        "resolve",
+        "--case-id",
+        "case-1",
+        "--expected-revision",
+        "1",
+        "--reason",
+        "assignment",
+        "--broker-ref",
+        "futu:lx:1001:deal-1",
+        "--note",
+        "operator evidence",
+    ]
+    with pytest.raises(
+        SystemExit,
+        match="use --confirm or --yes",
+    ):
+        cli_mod.main([*common, "--apply"])
+    with pytest.raises(
+        SystemExit,
+        match="requires --apply together",
+    ):
+        cli_mod.main([*common, "--confirm"])
+
+
 def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
@@ -1261,7 +1290,7 @@ def test_option_positions_cli_lifecycle_inspect_shows_case_evidence(monkeypatch,
     assert payload["case"]["evidence"][0]["evidence_id"] == "ev_stock_settlement"
 
 
-def test_option_positions_cli_lifecycle_confirm_expired_records_expire_close(
+def test_option_positions_cli_lifecycle_confirm_expired_is_retired(
     monkeypatch,
     tmp_path: Path,
     capsys,
@@ -1340,18 +1369,14 @@ def test_option_positions_cli_lifecycle_confirm_expired_records_expire_close(
         ],
     )
 
-    cli_mod.main()
+    with pytest.raises(
+        SystemExit,
+        match="lifecycle confirm-expired is retired",
+    ):
+        cli_mod.main()
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["operation"] == "lifecycle_confirm_expired"
-    assert payload["mode"] == "applied"
-    assert payload["write_applied"] is True
-    assert payload["reason"] == "expire_close_recorded"
-    assert payload["operations"][0]["ledger_preflight"]["event_type"] == "expire_close"
-    assert repo.list_trade_lifecycle_cases()[0]["decision_type"] == "expire_close"
     events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
-    assert len(events) == 1
-    assert events[0]["raw_payload"]["evidence_ids"] == ["ev_0700_option_zero"]
+    assert events == []
 
 
 def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
@@ -1448,7 +1473,7 @@ def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
     assert len(repo.list_trade_lifecycle_cases()) == 1
 
 
-def test_option_positions_cli_lifecycle_confirm_expired_canonicalizes_futu_root_alias(
+def test_option_positions_cli_lifecycle_confirm_expired_alias_path_is_retired(
     monkeypatch,
     tmp_path: Path,
     capsys,
@@ -1527,17 +1552,14 @@ def test_option_positions_cli_lifecycle_confirm_expired_canonicalizes_futu_root_
         ],
     )
 
-    cli_mod.main()
+    with pytest.raises(
+        SystemExit,
+        match="lifecycle confirm-expired is retired",
+    ):
+        cli_mod.main()
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["operation"] == "lifecycle_confirm_expired"
-    assert payload["mode"] == "applied"
-    assert payload["reason"] == "expire_close_recorded"
-    assert payload["diagnostics"]["lifecycle_case"]["symbol"] == "0700.HK"
     events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
-    assert len(events) == 1
-    assert events[0]["symbol"] == "0700.HK"
-    assert events[0]["raw_payload"]["evidence_ids"] == ["ev_tch_option_zero"]
+    assert events == []
 
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:

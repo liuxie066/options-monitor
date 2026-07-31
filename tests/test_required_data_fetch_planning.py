@@ -654,3 +654,170 @@ def test_put_and_call_different_expirations_split_requests(monkeypatch, tmp_path
 
     assert len(plan.merged_specs) == 2
     assert all(len(spec.option_types) == 1 for spec in plan.merged_specs)
+
+
+def test_required_data_plan_preserves_typed_success_empty_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_chain_fetching as chain_mod
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 7, 30))
+    monkeypatch.setattr(
+        chain_mod,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="0700.HK",
+        limit_expirations=0,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert plan.projection_outcome == "success_empty"
+    assert plan.projected_expirations == []
+    assert plan.expiration_discovery is not None
+    assert plan.expiration_discovery.outcome == "success_empty"
+    assert plan.expiration_discovery.reason_code == "no_expirations"
+    assert plan.expiration_discovery.observed_at_utc
+    assert plan.expiration_discovery.request_identity["trading_date"] == "2026-07-30"
+
+
+@pytest.mark.parametrize(
+    ("discovery_value", "expected_outcome"),
+    [
+        (RuntimeError("provider unavailable"), "provider_error"),
+        ({"unexpected": "mapping"}, "parse_error"),
+    ],
+)
+def test_required_data_plan_preserves_discovery_failure_type(
+    monkeypatch,
+    tmp_path: Path,
+    discovery_value,
+    expected_outcome: str,
+) -> None:
+    import src.application.opend_symbol_chain_fetching as chain_mod
+    import src.application.required_data_planning as mod
+
+    def discover(*args, **kwargs):
+        if isinstance(discovery_value, Exception):
+            raise discovery_value
+        return discovery_value
+
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "list_option_expirations", discover)
+    monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 7, 30))
+    monkeypatch.setattr(
+        chain_mod,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=0,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+        sell_call_cfg={"enabled": False},
+    )
+
+    assert plan.projection_outcome == expected_outcome
+    assert plan.expiration_discovery is not None
+    assert plan.expiration_discovery.outcome == expected_outcome
+    assert plan.expiration_discovery_complete is False
+
+
+def test_required_data_plan_fails_closed_when_discovery_rows_project_to_no_targets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_chain_fetching as chain_mod
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2027-12-17"],
+    )
+    monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 7, 30))
+    monkeypatch.setattr(
+        chain_mod,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=0,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+        sell_call_cfg={"enabled": False},
+    )
+
+    assert plan.expiration_discovery is not None
+    assert plan.expiration_discovery.outcome == "success_rows"
+    assert plan.projected_expirations == []
+    assert plan.projection_outcome == "projection_empty"
+
+
+def test_required_data_plan_memoizes_discovery_by_physical_binding(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_chain_fetching as chain_mod
+    import src.application.required_data_planning as mod
+
+    calls: list[str] = []
+
+    def discover(symbol: str, **kwargs):
+        calls.append(symbol)
+        return ["2026-08-21"]
+
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "list_option_expirations", discover)
+    monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 7, 30))
+    monkeypatch.setattr(
+        chain_mod,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
+    cache = {}
+    plans = [
+        mod.build_required_data_fetch_plan(
+            base=tmp_path,
+            required_data_dir=tmp_path,
+            symbol="NVDA",
+            limit_expirations=0,
+            want_put=True,
+            want_call=False,
+            sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+            sell_call_cfg={"enabled": False},
+            fetch_source="futu",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+            expiration_discovery_cache=cache,
+        )
+        for _account in ("lx", "sy")
+    ]
+
+    assert calls == ["NVDA"]
+    assert plans[0].expiration_discovery is plans[1].expiration_discovery
+    assert plans[0].projected_expirations == ["2026-08-21"]

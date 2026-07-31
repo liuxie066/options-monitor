@@ -417,6 +417,227 @@ def test_deal_json_source_selection_rejects_account_mapping_conflict() -> None:
         )
 
 
+def test_push_source_binding_supplies_account_identity_before_inbox() -> None:
+    source = {
+        "id": "sy",
+        "account": "sy",
+        "host": "127.0.0.1",
+        "port": 11112,
+        "account_mapping": {"REAL_87654321": "sy"},
+        "futu_account_ids": ["REAL_87654321"],
+    }
+    push_payload = {
+        "deal_id": "deal-expiry-1",
+        "code": "HK.TCH260730P440000",
+        "price": 0.0,
+        "qty": 1.0,
+        "trd_side": "BUY_BACK",
+    }
+
+    bound = auto_intake._bind_push_payload_to_source(
+        push_payload,
+        source=source,
+        received_at_utc="2026-07-30T11:58:17+00:00",
+    )
+
+    assert bound["futu_account_id"] == "REAL_87654321"
+    assert bound["_trade_intake_source"] == {
+        "schema_version": "trade_intake_source.v1",
+        "transport": "push",
+        "source_id": "sy",
+        "account": "sy",
+        "futu_account_id": "REAL_87654321",
+        "opend_process": "FutuOpenD",
+        "opend_host": "127.0.0.1",
+        "opend_port": 11112,
+        "received_at_utc": "2026-07-30T11:58:17+00:00",
+    }
+
+
+def test_push_and_backfill_build_same_inbox_identity_regardless_of_arrival_order(
+    tmp_path: Path,
+) -> None:
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import enqueue_trade_payload, trade_inbox_summary
+
+    source = {
+        "id": "sy",
+        "account": "sy",
+        "host": "127.0.0.1",
+        "port": 11112,
+        "account_mapping": {"REAL_87654321": "sy"},
+        "futu_account_ids": ["REAL_87654321"],
+    }
+    push_payload = auto_intake._bind_push_payload_to_source(
+        {"deal_id": "same-deal", "code": "HK.TCH260730P440000"},
+        source=source,
+        received_at_utc="2026-07-30T11:58:17+00:00",
+    )
+    backfill_payload = {
+        "deal_id": "same-deal",
+        "code": "HK.TCH260730P440000",
+        "futu_account_id": "REAL_87654321",
+        "trd_acc_id": "REAL_87654321",
+    }
+    inputs = {
+        "push": push_payload,
+        "backfill": backfill_payload,
+    }
+    for first, second in (("push", "backfill"), ("backfill", "push")):
+        path = tmp_path / f"{first}-first.sqlite3"
+        ids = [
+            enqueue_trade_payload(
+                path,
+                payload=inputs[source_name],
+                source=source_name,
+                broker_deal_key=broker_deal_key_from_payload(
+                    inputs[source_name],
+                    account_mapping=source["account_mapping"],
+                ),
+            )
+            for source_name in (first, second)
+        ]
+
+        assert ids[0] == ids[1]
+        assert trade_inbox_summary(path)["pending_count"] == 1
+
+
+def test_push_source_binding_rejects_payload_from_another_account() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="conflicts with OpenD source binding"):
+        auto_intake._bind_push_payload_to_source(
+            {
+                "deal_id": "wrong-account",
+                "futu_account_id": "REAL_87654321",
+            },
+            source={
+                "id": "lx",
+                "account": "lx",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "account_mapping": {"REAL_12345678": "lx"},
+                "futu_account_ids": ["REAL_12345678"],
+            },
+            received_at_utc="2026-07-30T11:58:17+00:00",
+        )
+
+
+def test_push_source_binding_rejects_ambiguous_source_without_payload_account() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="requires exactly one futu_account_id"):
+        auto_intake._bind_push_payload_to_source(
+            {"deal_id": "ambiguous"},
+            source={
+                "id": "shared",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "account_mapping": {
+                    "REAL_12345678": "lx",
+                    "REAL_87654321": "sy",
+                },
+                "futu_account_ids": ["REAL_12345678", "REAL_87654321"],
+            },
+            received_at_utc="2026-07-30T11:58:17+00:00",
+        )
+
+
+def test_listener_binds_push_source_before_enqueue(monkeypatch, tmp_path: Path) -> None:
+    import threading
+
+    captured: dict = {}
+
+    class _Listener:
+        def __init__(self, *, on_deal, **_kwargs):
+            self.on_deal = on_deal
+
+        def start(self, *, cancel_event):
+            self.on_deal(
+                {
+                    "deal_id": "push-deal-1",
+                    "code": "HK.TCH260730P440000",
+                }
+            )
+            cancel_event.set()
+
+        def check_health(self):
+            raise AssertionError("listener health should not run after test push stops the source")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", _Listener)
+    monkeypatch.setattr(
+        auto_intake,
+        "enqueue_trade_payload",
+        lambda _path, *, payload, source, broker_deal_key: captured.update(
+            payload=dict(payload),
+            source=source,
+            broker_deal_key=broker_deal_key,
+        )
+        or "inbox-1",
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_process_payload",
+        lambda payload, **_kwargs: {
+            "status": "unresolved",
+            "action": "lifecycle",
+            "reason": "waiting_settlement_evidence",
+            "deal_id": payload["deal_id"],
+            "account": "sy",
+            "diagnostics": {"retryable": True},
+        },
+    )
+    monkeypatch.setattr(auto_intake, "settle_trade_payload_result", lambda *_args, **_kwargs: None)
+    stop = threading.Event()
+    source = {
+        "id": "sy",
+        "account": "sy",
+        "host": "127.0.0.1",
+        "port": 11112,
+        "state_path": tmp_path / "state.json",
+        "audit_path": tmp_path / "audit.jsonl",
+        "status_path": tmp_path / "status.json",
+        "inbox_path": tmp_path / "inbox.sqlite3",
+        "backfill_checkpoint_path": tmp_path / "backfill.json",
+        "reconnect_sec": 5,
+        "account_mapping": {"REAL_87654321": "sy"},
+        "futu_account_ids": ["REAL_87654321"],
+        "backfill": {"enabled": False},
+    }
+
+    rc = auto_intake._run_listener_source_loop(
+        source=source,
+        repo=object(),
+        cfg={},
+        cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+        intake_cfg={
+            "mode": "dry-run",
+            "enabled": True,
+            "account_mapping": source["account_mapping"],
+            "backfill": {"enabled": False},
+        },
+        apply_changes=False,
+        receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(),
+        stop_event=stop,
+    )
+
+    assert rc == 0
+    assert captured["source"] == "push"
+    assert captured["payload"]["futu_account_id"] == "REAL_87654321"
+    assert captured["payload"]["_trade_intake_source"]["source_id"] == "sy"
+    assert captured["payload"]["_trade_intake_source"]["opend_port"] == 11112
+    assert (
+        captured["broker_deal_key"]
+        == "futu:sy:REAL_87654321:push-deal-1"
+    )
+
+
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:
     config_path = _write_runtime_config(tmp_path)
     payload_path = None

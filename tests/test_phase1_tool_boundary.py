@@ -15,7 +15,10 @@ if str(BASE) not in sys.path:
 @pytest.fixture(autouse=True)
 def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.application.required_data_planning._resolve_spot_reference", lambda **_kwargs: None)
-    monkeypatch.setattr("src.application.required_data_planning.list_option_expirations", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "src.application.required_data_planning.list_option_expirations",
+        lambda *_args, **_kwargs: ["2026-12-18"],
+    )
 
 
 def test_scheduler_decision_schema_boundary() -> None:
@@ -255,7 +258,7 @@ def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:
         assert out["budget_triggered"] is False
         assert "US" in (out.get("opend_rate_limit_classes") or [])
         assert calls == ["AAPL", "MSFT", "TSLA", "BABA"]
-        assert cooldowns == [30.0]
+        assert cooldowns == []
     finally:
         mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec

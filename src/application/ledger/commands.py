@@ -90,6 +90,8 @@ from src.application.ledger.results import (
     TradeEventInterventionLedgerResult,
 )
 from src.application.ledger.writer import (
+    accept_option_close_evidence_atomically,
+    advance_lifecycle_case_state_atomically,
     apply_lifecycle_allocation_atomically,
     discover_expired_lifecycle_cases_atomically,
     persist_normalized_trade_events_atomically,
@@ -2021,6 +2023,9 @@ def record_lifecycle_allocation(
     allocations: list[dict[str, Any]],
     derived_status: str,
     derived_summary: dict[str, Any],
+    expected_resolution_revision: int | None = None,
+    correction_void_events: list[Any] | None = None,
+    notification_transition_type: str | None = None,
 ) -> dict[str, Any]:
     return apply_lifecycle_allocation_atomically(
         repo,
@@ -2030,6 +2035,26 @@ def record_lifecycle_allocation(
         allocations=allocations,
         derived_status=derived_status,
         derived_summary=derived_summary,
+        expected_resolution_revision=expected_resolution_revision,
+        correction_void_events=list(
+            correction_void_events or []
+        ),
+        notification_transition_type=notification_transition_type,
+    )
+
+
+def accept_option_close_evidence(
+    repo: Any,
+    *,
+    contract_identity: dict[str, Any],
+    evidence: dict[str, Any],
+    apply_changes: bool = True,
+) -> dict[str, Any]:
+    return accept_option_close_evidence_atomically(
+        repo,
+        contract_identity=contract_identity,
+        evidence=evidence,
+        apply_changes=apply_changes,
     )
 
 
@@ -2062,6 +2087,23 @@ def record_lifecycle_evidence_issue(
         evidence=evidence,
         status=status,
         reason_codes=reason_codes,
+    )
+
+
+def advance_lifecycle_case_state(
+    repo: Any,
+    *,
+    case_id: str,
+    status: str,
+    derived_summary: dict[str, Any],
+    public_transition: str | None,
+) -> dict[str, Any]:
+    return advance_lifecycle_case_state_atomically(
+        repo,
+        case_id=case_id,
+        status=status,
+        derived_summary=derived_summary,
+        public_transition=public_transition,
     )
 
 
@@ -2188,6 +2230,7 @@ __all__ = [
     "record_lifecycle_exercise",
     "record_lifecycle_expire_close",
     "record_lifecycle_allocation",
+    "accept_option_close_evidence",
     "discover_expired_lifecycle_cases",
     "record_lifecycle_evidence_issue",
     "record_manual_exercise",

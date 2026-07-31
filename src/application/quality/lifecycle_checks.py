@@ -59,7 +59,12 @@ def build_lifecycle_datasets(
     now: datetime,
     trading_days: list[date],
     first_deep_by_case: dict[str, str],
+    timing_policies_by_case: dict[str, dict[str, Any]] | None = None,
+    read_models_by_case: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    del trading_days, first_deep_by_case
+    timing_policies = dict(timing_policies_by_case or {})
+    read_models = dict(read_models_by_case or {})
     evidence_count_by_case: dict[str, int] = {}
     for item in evidence_rows:
         case_id = str(item.get("case_id") or "").strip()
@@ -72,7 +77,6 @@ def build_lifecycle_datasets(
             continue
         case_id = str(case.get("case_id") or "").strip()
         case_status = str(case.get("status") or "").strip().lower()
-        expiration = _parse_date(case.get("expiration_ymd"))
         scope = {"account": account, "market": market, "lifecycle_case_id": case_id}
         evidence_count = evidence_count_by_case.get(case_id, 0)
         is_legacy_gap = bool(
@@ -160,21 +164,38 @@ def build_lifecycle_datasets(
             )
             continue
 
-        first_deep = _parse_utc(first_deep_by_case.get(case_id))
-        deadline = (
-            lifecycle_deadline(
-                expiration=expiration,
-                trading_days=trading_days,
-                first_deep_reconcile_at=first_deep,
-            )
-            if expiration
-            else None
+        read_model = (
+            dict(read_models.get(case_id) or {})
+            if isinstance(read_models.get(case_id), dict)
+            else {}
         )
+        timing_policy = (
+            dict(timing_policies.get(case_id) or {})
+            if isinstance(timing_policies.get(case_id), dict)
+            else {}
+        )
+        deadline_ms = (
+            read_model.get("pending_until_ms")
+            if read_model.get("pending_until_ms") is not None
+            else timing_policy.get("settlement_deadline_ms")
+        )
+        try:
+            deadline = (
+                datetime.fromtimestamp(
+                    int(deadline_ms) / 1000,
+                    tz=timezone.utc,
+                )
+                if deadline_ms is not None
+                and int(deadline_ms) > 0
+                else None
+            )
+        except (TypeError, ValueError, OverflowError):
+            deadline = None
         pending = case_status in PENDING_STATUSES or not case_status
         if deadline is None:
             status = "unknown"
             reason = "LIFECYCLE_DEADLINE_UNAVAILABLE"
-            message = "Lifecycle deadline cannot be proven without market-calendar and deep-reconcile evidence."
+            message = "Lifecycle deadline is unavailable because no immutable timing policy is bound."
             dataset_verdict = "unavailable"
         elif now.astimezone(timezone.utc) <= deadline and pending:
             status = "warn"
@@ -184,7 +205,7 @@ def build_lifecycle_datasets(
         else:
             status = "fail"
             reason = "LIFECYCLE_EVIDENCE_OVERDUE"
-            message = "Lifecycle evidence is stale after the first next-market-day deep reconciliation plus two hours."
+            message = "Lifecycle evidence is stale after its immutable settlement deadline."
             dataset_verdict = "untrusted"
         check = check_result(
             check_id="OM-LCY-001",
@@ -196,10 +217,17 @@ def build_lifecycle_datasets(
             observed={
                 "status": case_status or None,
                 "evidence_count": evidence_count,
-                "first_deep_reconcile_at_utc": utc_iso(first_deep) if first_deep else None,
+                "reason_state": read_model.get("reason_state"),
+                "timing_policy_hash": read_model.get(
+                    "timing_policy_hash"
+                ),
             },
             expected={"terminal_statuses": sorted(FINAL_STATUSES)},
-            thresholds={"deadline_rule": "next_market_day_first_deep_reconcile_plus_2h"},
+            thresholds={
+                "deadline_rule": (
+                    "immutable_lifecycle_settlement_deadline"
+                )
+            },
             evidence_refs=[],
         )
         is_blocking = dataset_verdict in {"untrusted", "unavailable"}
