@@ -1191,6 +1191,85 @@ markets:
     assert cfg["trade_intake"]["holdings_sync"] == {"enabled": True}
 
 
+def test_yaml_config_accepts_account_scoped_combo_reconciliation(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  combo_reconciliation:
+    default_mode: off
+    accounts:
+      lx: observe
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert cfg["trade_intake"]["combo_reconciliation"] == {
+        "default_mode": "off",
+        "accounts": {"lx": "observe"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("combo_yaml", "expected_error"),
+    [
+        (
+            "default_mode: observe\n    accounts: {}",
+            "default_mode must remain off",
+        ),
+        (
+            "default_mode: off\n    accounts:\n      LX: confirm",
+            "account labels must be lowercase",
+        ),
+        (
+            "default_mode: off\n    accounts:\n      unknown: confirm",
+            "is not a configured account",
+        ),
+    ],
+)
+def test_yaml_config_rejects_invalid_combo_reconciliation(
+    tmp_path: Path,
+    combo_yaml: str,
+    expected_error: str,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        f"""\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  combo_reconciliation:
+    {combo_yaml}
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    with pytest.raises(AgentToolError, match=expected_error):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+
 def test_yaml_config_rejects_invalid_trade_intake_holdings_sync(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",

@@ -60,7 +60,7 @@ PASSTHROUGH_KEYS = {
     "watchdog",
 }
 ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
-TRADE_INTAKE_AUTHORING_KEYS = {"holdings_sync"}
+TRADE_INTAKE_AUTHORING_KEYS = {"combo_reconciliation", "holdings_sync"}
 ROOT_KEYS = {
     "accounts",
     "features",
@@ -466,15 +466,52 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object")
     _reject_unknown_keys(raw, allowed=TRADE_INTAKE_AUTHORING_KEYS, path=path)
-    if "holdings_sync" not in raw:
-        return {}
-    holdings_sync = raw.get("holdings_sync")
-    if not isinstance(holdings_sync, dict):
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"{path}.holdings_sync must be an object",
+    out: dict[str, Any] = {}
+    if "holdings_sync" in raw:
+        holdings_sync = raw.get("holdings_sync")
+        if not isinstance(holdings_sync, dict):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path}.holdings_sync must be an object",
+            )
+        out["holdings_sync"] = deepcopy(holdings_sync)
+    if "combo_reconciliation" in raw:
+        combo_reconciliation = raw.get("combo_reconciliation")
+        if not isinstance(combo_reconciliation, dict):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path}.combo_reconciliation must be an object",
+            )
+        _reject_unknown_keys(
+            combo_reconciliation,
+            allowed={"accounts", "default_mode"},
+            path=f"{path}.combo_reconciliation",
         )
-    return {"holdings_sync": deepcopy(holdings_sync)}
+        default_raw = combo_reconciliation.get("default_mode", "off")
+        default_mode = (
+            "off"
+            if default_raw is False
+            else str(default_raw or "off").strip().lower()
+        )
+        accounts_raw = combo_reconciliation.get("accounts") or {}
+        if not isinstance(accounts_raw, dict):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path}.combo_reconciliation.accounts must be an object",
+            )
+        account_modes = {
+            str(account): (
+                "off"
+                if mode is False
+                else str(mode or "").strip().lower()
+            )
+            for account, mode in accounts_raw.items()
+        }
+        out["combo_reconciliation"] = {
+            "default_mode": default_mode,
+            "accounts": account_modes,
+        }
+    return out
 
 
 def _normalize_templates_authoring_keys(raw: Any, *, path: str) -> Any:

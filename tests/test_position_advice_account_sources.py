@@ -17,6 +17,13 @@ from src.application.position_advice_source_receipts import (
     publish_source_receipt,
     validate_source_receipt,
 )
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
 
 
 NOW = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
@@ -50,16 +57,44 @@ def _quote_receipt(root: Path) -> dict:
 
 
 def _decision_snapshot() -> dict:
-    return {
+    snapshot = {
         "schema_version": "decision_state_snapshot.v2",
         "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
         "snapshot_status": "trusted",
         "actionable": True,
         "reason_codes": [],
         "decision_state_fingerprint": "b" * 64,
         "source_observed_at": (NOW + timedelta(seconds=2)).isoformat(),
         "account_position_lots": [],
+        "account_lifecycle_cases": [],
+        "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
+        "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=[],
+            )
+        ),
+        "effective_void_event_ids": [],
+        "account_combo_identities": [],
+        "account_combo_group_memberships": [],
     }
+    snapshot["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(snapshot)
+    )
+    return snapshot
 
 
 def _account_run_inputs(

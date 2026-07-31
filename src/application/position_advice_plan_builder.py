@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
-from domain.domain.combo_identity import classify_combo_structure
+from domain.domain.combo_identity import (
+    FUNDING_PUT_ROLES,
+    PARTICIPATION_CALL_ROLES,
+    classify_combo_structure,
+)
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.option_lifecycle import expiration_observation_start_ms
@@ -25,7 +29,11 @@ from domain.domain.risk_capacity import (
     compute_short_put_cash_secured,
 )
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
-from src.application.ledger.api import position_lot_risk_view
+from src.application.ledger.api import (
+    position_lot_risk_view,
+    validate_combo_group_membership,
+    validate_position_fact_snapshot_contract,
+)
 from src.application.positions.context_builder import (
     build_lifecycle_read_models_from_decision_snapshot,
 )
@@ -120,6 +128,14 @@ def build_position_advice_plan(
         or snapshot.get("actionable") is not True
     ):
         raise PositionAdvicePlanError("decision snapshot is not trusted")
+    position_fact_reasons = validate_position_fact_snapshot_contract(
+        snapshot
+    )
+    if position_fact_reasons:
+        raise PositionAdvicePlanError(
+            "decision snapshot position facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
     fingerprint = _sha256(
         snapshot.get("decision_state_fingerprint"),
         "decision_state_fingerprint",
@@ -403,7 +419,14 @@ def _position_row_and_proposals(
         ),
         lifecycle_state=lifecycle,
         group_structure_state=str(group_state.get("state") or "standalone"),
-        reason_codes=lifecycle_reasons,
+        reason_codes=[
+            *lifecycle_reasons,
+            *(
+                str(item)
+                for item in group_state.get("reason_codes") or []
+                if str(item)
+            ),
+        ],
     )
     if side != "short":
         if option_type == "call":
@@ -1401,6 +1424,14 @@ def _group_structure_states(
         for item in snapshot.get("account_combo_identities", [])
         if isinstance(item, Mapping) and str(item.get("group_id") or "")
     }
+    membership_field_present = (
+        "account_combo_group_memberships" in snapshot
+    )
+    memberships = {
+        str(item.get("group_id") or ""): dict(item)
+        for item in snapshot.get("account_combo_group_memberships", [])
+        if isinstance(item, Mapping) and str(item.get("group_id") or "")
+    }
     group_ids = {
         str(fields.get("strategy_group_id") or "")
         for fields in lots.values()
@@ -1415,6 +1446,121 @@ def _group_structure_states(
                 "identity": None,
             }
             continue
+        if membership_field_present:
+            membership = memberships.get(group_id)
+            if membership is None:
+                output[group_id] = {
+                    "state": "review_required",
+                    "identity": identity,
+                    "reason_codes": [
+                        "combo_group_membership_missing"
+                    ],
+                }
+                continue
+            validation = validate_combo_group_membership(membership)
+            expected_ids = sorted(
+                {
+                    str(identity.get("funding_put_record_id") or ""),
+                    str(
+                        identity.get(
+                            "participation_call_record_id"
+                        )
+                        or ""
+                    ),
+                }
+                - {""}
+            )
+            observed_ids = list(
+                membership.get(
+                    "current_account_member_record_ids"
+                )
+                or []
+            )
+            membership_reasons = {
+                *validation.reason_codes,
+                *(
+                    str(item)
+                    for item in membership.get("reason_codes") or []
+                    if str(item)
+                ),
+            }
+            if observed_ids != expected_ids:
+                membership_reasons.add(
+                    "combo_identity_membership_binding_mismatch"
+                )
+            bindings_by_record_id = {
+                str(item.get("record_id") or ""): dict(item)
+                for item in membership.get(
+                    "member_bindings_for_current_account"
+                )
+                or []
+                if isinstance(item, Mapping)
+                and str(item.get("record_id") or "")
+            }
+            expected_account = str(
+                identity.get("account") or ""
+            ).strip().lower()
+            expected_symbol = str(
+                identity.get("symbol") or ""
+            ).strip().upper()
+            expected_bindings = (
+                (
+                    str(
+                        identity.get("funding_put_record_id") or ""
+                    ),
+                    str(
+                        identity.get("funding_put_open_event_id")
+                        or ""
+                    ),
+                    FUNDING_PUT_ROLES,
+                ),
+                (
+                    str(
+                        identity.get(
+                            "participation_call_record_id"
+                        )
+                        or ""
+                    ),
+                    str(
+                        identity.get(
+                            "participation_call_open_event_id"
+                        )
+                        or ""
+                    ),
+                    PARTICIPATION_CALL_ROLES,
+                ),
+            )
+            if any(
+                not record_id
+                or not open_event_id
+                or (
+                    binding := bindings_by_record_id.get(record_id)
+                )
+                is None
+                or binding.get("open_event_id") != open_event_id
+                or binding.get("role") not in expected_roles
+                or binding.get("strategy") != "combo_yield"
+                or binding.get("account") != expected_account
+                or binding.get("symbol") != expected_symbol
+                for record_id, open_event_id, expected_roles in (
+                    expected_bindings
+                )
+            ):
+                membership_reasons.add(
+                    "combo_identity_membership_binding_mismatch"
+                )
+            if (
+                validation.status != "valid"
+                or membership.get("status") != "exact"
+                or membership_reasons
+            ):
+                output[group_id] = {
+                    "state": "review_required",
+                    "identity": identity,
+                    "membership": membership,
+                    "reason_codes": sorted(membership_reasons),
+                }
+                continue
         put_id = str(identity.get("funding_put_record_id") or "")
         call_id = str(identity.get("participation_call_record_id") or "")
         put_fields = lots.get(put_id, {})

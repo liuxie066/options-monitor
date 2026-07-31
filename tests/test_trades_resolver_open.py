@@ -134,7 +134,7 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
     assert result.operations[0].to_payload()["fields"]["side"] == "long"
 
 
-def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() -> None:
+def test_resolve_unknown_buy_call_with_companion_put_as_independent_open() -> None:
     repo = FakeRepo([_position_record("lot_pdd_short_put")])
     deal = _deal(
         deal_id="deal-pdd-long-call",
@@ -157,12 +157,13 @@ def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() 
     assert result.diagnostics["position_effect_inference"]["decision"] == "open"
     fields = result.operations[0].to_payload()["fields"]
     assert fields["side"] == "long"
-    assert fields["strategy"] == "combo_yield"
-    assert fields["leg_role"] == "enhancement_call"
-    assert fields["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+    assert "strategy" not in fields
+    assert "leg_role" not in fields
+    assert "strategy_group_id" not in fields
+    assert result.diagnostics["combo_yield_enrichment"]["decision"] == "defer_to_post_trade_reconciliation"
 
 
-def test_combo_yield_group_id_canonicalizes_hk_option_alias() -> None:
+def test_independent_hk_call_open_still_canonicalizes_symbol_alias() -> None:
     repo = FakeRepo(
         [
             _position_record(
@@ -191,11 +192,12 @@ def test_combo_yield_group_id_canonicalizes_hk_option_alias() -> None:
 
     assert result.status == "dry_run"
     fields = result.operations[0].to_payload()["fields"]
-    assert fields["strategy"] == "combo_yield"
-    assert fields["strategy_group_id"] == "combo_yield:lx:0700.HK:2026-06-05"
+    assert fields["symbol"] == "0700.HK"
+    assert "strategy" not in fields
+    assert "strategy_group_id" not in fields
 
 
-def test_resolve_unknown_buy_call_without_companion_opens_pending_combo_yield_long_call() -> None:
+def test_resolve_unknown_buy_call_without_companion_opens_independent_long_call() -> None:
     deal = _deal(
         deal_id="deal-pdd-long-call",
         symbol="PDD",
@@ -217,9 +219,9 @@ def test_resolve_unknown_buy_call_without_companion_opens_pending_combo_yield_lo
     assert result.diagnostics["position_effect_inference"]["open_reason"] == "buy_call_without_close_target"
     fields = result.operations[0].to_payload()["fields"]
     assert fields["side"] == "long"
-    assert fields["strategy"] == "combo_yield"
-    assert fields["leg_role"] == "enhancement_call"
-    assert fields["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+    assert "strategy" not in fields
+    assert "leg_role" not in fields
+    assert "strategy_group_id" not in fields
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
@@ -263,7 +265,7 @@ def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Pa
     assert lots[0]["fields"]["contracts_open"] == 2
 
 
-def test_resolve_unknown_combo_yield_long_call_apply_preserves_strategy_fields(tmp_path: Path) -> None:
+def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     put_result = resolve_trade_deal(
@@ -308,13 +310,12 @@ def test_resolve_unknown_combo_yield_long_call_apply_preserves_strategy_fields(t
     lots = repo.list_position_lots()
     call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
     assert call_lot["fields"]["side"] == "long"
-    assert call_lot["fields"]["strategy"] == "combo_yield"
-    assert call_lot["fields"]["leg_role"] == "enhancement_call"
-    assert call_lot["fields"]["yield_enhancement_mode"] == "income_upside_enhancement"
-    assert call_lot["fields"]["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+    assert "strategy" not in call_lot["fields"]
+    assert "leg_role" not in call_lot["fields"]
+    assert "strategy_group_id" not in call_lot["fields"]
 
 
-def test_resolve_sell_put_open_after_long_call_uses_same_combo_yield_group(tmp_path: Path) -> None:
+def test_resolve_sell_put_open_after_long_call_keeps_both_lots_independent(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     call_result = resolve_trade_deal(
@@ -359,10 +360,10 @@ def test_resolve_sell_put_open_after_long_call_uses_same_combo_yield_group(tmp_p
     lots = repo.list_position_lots()
     call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
     put_lot = next(item for item in lots if item["fields"]["option_type"] == "put")
-    assert call_lot["fields"]["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
-    assert put_lot["fields"]["strategy"] == "combo_yield"
-    assert put_lot["fields"]["leg_role"] == "sell_put"
-    assert put_lot["fields"]["strategy_group_id"] == call_lot["fields"]["strategy_group_id"]
+    assert "strategy_group_id" not in call_lot["fields"]
+    assert "leg_role" not in call_lot["fields"]
+    assert "strategy_group_id" not in put_lot["fields"]
+    assert "leg_role" not in put_lot["fields"]
 
 
 def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:

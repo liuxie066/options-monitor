@@ -6,6 +6,13 @@ from pathlib import Path
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
 from src.application.position_advice_source_producers import (
     publish_candidate_decisions_snapshot,
     publish_cash_capacity_snapshot,
@@ -72,6 +79,42 @@ def test_portfolio_and_ledger_producers_preserve_native_observation(
         },
         completed_at=NOW + timedelta(seconds=1),
     )
+    ledger_snapshot = {
+        "schema_version": "decision_state_snapshot.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
+        "snapshot_status": "trusted",
+        "actionable": True,
+        "decision_state_fingerprint": "",
+        "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "source_observed_at": (NOW + timedelta(seconds=2)).isoformat(),
+        "account_position_lots": [],
+        "account_lifecycle_cases": [],
+        "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
+        "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=[],
+            )
+        ),
+        "effective_void_event_ids": [],
+        "account_combo_identities": [],
+        "account_combo_group_memberships": [],
+    }
+    ledger_snapshot["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(ledger_snapshot)
+    )
     ledger_path, ledger = publish_ledger_source_snapshot(
         producer_root=tmp_path,
         account_run_id="run-1",
@@ -79,13 +122,7 @@ def test_portfolio_and_ledger_producers_preserve_native_observation(
         broker="futu",
         portfolio_account_identity_hash=IDENTITY,
         included_markets=["US"],
-        decision_state_snapshot={
-            "snapshot_status": "trusted",
-            "actionable": True,
-            "decision_state_fingerprint": "c" * 64,
-            "fingerprint_schema_version": "decision_state_fingerprint.v2",
-            "source_observed_at": (NOW + timedelta(seconds=2)).isoformat(),
-        },
+        decision_state_snapshot=ledger_snapshot,
         completed_at=NOW + timedelta(seconds=3),
     )
 

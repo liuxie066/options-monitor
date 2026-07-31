@@ -499,6 +499,74 @@ class SQLiteOptionPositionsRepository:
                 ON strategy_group_identities(account, symbol, group_id)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS combo_pair_inferences (
+                  inference_id TEXT PRIMARY KEY,
+                  schema_version TEXT NOT NULL,
+                  algorithm_version TEXT NOT NULL,
+                  account TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  market TEXT NOT NULL,
+                  market_date TEXT NOT NULL,
+                  put_record_id TEXT NOT NULL,
+                  put_open_event_id TEXT NOT NULL,
+                  call_record_id TEXT NOT NULL,
+                  call_open_event_id TEXT NOT NULL,
+                  evidence_grade TEXT NOT NULL,
+                  candidate_occurrence_ids_json TEXT NOT NULL,
+                  candidate_exposure_ids_json TEXT NOT NULL,
+                  input_snapshot_hash TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK(status IN (
+                    'proposal_ready', 'ambiguous', 'user_confirmed',
+                    'user_rejected', 'expired_unresolved', 'superseded'
+                  )),
+                  proposal_expires_at_ms INTEGER NOT NULL,
+                  evidence_json TEXT NOT NULL,
+                  alternatives_json TEXT NOT NULL,
+                  strategy_group_id TEXT NOT NULL,
+                  identity_hash TEXT,
+                  put_adoption_event_id TEXT,
+                  call_adoption_event_id TEXT,
+                  put_void_event_id TEXT,
+                  call_void_event_id TEXT,
+                  decision_at_ms INTEGER,
+                  decision_by TEXT,
+                  decision_reason TEXT,
+                  created_at_ms INTEGER NOT NULL,
+                  updated_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL,
+                  FOREIGN KEY(put_open_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(call_open_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(put_adoption_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(call_adoption_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(put_void_event_id) REFERENCES trade_events(event_id),
+                  FOREIGN KEY(call_void_event_id) REFERENCES trade_events(event_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_combo_pair_inferences_account_status
+                ON combo_pair_inferences(
+                  account, status, market_date, symbol, updated_at_ms, inference_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_combo_pair_confirmed_put
+                ON combo_pair_inferences(put_open_event_id)
+                WHERE status = 'user_confirmed'
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_combo_pair_confirmed_call
+                ON combo_pair_inferences(call_open_event_id)
+                WHERE status = 'user_confirmed'
+                """
+            )
             self._backfill_position_lot_contract_columns(conn)
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
@@ -1979,75 +2047,574 @@ class SQLiteOptionPositionsRepository:
             ).fetchall()
         return [_json_object(row["raw_json"]) for row in rows]
 
+    def upsert_combo_pair_inference(
+        self,
+        inference: dict[str, Any],
+        *,
+        reactivate_stale: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = _normalize_combo_pair_inference_payload(inference)
+        inference_id = str(payload["inference_id"])
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing_row = active_conn.execute(
+                """
+                SELECT raw_json, status, created_at_ms
+                FROM combo_pair_inferences
+                WHERE inference_id = ?
+                """,
+                (inference_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = _json_object(existing_row["raw_json"])
+                _assert_same_combo_pair_inference_identity(existing, payload)
+                existing_status = str(existing_row["status"] or "").strip().lower()
+                reactivating = (
+                    bool(reactivate_stale)
+                    and existing_status == "expired_unresolved"
+                    and str(existing.get("decision_reason") or "").strip()
+                    == "facts_drifted_or_leg_claimed"
+                )
+                if (
+                    existing_status not in {"proposal_ready", "ambiguous"}
+                    and not reactivating
+                ):
+                    return False
+                created_at_ms = int(existing_row["created_at_ms"])
+            else:
+                reactivating = False
+                created_at_ms = int(payload.get("created_at_ms") or now_ms())
+            updated_at_ms = int(now_ms())
+            payload["created_at_ms"] = created_at_ms
+            payload["updated_at_ms"] = updated_at_ms
+            raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            values = _combo_pair_inference_sql_values(
+                payload,
+                raw_json=raw_json,
+            )
+            if existing_row is None:
+                active_conn.execute(
+                    """
+                    INSERT INTO combo_pair_inferences (
+                      inference_id, schema_version, algorithm_version,
+                      account, symbol, market, market_date,
+                      put_record_id, put_open_event_id,
+                      call_record_id, call_open_event_id,
+                      evidence_grade,
+                      candidate_occurrence_ids_json,
+                      candidate_exposure_ids_json,
+                      input_snapshot_hash, status, proposal_expires_at_ms,
+                      evidence_json, alternatives_json, strategy_group_id,
+                      identity_hash, put_adoption_event_id, call_adoption_event_id,
+                      put_void_event_id, call_void_event_id,
+                      decision_at_ms, decision_by, decision_reason,
+                      created_at_ms, updated_at_ms, raw_json
+                    ) VALUES (
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    values,
+                )
+                return True
+            active_conn.execute(
+                """
+                UPDATE combo_pair_inferences
+                SET algorithm_version = ?, evidence_grade = ?,
+                    candidate_occurrence_ids_json = ?,
+                    candidate_exposure_ids_json = ?,
+                    input_snapshot_hash = ?, status = ?,
+                    proposal_expires_at_ms = ?, evidence_json = ?,
+                    alternatives_json = ?, strategy_group_id = ?,
+                    decision_at_ms = NULL, decision_by = NULL,
+                    decision_reason = NULL,
+                    updated_at_ms = ?, raw_json = ?
+                WHERE inference_id = ?
+                  AND (
+                    status IN ('proposal_ready', 'ambiguous')
+                    OR (
+                      ? = 1
+                      AND status = 'expired_unresolved'
+                      AND decision_reason = 'facts_drifted_or_leg_claimed'
+                    )
+                  )
+                """,
+                (
+                    str(payload["algorithm_version"]),
+                    str(payload["evidence_grade"]),
+                    _json_text(payload["candidate_occurrence_ids"]),
+                    _json_text(payload["candidate_exposure_ids"]),
+                    str(payload["input_snapshot_hash"]),
+                    str(payload["status"]),
+                    int(payload["proposal_expires_at_ms"]),
+                    _json_text(payload["evidence"]),
+                    _json_text(payload["alternative_inference_ids"]),
+                    str(payload["strategy_group_id"]),
+                    updated_at_ms,
+                    raw_json,
+                    inference_id,
+                    int(reactivating),
+                ),
+            )
+        return False
+
+    def get_combo_pair_inference(
+        self,
+        inference_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM combo_pair_inferences
+                WHERE inference_id = ?
+                """,
+                (str(inference_id or "").strip(),),
+            ).fetchone()
+        return _json_object(row["raw_json"]) if row is not None else None
+
+    def transition_combo_pair_inference(
+        self,
+        *,
+        inference_id: str,
+        expected_statuses: Sequence[str],
+        new_status: str,
+        expected_input_hash: str | None = None,
+        decision_fields: dict[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        inference_value = str(inference_id or "").strip()
+        expected = sorted(
+            {str(item or "").strip().lower() for item in expected_statuses}
+            - {""}
+        )
+        status_value = str(new_status or "").strip().lower()
+        allowed_statuses = {
+            "proposal_ready",
+            "ambiguous",
+            "user_confirmed",
+            "user_rejected",
+            "expired_unresolved",
+            "superseded",
+        }
+        if not inference_value or not expected or status_value not in allowed_statuses:
+            raise ValueError("combo inference transition is incomplete")
+        allowed_fields = {
+            "decision_at_ms",
+            "decision_by",
+            "decision_reason",
+            "strategy_group_id",
+            "identity_hash",
+            "put_adoption_event_id",
+            "call_adoption_event_id",
+            "put_void_event_id",
+            "call_void_event_id",
+        }
+        updates = dict(decision_fields or {})
+        invalid = sorted(set(updates) - allowed_fields)
+        if invalid:
+            raise ValueError(
+                "unsupported combo inference decision fields: " + ",".join(invalid)
+            )
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json, status, input_snapshot_hash FROM combo_pair_inferences WHERE inference_id = ?",
+                (inference_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"combo inference not found: {inference_value}")
+            current_status = str(row["status"] or "").strip().lower()
+            if current_status not in expected:
+                raise ValueError(
+                    f"combo inference status compare-and-set failed: {current_status}"
+                )
+            if (
+                expected_input_hash is not None
+                and str(row["input_snapshot_hash"] or "").strip()
+                != str(expected_input_hash or "").strip()
+            ):
+                raise ValueError("combo inference input hash compare-and-set failed")
+            payload = _json_object(row["raw_json"])
+            payload.update(updates)
+            payload["status"] = status_value
+            updated_at_ms = int(updates.get("decision_at_ms") or now_ms())
+            payload["updated_at_ms"] = updated_at_ms
+            cursor = active_conn.execute(
+                """
+                UPDATE combo_pair_inferences
+                SET status = ?, decision_at_ms = ?, decision_by = ?,
+                    decision_reason = ?, strategy_group_id = ?, identity_hash = ?,
+                    put_adoption_event_id = ?, call_adoption_event_id = ?,
+                    put_void_event_id = ?, call_void_event_id = ?,
+                    updated_at_ms = ?, raw_json = ?
+                WHERE inference_id = ? AND status = ?
+                """,
+                (
+                    status_value,
+                    payload.get("decision_at_ms"),
+                    payload.get("decision_by"),
+                    payload.get("decision_reason"),
+                    payload.get("strategy_group_id"),
+                    payload.get("identity_hash"),
+                    payload.get("put_adoption_event_id"),
+                    payload.get("call_adoption_event_id"),
+                    payload.get("put_void_event_id"),
+                    payload.get("call_void_event_id"),
+                    updated_at_ms,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    inference_value,
+                    current_status,
+                ),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                raise ValueError("combo inference status compare-and-set failed")
+        return payload
+
+    def list_combo_pair_inferences(
+        self,
+        *,
+        account: str | None = None,
+        status: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if account:
+            clauses.append("account = ?")
+            values.append(str(account).strip().lower())
+        if status:
+            clauses.append("status = ?")
+            values.append(str(status).strip().lower())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json
+                FROM combo_pair_inferences
+                {where}
+                ORDER BY account ASC, market_date DESC, symbol ASC,
+                         updated_at_ms DESC, inference_id ASC
+                """,
+                values,
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
+    def expire_combo_pair_inferences(
+        self,
+        *,
+        effective_now_ms: int,
+        account: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        cutoff = int(effective_now_ms)
+        if cutoff <= 0:
+            raise ValueError("effective_now_ms must be > 0")
+        clauses = [
+            "status IN ('proposal_ready', 'ambiguous')",
+            "proposal_expires_at_ms < ?",
+        ]
+        values: list[Any] = [cutoff]
+        if account:
+            clauses.append("account = ?")
+            values.append(str(account).strip().lower())
+        with self._optional_conn(conn, commit=True) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT inference_id, raw_json
+                FROM combo_pair_inferences
+                WHERE {' AND '.join(clauses)}
+                ORDER BY inference_id ASC
+                """,
+                values,
+            ).fetchall()
+            updated = 0
+            for row in rows:
+                payload = _json_object(row["raw_json"])
+                payload["status"] = "expired_unresolved"
+                payload["updated_at_ms"] = cutoff
+                payload["decision_at_ms"] = cutoff
+                payload["decision_reason"] = "proposal_expired"
+                active_conn.execute(
+                    """
+                    UPDATE combo_pair_inferences
+                    SET status = 'expired_unresolved', decision_at_ms = ?,
+                        decision_reason = 'proposal_expired', updated_at_ms = ?,
+                        raw_json = ?
+                    WHERE inference_id = ?
+                      AND status IN ('proposal_ready', 'ambiguous')
+                    """,
+                    (
+                        cutoff,
+                        cutoff,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        str(row["inference_id"]),
+                    ),
+                )
+                updated += 1
+        return updated
+
+    def expire_stale_combo_pair_inferences(
+        self,
+        *,
+        account: str,
+        active_inference_ids: Sequence[str],
+        effective_now_ms: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        account_value = str(account or "").strip().lower()
+        if not account_value:
+            raise ValueError("account is required to expire stale combo inferences")
+        changed_at_ms = int(effective_now_ms)
+        if changed_at_ms <= 0:
+            raise ValueError("effective_now_ms must be > 0")
+        active_ids = {
+            str(item).strip() for item in active_inference_ids if str(item).strip()
+        }
+        with self._optional_conn(conn, commit=True) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT inference_id, raw_json
+                FROM combo_pair_inferences
+                WHERE account = ?
+                  AND status IN ('proposal_ready', 'ambiguous')
+                ORDER BY inference_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+            updated = 0
+            for row in rows:
+                inference_id = str(row["inference_id"])
+                if inference_id in active_ids:
+                    continue
+                payload = _json_object(row["raw_json"])
+                payload["status"] = "expired_unresolved"
+                payload["updated_at_ms"] = changed_at_ms
+                payload["decision_at_ms"] = changed_at_ms
+                payload["decision_reason"] = "facts_drifted_or_leg_claimed"
+                cursor = active_conn.execute(
+                    """
+                    UPDATE combo_pair_inferences
+                    SET status = 'expired_unresolved', decision_at_ms = ?,
+                        decision_reason = 'facts_drifted_or_leg_claimed',
+                        updated_at_ms = ?, raw_json = ?
+                    WHERE inference_id = ?
+                      AND status IN ('proposal_ready', 'ambiguous')
+                    """,
+                    (
+                        changed_at_ms,
+                        changed_at_ms,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        inference_id,
+                    ),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
+
     def assert_foreign_keys_clean(self, *, conn: sqlite3.Connection | None = None) -> None:
         with self._optional_conn(conn) as active_conn:
             violations = active_conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise RuntimeError(f"SQLite foreign key check failed: {len(violations)} violation(s)")
 
-    def read_decision_state_rows(self, *, account: str) -> dict[str, Any]:
+    def _read_account_decision_state_rows(
+        self,
+        *,
+        account: str,
+        conn: sqlite3.Connection,
+    ) -> dict[str, Any]:
         account_value = str(account or "").strip().lower()
         if not account_value:
             raise ValueError("decision state snapshot requires account")
+        events = self.list_trade_events(conn=conn)
+        lots = self.list_position_lots(conn=conn)
+        cases = [
+            _json_object(row["raw_json"])
+            for row in conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_cases
+                WHERE account = ?
+                ORDER BY updated_at_ms DESC, case_id DESC
+                """,
+                (account_value,),
+            ).fetchall()
+        ]
+        evidence: list[dict[str, Any]] = []
+        evidence_received_at_ms_by_id: dict[str, int] = {}
+        for row in conn.execute(
+            """
+            SELECT lifecycle_evidence.raw_json,
+                   lifecycle_evidence.created_at_ms
+            FROM trade_lifecycle_evidence AS lifecycle_evidence
+            JOIN trade_lifecycle_cases AS lifecycle_case
+              ON lifecycle_case.case_id = lifecycle_evidence.case_id
+            WHERE lifecycle_case.account = ?
+            ORDER BY lifecycle_evidence.created_at_ms ASC,
+                     lifecycle_evidence.evidence_id ASC
+            """,
+            (account_value,),
+        ).fetchall():
+            payload = _json_object(row["raw_json"])
+            evidence.append(payload)
+            evidence_id = str(payload.get("evidence_id") or "").strip()
+            if evidence_id:
+                evidence_received_at_ms_by_id[evidence_id] = int(
+                    row["created_at_ms"]
+                )
+        allocations = [
+            _json_object(row["raw_json"])
+            for row in conn.execute(
+                """
+                SELECT allocation.raw_json
+                FROM trade_lifecycle_allocations AS allocation
+                JOIN trade_lifecycle_cases AS lifecycle_case
+                  ON lifecycle_case.case_id = allocation.case_id
+                WHERE lifecycle_case.account = ?
+                ORDER BY allocation.created_at_ms ASC,
+                         allocation.allocation_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        ]
+        source_claims = [
+            _json_object(row["raw_json"])
+            for row in conn.execute(
+                """
+                SELECT source_claim.raw_json
+                FROM trade_lifecycle_source_consumptions AS source_claim
+                JOIN trade_lifecycle_cases AS lifecycle_case
+                  ON lifecycle_case.case_id = source_claim.case_id
+                WHERE lifecycle_case.account = ?
+                ORDER BY source_claim.created_at_ms ASC,
+                         source_claim.source_key ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        ]
+        timing_policies = [
+            _json_object(row["raw_json"])
+            for row in conn.execute(
+                """
+                SELECT timing.raw_json
+                FROM trade_lifecycle_timing_policies AS timing
+                JOIN trade_lifecycle_cases AS lifecycle_case
+                  ON lifecycle_case.case_id = timing.case_id
+                WHERE lifecycle_case.account = ?
+                ORDER BY timing.case_id ASC
+                """,
+                (account_value,),
+            ).fetchall()
+        ]
+        assigned_stock_events = [
+            _json_object(row["event_json"])
+            for row in conn.execute(
+                """
+                SELECT event_json
+                FROM assigned_stock_events
+                ORDER BY trade_time_ms ASC, stock_event_id ASC
+                """
+            ).fetchall()
+        ]
+        identities = self.list_strategy_group_identities(
+            account=account_value,
+            conn=conn,
+        )
+        return {
+            "account": account_value,
+            "trade_events": events,
+            "stored_position_lots": lots,
+            "account_position_lots": [
+                row
+                for row in lots
+                if str(
+                    (row.get("fields") or {}).get("account") or ""
+                ).strip().lower()
+                == account_value
+            ],
+            "account_lifecycle_cases": cases,
+            "account_lifecycle_evidence": evidence,
+            "account_lifecycle_evidence_received_at_ms_by_id": (
+                evidence_received_at_ms_by_id
+            ),
+            "account_lifecycle_allocations": allocations,
+            "account_lifecycle_source_consumptions": source_claims,
+            "account_lifecycle_timing_policies": timing_policies,
+            "account_assigned_stock_events": [
+                row
+                for row in assigned_stock_events
+                if str(
+                    row.get("account")
+                    or (row.get("raw_payload") or {}).get("account")
+                    or ""
+                ).strip().lower()
+                == account_value
+            ],
+            "account_combo_identities": identities,
+        }
+
+    def read_lifecycle_account_rows(
+        self,
+        *,
+        account: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        account_value = str(account or "").strip().lower()
+        if not account_value:
+            raise ValueError("lifecycle account reader requires account")
+        if conn is not None:
+            return self._read_account_decision_state_rows(
+                account=account_value,
+                conn=conn,
+            )
+        active_conn = self._connect()
+        try:
+            active_conn.execute("BEGIN")
+            rows = self._read_account_decision_state_rows(
+                account=account_value,
+                conn=active_conn,
+            )
+            active_conn.commit()
+        except Exception:
+            active_conn.rollback()
+            raise
+        finally:
+            active_conn.close()
+        return rows
+
+    def read_lifecycle_case_rows(
+        self,
+        *,
+        case_id: str,
+    ) -> dict[str, Any]:
+        case_value = str(case_id or "").strip()
+        if not case_value:
+            raise ValueError("lifecycle case reader requires case_id")
         conn = self._connect()
         try:
             conn.execute("BEGIN")
-            events = self.list_trade_events(conn=conn)
-            lots = self.list_position_lots(conn=conn)
-            cases = self.list_trade_lifecycle_cases(conn=conn)
-            evidence = self.list_trade_lifecycle_evidence(account=account_value, conn=conn)
-            allocations = [
-                _json_object(row["raw_json"])
-                for row in conn.execute(
-                    """
-                    SELECT allocation.raw_json
-                    FROM trade_lifecycle_allocations AS allocation
-                    JOIN trade_lifecycle_cases AS lifecycle_case
-                      ON lifecycle_case.case_id = allocation.case_id
-                    WHERE lifecycle_case.account = ?
-                    ORDER BY allocation.created_at_ms ASC, allocation.allocation_id ASC
-                    """,
-                    (account_value,),
-                ).fetchall()
-            ]
-            assigned_stock_events = [
-                _json_object(row["event_json"])
-                for row in conn.execute(
-                    """
-                    SELECT event_json
-                    FROM assigned_stock_events
-                    ORDER BY trade_time_ms ASC, stock_event_id ASC
-                    """
-                ).fetchall()
-            ]
-            identities = self.list_strategy_group_identities(account=account_value, conn=conn)
+            lifecycle_case = self.get_trade_lifecycle_case(
+                case_value,
+                conn=conn,
+            )
+            if lifecycle_case is None:
+                raise ValueError(f"lifecycle case not found: {case_value}")
+            rows = self._read_account_decision_state_rows(
+                account=str(lifecycle_case.get("account") or ""),
+                conn=conn,
+            )
+            rows["requested_lifecycle_case_id"] = case_value
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
-        return {
-            "trade_events": events,
-            "stored_position_lots": lots,
-            "account_position_lots": [
-                row
-                for row in lots
-                if str((row.get("fields") or {}).get("account") or "").strip().lower() == account_value
-            ],
-            "account_lifecycle_cases": [
-                row for row in cases if str(row.get("account") or "").strip().lower() == account_value
-            ],
-            "account_lifecycle_evidence": evidence,
-            "account_lifecycle_allocations": allocations,
-            "account_assigned_stock_events": [
-                row
-                for row in assigned_stock_events
-                if str(row.get("account") or (row.get("raw_payload") or {}).get("account") or "").strip().lower()
-                == account_value
-            ],
-            "account_combo_identities": identities,
-        }
+        return rows
+
+    def read_decision_state_rows(self, *, account: str) -> dict[str, Any]:
+        return self.read_lifecycle_account_rows(account=account)
 
 
 def _json_text(value: Any) -> str:
@@ -2059,6 +2626,170 @@ def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("stored ledger JSON value must be an object")
     return dict(payload)
+
+
+def _normalize_combo_pair_inference_payload(
+    inference: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(inference or {})
+    required = (
+        "inference_id",
+        "schema_version",
+        "algorithm_version",
+        "account",
+        "symbol",
+        "market",
+        "market_date",
+        "put_record_id",
+        "put_open_event_id",
+        "call_record_id",
+        "call_open_event_id",
+        "evidence_grade",
+        "input_snapshot_hash",
+        "status",
+        "strategy_group_id",
+    )
+    missing = [
+        field
+        for field in required
+        if not str(payload.get(field) or "").strip()
+    ]
+    if missing:
+        raise ValueError(
+            "combo pair inference missing fields: " + ",".join(missing)
+        )
+    status = str(payload["status"]).strip().lower()
+    allowed_statuses = {
+        "proposal_ready",
+        "ambiguous",
+        "user_confirmed",
+        "user_rejected",
+        "expired_unresolved",
+        "superseded",
+    }
+    if status not in allowed_statuses:
+        raise ValueError(f"unsupported combo pair inference status: {status}")
+    try:
+        expires_at_ms = int(payload.get("proposal_expires_at_ms") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "combo pair inference proposal_expires_at_ms must be numeric"
+        ) from exc
+    if expires_at_ms <= 0:
+        raise ValueError(
+            "combo pair inference proposal_expires_at_ms must be > 0"
+        )
+    payload.update(
+        {
+            "inference_id": str(payload["inference_id"]).strip(),
+            "schema_version": str(payload["schema_version"]).strip(),
+            "algorithm_version": str(payload["algorithm_version"]).strip(),
+            "account": str(payload["account"]).strip().lower(),
+            "symbol": str(payload["symbol"]).strip().upper(),
+            "market": str(payload["market"]).strip().upper(),
+            "market_date": str(payload["market_date"]).strip(),
+            "put_record_id": str(payload["put_record_id"]).strip(),
+            "put_open_event_id": str(payload["put_open_event_id"]).strip(),
+            "call_record_id": str(payload["call_record_id"]).strip(),
+            "call_open_event_id": str(payload["call_open_event_id"]).strip(),
+            "evidence_grade": str(payload["evidence_grade"]).strip().lower(),
+            "candidate_occurrence_ids": _canonical_text_values(
+                payload.get("candidate_occurrence_ids")
+            ),
+            "candidate_exposure_ids": _canonical_text_values(
+                payload.get("candidate_exposure_ids")
+            ),
+            "input_snapshot_hash": str(payload["input_snapshot_hash"]).strip(),
+            "status": status,
+            "proposal_expires_at_ms": expires_at_ms,
+            "evidence": [
+                dict(item)
+                for item in (payload.get("evidence") or [])
+                if isinstance(item, dict)
+            ],
+            "alternative_inference_ids": _canonical_text_values(
+                payload.get("alternative_inference_ids")
+            ),
+            "strategy_group_id": str(payload["strategy_group_id"]).strip(),
+        }
+    )
+    return payload
+
+
+def _canonical_text_values(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError("combo pair inference ID collection must be a sequence")
+    return sorted({str(item).strip() for item in value if str(item).strip()})
+
+
+def _assert_same_combo_pair_inference_identity(
+    existing: dict[str, Any],
+    candidate: dict[str, Any],
+) -> None:
+    immutable_fields = (
+        "inference_id",
+        "schema_version",
+        "account",
+        "symbol",
+        "market",
+        "market_date",
+        "put_record_id",
+        "put_open_event_id",
+        "call_record_id",
+        "call_open_event_id",
+    )
+    conflicts = [
+        field
+        for field in immutable_fields
+        if str(existing.get(field) or "").strip()
+        != str(candidate.get(field) or "").strip()
+    ]
+    if conflicts:
+        raise ValueError(
+            "combo pair inference identity conflict: " + ",".join(conflicts)
+        )
+
+
+def _combo_pair_inference_sql_values(
+    payload: dict[str, Any],
+    *,
+    raw_json: str,
+) -> tuple[Any, ...]:
+    return (
+        str(payload["inference_id"]),
+        str(payload["schema_version"]),
+        str(payload["algorithm_version"]),
+        str(payload["account"]),
+        str(payload["symbol"]),
+        str(payload["market"]),
+        str(payload["market_date"]),
+        str(payload["put_record_id"]),
+        str(payload["put_open_event_id"]),
+        str(payload["call_record_id"]),
+        str(payload["call_open_event_id"]),
+        str(payload["evidence_grade"]),
+        _json_text(payload["candidate_occurrence_ids"]),
+        _json_text(payload["candidate_exposure_ids"]),
+        str(payload["input_snapshot_hash"]),
+        str(payload["status"]),
+        int(payload["proposal_expires_at_ms"]),
+        _json_text(payload["evidence"]),
+        _json_text(payload["alternative_inference_ids"]),
+        str(payload["strategy_group_id"]),
+        payload.get("identity_hash"),
+        payload.get("put_adoption_event_id"),
+        payload.get("call_adoption_event_id"),
+        payload.get("put_void_event_id"),
+        payload.get("call_void_event_id"),
+        payload.get("decision_at_ms"),
+        payload.get("decision_by"),
+        payload.get("decision_reason"),
+        int(payload["created_at_ms"]),
+        int(payload["updated_at_ms"]),
+        raw_json,
+    )
 
 
 def _notification_outbox_row(row: sqlite3.Row) -> dict[str, Any]:
