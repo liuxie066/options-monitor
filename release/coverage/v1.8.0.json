@@ -1,0 +1,52 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.0",
+  "base": {
+    "tag": "v1.7.8",
+    "commit": "039dd1960d19461cf0cf85c4eb6e629bca73b193"
+  },
+  "reviewed_head": "8a469a448ea6510a86a7f67144ce27c4c2267816",
+  "commits": [
+    {
+      "sha": "eb5d1e9674eef627a91a20cef7d02f5bb749d5b1",
+      "subject": "feat: add post-trade combo reconciliation"
+    },
+    {
+      "sha": "5417c36b8edec7bd118998f0909c1c2661af500a",
+      "subject": "fix: fail closed on corrupt reconciliation evidence"
+    },
+    {
+      "sha": "8a469a448ea6510a86a7f67144ce27c4c2267816",
+      "subject": "Merge release v1.7.8 hotfix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added review-gated post-trade Combo reconciliation that derives deterministic Put/Call lot pairings from authoritative ledger facts and writes canonical Combo identities only after exact operator confirmation.",
+      "commits": [
+        "eb5d1e9674eef627a91a20cef7d02f5bb749d5b1"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Hardened lifecycle and position-fact reconciliation with account-coherent frozen evidence, exact Combo membership validation, and per-case due-run isolation so malformed or ambiguous holdings fail closed without interrupting unrelated cases.",
+      "commits": [
+        "eb5d1e9674eef627a91a20cef7d02f5bb749d5b1"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made read-only trade-intake reconciliation reject corrupt persisted JSON instead of treating it as an empty state, preserving fail-closed production quality signals.",
+      "commits": [
+        "5417c36b8edec7bd118998f0909c1c2661af500a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "8a469a448ea6510a86a7f67144ce27c4c2267816",
+      "reason": "Ancestry-only integration of the already released v1.7.8 hotfix with the reviewed mainline changes; no independent runtime behavior."
+    }
+  ]
+}

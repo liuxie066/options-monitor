@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.8.0 - 2026-07-31
+
+### New Features
+- Added review-gated post-trade Combo reconciliation that derives deterministic Put/Call lot pairings from authoritative ledger facts and writes canonical Combo identities only after exact operator confirmation.
+
+### Bug Fixes
+- Hardened lifecycle and position-fact reconciliation with account-coherent frozen evidence, exact Combo membership validation, and per-case due-run isolation so malformed or ambiguous holdings fail closed without interrupting unrelated cases.
+- Made read-only trade-intake reconciliation reject corrupt persisted JSON instead of treating it as an empty state, preserving fail-closed production quality signals.
+
 ## 1.7.8 - 2026-07-31
 
 ### Bug Fixes
