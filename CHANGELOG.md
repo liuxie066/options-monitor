@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.7.6 - 2026-07-31
+
+### Bug Fixes
+- Made legacy lifecycle cutover require operator-curated account-scoped evidence, existing terminal events, valid allocations, and closed lot projections, while bridging waiting cases only to an existing v2 case with a frozen timing policy; frozen history no longer creates economic terminal events or delivery retries.
+
 ## 1.7.5 - 2026-07-31
 
 ### Improvements
