@@ -500,6 +500,14 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
     )
     p_migration_inventory.add_argument(
+        '--mapping-manifest',
+        default=None,
+        help=(
+            'operator-curated lifecycle_explicit_mapping.v1 '
+            'used to resolve legacy rows'
+        ),
+    )
+    p_migration_inventory.add_argument(
         '--format',
         default='json',
         choices=['json'],
@@ -1424,8 +1432,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.lifecycle_cmd == 'migration':
             if args.migration_cmd == 'inventory':
+                explicit_mapping = None
+                if args.mapping_manifest:
+                    explicit_mapping = _load_json_object(
+                        _resolve_path_under(
+                            str(args.mapping_manifest),
+                            base=base,
+                        )
+                    )
                 manifest = build_lifecycle_migration_inventory(
-                    repo
+                    repo,
+                    explicit_mapping=explicit_mapping,
                 )
                 selected_targets = [
                     str(item)
