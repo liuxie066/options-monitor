@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
 from src.application.ledger.api import (
     assigned_stock_event_log,
+    build_source_consumption_claim,
     open_trade_reconciliation_evidence_repo,
 )
 from src.application.trades.deal_identity import (
@@ -23,6 +25,12 @@ TERMINAL_EVIDENCE_REASONS = {
     "ledger_event_already_recorded",
     "assigned_stock_sale_event_recorded",
     "lifecycle_case_already_recorded",
+}
+PENDING_LIFECYCLE_STATUSES = {
+    "pending",
+    "waiting_settlement_evidence",
+    "needs_review",
+    "partially_resolved",
 }
 
 
@@ -40,6 +48,7 @@ def preview_trade_intake_reconciliation_from_sqlite(
             "reason": "ledger_sqlite_not_found",
             "terminal_evidence_found": False,
             "terminal_evidence_count": 0,
+            "delegated_lifecycle_pending_count": 0,
             "stale_state_count": 0,
         }
     result = reconcile_trade_intake_state(
@@ -59,17 +68,28 @@ def preview_trade_intake_reconciliation_from_sqlite(
         for item in actions
         if str(item.get("reason") or "") == "not_option_deal"
     )
+    delegated_count = sum(
+        1
+        for item in actions
+        if str(item.get("reason") or "") == "lifecycle_pending_delegated"
+    )
     pending_before = result.get("pending_before") if isinstance(result.get("pending_before"), dict) else {}
     pending_after = result.get("pending_after") if isinstance(result.get("pending_after"), dict) else {}
+    pending_after_count = _pending_bucket_count(pending_after)
     return {
         "available": True,
         "reason": None,
         "terminal_evidence_found": terminal_count > 0,
         "terminal_evidence_count": terminal_count,
         "ignored_non_option_count": ignored_count,
+        "delegated_lifecycle_pending_count": delegated_count,
         "stale_state_count": int(result.get("planned_count") or 0),
         "pending_before_count": _pending_bucket_count(pending_before),
-        "pending_after_reconcile_count": _pending_bucket_count(pending_after),
+        "pending_after_reconcile_count": pending_after_count,
+        "actionable_pending_after_reconcile_count": max(
+            0,
+            pending_after_count - delegated_count,
+        ),
     }
 
 
@@ -98,6 +118,7 @@ def reconcile_trade_intake_state(
     ledger_by_deal = _ledger_events_by_deal(repo)
     assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
     lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
+    delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo)
     candidates = _pending_deal_ids(state, requested=requested)
 
     actions: list[dict[str, Any]] = []
@@ -186,6 +207,27 @@ def reconcile_trade_intake_state(
                 }
             )
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
+            continue
+
+        delegated_entries = _filter_evidence_for_state_item(
+            delegated_lifecycle_by_deal.get(deal_id) or [],
+            state_item=item,
+        )
+        if len(delegated_entries) == 1:
+            delegated = delegated_entries[0]
+            case = delegated.get("case") if isinstance(delegated.get("case"), dict) else {}
+            actions.append(
+                {
+                    "deal_id": deal_id,
+                    "from_bucket": bucket,
+                    "action": "keep_pending",
+                    "reason": "lifecycle_pending_delegated",
+                    "lifecycle_case_id": case.get("case_id"),
+                    "lifecycle_status": case.get("status"),
+                    "lifecycle_anchor_kind": delegated.get("anchor_kind"),
+                    "write_state": False,
+                }
+            )
             continue
 
         if _is_ignored_non_option(item, audit_by_deal.get(deal_id) or []):
@@ -395,6 +437,296 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
             for deal_id in deal_ids:
                 out.setdefault(deal_id, []).append(entry)
     return out
+
+
+def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    """Return pending lifecycle owners with a complete source-binding chain."""
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
+    list_claims = getattr(repo, "list_trade_lifecycle_source_consumptions", None)
+    if not callable(list_cases) or not callable(list_evidence) or not callable(list_claims):
+        return {}
+    try:
+        cases = _dict_rows(list_cases())
+        evidence = _dict_rows(list_evidence())
+        claims = _dict_rows(list_claims())
+    except Exception:
+        return {}
+    cases_by_id = _rows_by_group(cases, "case_id")
+    evidence_by_id = _rows_by_group(evidence, "evidence_id")
+    evidence_by_case = _rows_by_group(evidence, "case_id")
+    claims_by_evidence = _rows_by_group(claims, "owner_evidence_id")
+    claims_by_source = _rows_by_group(claims, "source_key")
+    out: dict[str, list[dict[str, Any]]] = {}
+    for claim in claims:
+        validated = _validated_option_anchor_claim(
+            claim,
+            claims_by_evidence=claims_by_evidence,
+            claims_by_source=claims_by_source,
+        )
+        if validated is None:
+            continue
+        source_key, payload = validated
+        owner_case_id = str(claim.get("case_id") or "").strip()
+        owner_evidence_id = str(claim.get("owner_evidence_id") or "").strip()
+        owner_cases = cases_by_id.get(owner_case_id) or []
+        owner_evidence_rows = evidence_by_id.get(owner_evidence_id) or []
+        if len(owner_cases) != 1 or len(owner_evidence_rows) != 1:
+            continue
+        owner_case = owner_cases[0]
+        owner_evidence = owner_evidence_rows[0]
+        if not _valid_option_anchor_evidence(
+            owner_evidence,
+            owner_case_id=owner_case_id,
+            source_key=source_key,
+        ):
+            continue
+        delegated = _pending_lifecycle_owner(
+            owner_case=owner_case,
+            owner_evidence=owner_evidence,
+            payload=payload,
+            cases_by_id=cases_by_id,
+            evidence_by_case=evidence_by_case,
+            claims=claims,
+        )
+        if delegated is None:
+            continue
+        lifecycle_case, anchor_kind = delegated
+        entry = {
+            "case": lifecycle_case,
+            "evidence": owner_evidence,
+            "source_key": source_key,
+            "anchor_kind": anchor_kind,
+        }
+        for deal_id in _deal_ids_from_source_key(source_key):
+            out.setdefault(deal_id, []).append(entry)
+    return out
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in value or [] if isinstance(item, dict)]
+
+
+def _rows_by_group(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for item in rows:
+        key = str(item.get(field) or "").strip()
+        if key:
+            out.setdefault(key, []).append(item)
+    return out
+
+
+def _validated_option_anchor_claim(
+    claim: dict[str, Any],
+    *,
+    claims_by_evidence: dict[str, list[dict[str, Any]]],
+    claims_by_source: dict[str, list[dict[str, Any]]],
+) -> tuple[str, dict[str, Any]] | None:
+    source_key = str(claim.get("source_key") or "").strip()
+    case_id = str(claim.get("case_id") or "").strip()
+    evidence_id = str(claim.get("owner_evidence_id") or "").strip()
+    role = str(claim.get("source_role") or "").strip().lower()
+    payload = claim.get("source_payload") if isinstance(claim.get("source_payload"), dict) else {}
+    if (
+        str(claim.get("schema_version") or "").strip()
+        != "trade_lifecycle_source_consumption.v1"
+        or role != "option_anchor"
+        or len(claims_by_source.get(source_key) or []) != 1
+        or len(claims_by_evidence.get(evidence_id) or []) != 1
+    ):
+        return None
+    try:
+        expected = build_source_consumption_claim(
+            source_key=source_key,
+            case_id=case_id,
+            owner_evidence_id=evidence_id,
+            source_role=role,
+            economic_payload=payload,
+        )
+    except (TypeError, ValueError):
+        return None
+    if any(claim.get(key) != value for key, value in expected.items()):
+        return None
+    return source_key, dict(expected["source_payload"])
+
+
+def _valid_option_anchor_evidence(
+    evidence: dict[str, Any] | None,
+    *,
+    owner_case_id: str,
+    source_key: str,
+) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    source_event_id = str(evidence.get("source_event_id") or "").strip()
+    source_suffix = source_key.split(":", 3)[-1]
+    return bool(
+        str(evidence.get("case_id") or "").strip() == owner_case_id
+        and str(evidence.get("evidence_type") or "").strip().lower()
+        == "option_zero_price_close"
+        and _decimal_equal(_evidence_value(evidence, "price"), 0)
+        and source_event_id in {source_key, source_suffix}
+    )
+
+
+def _pending_lifecycle_owner(
+    *,
+    owner_case: dict[str, Any] | None,
+    owner_evidence: dict[str, Any],
+    payload: dict[str, Any],
+    cases_by_id: dict[str, list[dict[str, Any]]],
+    evidence_by_case: dict[str, list[dict[str, Any]]],
+    claims: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str] | None:
+    if not isinstance(owner_case, dict):
+        return None
+    owner_case_id = str(owner_case.get("case_id") or "").strip()
+    owner_status = str(owner_case.get("status") or "").strip().lower()
+    owner_rows = evidence_by_case.get(owner_case_id) or []
+    if (
+        owner_status in PENDING_LIFECYCLE_STATUSES
+        and str(owner_case.get("schema_version") or "").strip()
+        == "lifecycle_case.v2"
+        and _source_payload_matches_case(payload, owner_case)
+        and not _has_evidence_type(owner_rows, "migration_bridge")
+    ):
+        return dict(owner_case), "direct"
+    if owner_status != "superseded":
+        return None
+    successor_id = str(owner_case.get("superseded_by_case_id") or "").strip()
+    successor_rows = cases_by_id.get(successor_id) or []
+    if len(successor_rows) != 1:
+        return None
+    successor = successor_rows[0]
+    successor_evidence_rows = evidence_by_case.get(successor_id) or []
+    bridges = [
+        item
+        for item in successor_evidence_rows
+        if str(item.get("evidence_type") or "").strip().lower()
+        == "migration_bridge"
+    ]
+    successor_claims = [
+        item
+        for item in claims
+        if str(item.get("case_id") or "").strip() == successor_id
+        and str(item.get("source_role") or "").strip().lower() == "option_anchor"
+    ]
+    if (
+        isinstance(successor, dict)
+        and str(successor.get("schema_version") or "").strip()
+        == "lifecycle_case.v2"
+        and str(successor.get("status") or "").strip().lower()
+        in PENDING_LIFECYCLE_STATUSES
+        and _source_payload_matches_case(payload, successor)
+        and len(bridges) == 1
+        and not successor_claims
+        and not _has_evidence_type(
+            successor_evidence_rows,
+            "option_zero_price_close",
+        )
+        and _bridge_matches(
+            bridges[0],
+            successor=successor,
+            legacy_case=owner_case,
+            legacy_evidence=owner_evidence,
+        )
+    ):
+        return dict(successor), "migration_bridge"
+    return None
+
+
+def _source_payload_matches_case(
+    payload: dict[str, Any],
+    lifecycle_case: dict[str, Any],
+) -> bool:
+    text_fields = (
+        ("account", "lower"),
+        ("futu_account_id", "plain"),
+        ("symbol", "upper"),
+        ("option_type", "lower"),
+        ("position_side", "lower"),
+        ("expiration_ymd", "plain"),
+    )
+    for field, mode in text_fields:
+        left = str(payload.get(field) or "").strip()
+        right = str(lifecycle_case.get(field) or "").strip()
+        if mode == "lower":
+            left, right = left.lower(), right.lower()
+        elif mode == "upper":
+            left, right = left.upper(), right.upper()
+        if left != right:
+            return False
+    return _decimal_equal(payload.get("strike"), lifecycle_case.get("strike")) and _decimal_equal(
+        payload.get("price"),
+        0,
+    )
+
+
+def _bridge_matches(
+    bridge: dict[str, Any],
+    *,
+    successor: dict[str, Any],
+    legacy_case: dict[str, Any],
+    legacy_evidence: dict[str, Any],
+) -> bool:
+    return bool(
+        str(bridge.get("schema_version") or "").strip()
+        == "migration_bridge_evidence.v1"
+        and bridge.get("allocating") is False
+        and str(bridge.get("case_id") or "").strip()
+        == str(successor.get("case_id") or "").strip()
+        and str(bridge.get("account") or "").strip().lower()
+        == str(successor.get("account") or "").strip().lower()
+        and str(bridge.get("symbol") or "").strip().upper()
+        == str(successor.get("symbol") or "").strip().upper()
+        and str(legacy_case.get("superseded_by_case_id") or "").strip()
+        == str(successor.get("case_id") or "").strip()
+        and str(bridge.get("referenced_legacy_case_id") or "").strip()
+        == str(legacy_case.get("case_id") or "").strip()
+        and str(bridge.get("referenced_legacy_evidence_id") or "").strip()
+        == str(legacy_evidence.get("evidence_id") or "").strip()
+    )
+
+
+def _has_evidence_type(rows: list[dict[str, Any]], evidence_type: str) -> bool:
+    wanted = str(evidence_type or "").strip().lower()
+    return any(
+        str(item.get("evidence_type") or "").strip().lower() == wanted
+        for item in rows
+    )
+
+
+def _evidence_value(evidence: dict[str, Any], key: str) -> Any:
+    if evidence.get(key) not in (None, ""):
+        return evidence.get(key)
+    raw = evidence.get("raw") if isinstance(evidence.get("raw"), dict) else {}
+    if raw.get(key) not in (None, ""):
+        return raw.get(key)
+    option_deal = raw.get("option_deal") if isinstance(raw.get("option_deal"), dict) else {}
+    return option_deal.get(key)
+
+
+def _decimal_equal(left: Any, right: Any) -> bool:
+    try:
+        left_value = Decimal(str(left))
+        right_value = Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return bool(
+        left_value.is_finite()
+        and right_value.is_finite()
+        and left_value == right_value
+    )
+
+
+def _deal_ids_from_source_key(source_key: str) -> list[str]:
+    parts = str(source_key or "").strip().split(":", 3)
+    if len(parts) != 4:
+        return []
+    return _normalize_deal_ids([source_key, parts[3]])
 
 
 def _deal_ids_from_lifecycle_evidence(evidence: dict[str, Any]) -> list[str]:
