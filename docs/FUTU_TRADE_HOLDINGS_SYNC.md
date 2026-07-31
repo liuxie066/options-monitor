@@ -206,6 +206,14 @@ observation。
 owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
 和重复消息计数；启动服务与真实发送属于另一次明确授权。
 
+普通平仓的历史通知迁移只接受完整且一致的 canonical broker deal key：
+`futu:<account>:<futu-account-id>:<deal-id>`。旧事件顶层 account 缺失时，
+只有 contract key 和 raw close target 等候选账户唯一且一致才可恢复；账户
+冲突、部分券商标识或未知来源继续进入 `needs_review`。完全没有券商标识的
+`manual_trade_event` / `system_trade_event` 是内部账本历史，不属于 broker
+deal replay；已被有效 void 的 close 也不是迁移目标，两者均不得生成历史通知
+回执。
+
 旧 lifecycle case 只能通过 operator-curated
 `lifecycle_explicit_mapping.v1` 进入自动迁移。每行必须给出：
 
