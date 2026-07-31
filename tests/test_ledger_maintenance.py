@@ -905,7 +905,7 @@ def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tm
             "stock_qty": 200,
             "stock_price": 200,
             "trade_time_ms": parse_exp_to_ms("2026-05-23"),
-            "raw": {"deal_id": "deal-aapl-stock"},
+            "raw": {"broker": "富途", "deal_id": "deal-aapl-stock"},
         }
     )
     as_of_ms = parse_exp_to_ms("2026-05-25")
@@ -926,6 +926,61 @@ def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tm
     assert decisions[0]["skip_reason"] == "lifecycle_stock_settlement_evidence_seen"
     assert [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"] == []
     assert repo.get_record_fields("lot_aapl_call_200_20260522")["status"] == "open"
+
+
+def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_0700_put_440_20260730",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=440,
+        multiplier=100,
+        expiration_ymd="2026-07-30",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_0700_old_450_put_assignment",
+            "case_id": "lc_0700_old_450_put_assignment",
+            "source_type": "futu_trade_push",
+            "source_event_id": "deal-0700-old-450-put-stock",
+            "evidence_type": "stock_settlement_leg",
+            "account": "lx",
+            "symbol": "0700.HK",
+            "side": "buy",
+            "stock_qty": 100,
+            "stock_price": 450,
+            "trade_time_ms": parse_exp_to_ms("2026-06-29"),
+            "raw": {
+                "broker": "富途",
+                "deal_id": "deal-0700-old-450-put-stock",
+            },
+        }
+    )
+    as_of_ms = parse_exp_to_ms("2026-08-01")
+    assert as_of_ms is not None
+    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 500
+
+    decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert errors == []
+    assert [item["record_id"] for item in applied] == ["lot_0700_put_440_20260730"]
+    assert decisions[0]["should_close"] is True
+    assert decisions[0].get("lifecycle_blocker") is None
+    assert repo.get_record_fields("lot_0700_put_440_20260730")["status"] == "close"
 
 
 def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tmp_path: Path) -> None:
