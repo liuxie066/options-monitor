@@ -52,6 +52,7 @@ from src.application.required_data_planning import (
 from src.application.required_data_prefetch_planning import (
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
+    estimate_prefetch_option_chain_calls,
     required_data_plan_id,
 )
 from src.application.yield_enhancement_config import (
@@ -128,6 +129,7 @@ def _build_prefetch_fetch_plan(
     base: Path,
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
+    expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
@@ -137,6 +139,7 @@ def _build_prefetch_fetch_plan(
                 base=base,
                 shared_required=shared_required,
                 opend_fetch_cfg=opend_fetch_cfg,
+                expiration_discovery_cache=expiration_discovery_cache,
             )
             for item in source_cfgs
             if isinstance(item, dict)
@@ -152,6 +155,34 @@ def _build_prefetch_fetch_plan(
                 for side_plan in bundle.side_plans
             ])
             fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+            expiration_discovery = bundles[0].expiration_discovery
+            projected_expirations = sorted(
+                {
+                    str(expiration)
+                    for bundle in bundles
+                    for expiration in (
+                        [
+                            expiration
+                            for side_plan in bundle.side_plans
+                            for expiration in side_plan.explicit_expirations
+                        ]
+                        if bundle.side_plans
+                        else bundle.projected_expirations
+                    )
+                    if str(expiration).strip()
+                }
+            )
+            discovery_outcome = str(
+                getattr(expiration_discovery, "outcome", "") or ""
+            )
+            if discovery_outcome == "success_empty":
+                projection_outcome = "success_empty"
+            elif discovery_outcome in {"provider_error", "parse_error"}:
+                projection_outcome = discovery_outcome
+            elif merged_side_plans and not projected_expirations:
+                projection_outcome = "projection_empty"
+            else:
+                projection_outcome = "success_rows"
             return RequiredDataFetchPlanBundle(
                 symbol=str(symbol_cfg.get("symbol") or bundles[0].symbol),
                 spot_reference=spot_reference,
@@ -177,12 +208,16 @@ def _build_prefetch_fetch_plan(
                     if bundle.expiration_discovery_error
                 )
                 or None,
+                expiration_discovery=expiration_discovery,
+                projection_outcome=projection_outcome,
+                projected_expirations=projected_expirations,
             )
     return _build_single_prefetch_fetch_plan(
         symbol_cfg,
         base=base,
         shared_required=shared_required,
         opend_fetch_cfg=opend_fetch_cfg,
+        expiration_discovery_cache=expiration_discovery_cache,
     )
 
 
@@ -192,6 +227,7 @@ def _build_single_prefetch_fetch_plan(
     base: Path,
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
+    expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -228,6 +264,8 @@ def _build_single_prefetch_fetch_plan(
         symbol_cfg=symbol_cfg,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=_to_int(fetch_cfg.get("port") or 11111, 11111),
+        fetch_source=resolve_symbol_fetch_source(fetch_cfg)[0],
+        expiration_discovery_cache=expiration_discovery_cache,
         snapshot_max_wait_sec=float(snapshot_cfg.get("max_wait_sec") or 30.0),
         snapshot_window_sec=float(snapshot_cfg.get("window_sec") or 30.0),
         snapshot_max_calls=int(snapshot_cfg.get("max_calls") or 60),
@@ -238,7 +276,7 @@ def _build_single_prefetch_fetch_plan(
 
 
 def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | None) -> dict[str, Any]:
-    if fetch_plan is None or not fetch_plan.side_plans:
+    if fetch_plan is None:
         return {
             "option_types": "put,call",
             "min_dte": None,
@@ -270,13 +308,36 @@ def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | N
             "min_strike": side_plan.strike_window.min_strike,
             "max_strike": side_plan.strike_window.max_strike,
         }
+    if not fetch_plan.side_plans:
+        expirations = list(fetch_plan.projected_expirations)
+
+    projection_outcome = str(
+        fetch_plan.projection_outcome or ""
+    ).strip()
+    if projection_outcome == "success_rows" and not expirations:
+        raise RuntimeError(
+            "success-rows scheduled plan lacks exact expiration targets"
+        )
+    if projection_outcome not in {
+        "success_rows",
+        "success_empty",
+        "projection_empty",
+        "provider_error",
+        "parse_error",
+    }:
+        raise RuntimeError(
+            "scheduled plan lacks typed discovery evidence"
+        )
 
     return {
         "option_types": ",".join([side for side in ("put", "call") if side in set(option_types)]) or "put,call",
         "min_dte": min(min_dtes) if min_dtes else None,
         "max_dte": max(max_dtes) if max_dtes else None,
         "side_strike_windows": side_strike_windows or None,
-        "explicit_expirations": expirations or None,
+        "explicit_expirations": (
+            expirations if projection_outcome == "success_rows" else []
+        ),
+        "scheduled_outcome": projection_outcome,
         "spot_override": fetch_plan.spot_reference,
         "include_realized_volatility": any(bool(spec.include_realized_volatility) for spec in fetch_plan.merged_specs),
     }
@@ -286,7 +347,7 @@ def _prefetch_limit_expirations(
     symbol_cfg: dict[str, Any],
     fetch_plan: RequiredDataFetchPlanBundle | None,
 ) -> int:
-    if fetch_plan is not None and fetch_plan.side_plans:
+    if fetch_plan is not None:
         return 0
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list):
@@ -326,11 +387,13 @@ def _global_required_data_plan_summary(
             if str(expiration).strip()
         })
         has_strategy_requirements = bool(fetch_plan.side_plans)
-        option_chain_calls = (
-            max(1, len(expirations))
-            if has_strategy_requirements
-            else _prefetch_limit_expirations(symbol_cfg, fetch_plan)
+        option_chain_calls = estimate_prefetch_option_chain_calls(
+            symbol_cfg,
+            fetch_plan=fetch_plan,
         )
+        projection_outcome = str(
+            fetch_plan.projection_outcome or ""
+        ).strip()
         items.append(
             {
                 "symbol": str(symbol_cfg.get("symbol") or "").strip(),
@@ -360,7 +423,16 @@ def _global_required_data_plan_summary(
                     if fetch_plan.expiration_discovery_complete
                     else "incomplete"
                 ),
+                "discovery_outcome": str(
+                    getattr(
+                        fetch_plan.expiration_discovery,
+                        "outcome",
+                        "",
+                    )
+                    or "missing"
+                ),
                 "discovery_error": fetch_plan.expiration_discovery_error,
+                "projection_outcome": projection_outcome or "missing",
                 "fetch_plan": fetch_plan.to_debug_dict(),
             }
         )
@@ -378,7 +450,128 @@ def _global_required_data_plan_summary(
             item["discovery_status"] == "complete"
             for item in items
         ),
+        "planning_complete": all(
+            item["projection_outcome"]
+            in {"success_rows", "success_empty"}
+            for item in items
+        ),
     }
+
+
+def _publish_planned_success_empty(
+    symbol_cfg: dict[str, Any],
+    *,
+    base: Path,
+    shared_required: Path,
+    opend_fetch_cfg: dict[str, Any],
+    fetch_plan: RequiredDataFetchPlanBundle,
+    producer_run_id: str | None,
+    execution_mode: str,
+) -> dict[str, Any]:
+    symbol = str(symbol_cfg.get("symbol") or "").strip()
+    fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+    source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    discovery = fetch_plan.expiration_discovery
+    if (
+        fetch_plan.projection_outcome != "success_empty"
+        or discovery is None
+        or discovery.outcome != "success_empty"
+        or discovery.reason_code != "no_expirations"
+        or not str(discovery.observed_at_utc or "").strip()
+        or discovery.expirations
+    ):
+        raise RuntimeError(
+            "success-empty scheduled plan lacks valid discovery evidence"
+        )
+    host = str(fetch_cfg.get("host") or "127.0.0.1")
+    port = _to_int(fetch_cfg.get("port") or 11111, 11111)
+    payload0 = {
+        "symbol": symbol,
+        "underlier_code": discovery.request_identity.get("underlier"),
+        "spot": fetch_plan.spot_reference,
+        "expiration_count": 0,
+        "expirations": [],
+        "rows": [],
+        "meta": {
+            "source": "opend",
+            "host": host,
+            "port": port,
+            "status": "ok",
+            "source_outcome": "success_empty",
+            "reason_code": "no_expirations",
+            "error_code": None,
+            "error": None,
+            "expiration_statuses": {},
+            "errors": [],
+            "diagnostics": [
+                {
+                    "diagnostic_code": "NO_EXPIRATIONS",
+                    "message": "no_expirations",
+                }
+            ],
+            "expiration_opend_calls": 0,
+            "expiration_cache_hits": 0,
+            "opend_call_count": 0,
+            "source_observed_at": discovery.observed_at_utc,
+            "completed_at_utc": discovery.completed_at_utc,
+        },
+    }
+    raw_path, csv_path = save_outputs(
+        base,
+        symbol,
+        payload0,
+        output_root=shared_required,
+    )
+    quote_receipt_relpath: str | None = None
+    if str(producer_run_id or "").strip():
+        quote_receipt_path, _quote_receipt = (
+            publish_required_data_quote_snapshot(
+                producer_root=shared_required,
+                producer_run_id=str(producer_run_id),
+                symbol=symbol,
+                raw_path=raw_path,
+                csv_path=csv_path,
+                fetch_plan=fetch_plan.to_debug_dict(),
+                fetch_policy={
+                    "source": source,
+                    "host": host,
+                    "port": port,
+                    "limit_expirations": 0,
+                    "fetch_kwargs": _prefetch_fetch_kwargs_from_plan(
+                        fetch_plan
+                    ),
+                    "opend_fetch": opend_fetch_cfg,
+                    "execution_mode": execution_mode,
+                },
+                source_observed_at=str(discovery.observed_at_utc),
+                completed_at=discovery.completed_at_utc,
+            )
+        )
+        quote_receipt_relpath = (
+            quote_receipt_path.resolve()
+            .relative_to(shared_required.resolve())
+            .as_posix()
+        )
+    payload = normalize_tool_execution_payload(
+        tool_name="required_data_prefetch",
+        symbol=symbol,
+        source=source,
+        limit_exp=0,
+        status="fetched",
+        ok=True,
+        message="success_empty:no_expirations",
+        returncode=0,
+    )
+    payload["payload"] = payload0
+    if quote_receipt_relpath is not None:
+        payload["quote_source_receipt"] = quote_receipt_relpath
+    source_snapshot = adapt_opend_tool_payload(payload)
+    payload["source_snapshot"] = source_snapshot
+    try:
+        state_repo.append_source_snapshot_event(base, source_snapshot)
+    except Exception:
+        pass
+    return payload
 
 
 def _fetch_one_inprocess(
@@ -418,6 +611,23 @@ def _fetch_one_inprocess(
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
     fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
     try:
+        if (
+            fetch_plan is not None
+            and fetch_plan.projection_outcome == "success_empty"
+        ):
+            return _publish_planned_success_empty(
+                symbol_cfg,
+                base=base,
+                shared_required=shared_required,
+                opend_fetch_cfg=opend_fetch_cfg,
+                fetch_plan=fetch_plan,
+                producer_run_id=producer_run_id,
+                execution_mode="inprocess_short_circuit",
+            )
+        if fetch_plan is not None and fetch_plan.projection_outcome != "success_rows":
+            raise RuntimeError(
+                "scheduled fetch plan is not executable"
+            )
         gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
         payload0 = fetch_symbol(
             symbol,
@@ -449,7 +659,19 @@ def _fetch_one_inprocess(
             expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
             include_realized_volatility=bool(fetch_kwargs.get("include_realized_volatility")),
         )
-        source_observed_at = datetime.now(timezone.utc)
+        raw_meta = (
+            payload0.get("meta")
+            if isinstance(payload0.get("meta"), dict)
+            else {}
+        )
+        source_observed_at = (
+            str(raw_meta.get("source_observed_at") or "").strip()
+            or datetime.now(timezone.utc).isoformat()
+        )
+        completed_at = (
+            str(raw_meta.get("completed_at_utc") or "").strip()
+            or None
+        )
         _gateway_pool.mark_success()
         saved_paths = save_outputs(base, symbol, payload0, output_root=shared_required)
         raw_meta = payload0.get('meta')
@@ -507,6 +729,7 @@ def _fetch_one_inprocess(
                     ),
                 },
                 source_observed_at=source_observed_at,
+                completed_at=completed_at,
             )
             quote_receipt_relpath = (
                 quote_receipt_path.resolve()
@@ -668,12 +891,14 @@ def _prefetch_required_data_unlocked(
     option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
+    expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
     fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
         id(symbol_cfg): _build_prefetch_fetch_plan(
             symbol_cfg,
             base=base,
             shared_required=shared_required,
             opend_fetch_cfg=opend_fetch_cfg,
+            expiration_discovery_cache=expiration_discovery_cache,
         )
         for symbol_cfg in fetch_syms
     }
@@ -681,14 +906,15 @@ def _prefetch_required_data_unlocked(
         symbol_cfgs=fetch_syms,
         fetch_plans_by_config_id=fetch_plan_cache,
     )
-    if not bool(global_required_data_plan["discovery_complete"]):
+    if not bool(global_required_data_plan["planning_complete"]):
         failed_symbols = [
             str(item.get("symbol") or "")
             for item in global_required_data_plan["symbols"]
-            if item.get("discovery_status") != "complete"
+            if item.get("projection_outcome")
+            not in {"success_rows", "success_empty"}
         ]
         raise RuntimeError(
-            "global required-data plan incomplete; expiration discovery failed for: "
+            "global required-data plan incomplete; discovery or projection failed for: "
             + ", ".join(failed_symbols)
         )
 
@@ -710,6 +936,8 @@ def _prefetch_required_data_unlocked(
             if cached_df is None:
                 return True
             fetch_plan = _get_fetch_plan(symbol_cfg)
+            if fetch_plan.projection_outcome == "success_empty":
+                return True
             return not required_data_frame_covers_fetch_plan(
                 df=cached_df,
                 fetch_plan=fetch_plan,
@@ -745,6 +973,20 @@ def _prefetch_required_data_unlocked(
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         fetch_plan = _get_fetch_plan(symbol_cfg)
+        if fetch_plan.projection_outcome == "success_empty":
+            return _publish_planned_success_empty(
+                symbol_cfg,
+                base=base,
+                shared_required=shared_required,
+                opend_fetch_cfg=opend_fetch_cfg,
+                fetch_plan=fetch_plan,
+                producer_run_id=producer_run_id,
+                execution_mode="subprocess_short_circuit",
+            )
+        if fetch_plan.projection_outcome != "success_rows":
+            raise RuntimeError(
+                "scheduled fetch plan is not executable"
+            )
         fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
         limit_exp = _prefetch_limit_expirations(symbol_cfg, fetch_plan)
         opt_types = str(fetch_kwargs["option_types"])
@@ -800,9 +1042,23 @@ def _prefetch_required_data_unlocked(
             )
         )
         if bool(payload.get("ok")) and str(producer_run_id or "").strip():
-            source_observed_at = datetime.now(timezone.utc)
             raw_path = shared_required / "raw" / f"{symbol}_required_data.json"
             csv_path = shared_required / "parsed" / f"{symbol}_required_data.csv"
+            raw_payload = json.loads(raw_path.read_text(encoding="utf-8"))
+            raw_meta = (
+                raw_payload.get("meta")
+                if isinstance(raw_payload, dict)
+                and isinstance(raw_payload.get("meta"), dict)
+                else {}
+            )
+            source_observed_at = (
+                str(raw_meta.get("source_observed_at") or "").strip()
+                or datetime.now(timezone.utc).isoformat()
+            )
+            completed_at = (
+                str(raw_meta.get("completed_at_utc") or "").strip()
+                or None
+            )
             apply_multiplier_cache_to_required_data_csv(
                 base=base,
                 required_data_dir=shared_required,
@@ -825,6 +1081,7 @@ def _prefetch_required_data_unlocked(
                     "execution_mode": "subprocess",
                 },
                 source_observed_at=source_observed_at,
+                completed_at=completed_at,
             )
             payload["quote_source_receipt"] = (
                 quote_receipt_path.resolve()

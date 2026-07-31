@@ -242,6 +242,77 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     _assert_no_internal_leak(view)
 
 
+def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view,
+        render_daily_brief_lifecycle,
+    )
+
+    brief = _brief()
+    brief["status"] = "degraded"
+    brief["data_gaps"].append(
+        {
+            "scope": "strategy",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "outcome": "success_empty",
+            "reason": "no_expirations",
+            "severity": "warning",
+            "actionable": False,
+        }
+    )
+
+    view = build_daily_brief_user_view(
+        brief,
+        delivery_kind="full",
+        context=_scheduled_context(),
+    )
+    message = render_daily_brief_lifecycle(
+        {"brief": brief, "diff": {}, "delivery_kind": "full"},
+        context=_scheduled_context(),
+    )
+
+    reminder = (
+        "NVDA Sell Put：本轮未发现可用到期日，"
+        "已按零候选完成（非操作建议）"
+    )
+    assert reminder in view["reminders"]
+    assert reminder.replace("：", "｜") in message
+    assert "数据异常" not in message
+    assert "获取失败" not in message
+    assert "扫描失败" not in message
+
+
+def test_status_projection_mismatch_renders_only_a_local_reminder() -> None:
+    from src.application.daily_decision_brief_renderer import (
+        render_daily_brief_lifecycle,
+    )
+
+    brief = _brief()
+    brief["status"] = "degraded"
+    brief["data_gaps"].append(
+        {
+            "scope": "strategy",
+            "symbol": "NVDA",
+            "strategy_family": "sell_put",
+            "reason": "strategy_status_projection_mismatch",
+            "severity": "warning",
+            "actionable": False,
+        }
+    )
+
+    message = render_daily_brief_lifecycle(
+        {"brief": brief, "diff": {}, "delivery_kind": "full"},
+        context=_scheduled_context(),
+    )
+
+    assert (
+        "NVDA Sell Put｜局部告警证据不一致，"
+        "已忽略该提示（不影响其他可靠结果）"
+    ) in message
+    assert "数据异常" not in message
+
+
 def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 

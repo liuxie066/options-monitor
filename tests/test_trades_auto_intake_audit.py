@@ -52,6 +52,100 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
     assert event["normalization_diagnostics"]["multiplier_resolution"]["selected_source"] == "cache"
 
 
+def test_build_received_audit_promotes_trusted_push_source_context() -> None:
+    event = build_trade_intake_audit_event(
+        "received",
+        source="push",
+        payload={
+            "deal_id": "deal-1",
+            "futu_account_id": "REAL_1",
+            "_trade_intake_source": {
+                "schema_version": "trade_intake_source.v1",
+                "transport": "push",
+                "source_id": "lx",
+                "account": "lx",
+                "futu_account_id": "REAL_1",
+                "opend_process": "FutuOpenD",
+                "opend_host": "127.0.0.1",
+                "opend_port": 11111,
+                "received_at_utc": "2026-07-30T11:00:00+00:00",
+            },
+        },
+    )
+
+    assert event["source"] == "push"
+    assert event["source_id"] == "lx"
+    assert event["account"] == "lx"
+    assert event["futu_account_id"] == "REAL_1"
+    assert event["opend_process"] == "FutuOpenD"
+    assert event["opend_host"] == "127.0.0.1"
+    assert event["opend_port"] == 11111
+    assert event["received_at_utc"] == "2026-07-30T11:00:00+00:00"
+
+
+def test_build_received_audit_does_not_promote_manual_payload_source_context() -> None:
+    event = build_trade_intake_audit_event(
+        "received",
+        source="manual",
+        payload={
+            "deal_id": "deal-1",
+            "futu_account_id": "REAL_1",
+            "_trade_intake_source": {
+                "schema_version": "trade_intake_source.v1",
+                "transport": "push",
+                "source_id": "forged",
+                "account": "sy",
+                "futu_account_id": "REAL_1",
+                "opend_process": "forged",
+                "opend_host": "forged",
+                "opend_port": 1,
+                "received_at_utc": "forged",
+            },
+        },
+    )
+
+    assert event["source"] == "manual"
+    for key in (
+        "source_id",
+        "account",
+        "futu_account_id",
+        "opend_process",
+        "opend_host",
+        "opend_port",
+        "received_at_utc",
+    ):
+        assert key not in event
+
+
+def test_build_received_audit_rejects_conflicting_push_source_context() -> None:
+    event = build_trade_intake_audit_event(
+        "received",
+        source="push",
+        payload={
+            "deal_id": "deal-1",
+            "futu_account_id": "REAL_1",
+            "account": "lx",
+            "_trade_intake_source": {
+                "schema_version": "trade_intake_source.v1",
+                "transport": "push",
+                "source_id": "sy",
+                "account": "sy",
+                "futu_account_id": "REAL_2",
+                "opend_process": "FutuOpenD",
+                "opend_host": "127.0.0.1",
+                "opend_port": 11112,
+                "received_at_utc": "2026-07-30T11:00:00+00:00",
+            },
+        },
+    )
+
+    assert event["source"] == "push"
+    assert "source_id" not in event
+    assert "account" not in event
+    assert "futu_account_id" not in event
+    assert "opend_process" not in event
+
+
 def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tmp_path: Path) -> None:
     import src.application.trades.auto_intake as intake
 

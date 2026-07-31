@@ -25,7 +25,11 @@ from src.application.ledger.api import (
 )
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.normalizer import NormalizedTradeDeal
-from src.application.trades.lifecycle import LifecycleTradeResolution, resolve_lifecycle_trade_deal
+from src.application.trades.lifecycle import (
+    LifecycleTradeResolution,
+    lifecycle_deal_economic_hash,
+    resolve_lifecycle_trade_deal,
+)
 from src.application.trades.state import lookup_deal_state_entry
 from src.application.trades.workflows import (
     BrokerAssignedStockSaleMatchError,
@@ -312,6 +316,28 @@ def resolve_trade_deal(
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
     state_entry = _deal_state_entry(state, deal)
+    economic_hash = lifecycle_deal_economic_hash(deal)
+    if state_entry is not None and economic_hash:
+        existing_economic_hash = str(
+            state_entry[1].get("economic_payload_hash") or ""
+        ).strip()
+        if (
+            existing_economic_hash
+            and existing_economic_hash != economic_hash
+        ):
+            return _failure(
+                status="failed",
+                action="lifecycle",
+                reason="broker_deal_economic_conflict",
+                deal=deal,
+                diagnostics={
+                    "retryable": False,
+                    "existing_economic_payload_hash": (
+                        existing_economic_hash
+                    ),
+                    "incoming_economic_payload_hash": economic_hash,
+                },
+            )
     can_retry_existing_deal = _state_entry_is_retryable_unresolved(state_entry) or (
         retry_failed_deal and _state_entry_is_failed(state_entry)
     )
@@ -334,6 +360,22 @@ def resolve_trade_deal(
             reason=reason,
             deal=deal,
                 diagnostics=diagnostics,
+        )
+    if not broker_deal_key(deal):
+        return _failure(
+            status="unresolved",
+            action=None,
+            reason="identity_needs_review",
+            deal=deal,
+            diagnostics={
+                "retryable": False,
+                "identity_status": "identity_needs_review",
+                "required_fields": [
+                    "deal_id",
+                    "internal_account",
+                    "futu_account_id",
+                ],
+            },
         )
     lifecycle_result = resolve_lifecycle_trade_deal(deal, repo=repo, apply_changes=apply_changes)
     if lifecycle_result is not None and lifecycle_result.handled:

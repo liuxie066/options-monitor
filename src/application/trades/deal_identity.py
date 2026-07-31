@@ -34,7 +34,7 @@ def broker_deal_key_from_payload(
     account = str(resolve_internal_account(futu_account_id, account_mapping) or "").strip()
     if deal_id and account and futu_account_id:
         return f"futu:{account}:{futu_account_id}:{deal_id}"
-    return deal_id
+    return ""
 
 
 def structured_deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:

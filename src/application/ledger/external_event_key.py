@@ -9,4 +9,4 @@ def broker_external_event_key(deal: Any) -> str:
     futu_account_id = str(getattr(deal, "futu_account_id", "") or "").strip()
     if deal_id and account and futu_account_id:
         return f"futu:{account}:{futu_account_id}:{deal_id}"
-    return deal_id
+    return ""

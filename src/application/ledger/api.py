@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from src.application.ledger.commands import (
+    accept_option_close_evidence,
+    advance_lifecycle_case_state,
     BrokerTradeOpenPreviewResult,
     BrokerTradeOperation,
     CloseTargetResolution,
@@ -103,13 +105,40 @@ from src.application.ledger.store_resolution import (
 )
 from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.decision_snapshot import decision_state_snapshot
+from src.application.ledger.lifecycle_migration import (
+    apply_lifecycle_migration_manifest,
+    build_lifecycle_migration_inventory,
+    select_lifecycle_migration_targets,
+)
+from src.application.ledger.lifecycle_overlay import (
+    lifecycle_evidence_facts,
+)
+from src.application.ledger.notification_outbox import (
+    build_notification_intent,
+    canonical_payload_hash,
+)
+from src.application.ledger.repository import (
+    with_sqlite_repo_transaction,
+)
+from src.application.ledger.source_consumption import (
+    canonical_source_economic_payload,
+    canonical_source_payload_hash,
+)
 
 __all__ = [
     "AssignedStockEventLog",
     "assigned_stock_event_log",
+    "accept_option_close_evidence",
+    "advance_lifecycle_case_state",
+    "apply_lifecycle_migration_manifest",
     "CashConversionBackfillResult",
     "backfill_cash_conversions",
     "broker_external_event_key",
+    "build_lifecycle_migration_inventory",
+    "build_notification_intent",
+    "canonical_payload_hash",
+    "canonical_source_economic_payload",
+    "canonical_source_payload_hash",
     "LedgerPreflightError",
     "LedgerStoreResolution",
     "BrokerTradeOpenPreviewResult",
@@ -140,6 +169,7 @@ __all__ = [
     "list_trade_lifecycle_cases",
     "list_trade_lifecycle_evidence",
     "lifecycle_reconciliation_facts",
+    "lifecycle_evidence_facts",
     "ledger_store_payload",
     "ledger_store_write_guard",
     "normalize_position_lot_fields",
@@ -191,6 +221,7 @@ __all__ = [
     "resolve_manual_position_close_lot",
     "resolve_manual_position_close_target",
     "resolve_position_lot_snapshots",
+    "select_lifecycle_migration_targets",
     "summarize_position_lot_shadow_status",
     "summarize_broker_trade_close_candidates",
     "trade_event_economic_allocations",
@@ -198,4 +229,5 @@ __all__ = [
     "trade_event_projection_preview",
     "valid_void_target_event_id",
     "verify_position_lot_projection",
+    "with_sqlite_repo_transaction",
 ]

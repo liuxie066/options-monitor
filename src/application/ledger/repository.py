@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -99,6 +100,109 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _ensure_notification_outbox_v2(conn: sqlite3.Connection) -> None:
+    table = "trade_lifecycle_notification_outbox"
+    existing = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    create_sql = """
+        CREATE TABLE {table_name} (
+          outbox_id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL,
+          transition_type TEXT NOT NULL,
+          resolution_revision INTEGER NOT NULL,
+          delivery_revision INTEGER NOT NULL DEFAULT 0,
+          transition_key TEXT NOT NULL,
+          state_fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          provider_message_id TEXT,
+          claim_id TEXT,
+          claimed_at_ms INTEGER,
+          send_started_at_ms INTEGER,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at_ms INTEGER,
+          last_error TEXT,
+          provider_receipt_json TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          confirmed_at_ms INTEGER,
+          UNIQUE(transition_key, delivery_revision),
+          UNIQUE(case_id, transition_type, resolution_revision, delivery_revision),
+          UNIQUE(case_id, transition_type, state_fingerprint, delivery_revision)
+        )
+    """
+    if existing is None:
+        conn.execute(create_sql.format(table_name=table))
+        return
+
+    columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    required = {
+        "delivery_revision",
+        "transition_key",
+        "state_fingerprint",
+    }
+    unique_indexes: set[tuple[str, ...]] = set()
+    for index in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        if not bool(index["unique"]):
+            continue
+        name = str(index["name"])
+        unique_indexes.add(
+            tuple(
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA index_info({name})").fetchall()
+            )
+        )
+    expected_unique = {
+        ("transition_key", "delivery_revision"),
+        (
+            "case_id",
+            "transition_type",
+            "resolution_revision",
+            "delivery_revision",
+        ),
+        (
+            "case_id",
+            "transition_type",
+            "state_fingerprint",
+            "delivery_revision",
+        ),
+    }
+    if required.issubset(columns) and expected_unique.issubset(unique_indexes):
+        return
+
+    replacement = f"{table}_v2_rebuild"
+    conn.execute(f"DROP TABLE IF EXISTS {replacement}")
+    conn.execute(create_sql.format(table_name=replacement))
+    conn.execute(
+        f"""
+        INSERT INTO {replacement} (
+          outbox_id, case_id, transition_type, resolution_revision,
+          delivery_revision, transition_key, state_fingerprint, status,
+          payload_json, payload_hash, provider_message_id, claim_id,
+          claimed_at_ms, send_started_at_ms, attempt_count,
+          next_attempt_at_ms, last_error, provider_receipt_json,
+          created_at_ms, updated_at_ms, confirmed_at_ms
+        )
+        SELECT
+          outbox_id, case_id, transition_type, resolution_revision,
+          0, 'legacy:' || outbox_id, payload_hash, status,
+          payload_json, payload_hash, provider_message_id, claim_id,
+          claimed_at_ms, send_started_at_ms, attempt_count,
+          next_attempt_at_ms, last_error, provider_receipt_json,
+          created_at_ms, updated_at_ms, confirmed_at_ms
+        FROM {table}
+        """
+    )
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {replacement} RENAME TO {table}")
 
 
 def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
@@ -275,6 +379,29 @@ class SQLiteOptionPositionsRepository:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_source_consumptions (
+                  source_key TEXT PRIMARY KEY,
+                  case_id TEXT NOT NULL,
+                  owner_evidence_id TEXT NOT NULL,
+                  source_role TEXT NOT NULL,
+                  source_payload_hash TEXT NOT NULL,
+                  created_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL,
+                  FOREIGN KEY(case_id, owner_evidence_id)
+                    REFERENCES trade_lifecycle_evidence(case_id, evidence_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_source_owner
+                ON trade_lifecycle_source_consumptions(
+                  case_id, owner_evidence_id, source_role, source_key
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS trade_lifecycle_allocations (
                   allocation_id TEXT PRIMARY KEY,
                   case_id TEXT NOT NULL,
@@ -298,6 +425,49 @@ class SQLiteOptionPositionsRepository:
                 """
                 CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_allocations_case
                 ON trade_lifecycle_allocations(case_id, target_lot_id, allocation_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_timing_policies (
+                  case_id TEXT PRIMARY KEY,
+                  policy_schema TEXT NOT NULL,
+                  market TEXT NOT NULL,
+                  timezone TEXT NOT NULL,
+                  settlement_style TEXT NOT NULL,
+                  underlying_security_type TEXT NOT NULL,
+                  last_trade_cutoff_ms INTEGER NOT NULL,
+                  last_trade_cutoff_source TEXT NOT NULL,
+                  settlement_deadline_ms INTEGER NOT NULL,
+                  trading_days_json TEXT NOT NULL,
+                  calendar_source TEXT NOT NULL,
+                  calendar_observed_at_ms INTEGER NOT NULL,
+                  calendar_hash TEXT NOT NULL,
+                  created_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL,
+                  FOREIGN KEY(case_id) REFERENCES trade_lifecycle_cases(case_id)
+                )
+                """
+            )
+            _ensure_notification_outbox_v2(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_outbox_dispatch
+                ON trade_lifecycle_notification_outbox(
+                  status, next_attempt_at_ms, created_at_ms, outbox_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_migration_receipts (
+                  target_key TEXT PRIMARY KEY,
+                  migration_schema TEXT NOT NULL,
+                  manifest_hash TEXT NOT NULL,
+                  row_hash TEXT NOT NULL,
+                  applied_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL
+                )
                 """
             )
             conn.execute(
@@ -725,25 +895,12 @@ class SQLiteOptionPositionsRepository:
                 (evidence_id,),
             ).fetchone()
             if existing is not None:
-                if not _same_lifecycle_evidence_source(existing["raw_json"], payload):
-                    raise ValueError(f"trade lifecycle evidence conflict for evidence_id={evidence_id}")
                 if str(existing["raw_json"] or "") == raw_json:
                     return False
-                active_conn.execute(
-                    """
-                    UPDATE trade_lifecycle_evidence
-                    SET case_id = ?, account = ?, symbol = ?, raw_json = ?
-                    WHERE evidence_id = ?
-                    """,
-                    (
-                        (str(payload.get("case_id") or "").strip() or None),
-                        (str(payload.get("account") or "").strip().lower() or None),
-                        (str(payload.get("symbol") or "").strip().upper() or None),
-                        raw_json,
-                        evidence_id,
-                    ),
+                raise ValueError(
+                    "trade lifecycle evidence is immutable for "
+                    f"evidence_id={evidence_id}"
                 )
-                return True
             active_conn.execute(
                 """
                 INSERT INTO trade_lifecycle_evidence (
@@ -869,6 +1026,7 @@ class SQLiteOptionPositionsRepository:
         case_id: str,
         status: str,
         derived_summary: dict[str, Any],
+        expected_state_fingerprint: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> bool:
         case_id_value = str(case_id or "").strip()
@@ -885,6 +1043,18 @@ class SQLiteOptionPositionsRepository:
             payload = json.loads(str(row["raw_json"]) or "{}")
             if not isinstance(payload, dict):
                 raise ValueError(f"lifecycle case JSON invalid: {case_id_value}")
+            if expected_state_fingerprint is not None:
+                current_summary = (
+                    dict(payload.get("derived_summary") or {})
+                    if isinstance(payload.get("derived_summary"), dict)
+                    else {}
+                )
+                if str(
+                    current_summary.get("state_fingerprint") or ""
+                ).strip() != str(expected_state_fingerprint or "").strip():
+                    raise ValueError(
+                        "lifecycle case state fingerprint compare-and-set failed"
+                    )
             updated = {
                 **payload,
                 "status": status_value,
@@ -900,6 +1070,128 @@ class SQLiteOptionPositionsRepository:
                 WHERE case_id = ?
                 """,
                 (status_value, int(now_ms()), updated_json, case_id_value),
+            )
+        return True
+
+    def bind_trade_lifecycle_case_futu_account_once(
+        self,
+        *,
+        case_id: str,
+        futu_account_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        case_id_value = str(case_id or "").strip()
+        account_id_value = str(futu_account_id or "").strip()
+        if not case_id_value or not account_id_value:
+            raise ValueError(
+                "lifecycle case and Futu account identity are required"
+            )
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_cases WHERE case_id = ?",
+                (case_id_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"lifecycle case not found: {case_id_value}"
+                )
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"lifecycle case JSON invalid: {case_id_value}"
+                )
+            existing = str(
+                payload.get("futu_account_id") or ""
+            ).strip()
+            if existing:
+                if existing != account_id_value:
+                    raise ValueError(
+                        "lifecycle case Futu account immutable conflict"
+                    )
+                return False
+            payload["futu_account_id"] = account_id_value
+            active_conn.execute(
+                """
+                UPDATE trade_lifecycle_cases
+                SET updated_at_ms = ?, raw_json = ?
+                WHERE case_id = ?
+                """,
+                (
+                    int(now_ms()),
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    case_id_value,
+                ),
+            )
+        return True
+
+    def supersede_trade_lifecycle_case_once(
+        self,
+        *,
+        case_id: str,
+        superseded_by_case_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        case_id_value = str(case_id or "").strip()
+        successor_id = str(superseded_by_case_id or "").strip()
+        if (
+            not case_id_value
+            or not successor_id
+            or case_id_value == successor_id
+        ):
+            raise ValueError(
+                "legacy lifecycle supersession identity is invalid"
+            )
+        with self._optional_conn(conn, commit=True) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_cases WHERE case_id = ?",
+                (case_id_value,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"lifecycle case not found: {case_id_value}"
+                )
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"lifecycle case JSON invalid: {case_id_value}"
+                )
+            existing_successor = str(
+                payload.get("superseded_by_case_id") or ""
+            ).strip()
+            existing_status = str(
+                payload.get("status") or ""
+            ).strip().lower()
+            if existing_successor:
+                if (
+                    existing_successor != successor_id
+                    or existing_status != "superseded"
+                ):
+                    raise ValueError(
+                        "legacy lifecycle supersession conflict"
+                    )
+                return False
+            payload["status"] = "superseded"
+            payload["superseded_by_case_id"] = successor_id
+            active_conn.execute(
+                """
+                UPDATE trade_lifecycle_cases
+                SET status = ?, updated_at_ms = ?, raw_json = ?
+                WHERE case_id = ?
+                """,
+                (
+                    "superseded",
+                    int(now_ms()),
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    case_id_value,
+                ),
             )
         return True
 
@@ -1000,6 +1292,110 @@ class SQLiteOptionPositionsRepository:
             ).fetchone()
         return _json_object(row["raw_json"]) if row is not None else None
 
+    def insert_trade_lifecycle_source_consumption_once(
+        self,
+        claim: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(claim or {})
+        source_key = str(payload.get("source_key") or "").strip()
+        case_id = str(payload.get("case_id") or "").strip()
+        evidence_id = str(payload.get("owner_evidence_id") or "").strip()
+        role = str(payload.get("source_role") or "").strip().lower()
+        payload_hash = str(
+            payload.get("source_payload_hash") or ""
+        ).strip()
+        if (
+            str(payload.get("schema_version") or "").strip()
+            != "trade_lifecycle_source_consumption.v1"
+            or not source_key
+            or not case_id
+            or not evidence_id
+            or role not in {"option_anchor", "stock_settlement"}
+            or not payload_hash
+        ):
+            raise ValueError("lifecycle source consumption claim is incomplete")
+        raw_json = _json_text(payload)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_source_consumptions
+                WHERE source_key = ?
+                """,
+                (source_key,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["raw_json"] or "") != raw_json:
+                    raise ValueError(
+                        "lifecycle_source_event_already_consumed"
+                    )
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_source_consumptions (
+                  source_key, case_id, owner_evidence_id, source_role,
+                  source_payload_hash, created_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_key,
+                    case_id,
+                    evidence_id,
+                    role,
+                    payload_hash,
+                    int(now_ms()),
+                    raw_json,
+                ),
+            )
+        return True
+
+    def get_trade_lifecycle_source_consumption(
+        self,
+        source_key: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_source_consumptions
+                WHERE source_key = ?
+                """,
+                (str(source_key or "").strip(),),
+            ).fetchone()
+        return _json_object(row["raw_json"]) if row is not None else None
+
+    def list_trade_lifecycle_source_consumptions(
+        self,
+        *,
+        case_id: str | None = None,
+        owner_evidence_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(str(case_id).strip())
+        if owner_evidence_id:
+            clauses.append("owner_evidence_id = ?")
+            params.append(str(owner_evidence_id).strip())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json
+                FROM trade_lifecycle_source_consumptions
+                {where}
+                ORDER BY created_at_ms ASC, source_key ASC
+                """,
+                params,
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
     def insert_trade_lifecycle_allocation(
         self,
         allocation: dict[str, Any],
@@ -1071,6 +1467,434 @@ class SQLiteOptionPositionsRepository:
                 params,
             ).fetchall()
         return [_json_object(row["raw_json"]) for row in rows]
+
+    def insert_trade_lifecycle_timing_policy_once(
+        self,
+        policy: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(policy or {})
+        payload.pop("pairing_until_ms", None)
+        case_id = str(payload.get("case_id") or "").strip()
+        if (
+            not case_id
+            or str(payload.get("policy_schema") or "").strip()
+            != "lifecycle_timing_policy.v1"
+        ):
+            raise ValueError(
+                "lifecycle timing policy requires case_id and v1 schema"
+            )
+        raw_json = _json_text(payload)
+        ts = int(now_ms())
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_timing_policies
+                WHERE case_id = ?
+                """,
+                (case_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_payload = _json_object(existing["raw_json"])
+                existing_payload.pop("pairing_until_ms", None)
+                if _json_text(existing_payload) != raw_json:
+                    raise ValueError(
+                        "lifecycle timing policy immutable conflict "
+                        f"for case_id={case_id}"
+                    )
+                return False
+            columns = {
+                str(row["name"])
+                for row in active_conn.execute(
+                    "PRAGMA table_info(trade_lifecycle_timing_policies)"
+                ).fetchall()
+            }
+            names = [
+                "case_id",
+                "policy_schema",
+                "market",
+                "timezone",
+                "settlement_style",
+                "underlying_security_type",
+                "last_trade_cutoff_ms",
+                "last_trade_cutoff_source",
+            ]
+            values: list[Any] = [
+                case_id,
+                str(payload["policy_schema"]),
+                str(payload.get("market") or "").strip().upper(),
+                str(payload.get("timezone") or "").strip(),
+                str(payload.get("settlement_style") or "").strip().lower(),
+                str(
+                    payload.get("underlying_security_type") or ""
+                ).strip().lower(),
+                int(payload.get("last_trade_cutoff_ms") or 0),
+                str(payload.get("last_trade_cutoff_source") or "").strip(),
+            ]
+            if "pairing_until_ms" in columns:
+                # Compatibility with databases initialized by the pre-v2 draft.
+                names.append("pairing_until_ms")
+                values.append(0)
+            names.extend(
+                [
+                    "settlement_deadline_ms",
+                    "trading_days_json",
+                    "calendar_source",
+                    "calendar_observed_at_ms",
+                    "calendar_hash",
+                    "created_at_ms",
+                    "raw_json",
+                ]
+            )
+            values.extend(
+                [
+                    int(payload.get("settlement_deadline_ms") or 0),
+                    _json_text(payload.get("trading_days") or []),
+                    str(payload.get("calendar_source") or "").strip(),
+                    int(payload.get("calendar_observed_at_ms") or 0),
+                    str(payload.get("calendar_hash") or "").strip(),
+                    ts,
+                    raw_json,
+                ]
+            )
+            placeholders = ", ".join("?" for _ in names)
+            active_conn.execute(
+                f"""
+                INSERT INTO trade_lifecycle_timing_policies (
+                  {", ".join(names)}
+                ) VALUES ({placeholders})
+                """,
+                values,
+            )
+        return True
+
+    def get_trade_lifecycle_timing_policy(
+        self,
+        case_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_timing_policies
+                WHERE case_id = ?
+                """,
+                (str(case_id or "").strip(),),
+            ).fetchone()
+        return _json_object(row["raw_json"]) if row is not None else None
+
+    def list_trade_lifecycle_timing_policies(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_timing_policies
+                ORDER BY case_id ASC
+                """
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
+    def insert_trade_lifecycle_notification_once(
+        self,
+        intent: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(intent.get("payload") or {})
+        payload_json = _json_text(payload)
+        payload_hash = hashlib.sha256(
+            payload_json.encode("utf-8")
+        ).hexdigest()
+        supplied_hash = str(intent.get("payload_hash") or "").strip()
+        if supplied_hash and supplied_hash != payload_hash:
+            raise ValueError("notification outbox payload hash mismatch")
+        outbox_id = str(intent.get("outbox_id") or "").strip()
+        case_id = str(intent.get("case_id") or "").strip()
+        transition_type = str(
+            intent.get("transition_type") or ""
+        ).strip().lower()
+        revision = int(intent.get("resolution_revision") or 0)
+        delivery_revision = int(intent.get("delivery_revision") or 0)
+        transition_key = str(intent.get("transition_key") or "").strip()
+        state_fingerprint = str(
+            intent.get("state_fingerprint") or ""
+        ).strip()
+        status = str(intent.get("status") or "pending").strip().lower()
+        if (
+            not outbox_id
+            or not case_id
+            or not transition_type
+            or revision <= 0
+            or delivery_revision < 0
+            or not transition_key
+            or not state_fingerprint
+            or status not in {"pending", "suppressed"}
+        ):
+            raise ValueError("notification outbox intent is incomplete")
+        ts = int(now_ms())
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                """
+                SELECT *
+                FROM trade_lifecycle_notification_outbox
+                WHERE transition_key = ? AND delivery_revision = ?
+                """,
+                (transition_key, delivery_revision),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["outbox_id"] or "") != outbox_id
+                    or str(existing["case_id"] or "") != case_id
+                    or str(existing["transition_type"] or "")
+                    != transition_type
+                    or int(existing["resolution_revision"] or 0)
+                    != revision
+                    or str(existing["state_fingerprint"] or "")
+                    != state_fingerprint
+                    or str(existing["payload_hash"] or "") != payload_hash
+                    or str(existing["payload_json"] or "") != payload_json
+                ):
+                    raise ValueError(
+                        "notification outbox immutable intent conflict"
+                    )
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_notification_outbox (
+                  outbox_id, case_id, transition_type, resolution_revision,
+                  delivery_revision, transition_key, state_fingerprint,
+                  status, payload_json, payload_hash, attempt_count,
+                  next_attempt_at_ms, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    outbox_id,
+                    case_id,
+                    transition_type,
+                    revision,
+                    delivery_revision,
+                    transition_key,
+                    state_fingerprint,
+                    status,
+                    payload_json,
+                    payload_hash,
+                    ts if status == "pending" else None,
+                    ts,
+                    ts,
+                ),
+            )
+        return True
+
+    def insert_trade_lifecycle_migration_receipt_once(
+        self,
+        receipt: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(receipt or {})
+        target_key = str(payload.get("target_key") or "").strip()
+        migration_schema = str(
+            payload.get("migration_schema") or ""
+        ).strip()
+        manifest_hash = str(
+            payload.get("manifest_hash") or ""
+        ).strip()
+        row_hash = str(payload.get("row_hash") or "").strip()
+        if (
+            not target_key
+            or not migration_schema
+            or not manifest_hash
+            or not row_hash
+        ):
+            raise ValueError(
+                "lifecycle migration receipt identity is incomplete"
+            )
+        raw_json = _json_text(payload)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                """
+                SELECT row_hash
+                FROM trade_lifecycle_migration_receipts
+                WHERE target_key = ?
+                """,
+                (target_key,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["row_hash"] or "") != row_hash:
+                    raise ValueError(
+                        "lifecycle migration receipt row conflict"
+                    )
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_migration_receipts (
+                  target_key, migration_schema, manifest_hash,
+                  row_hash, applied_at_ms, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_key,
+                    migration_schema,
+                    manifest_hash,
+                    row_hash,
+                    int(now_ms()),
+                    raw_json,
+                ),
+            )
+        return True
+
+    def list_trade_lifecycle_migration_receipts(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT raw_json
+                FROM trade_lifecycle_migration_receipts
+                ORDER BY target_key ASC
+                """
+            ).fetchall()
+        return [_json_object(row["raw_json"]) for row in rows]
+
+    def get_trade_lifecycle_notification(
+        self,
+        outbox_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT *
+                FROM trade_lifecycle_notification_outbox
+                WHERE outbox_id = ?
+                """,
+                (str(outbox_id or "").strip(),),
+            ).fetchone()
+        return _notification_outbox_row(row) if row is not None else None
+
+    def get_trade_lifecycle_notification_by_transition(
+        self,
+        *,
+        transition_key: str,
+        delivery_revision: int = 0,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        transition_key_value = str(transition_key or "").strip()
+        delivery_revision_value = int(delivery_revision)
+        if not transition_key_value or delivery_revision_value < 0:
+            raise ValueError("notification transition identity is incomplete")
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT *
+                FROM trade_lifecycle_notification_outbox
+                WHERE transition_key = ? AND delivery_revision = ?
+                """,
+                (transition_key_value, delivery_revision_value),
+            ).fetchone()
+        return _notification_outbox_row(row) if row is not None else None
+
+    def list_trade_lifecycle_notifications(
+        self,
+        *,
+        status: str | None = None,
+        case_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status).strip().lower())
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(str(case_id).strip())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT *
+                FROM trade_lifecycle_notification_outbox
+                {where}
+                ORDER BY created_at_ms ASC, outbox_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [_notification_outbox_row(row) for row in rows]
+
+    def compare_and_set_trade_lifecycle_notification(
+        self,
+        *,
+        outbox_id: str,
+        expected_status: str,
+        new_status: str,
+        claim_id: str | None = None,
+        expected_claim_id: str | None = None,
+        fields: dict[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        allowed_fields = {
+            "provider_message_id",
+            "claim_id",
+            "claimed_at_ms",
+            "send_started_at_ms",
+            "attempt_count",
+            "next_attempt_at_ms",
+            "last_error",
+            "provider_receipt_json",
+            "confirmed_at_ms",
+        }
+        updates = dict(fields or {})
+        invalid = sorted(set(updates) - allowed_fields)
+        if invalid:
+            raise ValueError(
+                "unsupported notification outbox fields: "
+                + ",".join(invalid)
+            )
+        if claim_id is not None:
+            updates["claim_id"] = claim_id
+        assignments = ["status = ?", "updated_at_ms = ?"]
+        values: list[Any] = [
+            str(new_status or "").strip().lower(),
+            int(now_ms()),
+        ]
+        for key in sorted(updates):
+            value = updates[key]
+            if key == "provider_receipt_json" and isinstance(value, dict):
+                value = _json_text(value)
+            assignments.append(f"{key} = ?")
+            values.append(value)
+        clauses = ["outbox_id = ?", "status = ?"]
+        values.extend(
+            (
+                str(outbox_id or "").strip(),
+                str(expected_status or "").strip().lower(),
+            )
+        )
+        if expected_claim_id is not None:
+            clauses.append("claim_id = ?")
+            values.append(str(expected_claim_id))
+        with self._optional_conn(conn, commit=True) as active_conn:
+            cursor = active_conn.execute(
+                f"""
+                UPDATE trade_lifecycle_notification_outbox
+                SET {', '.join(assignments)}
+                WHERE {' AND '.join(clauses)}
+                """,
+                values,
+            )
+        return int(cursor.rowcount or 0) == 1
 
     def insert_strategy_group_identity(
         self,
@@ -1237,6 +2061,37 @@ def _json_object(value: Any) -> dict[str, Any]:
     return dict(payload)
 
 
+def _notification_outbox_row(row: sqlite3.Row) -> dict[str, Any]:
+    provider_receipt = (
+        _json_object(row["provider_receipt_json"])
+        if row["provider_receipt_json"]
+        else None
+    )
+    return {
+        "outbox_id": str(row["outbox_id"]),
+        "case_id": str(row["case_id"]),
+        "transition_type": str(row["transition_type"]),
+        "resolution_revision": int(row["resolution_revision"]),
+        "delivery_revision": int(row["delivery_revision"] or 0),
+        "transition_key": str(row["transition_key"]),
+        "state_fingerprint": str(row["state_fingerprint"]),
+        "status": str(row["status"]),
+        "payload": _json_object(row["payload_json"]),
+        "payload_hash": str(row["payload_hash"]),
+        "provider_message_id": row["provider_message_id"],
+        "claim_id": row["claim_id"],
+        "claimed_at_ms": row["claimed_at_ms"],
+        "send_started_at_ms": row["send_started_at_ms"],
+        "attempt_count": int(row["attempt_count"] or 0),
+        "next_attempt_at_ms": row["next_attempt_at_ms"],
+        "last_error": row["last_error"],
+        "provider_receipt": provider_receipt,
+        "created_at_ms": int(row["created_at_ms"]),
+        "updated_at_ms": int(row["updated_at_ms"]),
+        "confirmed_at_ms": row["confirmed_at_ms"],
+    }
+
+
 def _lifecycle_case_immutable_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": payload.get("schema_version"),
@@ -1244,6 +2099,9 @@ def _lifecycle_case_immutable_payload(payload: dict[str, Any]) -> dict[str, Any]
         "case_key": str(payload.get("case_key") or "").strip(),
         "account": str(payload.get("account") or "").strip().lower(),
         "broker": str(payload.get("broker") or "").strip().lower(),
+        "futu_account_id": str(
+            payload.get("futu_account_id") or ""
+        ).strip(),
         "contract_key": payload.get("contract_key"),
         "position_side": str(payload.get("position_side") or "").strip().lower(),
         "expiration_ymd": str(payload.get("expiration_ymd") or "").strip(),

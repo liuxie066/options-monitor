@@ -178,6 +178,9 @@ Actionability has two independent fields:
 `model_trade_actionable`. A `review` row is therefore
 `model_trade_actionable=false`, `human_review_required=true`, and is rendered
 as a P0 human operation in Daily Brief under `v1`, `v2_shadow`, and `v2`.
+Daily Brief renders these rows in a dedicated
+`持仓事实核查（非交易建议）` section with review reasons; they must not be
+projected into Close Advice price, locked-P&L, or remaining-yield columns.
 
 `settlement_pending` and `partially_resolved` lifecycle states cannot produce
 an option action.
