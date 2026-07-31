@@ -6,7 +6,11 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
-from domain.domain.combo_identity import identity_from_intent
+from domain.domain.combo_identity import (
+    build_combo_identity_intent,
+    identity_from_intent,
+    validate_combo_identity,
+)
 from domain.domain.fee_calc import extract_actual_fees
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
@@ -35,7 +39,15 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
-from src.application.ledger.lifecycle_overlay import lifecycle_evidence_facts
+from src.application.ledger.combo_membership import (
+    ComboMembershipResolution,
+    resolve_combo_group_membership,
+)
+from src.application.ledger.lifecycle_overlay import (
+    lifecycle_case_generation_token,
+    lifecycle_evidence_facts,
+    resolve_lifecycle_account_rows,
+)
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
@@ -52,6 +64,9 @@ from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.publisher import (
     ensure_projection_publishable,
     project_stored_trade_events_to_position_lots,
+)
+from src.application.ledger.projection_verify import (
+    compare_projection_lots,
 )
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
@@ -94,6 +109,40 @@ def safe_int_count(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _require_lifecycle_generation(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    case_id: str,
+    expected_generation_token: str | None,
+) -> None:
+    expected = str(expected_generation_token or "").strip()
+    if not expected:
+        return
+    lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
+        case_id,
+        conn=conn,
+    )
+    if lifecycle_case is None:
+        raise ValueError(f"lifecycle case not found: {case_id}")
+    rows = sqlite_repo.read_lifecycle_account_rows(
+        account=str(lifecycle_case.get("account") or ""),
+        conn=conn,
+    )
+    resolution = resolve_lifecycle_account_rows(rows)
+    token = lifecycle_case_generation_token(
+        resolution,
+        case_id=case_id,
+    )
+    observed = str(
+        (token or {}).get("generation_token") or ""
+    ).strip()
+    if observed != expected:
+        raise ValueError(
+            "lifecycle generation compare-and-set failed"
+        )
 
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
@@ -245,7 +294,48 @@ def persist_trade_event_with_combo_identity(
             first_leg=first_leg,
             second_leg=second_leg,
         )
+        if existing_identity is not None:
+            existing_validation = validate_combo_identity(
+                existing_identity
+            )
+            if (
+                existing_validation.status != "valid"
+                or existing_validation.identity_hash
+                != existing_identity.get("identity_hash")
+                or existing_identity != identity
+            ):
+                raise ValueError("strategy group identity conflict")
+        membership = resolve_combo_group_membership(
+            group_id=str(identity["group_id"]),
+            account=str(identity["account"]),
+            expected_symbol=str(identity["symbol"]),
+            trade_events=sqlite_repo.list_trade_events(conn=conn),
+            projected_position_lots=projection.lots,
+        )
+        _assert_combo_membership_exact(
+            membership,
+            expected_record_ids={
+                str(identity["funding_put_record_id"]),
+                str(identity["participation_call_record_id"]),
+            },
+            require_fully_open=True,
+        )
         identity_created = sqlite_repo.insert_strategy_group_identity(identity, conn=conn)
+        readback = sqlite_repo.get_strategy_group_identity(
+            str(identity["group_id"]),
+            conn=conn,
+        )
+        if readback != identity:
+            raise ValueError("strategy group identity readback conflict")
+        membership_readback = resolve_combo_group_membership(
+            group_id=str(identity["group_id"]),
+            account=str(identity["account"]),
+            expected_symbol=str(identity["symbol"]),
+            trade_events=sqlite_repo.list_trade_events(conn=conn),
+            projected_position_lots=projection.lots,
+        )
+        if membership_readback.generation_hash != membership.generation_hash:
+            raise ValueError("combo identity membership generation changed")
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "event_id": storage_event.event_id,
@@ -253,10 +343,327 @@ def persist_trade_event_with_combo_identity(
             "event_created": created,
             "identity_created": identity_created,
             "identity": identity,
+            "membership": membership.fact,
             "position_lot_count": len(projection.lots),
         }
 
     return with_sqlite_repo_transaction(repo, _run)
+
+
+def adopt_existing_combo_identity_atomically(
+    repo: Any,
+    *,
+    group_id: str,
+    funding_put_record_id: str,
+    funding_put_open_event_id: str,
+    participation_call_record_id: str,
+    participation_call_open_event_id: str,
+    expected_contracts: int,
+    apply_changes: bool = False,
+) -> dict[str, Any]:
+    """Insert immutable identity for two exact, already-open Combo legs."""
+
+    group_value = str(group_id or "").strip()
+    expected = _combo_contract_count(expected_contracts)
+    if not group_value:
+        raise ValueError("combo identity adoption requires strategy_group_id")
+    if expected is None:
+        raise ValueError("combo identity adoption requires positive contracts")
+
+    def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError("combo identity adoption requires SQLite transaction authority")
+        events = list(sqlite_repo.list_trade_events(conn=conn))
+        projection = project_stored_trade_events_to_position_lots(events)
+        ensure_projection_publishable(
+            projection,
+            operation="combo identity adoption",
+        )
+        current_lots = list(sqlite_repo.list_position_lots(conn=conn))
+        comparison = compare_projection_lots(
+            projected_lots=list(projection.lots),
+            current_lots=current_lots,
+            diagnostics=list(projection.diagnostics),
+        )
+        projection_errors = {
+            key: int(value)
+            for key, value in dict(comparison.get("summary") or {}).items()
+            if key != "matched" and int(value) > 0
+        }
+        if projection_errors:
+            raise ValueError("combo identity adoption requires a matching trade_events projection")
+        existing = sqlite_repo.get_strategy_group_identity(
+            group_value,
+            conn=conn,
+        )
+        if existing is not None:
+            existing_validation = validate_combo_identity(existing)
+            if (
+                existing_validation.status != "valid"
+                or existing_validation.identity_hash
+                != existing.get("identity_hash")
+            ):
+                raise ValueError("strategy group identity conflict")
+        records_by_id = {str(record.record_id): record for record in projection.lots}
+        events_by_id = {
+            str(item.get("event_id") or ""): dict(item)
+            for item in events
+            if isinstance(item, dict) and str(item.get("event_id") or "").strip()
+        }
+        funding_put = _existing_combo_adoption_leg(
+            records_by_id=records_by_id,
+            events_by_id=events_by_id,
+            record_id=funding_put_record_id,
+            open_event_id=funding_put_open_event_id,
+            group_id=group_value,
+            expected_contracts=expected,
+            expected_option_type="put",
+            expected_position_side="short",
+            accepted_roles={"funding_put", "sell_put"},
+            require_fully_open=existing is None,
+        )
+        participation_call = _existing_combo_adoption_leg(
+            records_by_id=records_by_id,
+            events_by_id=events_by_id,
+            record_id=participation_call_record_id,
+            open_event_id=participation_call_open_event_id,
+            group_id=group_value,
+            expected_contracts=expected,
+            expected_option_type="call",
+            expected_position_side="long",
+            accepted_roles={
+                "participation_call",
+                "enhancement_call",
+            },
+            require_fully_open=existing is None,
+        )
+        if (
+            funding_put["broker"] != participation_call["broker"]
+            or funding_put["account"] != participation_call["account"]
+            or funding_put["symbol"] != participation_call["symbol"]
+            or funding_put["currency"] != participation_call["currency"]
+            or funding_put["multiplier"] != participation_call["multiplier"]
+        ):
+            raise ValueError("combo identity adoption leg economics mismatch")
+        if (
+            funding_put["strike"] >= participation_call["strike"]
+            or funding_put["expiration_ymd"] > participation_call["expiration_ymd"]
+        ):
+            raise ValueError("combo identity adoption leg structure mismatch")
+        intent = build_combo_identity_intent(
+            first_leg=funding_put,
+            second_leg=participation_call,
+        )
+        identity = identity_from_intent(
+            intent,
+            first_leg=funding_put,
+            second_leg=participation_call,
+        )
+        if existing is not None and existing != identity:
+            raise ValueError("strategy group identity conflict")
+        membership = resolve_combo_group_membership(
+            group_id=group_value,
+            account=str(identity["account"]),
+            expected_symbol=str(identity["symbol"]),
+            trade_events=events,
+            projected_position_lots=projection.lots,
+        )
+        _assert_combo_membership_exact(
+            membership,
+            expected_record_ids={
+                str(identity["funding_put_record_id"]),
+                str(identity["participation_call_record_id"]),
+            },
+            require_fully_open=existing is None,
+        )
+        identity_created = False
+        if apply_changes and existing is None:
+            identity_created = sqlite_repo.insert_strategy_group_identity(
+                identity,
+                conn=conn,
+            )
+            readback = sqlite_repo.get_strategy_group_identity(
+                group_value,
+                conn=conn,
+            )
+            if readback != identity:
+                raise ValueError("strategy group identity readback conflict")
+            membership_readback = resolve_combo_group_membership(
+                group_id=group_value,
+                account=str(identity["account"]),
+                expected_symbol=str(identity["symbol"]),
+                trade_events=sqlite_repo.list_trade_events(conn=conn),
+                projected_position_lots=projection.lots,
+            )
+            if membership_readback.generation_hash != membership.generation_hash:
+                raise ValueError(
+                    "combo identity membership generation changed"
+                )
+            sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        return {
+            "schema_version": ("existing_combo_identity_adoption.v1"),
+            "status": ("existing" if existing is not None else ("adopted" if apply_changes else "dry_run")),
+            "apply_changes": bool(apply_changes),
+            "identity_created": identity_created,
+            "strategy_group_id": group_value,
+            "intent": intent,
+            "identity": identity,
+            "funding_put": funding_put,
+            "participation_call": participation_call,
+            "membership": membership.fact,
+            "projection_summary": comparison["summary"],
+        }
+
+    return with_sqlite_repo_transaction(repo, _run)
+
+
+def _existing_combo_adoption_leg(
+    *,
+    records_by_id: dict[str, Any],
+    events_by_id: dict[str, dict[str, Any]],
+    record_id: str,
+    open_event_id: str,
+    group_id: str,
+    expected_contracts: int,
+    expected_option_type: str,
+    expected_position_side: str,
+    accepted_roles: set[str],
+    require_fully_open: bool,
+) -> dict[str, Any]:
+    record_value = str(record_id or "").strip()
+    event_value = str(open_event_id or "").strip()
+    record = records_by_id.get(record_value)
+    event = events_by_id.get(event_value)
+    if record is None or event is None:
+        raise ValueError("combo identity adoption requires exact record and open event ids")
+    fields = dict(record.fields)
+    event_contract = dict(event.get("contract_key") or {}) if isinstance(event.get("contract_key"), dict) else {}
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    position_side = str(fields.get("side") or "").strip().lower()
+    role = str(fields.get("leg_role") or "").strip().lower()
+    original_contracts = _combo_contract_count(fields.get("contracts"))
+    open_contracts = _combo_nonnegative_contract_count(
+        fields.get("contracts_open")
+    )
+    if (
+        str(fields.get("source_event_id") or "").strip() != event_value
+        or str(event.get("event_type") or "").strip().lower() != "open"
+        or _combo_contract_count(event.get("contracts")) != expected_contracts
+        or original_contracts != expected_contracts
+        or open_contracts is None
+        or open_contracts > expected_contracts
+        or (require_fully_open and open_contracts != expected_contracts)
+        or option_type != expected_option_type
+        or position_side != expected_position_side
+        or role not in accepted_roles
+        or str(fields.get("strategy") or "").strip().lower() != "combo_yield"
+        or str(fields.get("strategy_group_id") or "").strip() != group_id
+    ):
+        raise ValueError("combo identity adoption leg metadata mismatch")
+    contract_key = ContractKey.from_values(
+        broker=fields.get("broker"),
+        account=fields.get("account"),
+        underlying_symbol=fields.get("symbol"),
+        option_type=option_type,
+        position_side=position_side,
+        strike=fields.get("strike"),
+        expiration_ymd=fields.get("expiration_ymd"),
+    )
+    event_key = ContractKey.from_values(
+        broker=event_contract.get("broker"),
+        account=event_contract.get("account"),
+        underlying_symbol=event_contract.get("underlying_symbol"),
+        option_type=event_contract.get("option_type"),
+        position_side=event_contract.get("position_side"),
+        strike=event_contract.get("strike"),
+        expiration_ymd=event_contract.get("expiration_ymd"),
+    )
+    if contract_key != event_key:
+        raise ValueError("combo identity adoption contract key mismatch")
+    multiplier = effective_multiplier(fields)
+    currency = normalize_currency(fields.get("currency"))
+    if multiplier is None or not currency:
+        raise ValueError("combo identity adoption leg economics incomplete")
+    return {
+        "strategy_group_id": group_id,
+        "strategy": "combo_yield",
+        "broker": contract_key.broker,
+        "account": contract_key.account,
+        "symbol": contract_key.underlying_symbol,
+        "leg_role": role,
+        "contracts": expected_contracts,
+        "open_event_id": event_value,
+        "record_id": record_value,
+        "contract_key": contract_key.to_dict(),
+        "currency": currency,
+        "multiplier": float(multiplier),
+        "strike": float(contract_key.strike),
+        "expiration_ymd": contract_key.expiration_ymd,
+    }
+
+
+def _combo_contract_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = Decimal(str(value))
+        parsed = int(numeric)
+    except (
+        InvalidOperation,
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        return None
+    if not numeric.is_finite() or parsed <= 0 or numeric != parsed:
+        return None
+    return parsed
+
+
+def _combo_nonnegative_contract_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = Decimal(str(value))
+        parsed = int(numeric)
+    except (
+        InvalidOperation,
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        return None
+    if not numeric.is_finite() or parsed < 0 or numeric != parsed:
+        return None
+    return parsed
+
+
+def _assert_combo_membership_exact(
+    membership: ComboMembershipResolution,
+    *,
+    expected_record_ids: set[str],
+    require_fully_open: bool,
+) -> None:
+    expected = tuple(sorted(expected_record_ids))
+    if (
+        membership.fact.get("status") != "exact"
+        or membership.global_current_record_ids != expected
+        or membership.global_historical_record_ids != expected
+        or membership.retag_events
+        or (
+            require_fully_open
+            and membership.global_live_record_ids != expected
+        )
+        or any(
+            record_id not in expected_record_ids
+            for record_id in membership.global_live_record_ids
+        )
+    ):
+        reasons = ",".join(membership.fact.get("reason_codes") or ())
+        raise ValueError(
+            "combo identity membership conflict"
+            + (f": {reasons}" if reasons else "")
+        )
 
 
 def _combo_leg_from_projected_record(
@@ -578,6 +985,7 @@ def apply_lifecycle_allocation_atomically(
     derived_status: str,
     derived_summary: dict[str, Any],
     expected_resolution_revision: int | None = None,
+    expected_lifecycle_generation_token: str | None = None,
     correction_void_events: Sequence[Any] = (),
     notification_transition_type: str | None = None,
 ) -> dict[str, Any]:
@@ -599,6 +1007,14 @@ def apply_lifecycle_allocation_atomically(
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
             raise ValueError(f"lifecycle case not found: {case_id_value}")
+        _require_lifecycle_generation(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
         _validate_broker_settlement_pair_for_write(
             sqlite_repo,
             conn=conn,
@@ -1699,6 +2115,7 @@ def record_lifecycle_evidence_issue_atomically(
     evidence: dict[str, Any],
     status: str,
     reason_codes: Sequence[str],
+    expected_lifecycle_generation_token: str | None = None,
 ) -> dict[str, Any]:
     """Persist a uniquely matched evidence issue without creating terminal facts."""
 
@@ -1724,6 +2141,14 @@ def record_lifecycle_evidence_issue_atomically(
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
             raise ValueError(f"lifecycle case not found: {case_id_value}")
+        _require_lifecycle_generation(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
         evidence_id = str(evidence_payload.get("evidence_id") or "").strip()
         if not evidence_id:
             raise ValueError("lifecycle evidence_id is required")
@@ -2005,6 +2430,7 @@ def advance_lifecycle_case_state_atomically(
     status: str,
     derived_summary: dict[str, Any],
     public_transition: str | None,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> dict[str, Any]:
     """Advance a derived lifecycle state and optional fixed Outbox slot."""
 
@@ -2035,6 +2461,14 @@ def advance_lifecycle_case_state_atomically(
             raise ValueError(
                 f"lifecycle case not found: {case_id_value}"
             )
+        _require_lifecycle_generation(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
         prior_summary = (
             dict(lifecycle_case.get("derived_summary") or {})
             if isinstance(lifecycle_case.get("derived_summary"), dict)

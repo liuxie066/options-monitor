@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from src.application.ledger.api import (
     assigned_stock_event_log,
+    lifecycle_account_coherent_facts,
     open_trade_reconciliation_evidence_repo,
 )
 from src.application.trades.deal_identity import (
@@ -23,6 +24,12 @@ TERMINAL_EVIDENCE_REASONS = {
     "ledger_event_already_recorded",
     "assigned_stock_sale_event_recorded",
     "lifecycle_case_already_recorded",
+}
+PENDING_LIFECYCLE_STATUSES = {
+    "pending",
+    "waiting_settlement_evidence",
+    "needs_review",
+    "partially_resolved",
 }
 
 
@@ -40,6 +47,8 @@ def preview_trade_intake_reconciliation_from_sqlite(
             "reason": "ledger_sqlite_not_found",
             "terminal_evidence_found": False,
             "terminal_evidence_count": 0,
+            "delegated_lifecycle_pending_count": 0,
+            "delegated_lifecycle_pending_deal_ids": [],
             "stale_state_count": 0,
         }
     result = reconcile_trade_intake_state(
@@ -59,17 +68,32 @@ def preview_trade_intake_reconciliation_from_sqlite(
         for item in actions
         if str(item.get("reason") or "") == "not_option_deal"
     )
+    delegated_deal_ids = sorted(
+        {
+            str(item.get("deal_id") or "").strip()
+            for item in actions
+            if str(item.get("reason") or "") == "lifecycle_pending_delegated"
+            and str(item.get("deal_id") or "").strip()
+        }
+    )
     pending_before = result.get("pending_before") if isinstance(result.get("pending_before"), dict) else {}
     pending_after = result.get("pending_after") if isinstance(result.get("pending_after"), dict) else {}
+    pending_after_count = _pending_bucket_count(pending_after)
     return {
         "available": True,
         "reason": None,
         "terminal_evidence_found": terminal_count > 0,
         "terminal_evidence_count": terminal_count,
         "ignored_non_option_count": ignored_count,
+        "delegated_lifecycle_pending_count": len(delegated_deal_ids),
+        "delegated_lifecycle_pending_deal_ids": delegated_deal_ids,
         "stale_state_count": int(result.get("planned_count") or 0),
         "pending_before_count": _pending_bucket_count(pending_before),
-        "pending_after_reconcile_count": _pending_bucket_count(pending_after),
+        "pending_after_reconcile_count": pending_after_count,
+        "actionable_pending_after_reconcile_count": max(
+            0,
+            pending_after_count - len(delegated_deal_ids),
+        ),
     }
 
 
@@ -98,6 +122,7 @@ def reconcile_trade_intake_state(
     ledger_by_deal = _ledger_events_by_deal(repo)
     assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
     lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
+    delegated_lifecycle_by_deal = _delegated_lifecycle_cases_by_deal(repo)
     candidates = _pending_deal_ids(state, requested=requested)
 
     actions: list[dict[str, Any]] = []
@@ -186,6 +211,27 @@ def reconcile_trade_intake_state(
                 }
             )
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
+            continue
+
+        delegated_entries = _filter_evidence_for_state_item(
+            delegated_lifecycle_by_deal.get(deal_id) or [],
+            state_item=item,
+        )
+        if len(delegated_entries) == 1:
+            delegated = delegated_entries[0]
+            case = delegated.get("case") if isinstance(delegated.get("case"), dict) else {}
+            actions.append(
+                {
+                    "deal_id": deal_id,
+                    "from_bucket": bucket,
+                    "action": "keep_pending",
+                    "reason": "lifecycle_pending_delegated",
+                    "lifecycle_case_id": case.get("case_id"),
+                    "lifecycle_status": case.get("status"),
+                    "lifecycle_anchor_kind": delegated.get("anchor_kind"),
+                    "write_state": False,
+                }
+            )
             continue
 
         if _is_ignored_non_option(item, audit_by_deal.get(deal_id) or []):
@@ -395,6 +441,90 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
             for deal_id in deal_ids:
                 out.setdefault(deal_id, []).append(entry)
     return out
+
+
+def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    """Return pending lifecycle owners accepted by the canonical overlay."""
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    if not callable(list_cases):
+        return {}
+    cases = _dict_rows(list_cases())
+    accounts = sorted(
+        {
+            str(item.get("account") or "").strip().lower()
+            for item in cases
+            if str(item.get("account") or "").strip()
+            and str(item.get("status") or "").strip().lower()
+            in PENDING_LIFECYCLE_STATUSES
+        }
+    )
+    if not accounts:
+        return {}
+    candidate = getattr(repo, "primary_repo", repo)
+    if not callable(getattr(candidate, "read_lifecycle_account_rows", None)):
+        # A repository without the coherent reader cannot prove delegation. Keep
+        # pending rows actionable while preserving terminal-evidence repair.
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for account in accounts:
+        facts = lifecycle_account_coherent_facts(repo, account=account)
+        cases_by_id = {
+            str(item.get("case_id") or "").strip(): dict(item)
+            for item in facts.get("account_lifecycle_cases") or []
+            if isinstance(item, dict)
+            and str(item.get("case_id") or "").strip()
+        }
+        evidence_by_id = {
+            str(item.get("evidence_id") or "").strip(): dict(item)
+            for item in facts.get("account_lifecycle_evidence") or []
+            if isinstance(item, dict)
+            and str(item.get("evidence_id") or "").strip()
+        }
+        resolution = facts.get("account_lifecycle_resolution")
+        if not isinstance(resolution, dict):
+            raise TypeError("canonical lifecycle resolution is unavailable")
+        for case_resolution in resolution.get("case_resolutions") or []:
+            if not isinstance(case_resolution, dict):
+                continue
+            case_id = str(case_resolution.get("case_id") or "").strip()
+            lifecycle_case = cases_by_id.get(case_id)
+            if (
+                not isinstance(lifecycle_case, dict)
+                or str(lifecycle_case.get("status") or "").strip().lower()
+                not in PENDING_LIFECYCLE_STATUSES
+                or str(case_resolution.get("status") or "").strip().lower()
+                not in {"direct", "bridged"}
+            ):
+                continue
+            for anchor in case_resolution.get("anchor_facts") or []:
+                if not isinstance(anchor, dict):
+                    continue
+                source_key = str(anchor.get("source_key") or "").strip()
+                owner_evidence_id = str(
+                    anchor.get("source_owner_evidence_id") or ""
+                ).strip()
+                if not source_key:
+                    continue
+                entry = {
+                    "case": dict(lifecycle_case),
+                    "evidence": dict(evidence_by_id.get(owner_evidence_id) or {}),
+                    "source_key": source_key,
+                    "anchor_kind": anchor.get("anchor_kind"),
+                }
+                for deal_id in _deal_ids_from_source_key(source_key):
+                    out.setdefault(deal_id, []).append(entry)
+    return out
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in value or [] if isinstance(item, dict)]
+
+
+def _deal_ids_from_source_key(source_key: str) -> list[str]:
+    parts = str(source_key or "").strip().split(":", 3)
+    if len(parts) != 4:
+        return []
+    return _normalize_deal_ids([source_key, parts[3]])
 
 
 def _deal_ids_from_lifecycle_evidence(evidence: dict[str, Any]) -> list[str]:

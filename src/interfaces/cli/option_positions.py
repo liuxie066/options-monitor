@@ -17,6 +17,8 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.ledger.api import (
+    adopt_post_trade_combo_pair,
+    adopt_existing_combo_identity,
     format_position_cash_secured,
     format_position_money,
     inspect_ledger_stores,
@@ -24,13 +26,18 @@ from src.application.ledger.api import (
     list_trade_lifecycle_cases,
     list_trade_lifecycle_evidence,
     list_position_rows,
+    list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
     record_trade_event_void,
+    reconcile_combo_pair_inferences,
+    reject_post_trade_combo_pair,
     refresh_position_lot_projection,
     resolve_position_data_config_path,
     preview_trade_event_void,
     verify_position_lot_projection,
+    supersede_post_trade_combo_pair,
 )
+from src.application.daily_decision_brief_repository import read_combo_candidate_exposures
 from src.application.ledger.api import (
     apply_lifecycle_migration_manifest,
     build_lifecycle_migration_inventory,
@@ -56,6 +63,7 @@ from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
 from src.application.trades.account_mapping import (
+    combo_reconciliation_mode_for_account,
     resolve_trade_intake_config,
 )
 from src.application.trades.lifecycle_runtime import (
@@ -187,6 +195,73 @@ def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
     """Compatibility wrapper kept for tests and older call sites."""
 
     return open_position_ledger_from_runtime_config(**kwargs)
+
+
+def _combo_reconcile_exposures(
+    *,
+    base: Path,
+    repo: Any,
+    account: str,
+    runtime_environment: str,
+) -> list[dict[str, Any]]:
+    provisional = reconcile_combo_pair_inferences(
+        repo=repo,
+        account=account,
+        runtime_environment=runtime_environment,
+        persist=False,
+    )
+    scopes = {
+        (str(item.get("market") or "").strip().upper(), str(item.get("market_date") or "").strip())
+        for item in [
+            *(provisional.get("inferences") or []),
+            *(provisional.get("waiting_for_counterpart") or []),
+        ]
+        if str(item.get("market") or "").strip()
+        and str(item.get("market_date") or "").strip()
+    }
+    exposures: dict[str, dict[str, Any]] = {}
+    for market, market_date in sorted(scopes):
+        result = read_combo_candidate_exposures(
+            base=base,
+            account=account,
+            market=market,
+            market_trading_date=market_date,
+        )
+        for item in result.get("exposures") or []:
+            exposure_id = str(item.get("candidate_exposure_id") or "").strip()
+            if exposure_id:
+                exposures[exposure_id] = dict(item)
+    return [exposures[key] for key in sorted(exposures)]
+
+
+def _require_combo_confirmation_mode(
+    *,
+    base: Path,
+    args: argparse.Namespace,
+    inference: dict[str, Any],
+) -> dict[str, str]:
+    market = str(inference.get("market") or "").strip().lower()
+    explicit = str(getattr(args, "config", "") or "").strip()
+    if explicit:
+        config_path = _resolve_path_under(explicit, base=base)
+    elif market in {"us", "hk"}:
+        config_path = (base / f"config.{market}.json").resolve()
+    else:
+        raise SystemExit(
+            "confirm-combo apply cannot infer config from the inference market; pass --config"
+        )
+    if not config_path.exists():
+        raise SystemExit(
+            f"confirm-combo apply requires a runtime config with account mode=confirm: {config_path}"
+        )
+    config = _load_json_object(config_path)
+    account = normalize_account(inference.get("account"))
+    mode = combo_reconciliation_mode_for_account(config, account=account)
+    if mode != "confirm":
+        raise SystemExit(
+            f"confirm-combo apply is disabled for account {account}: effective mode={mode}"
+        )
+    return {"account": account, "mode": mode, "config_path": str(config_path)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -578,6 +653,108 @@ def main(argv: list[str] | None = None) -> int:
     p_pair_combo.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_pair_combo, high_risk=True)
 
+    p_adopt_combo_identity = sub.add_parser(
+        "adopt-combo-identity",
+        help=("insert immutable identity for two exact existing Combo Yield legs"),
+    )
+    _add_runtime_root_arg(p_adopt_combo_identity)
+    p_adopt_combo_identity.add_argument(
+        "--strategy-group-id",
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--funding-put-record-id",
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--funding-put-open-event-id",
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--participation-call-record-id",
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--participation-call-open-event-id",
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--expected-contracts",
+        type=int,
+        required=True,
+    )
+    p_adopt_combo_identity.add_argument(
+        "--format",
+        default="text",
+        choices=["text", "json"],
+    )
+    _add_local_write_flags(
+        p_adopt_combo_identity,
+        high_risk=True,
+    )
+
+    p_combo_reconcile = sub.add_parser(
+        "combo-reconcile",
+        help="derive post-trade Combo proposals without changing canonical memberships",
+    )
+    _add_runtime_root_arg(p_combo_reconcile)
+    p_combo_reconcile.add_argument("--account", required=True)
+    p_combo_reconcile.add_argument("--runtime-environment", default="runtime")
+    p_combo_reconcile.add_argument("--dry-run", action="store_true", default=True)
+    p_combo_reconcile.add_argument("--format", default="json", choices=["text", "json"])
+
+    p_combo_inferences = sub.add_parser(
+        "combo-inferences",
+        help="list post-trade Combo inference state",
+    )
+    _add_runtime_root_arg(p_combo_inferences)
+    p_combo_inferences.add_argument("--account", required=True)
+    p_combo_inferences.add_argument(
+        "--status",
+        default=None,
+        choices=[
+            "proposal_ready",
+            "ambiguous",
+            "user_confirmed",
+            "user_rejected",
+            "expired_unresolved",
+            "superseded",
+        ],
+    )
+    p_combo_inferences.add_argument("--format", default="json", choices=["text", "json"])
+
+    for command, help_text in (
+        ("confirm-combo", "confirm and atomically adopt one exact Combo inference"),
+        ("supersede-combo", "atomically void both adoptions for a confirmed Combo inference"),
+    ):
+        parser = sub.add_parser(command, help=help_text)
+        _add_runtime_root_arg(parser)
+        parser.add_argument("--inference-id", required=True)
+        parser.add_argument("--expected-input-hash", required=True)
+        parser.add_argument("--actor", required=True)
+        if command == "confirm-combo":
+            parser.add_argument(
+                "--config",
+                default=None,
+                help="runtime config used to verify this account has combo reconciliation mode=confirm",
+            )
+        if command == "supersede-combo":
+            parser.add_argument("--reason", required=True)
+        parser.add_argument("--format", default="json", choices=["text", "json"])
+        _add_local_write_flags(parser, high_risk=True)
+
+    p_reject_combo = sub.add_parser(
+        "reject-combo",
+        help="reject one exact pending Combo inference without changing ledger facts",
+    )
+    _add_runtime_root_arg(p_reject_combo)
+    p_reject_combo.add_argument("--inference-id", required=True)
+    p_reject_combo.add_argument("--expected-input-hash", required=True)
+    p_reject_combo.add_argument("--reason", required=True)
+    p_reject_combo.add_argument("--actor", required=True)
+    p_reject_combo.add_argument("--format", default="json", choices=["text", "json"])
+    _add_local_write_flags(p_reject_combo, high_risk=True)
+
     p_auto_close = sub.add_parser('auto-close-expired', help='auto-close expired option position lots')
     p_auto_close.add_argument("--config", dest="auto_close_config", default=None, help="runtime config path; provides accounts and portfolio.data_config")
     p_auto_close.add_argument("--data-config", dest="auto_close_data_config", default=None, help="portfolio data config path; overrides runtime config when provided")
@@ -707,6 +884,10 @@ def main(argv: list[str] | None = None) -> int:
         "void-event",
         "adjust-lot",
         "pair-combo-yield",
+        "adopt-combo-identity",
+        "confirm-combo",
+        "reject-combo",
+        "supersede-combo",
     }:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"option-positions {args.cmd}", high_risk=True)
     elif args.cmd == "rebuild":
@@ -1811,6 +1992,174 @@ def main(argv: list[str] | None = None) -> int:
                 "adjust_events="
                 f"{out['put']['result'].get('event_id')},{out['call']['result'].get('event_id')}"
             )
+        return 0
+
+    if args.cmd == "adopt-combo-identity":
+        control = write_controls["adopt-combo-identity"]
+        dry_run = not bool(control["write_requested"])
+        try:
+            out = adopt_existing_combo_identity(
+                repo,
+                strategy_group_id=args.strategy_group_id,
+                funding_put_record_id=(args.funding_put_record_id),
+                funding_put_open_event_id=(args.funding_put_open_event_id),
+                participation_call_record_id=(args.participation_call_record_id),
+                participation_call_open_event_id=(args.participation_call_open_event_id),
+                expected_contracts=args.expected_contracts,
+                apply_changes=not dry_run,
+            )
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        payload = attach_write_contract(
+            {**out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=bool(out.get("identity_created")),
+            rollback_hint=(
+                "strategy group identity is insert-only; restore the pre-write SQLite backup if adoption was erroneous"
+            ),
+        )
+        if _json_or_text_format(args) == "json":
+            print(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+            )
+            return 0
+        prefix = "[NOOP]" if out.get("status") == "existing" else ("[DRY_RUN]" if dry_run else "[DONE]")
+        print(
+            f"{prefix} Combo identity "
+            f"group={out['strategy_group_id']} "
+            f"put={out['funding_put']['record_id']} "
+            f"call={out['participation_call']['record_id']} "
+            f"hash={out['identity']['identity_hash']}"
+        )
+        return 0
+
+    if args.cmd == "combo-reconcile":
+        account = normalize_account(args.account)
+        runtime_environment = str(args.runtime_environment or "").strip().lower()
+        evidence_base = Path(getattr(args, "runtime_root", None) or base).resolve()
+        exposures = _combo_reconcile_exposures(
+            base=evidence_base,
+            repo=repo,
+            account=account,
+            runtime_environment=runtime_environment,
+        )
+        out = reconcile_combo_pair_inferences(
+            repo=repo,
+            account=account,
+            runtime_environment=runtime_environment,
+            exposures=exposures,
+            persist=False,
+        )
+        print(
+            json.dumps(
+                {**out, "ledger_store": ledger_store},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+
+    if args.cmd == "combo-inferences":
+        rows = list_combo_pair_inferences(
+            repo=repo,
+            account=normalize_account(args.account),
+            status=args.status,
+        )
+        payload = {
+            "ok": True,
+            "count": len(rows),
+            "inferences": rows,
+            "ledger_store": ledger_store,
+        }
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        else:
+            for item in rows:
+                print(
+                    f"{item.get('status')} {item.get('inference_id')} "
+                    f"{item.get('put_record_id')} + {item.get('call_record_id')} "
+                    f"evidence={item.get('evidence_grade')} "
+                    f"hash={item.get('input_snapshot_hash')}"
+                )
+        return 0
+
+    if args.cmd in {"confirm-combo", "reject-combo", "supersede-combo"}:
+        control = write_controls[args.cmd]
+        apply_changes = bool(control["write_requested"])
+        existing = next(
+            (
+                item
+                for item in list_combo_pair_inferences(repo=repo)
+                if str(item.get("inference_id") or "") == args.inference_id
+            ),
+            None,
+        )
+        if existing is None:
+            raise SystemExit(f"combo inference not found: {args.inference_id}")
+        if args.cmd == "confirm-combo":
+            mode_evidence = None
+            if apply_changes:
+                mode_evidence = _require_combo_confirmation_mode(
+                    base=base,
+                    args=args,
+                    inference=existing,
+                )
+            out = adopt_post_trade_combo_pair(
+                repo=repo,
+                inference_id=args.inference_id,
+                expected_input_hash=args.expected_input_hash,
+                actor=args.actor,
+                apply_changes=apply_changes,
+            )
+            if mode_evidence is not None:
+                out["confirmation_mode"] = mode_evidence
+            write_applied = out.get("status") == "adopted"
+            rollback_hint = "use supersede-combo to append-only void both adoption events"
+        elif args.cmd == "supersede-combo":
+            out = supersede_post_trade_combo_pair(
+                repo=repo,
+                inference_id=args.inference_id,
+                expected_input_hash=args.expected_input_hash,
+                reason=args.reason,
+                actor=args.actor,
+                apply_changes=apply_changes,
+            )
+            write_applied = out.get("status") == "superseded"
+            rollback_hint = "review the append-only void events; the old identity remains auditable"
+        elif not apply_changes:
+            if str(existing.get("input_snapshot_hash") or "") != args.expected_input_hash:
+                raise SystemExit("combo inference input hash compare-and-set failed")
+            out = {
+                "schema_version": "post_trade_combo_rejection.v1",
+                "status": "dry_run",
+                "inference_id": args.inference_id,
+                "decision_reason": args.reason,
+            }
+            write_applied = False
+            rollback_hint = "rejection does not change trade events or position lots"
+        else:
+            out = reject_post_trade_combo_pair(
+                repo=repo,
+                inference_id=args.inference_id,
+                expected_input_hash=args.expected_input_hash,
+                reason=args.reason,
+                actor=args.actor,
+            )
+            write_applied = out.get("status") == "user_rejected"
+            rollback_hint = "rejected exact pairs do not reopen automatically"
+        payload = attach_write_contract(
+            {**out, "ledger_store": ledger_store},
+            dry_run=not apply_changes,
+            write_applied=bool(write_applied),
+            rollback_hint=rollback_hint,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return 0
 
     raise SystemExit("unknown cmd")

@@ -24,6 +24,13 @@ from src.application.position_advice_authority_service import (
 )
 from src.application.position_advice_runner import run_position_advice_v2
 from src.application.position_advice_reader import read_position_advice_v2
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
 
 
 NOW = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
@@ -35,21 +42,45 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _snapshot() -> dict[str, object]:
-    return {
+    snapshot = {
         "schema_version": "decision_state_snapshot.v2",
         "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
         "snapshot_status": "trusted",
         "actionable": True,
         "reason_codes": [],
-        "decision_state_fingerprint": "d" * 64,
+        "decision_state_fingerprint": "",
         "source_observed_at": (NOW + timedelta(seconds=2)).isoformat(),
         "account_position_lots": [],
         "account_lifecycle_cases": [],
         "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
         "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=[],
+            )
+        ),
+        "effective_void_event_ids": [],
         "account_assigned_stock_events": [],
         "account_combo_identities": [],
+        "account_combo_group_memberships": [],
     }
+    snapshot["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(snapshot)
+    )
+    return snapshot
 
 
 def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
@@ -356,7 +387,9 @@ def test_reader_validates_full_artifact_before_market_filter(
         "authority_policy_hash": "f" * 64,
         "source_manifest_hash": "b" * 64,
         "account_run_id": "run-1",
-        "decision_state_fingerprint": "d" * 64,
+        "decision_state_fingerprint": _snapshot()[
+            "decision_state_fingerprint"
+        ],
         "included_markets": ["HK", "US"],
         "current_market": "US",
         "current_manifest_hash": "c" * 64,

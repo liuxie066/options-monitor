@@ -5,7 +5,7 @@ from pathlib import Path
 
 import argparse
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
@@ -32,6 +32,10 @@ from src.application.ledger.api import (
     position_lot_snapshot,
     resolve_position_lot_snapshots,
     summarize_position_lot_shadow_status,
+    validate_account_lifecycle_resolution,
+)
+from src.application.trades.lifecycle_reconciliation import (
+    build_lifecycle_read_models_from_resolved_account,
 )
 
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
@@ -352,6 +356,47 @@ def build_lifecycle_read_models_from_decision_snapshot(
     snapshot = dict(decision_snapshot or {})
     if str(snapshot.get("snapshot_status") or "") != "trusted":
         return {}
+    resolved = snapshot.get("account_lifecycle_resolution")
+    if isinstance(resolved, Mapping):
+        validation_reasons = validate_account_lifecycle_resolution(
+            resolved
+        )
+        if validation_reasons:
+            raise ValueError(
+                "invalid account lifecycle resolution: "
+                + ",".join(validation_reasons)
+            )
+        return build_lifecycle_read_models_from_resolved_account(
+            cases=[
+                dict(item)
+                for item in snapshot.get("account_lifecycle_cases") or []
+                if isinstance(item, dict)
+            ],
+            allocations=[
+                dict(item)
+                for item in snapshot.get("account_lifecycle_allocations")
+                or []
+                if isinstance(item, dict)
+            ],
+            timing_policies=[
+                dict(item)
+                for item in snapshot.get(
+                    "account_lifecycle_timing_policies"
+                )
+                or []
+                if isinstance(item, dict)
+            ],
+            position_lots=[
+                dict(item)
+                for item in snapshot.get("account_position_lots") or []
+                if isinstance(item, dict)
+            ],
+            account_resolution=resolved,
+            void_event_ids=list(
+                snapshot.get("effective_void_event_ids") or []
+            ),
+            now_ms=now_ms,
+        )
     cases = [
         dict(item)
         for item in list(snapshot.get("account_lifecycle_cases") or [])

@@ -195,11 +195,13 @@ def build_daily_brief_user_view(
 def render_fixed_report(
     brief: Mapping[str, Any],
     *,
+    diff: Mapping[str, Any] | None = None,
     limits: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> str:
     view = build_daily_brief_user_view(
         brief,
+        diff=diff,
         delivery_kind="fixed_report",
         limits=limits,
         context=context,
@@ -210,11 +212,13 @@ def render_fixed_report(
 def render_fixed_report_card_markdown(
     brief: Mapping[str, Any],
     *,
+    diff: Mapping[str, Any] | None = None,
     limits: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> str:
     view = build_daily_brief_user_view(
         brief,
+        diff=diff,
         delivery_kind="fixed_report",
         limits=limits,
         context=context,
@@ -266,6 +270,32 @@ def render_candidate_alert_card_markdown(
             f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
         ]
     return _render_user_view_card(view, projection="candidate_alert")
+
+
+def select_rendered_combo_candidate_rows(
+    brief: Mapping[str, Any],
+    *,
+    delivery_kind: str,
+    candidate_identities: Iterable[str] = (),
+    diff: Mapping[str, Any] | None = None,
+    limits: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the Combo rows selected by the same projection used for rendering."""
+
+    kind = str(delivery_kind or "").strip().lower()
+    source: Mapping[str, Any] = brief
+    selection_limits = dict(limits or {})
+    if kind == "candidate_alert":
+        source, _omitted = _candidate_alert_brief(brief, candidate_identities)
+        selection_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
+    elif kind != "fixed_report":
+        return []
+    selected = _candidate_views(
+        source,
+        diff=dict(diff or {}),
+        limits=resolve_daily_brief_render_limits(selection_limits),
+    )[2]
+    return [dict(item) for item in selected.get("combo_yield") or []]
 
 
 def render_fixed_failure(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+from domain.domain.symbol_identity import symbol_market
 from src.application.quality.model import check_result, dataset_status, freshness, utc_iso
 from src.application.trades.lifecycle import FINAL_STATUSES, PENDING_STATUSES
 
@@ -75,8 +76,15 @@ def build_lifecycle_datasets(
     for case in cases:
         if str(case.get("account") or "").strip().lower() != account:
             continue
+        case_market = str(
+            case.get("market") or symbol_market(case.get("symbol")) or ""
+        ).strip().lower()
+        if case_market and case_market != market.strip().lower():
+            continue
         case_id = str(case.get("case_id") or "").strip()
         case_status = str(case.get("status") or "").strip().lower()
+        if case_status == "superseded":
+            continue
         scope = {"account": account, "market": market, "lifecycle_case_id": case_id}
         evidence_count = evidence_count_by_case.get(case_id, 0)
         is_legacy_gap = bool(

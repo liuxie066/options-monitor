@@ -6,6 +6,11 @@ accounts:
     type: external_holdings
     holdings_account: sy
 
+trade_intake:
+  combo_reconciliation:
+    default_mode: off
+    accounts: {}
+
 templates:
   put_base:
     sell_put:

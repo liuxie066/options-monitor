@@ -18,6 +18,58 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
+def test_combo_confirmation_mode_is_account_scoped_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    inference = {"account": "lx", "market": "US"}
+    off_path = tmp_path / "off.json"
+    off_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "trade_intake": {
+                    "combo_reconciliation": {
+                        "default_mode": "off",
+                        "accounts": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = type("Args", (), {"config": str(off_path)})()
+    with pytest.raises(SystemExit, match="effective mode=off"):
+        cli_mod._require_combo_confirmation_mode(
+            base=tmp_path,
+            args=args,
+            inference=inference,
+        )
+
+    confirm_path = tmp_path / "confirm.json"
+    confirm_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "trade_intake": {
+                    "combo_reconciliation": {
+                        "default_mode": "off",
+                        "accounts": {"lx": "confirm"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args.config = str(confirm_path)
+    assert cli_mod._require_combo_confirmation_mode(
+        base=tmp_path,
+        args=args,
+        inference=inference,
+    )["mode"] == "confirm"
+
+
 def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
     payload = {
         "option_positions": {"sqlite_path": str(sqlite_path)},
@@ -2057,3 +2109,112 @@ def test_option_positions_cli_pair_combo_yield_dry_run_outputs_both_patches(
     assert '"leg_role": "funding_put"' in out
     assert '"leg_role": "participation_call"' in out
     assert len(repo.list_trade_events()) == 2
+
+
+def test_option_positions_cli_adopt_combo_identity_dry_run(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.ledger import ContractKey, TradeEvent
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+
+    def _event(*, event_id: str, option_type: str) -> TradeEvent:
+        side = "short" if option_type == "put" else "long"
+        strike = 145 if option_type == "put" else 220
+        role = "funding_put" if option_type == "put" else "participation_call"
+        contract = ContractKey.from_values(
+            broker="futu",
+            account="lx",
+            underlying_symbol="9992.HK",
+            option_type=option_type,
+            position_side=side,
+            strike=strike,
+            expiration_ymd="2026-09-29",
+        )
+        return TradeEvent(
+            event_id=event_id,
+            event_type="open",
+            event_time_ms=1_700_000_000_000,
+            contract_key=contract,
+            contracts=1,
+            price=2.0,
+            currency="HKD",
+            source="test",
+            lot_id=f"lot-{event_id}",
+            raw_payload={
+                "fields": {
+                    "broker": "futu",
+                    "account": "lx",
+                    "symbol": "9992.HK",
+                    "option_type": option_type,
+                    "side": side,
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "currency": "HKD",
+                    "strike": strike,
+                    "expiration_ymd": "2026-09-29",
+                    "multiplier": 100,
+                    "premium": 2.0,
+                    "strategy": "combo_yield",
+                    "strategy_group_id": "combo:lx:9992",
+                    "leg_role": role,
+                }
+            },
+        )
+
+    ledger_writer.persist_trade_event_object(
+        repo,
+        _event(event_id="put-open", option_type="put"),
+    )
+    ledger_writer.persist_trade_event_object(
+        repo,
+        _event(event_id="call-open", option_type="call"),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "adopt-combo-identity",
+            "--strategy-group-id",
+            "combo:lx:9992",
+            "--funding-put-record-id",
+            "lot-put-open",
+            "--funding-put-open-event-id",
+            "put-open",
+            "--participation-call-record-id",
+            "lot-call-open",
+            "--participation-call-open-event-id",
+            "call-open",
+            "--expected-contracts",
+            "1",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == ("existing_combo_identity_adoption.v1")
+    assert payload["status"] == "dry_run"
+    assert payload["write_applied"] is False
+    assert payload["identity_created"] is False
+    assert repo.get_strategy_group_identity("combo:lx:9992") is None

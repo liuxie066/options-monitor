@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine.candidate_engine import (
     attach_opening_decision_provenance,
@@ -11,7 +13,15 @@ from domain.domain.engine.candidate_engine import (
 )
 from domain.domain.position_advice_authority import scope_for
 from src.application.position_advice_plan_builder import (
+    PositionAdvicePlanError,
     build_position_advice_plan,
+)
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot_fingerprint,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
 )
 from src.application.position_advice_promotion_checks import (
     evaluate_position_advice_plan_safety,
@@ -177,16 +187,43 @@ def _input(*, combo: bool = False) -> dict[str, object]:
         combo_identities.append(identity_payload)
     snapshot = {
         "schema_version": "decision_state_snapshot.v2",
+        "fingerprint_schema_version": "decision_state_fingerprint.v2",
+        "position_fact_contract_version": (
+            POSITION_FACT_SNAPSHOT_CONTRACT
+        ),
+        "normalized_account": "lx",
         "snapshot_status": "trusted",
         "actionable": True,
         "decision_state_fingerprint": FINGERPRINT,
         "account_position_lots": positions,
         "account_lifecycle_cases": [],
         "account_lifecycle_evidence": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {},
         "account_lifecycle_allocations": [],
+        "account_lifecycle_source_consumptions": [],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_resolution": (
+            resolve_account_lifecycle_overlay(
+                account="lx",
+                cases=[],
+                evidence=[],
+                allocations=[],
+                source_claims=[],
+                timing_policies=[],
+                position_lots=positions,
+            )
+        ),
+        "effective_void_event_ids": [],
         "account_assigned_stock_events": [],
         "account_combo_identities": combo_identities,
+        "account_combo_group_memberships": (
+            [_exact_combo_membership()] if combo else []
+        ),
     }
+    snapshot["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(snapshot)
+    )
+    fingerprint = snapshot["decision_state_fingerprint"]
     return {
         "schema_version": "position_advice_input.v2",
         "freshness_policy": "position_advice_freshness.v2",
@@ -204,7 +241,7 @@ def _input(*, combo: bool = False) -> dict[str, object]:
         "authority_policy_hash": "e" * 64,
         "authority_resolution_status": "resolved",
         "authority_covered_strategy_families": ["short_put"],
-        "decision_state_fingerprint": FINGERPRINT,
+        "decision_state_fingerprint": fingerprint,
         "decision_state_snapshot": snapshot,
         "input_hash": "f" * 64,
         "input_snapshot_ids": ["1" * 64],
@@ -218,6 +255,15 @@ def _input(*, combo: bool = False) -> dict[str, object]:
             }
         ],
     }
+
+
+def _rebind_snapshot_fingerprint(
+    immutable_input: dict[str, object],
+) -> None:
+    snapshot = immutable_input["decision_state_snapshot"]
+    fingerprint = decision_state_snapshot_fingerprint(snapshot)
+    snapshot["decision_state_fingerprint"] = fingerprint
+    immutable_input["decision_state_fingerprint"] = fingerprint
 
 
 def _quotes(*, combo: bool = False) -> list[dict[str, object]]:
@@ -257,6 +303,49 @@ def _quotes(*, combo: bool = False) -> list[dict[str, object]]:
     return rows
 
 
+def _exact_combo_membership() -> dict[str, object]:
+    fact: dict[str, object] = {
+        "membership_schema_version": (
+            "account_combo_group_membership.v1"
+        ),
+        "group_id": "combo-1",
+        "status": "exact",
+        "current_account_member_record_ids": [
+            "lot-call",
+            "lot-put",
+        ],
+        "global_current_member_count": 2,
+        "global_historical_member_count": 2,
+        "external_member_count": 0,
+        "external_membership_hash": canonical_sha256([]),
+        "retag_event_count": 0,
+        "retag_history_hash": canonical_sha256([]),
+        "cross_account_member_present": False,
+        "cross_symbol_member_present": False,
+        "member_bindings_for_current_account": [
+            {
+                "record_id": "lot-call",
+                "role": "participation_call",
+                "open_event_id": "event-call",
+                "strategy": "combo_yield",
+                "account": "lx",
+                "symbol": "NVDA",
+            },
+            {
+                "record_id": "lot-put",
+                "role": "funding_put",
+                "open_event_id": "event-put",
+                "strategy": "combo_yield",
+                "account": "lx",
+                "symbol": "NVDA",
+            },
+        ],
+        "reason_codes": [],
+    }
+    fact["membership_hash"] = canonical_sha256(fact)
+    return fact
+
+
 def _build(*, combo: bool = False) -> dict[str, object]:
     return build_position_advice_plan(
         immutable_input=_input(combo=combo),
@@ -279,6 +368,59 @@ def _build(*, combo: bool = False) -> dict[str, object]:
         fx_payload={"rates": {"USDCNY": 7.2}},
         checked_at=NOW,
     )
+
+
+def test_legacy_v2_snapshot_without_position_fact_contract_is_rejected() -> None:
+    immutable_input = _input()
+    immutable_input["decision_state_snapshot"].pop(
+        "position_fact_contract_version"
+    )
+
+    with pytest.raises(
+        PositionAdvicePlanError,
+        match="position_fact_contract_version_invalid",
+    ):
+        build_position_advice_plan(
+            immutable_input=immutable_input,
+            candidate_decisions=[_candidate()],
+            quote_rows=_quotes(),
+            cash_capacity={
+                "status": "available",
+                "uncommitted_cash_headroom_base_cny": "0",
+            },
+            share_coverage={"by_symbol": {}},
+            fx_payload={"rates": {"USDCNY": 7.2}},
+            checked_at=NOW,
+        )
+
+
+def test_position_fact_marker_must_be_bound_by_decision_fingerprint() -> None:
+    immutable_input = _input()
+    snapshot = immutable_input["decision_state_snapshot"]
+    legacy_payload = dict(snapshot)
+    legacy_payload.pop("position_fact_contract_version")
+    legacy_fingerprint = decision_state_snapshot_fingerprint(
+        legacy_payload
+    )
+    snapshot["decision_state_fingerprint"] = legacy_fingerprint
+    immutable_input["decision_state_fingerprint"] = legacy_fingerprint
+
+    with pytest.raises(
+        PositionAdvicePlanError,
+        match="position_fact_decision_fingerprint_mismatch",
+    ):
+        build_position_advice_plan(
+            immutable_input=immutable_input,
+            candidate_decisions=[_candidate()],
+            quote_rows=_quotes(),
+            cash_capacity={
+                "status": "available",
+                "uncommitted_cash_headroom_base_cny": "0",
+            },
+            share_coverage={"by_symbol": {}},
+            fx_payload={"rates": {"USDCNY": 7.2}},
+            checked_at=NOW,
+        )
 
 
 def test_production_built_shadow_plans_pass_automatic_promotion_safety() -> None:
@@ -372,6 +514,7 @@ def test_lifecycle_review_is_human_actionable_but_never_trade_actionable() -> No
     immutable_input["decision_state_snapshot"][
         "account_position_lots"
     ][0]["fields"]["expiration_ymd"] = "2026-07-01"
+    _rebind_snapshot_fingerprint(immutable_input)
     plan = build_position_advice_plan(
         immutable_input=immutable_input,
         candidate_decisions=[_candidate()],
@@ -416,3 +559,103 @@ def test_active_combo_funding_put_action_decomposes_group_and_new_put_is_indepen
     assert long_call["reason_codes"] == [
         "long_call_forward_model_not_approved"
     ]
+
+
+def test_exact_combo_membership_preserves_group_action() -> None:
+    immutable_input = _input(combo=True)
+    immutable_input["decision_state_snapshot"][
+        "account_combo_group_memberships"
+    ] = [_exact_combo_membership()]
+    _rebind_snapshot_fingerprint(immutable_input)
+
+    plan = build_position_advice_plan(
+        immutable_input=immutable_input,
+        candidate_decisions=[_candidate()],
+        quote_rows=_quotes(combo=True),
+        cash_capacity={
+            "status": "available",
+            "uncommitted_cash_headroom_base_cny": "0",
+        },
+        share_coverage={"by_symbol": {}},
+        fx_payload={"rates": {"USDCNY": 7.2}},
+        checked_at=NOW,
+    )
+
+    funding = next(
+        row for row in plan["rows"] if row["position_id"] == "lot-put"
+    )
+    assert funding["group_structure_state"] == "active_combo"
+    assert funding["action_scope"] == "combo_group"
+
+
+def test_combo_membership_must_bind_identity_open_events() -> None:
+    immutable_input = _input(combo=True)
+    membership = _exact_combo_membership()
+    membership["member_bindings_for_current_account"][0][
+        "open_event_id"
+    ] = "wrong-call-event"
+    membership["membership_hash"] = canonical_sha256(
+        {
+            key: value
+            for key, value in membership.items()
+            if key != "membership_hash"
+        }
+    )
+    immutable_input["decision_state_snapshot"][
+        "account_combo_group_memberships"
+    ] = [membership]
+    _rebind_snapshot_fingerprint(immutable_input)
+
+    plan = build_position_advice_plan(
+        immutable_input=immutable_input,
+        candidate_decisions=[_candidate()],
+        quote_rows=_quotes(combo=True),
+        cash_capacity={
+            "status": "available",
+            "uncommitted_cash_headroom_base_cny": "0",
+        },
+        share_coverage={"by_symbol": {}},
+        fx_payload={"rates": {"USDCNY": 7.2}},
+        checked_at=NOW,
+    )
+
+    funding = next(
+        row for row in plan["rows"] if row["position_id"] == "lot-put"
+    )
+    assert funding["group_structure_state"] == "review_required"
+    assert funding["recommendation"] == "review"
+    assert (
+        "combo_identity_membership_binding_mismatch"
+        in funding["reason_codes"]
+    )
+    assert plan["selected_proposals"] == []
+
+
+def test_missing_combo_membership_fact_blocks_group_action() -> None:
+    immutable_input = _input(combo=True)
+    immutable_input["decision_state_snapshot"][
+        "account_combo_group_memberships"
+    ] = []
+    _rebind_snapshot_fingerprint(immutable_input)
+
+    plan = build_position_advice_plan(
+        immutable_input=immutable_input,
+        candidate_decisions=[_candidate()],
+        quote_rows=_quotes(combo=True),
+        cash_capacity={
+            "status": "available",
+            "uncommitted_cash_headroom_base_cny": "0",
+        },
+        share_coverage={"by_symbol": {}},
+        fx_payload={"rates": {"USDCNY": 7.2}},
+        checked_at=NOW,
+    )
+
+    funding = next(
+        row for row in plan["rows"] if row["position_id"] == "lot-put"
+    )
+    assert funding["group_structure_state"] == "review_required"
+    assert funding["recommendation"] == "review"
+    assert funding["model_trade_actionable"] is False
+    assert "combo_group_membership_missing" in funding["reason_codes"]
+    assert plan["selected_proposals"] == []

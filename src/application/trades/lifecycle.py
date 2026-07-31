@@ -356,6 +356,7 @@ def reconcile_polled_stock_settlement_evidence(
     *,
     evidence: dict[str, Any],
     apply_changes: bool,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> LifecycleTradeResolution:
     payload = dict(evidence or {})
     if (
@@ -369,6 +370,9 @@ def reconcile_polled_stock_settlement_evidence(
         payload,
         repo=repo,
         apply_changes=apply_changes,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
 
 
@@ -377,6 +381,7 @@ def _resolve_stock_settlement_evidence(
     *,
     repo: Any,
     apply_changes: bool,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> LifecycleTradeResolution:
     matching_cases = _find_matching_option_cases(
         repo,
@@ -405,26 +410,30 @@ def _resolve_stock_settlement_evidence(
             diagnostics=diagnostics,
         )
 
-    try:
-        _persist_broker_evidence_once(repo, evidence)
-    except ValueError as exc:
-        return LifecycleTradeResolution(
-            handled=True,
-            status="unresolved",
-            action="lifecycle",
-            reason="broker_evidence_economic_conflict",
-            operations=[
-                _lifecycle_operation(
-                    "lifecycle_evidence_conflict",
-                    {**diagnostics, "error": str(exc)},
-                )
-            ],
-            diagnostics={
-                **diagnostics,
-                "error": str(exc),
-                "retryable": False,
-            },
-        )
+    # Polled reconciliation carries a prepared generation token and must not
+    # create an unbound evidence row before the transaction-local CAS.  The
+    # paired lifecycle evidence is persisted later by the atomic writer.
+    if not str(expected_lifecycle_generation_token or "").strip():
+        try:
+            _persist_broker_evidence_once(repo, evidence)
+        except ValueError as exc:
+            return LifecycleTradeResolution(
+                handled=True,
+                status="unresolved",
+                action="lifecycle",
+                reason="broker_evidence_economic_conflict",
+                operations=[
+                    _lifecycle_operation(
+                        "lifecycle_evidence_conflict",
+                        {**diagnostics, "error": str(exc)},
+                    )
+                ],
+                diagnostics={
+                    **diagnostics,
+                    "error": str(exc),
+                    "retryable": False,
+                },
+            )
     if len(matching_cases) > 1:
         return LifecycleTradeResolution(
             handled=True,
@@ -528,6 +537,9 @@ def _resolve_stock_settlement_evidence(
         option_evidence=option_evidence,
         stock_evidence=evidence,
         apply_changes=True,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
 
 
@@ -539,6 +551,7 @@ def _write_lifecycle_close_from_case(
     option_evidence: dict[str, Any] | None,
     stock_evidence: dict[str, Any] | None,
     apply_changes: bool,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> LifecycleTradeResolution:
     if not apply_changes:
         raise ValueError("lifecycle close write requires apply_changes")
@@ -557,6 +570,9 @@ def _write_lifecycle_close_from_case(
         option_evidence=option_evidence,
         stock_evidence=stock,
         event_time_ms=event_time_ms,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
     if v2_result is not None:
         return v2_result
@@ -675,6 +691,7 @@ def _write_v2_lifecycle_close_from_case(
     option_evidence: dict[str, Any] | None,
     stock_evidence: dict[str, Any],
     event_time_ms: int | None,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> LifecycleTradeResolution | None:
     option_source_id = str(
         (option_evidence or {}).get("source_event_id") or ""
@@ -741,6 +758,9 @@ def _write_v2_lifecycle_close_from_case(
         evidence=evidence,
         apply_changes=True,
         now_ms=int(event_time_ms or 0) or None,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
     if (
         result.status == "needs_review"

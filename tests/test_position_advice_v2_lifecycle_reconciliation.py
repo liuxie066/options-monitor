@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from domain.domain.position_advice_authority import scope_for
-from src.application.ledger.decision_snapshot import decision_state_snapshot
-from src.application.ledger.api import record_trade_event_void
+from src.application.ledger.decision_snapshot import (
+    decision_state_snapshot,
+    decision_state_snapshot_fingerprint,
+    validate_position_fact_snapshot_contract,
+)
+from src.application.ledger.lifecycle_overlay import (
+    resolve_account_lifecycle_overlay,
+)
+from src.application.ledger.api import (
+    advance_lifecycle_case_state,
+    record_trade_event_void,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.ledger.source_consumption import (
@@ -148,11 +161,40 @@ def _zero_price_close_evidence(
         "source_event_id": f"futu:lx:1001:{evidence_id}",
         "evidence_type": "option_zero_price_close",
         "account": "lx",
+        "futu_account_id": "1001",
         "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD,
         "contracts": contracts,
+        "price": 0,
         "event_time_ms": event_time_ms,
+        "received_at_ms": event_time_ms + 1,
         "target_lot_id": target_lot_id,
     }
+
+
+def _record_zero_price_close_anchor(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    evidence: dict,
+) -> None:
+    case_id = str(evidence["case_id"])
+    assert repo.bind_trade_lifecycle_case_futu_account_once(
+        case_id=case_id,
+        futu_account_id="1001",
+    )
+    assert repo.insert_trade_lifecycle_evidence_once(evidence)
+    assert repo.insert_trade_lifecycle_source_consumption_once(
+        build_source_consumption_claim(
+            source_key=str(evidence["source_event_id"]),
+            case_id=case_id,
+            owner_evidence_id=str(evidence["evidence_id"]),
+            source_role="option_anchor",
+            economic_payload=evidence,
+        )
+    )
 
 
 def test_discovery_freezes_case_at_observation_start_and_deadline_only_reviews(
@@ -300,8 +342,9 @@ def test_zero_price_close_reserves_lot_without_changing_projection(
         account="lx",
         observed_at_ms=observation_start,
     )["created_case_ids"][0]
-    repo.upsert_trade_lifecycle_evidence(
-        _zero_price_close_evidence(
+    _record_zero_price_close_anchor(
+        repo,
+        evidence=_zero_price_close_evidence(
             evidence_id="zero-close-1",
             case_id=case_id,
             contracts=2,
@@ -330,6 +373,52 @@ def test_zero_price_close_reserves_lot_without_changing_projection(
         account="lx",
         portfolio_scope_id=scope_for("lx"),
     )
+    assert validate_position_fact_snapshot_contract(snapshot) == ()
+    assert snapshot[
+        "account_lifecycle_evidence_received_at_ms_by_id"
+    ].keys() == {"zero-close-1"}
+
+    omitted_resolution = deepcopy(snapshot)
+    omitted_resolution["account_lifecycle_resolution"] = (
+        resolve_account_lifecycle_overlay(
+            account="lx",
+            cases=[],
+            evidence=[],
+            allocations=[],
+            source_claims=[],
+            timing_policies=[],
+            position_lots=omitted_resolution["account_position_lots"],
+        )
+    )
+    omitted_resolution["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(omitted_resolution)
+    )
+    assert "position_fact_lifecycle_resolution_facts_mismatch" in (
+        validate_position_fact_snapshot_contract(omitted_resolution)
+    )
+
+    conflicted_facts = deepcopy(snapshot)
+    conflicted_facts["account_lifecycle_source_consumptions"][0][
+        "source_payload_hash"
+    ] = "0" * 64
+    conflicted_facts["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(conflicted_facts)
+    )
+    assert "position_fact_lifecycle_resolution_facts_mismatch" in (
+        validate_position_fact_snapshot_contract(conflicted_facts)
+    )
+
+    missing_receive_times = deepcopy(snapshot)
+    missing_receive_times.pop(
+        "account_lifecycle_evidence_received_at_ms_by_id"
+    )
+    missing_receive_times["decision_state_fingerprint"] = (
+        decision_state_snapshot_fingerprint(missing_receive_times)
+    )
+    assert "position_fact_lifecycle_evidence_receive_times_invalid" in (
+        validate_position_fact_snapshot_contract(missing_receive_times)
+    )
+
     context = build_context(
         repo.list_position_lots(),
         broker="富途",
@@ -361,8 +450,9 @@ def test_voided_terminal_allocation_becomes_reservation_again(
         account="lx",
         observed_at_ms=observation_start,
     )["created_case_ids"][0]
-    repo.upsert_trade_lifecycle_evidence(
-        _zero_price_close_evidence(
+    _record_zero_price_close_anchor(
+        repo,
+        evidence=_zero_price_close_evidence(
             evidence_id="zero-close-1",
             case_id=case_id,
             contracts=1,
@@ -427,6 +517,57 @@ def test_voided_terminal_allocation_becomes_reservation_again(
     assert context["position_lifecycle_by_lot"]["lot-1"]["reason_state"] == (
         "cause_pending"
     )
+
+
+def test_lifecycle_writer_rejects_stale_related_generation_before_state_write(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_object(
+        repo,
+        _open_event(event_id="open-1", lot_id="lot-1", contracts=1),
+    )
+    observation_start = expiration_observation_start_ms(
+        EXPIRATION_YMD,
+        "US",
+    )
+    assert observation_start is not None
+    case_id = discover_lifecycle_cases(
+        repo,
+        account="lx",
+        observed_at_ms=observation_start,
+    )["created_case_ids"][0]
+    prepared = lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=observation_start,
+    )
+    expected_token = prepared["lifecycle_generation_token"]
+    before = repo.get_trade_lifecycle_case(case_id)
+    assert before is not None
+    assert repo.insert_trade_lifecycle_case_once(
+        {
+            **before,
+            "case_id": "competing-case",
+            "case_key": "competing-case",
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="lifecycle generation compare-and-set failed",
+    ):
+        advance_lifecycle_case_state(
+            repo,
+            case_id=case_id,
+            status="waiting_settlement_evidence",
+            derived_summary={"reason_state": "cause_pending"},
+            public_transition=None,
+            expected_lifecycle_generation_token=expected_token,
+        )
+
+    assert repo.get_trade_lifecycle_case(case_id) == before
+    assert repo.list_trade_lifecycle_notifications() == []
 
 
 def test_ambiguous_quantity_binding_records_conflict_without_closing_lots(

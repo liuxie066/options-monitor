@@ -41,6 +41,7 @@ def resolve_trade_intake_config(
     receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
     backfill_cfg = resolve_trade_intake_backfill_config(ti.get("backfill"))
     holdings_sync_cfg = resolve_trade_intake_holdings_sync_config(ti.get("holdings_sync"))
+    combo_reconciliation_cfg = resolve_combo_reconciliation_config(src)
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
     sources = resolve_trade_intake_sources(
@@ -67,10 +68,64 @@ def resolve_trade_intake_config(
         "receipt": receipt_cfg,
         "backfill": backfill_cfg,
         "holdings_sync": holdings_sync_cfg,
+        "combo_reconciliation": combo_reconciliation_cfg,
         "account_mapping": account_mapping,
         "futu_account_ids": futu_lookup_account_ids,
         "sources": sources,
     }
+
+
+def resolve_combo_reconciliation_config(
+    cfg: dict[str, Any] | None,
+) -> dict[str, Any]:
+    src = cfg if isinstance(cfg, dict) else {}
+    trade_intake = src.get("trade_intake")
+    trade_intake = trade_intake if isinstance(trade_intake, dict) else {}
+    raw = trade_intake.get("combo_reconciliation")
+    if raw is None:
+        section: dict[str, Any] = {}
+    elif isinstance(raw, dict):
+        section = raw
+    else:
+        raise ValueError("trade_intake.combo_reconciliation must be an object")
+    default_mode = str(section.get("default_mode") or "off").strip().lower()
+    if default_mode != "off":
+        raise ValueError("trade_intake.combo_reconciliation.default_mode must remain off")
+    account_modes_raw = section.get("accounts")
+    if account_modes_raw is None:
+        account_modes_raw = {}
+    if not isinstance(account_modes_raw, dict):
+        raise ValueError("trade_intake.combo_reconciliation.accounts must be an object")
+    known_accounts = set(accounts_from_config(src))
+    account_modes: dict[str, str] = {}
+    for raw_account, raw_mode in account_modes_raw.items():
+        account = str(raw_account or "").strip().lower()
+        mode = str(raw_mode or "").strip().lower()
+        if not account or account != str(raw_account or "").strip():
+            raise ValueError("trade_intake.combo_reconciliation account labels must be lowercase")
+        if account not in known_accounts:
+            raise ValueError(
+                f"trade_intake.combo_reconciliation.accounts.{account} is not a configured account"
+            )
+        if mode not in {"off", "observe", "confirm"}:
+            raise ValueError(
+                f"trade_intake.combo_reconciliation.accounts.{account} must be off, observe, or confirm"
+            )
+        account_modes[account] = mode
+    return {
+        "default_mode": "off",
+        "accounts": account_modes,
+    }
+
+
+def combo_reconciliation_mode_for_account(
+    config: dict[str, Any] | None,
+    *,
+    account: str,
+) -> str:
+    resolved = resolve_combo_reconciliation_config(config)
+    account_value = str(account or "").strip().lower()
+    return str(resolved["accounts"].get(account_value) or resolved["default_mode"])
 
 
 def resolve_trade_intake_receipt_config(value: Any) -> dict[str, bool]:
@@ -292,6 +347,7 @@ def resolve_trade_intake_sources(
     base_status_path = Path(fallback_status_path or "output_shared/state/auto_trade_intake_status.json")
     base_mapping = dict(fallback_account_mapping or resolve_futu_account_mapping(src))
     base_account_ids = list(fallback_futu_account_ids or resolve_futu_lookup_account_ids(src, account_mapping=base_mapping))
+    combo_reconciliation = resolve_combo_reconciliation_config(src)
 
     account_sources: list[dict[str, Any]] = []
     for account in accounts_from_config(src):
@@ -320,6 +376,10 @@ def resolve_trade_intake_sources(
                 "backfill": base_backfill,
                 "account_mapping": {plan.futu_account_id: account},
                 "futu_account_ids": [plan.futu_account_id],
+                "combo_reconciliation_mode": str(
+                    combo_reconciliation["accounts"].get(account)
+                    or combo_reconciliation["default_mode"]
+                ),
             }
         )
 
@@ -356,6 +416,7 @@ def resolve_trade_intake_sources(
             "backfill": base_backfill,
             "account_mapping": base_mapping,
             "futu_account_ids": base_account_ids,
+            "combo_reconciliation_mode": "off",
         }
     ]
 

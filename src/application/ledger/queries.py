@@ -8,6 +8,11 @@ from src.application.ledger.publisher import project_stored_trade_events_to_posi
 from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.lifecycle_overlay import (
+    lifecycle_case_generation_token,
+    lifecycle_case_resolution,
+    resolve_lifecycle_account_rows,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
     require_option_positions_event_write_repo,
@@ -392,6 +397,236 @@ def lifecycle_reconciliation_facts(
     }
 
 
+def lifecycle_option_close_anchor_facts(
+    repo: Any,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    """Expose validated anchors without re-reading or changing source ownership."""
+
+    facts = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    resolution = dict(facts["case_resolution"])
+    return {
+        "schema_version": "lifecycle_option_close_anchor_facts.v1",
+        "status": str(resolution.get("status") or "conflict"),
+        "reason_codes": list(resolution.get("reason_codes") or []),
+        "anchors": [dict(item) for item in facts["validated_anchors"]],
+        "source_claims": [dict(item) for item in facts["anchor_source_claims"]],
+        "bridge_evidence_ids": sorted(
+            str(item.get("bridge_evidence_id") or "")
+            for item in resolution.get("anchor_facts") or []
+            if str(item.get("bridge_evidence_id") or "")
+        ),
+        "generation_token": dict(facts["generation_token"]),
+    }
+
+
+def lifecycle_account_coherent_facts(
+    repo: Any,
+    *,
+    account: str,
+) -> dict[str, Any]:
+    """Read and resolve one account's lifecycle closure in one transaction."""
+
+    candidate = getattr(repo, "primary_repo", repo)
+    reader = getattr(candidate, "read_lifecycle_account_rows", None)
+    if not callable(reader):
+        raise TypeError("coherent lifecycle account reader is unavailable")
+    rows = reader(account=str(account or "").strip().lower())
+    if not isinstance(rows, dict):
+        raise TypeError("coherent lifecycle account reader returned invalid rows")
+    resolution = resolve_lifecycle_account_rows(rows)
+    return {
+        **rows,
+        "account_lifecycle_resolution": resolution,
+        "effective_void_event_ids": _effective_void_event_ids_from_rows(rows),
+    }
+
+
+def lifecycle_case_coherent_facts(
+    repo: Any,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    """Return one case view from the account-coherent lifecycle generation."""
+
+    case_value = str(case_id or "").strip()
+    candidate = getattr(repo, "primary_repo", repo)
+    reader = getattr(candidate, "read_lifecycle_case_rows", None)
+    if not case_value or not callable(reader):
+        raise TypeError("coherent lifecycle case reader is unavailable")
+    rows = reader(case_id=case_value)
+    if not isinstance(rows, dict):
+        raise TypeError("coherent lifecycle case reader returned invalid rows")
+    account_resolution = resolve_lifecycle_account_rows(rows)
+    case_resolution = lifecycle_case_resolution(
+        account_resolution,
+        case_id=case_value,
+    )
+    generation_token = lifecycle_case_generation_token(
+        account_resolution,
+        case_id=case_value,
+    )
+    if case_resolution is None or generation_token is None:
+        raise ValueError(f"active lifecycle case not found: {case_value}")
+    lifecycle_case = next(
+        (
+            dict(item)
+            for item in rows.get("account_lifecycle_cases") or []
+            if isinstance(item, dict)
+            and str(item.get("case_id") or "").strip() == case_value
+        ),
+        None,
+    )
+    if lifecycle_case is None:
+        raise ValueError(f"lifecycle case not found: {case_value}")
+    evidence = [
+        dict(item)
+        for item in rows.get("account_lifecycle_evidence") or []
+        if isinstance(item, dict)
+    ]
+    claims = [
+        dict(item)
+        for item in rows.get("account_lifecycle_source_consumptions") or []
+        if isinstance(item, dict)
+    ]
+    validated_anchors, anchor_claims = _materialize_validated_anchors(
+        lifecycle_case=lifecycle_case,
+        case_resolution=case_resolution,
+        evidence=evidence,
+        source_claims=claims,
+    )
+    return {
+        "schema_version": "lifecycle_case_coherent_facts.v1",
+        **rows,
+        "lifecycle_case": lifecycle_case,
+        "case_evidence": [
+            item
+            for item in evidence
+            if str(item.get("case_id") or "").strip() == case_value
+        ],
+        "case_allocations": [
+            dict(item)
+            for item in rows.get("account_lifecycle_allocations") or []
+            if isinstance(item, dict)
+            and str(item.get("case_id") or "").strip() == case_value
+        ],
+        "timing_policy": next(
+            (
+                dict(item)
+                for item in rows.get("account_lifecycle_timing_policies") or []
+                if isinstance(item, dict)
+                and str(item.get("case_id") or "").strip() == case_value
+            ),
+            None,
+        ),
+        "position_lot_fields_by_id": {
+            str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
+            for item in rows.get("account_position_lots") or []
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+        },
+        "effective_void_event_ids": _effective_void_event_ids_from_rows(rows),
+        "account_lifecycle_resolution": account_resolution,
+        "case_resolution": case_resolution,
+        "generation_token": generation_token,
+        "validated_anchors": validated_anchors,
+        "anchor_source_claims": anchor_claims,
+    }
+
+
+def _effective_void_event_ids_from_rows(rows: dict[str, Any]) -> list[str]:
+    return sorted(
+        {
+            target
+            for item in rows.get("trade_events") or []
+            if isinstance(item, dict)
+            for target in [valid_void_target_event_id(item)]
+            if target
+        }
+    )
+
+
+def _materialize_validated_anchors(
+    *,
+    lifecycle_case: dict[str, Any],
+    case_resolution: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    source_claims: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    evidence_by_id = {
+        str(item.get("evidence_id") or "").strip(): item
+        for item in evidence
+        if str(item.get("evidence_id") or "").strip()
+    }
+    claim_by_binding = {
+        (
+            str(item.get("source_key") or "").strip(),
+            str(item.get("owner_evidence_id") or "").strip(),
+        ): item
+        for item in source_claims
+    }
+    anchors: list[dict[str, Any]] = []
+    claims: list[dict[str, Any]] = []
+    for raw_fact in case_resolution.get("anchor_facts") or []:
+        if not isinstance(raw_fact, dict):
+            continue
+        fact = dict(raw_fact)
+        owner_evidence_id = str(
+            fact.get("source_owner_evidence_id") or ""
+        ).strip()
+        source_key = str(fact.get("source_key") or "").strip()
+        original = dict(evidence_by_id.get(owner_evidence_id) or {})
+        claim = dict(
+            claim_by_binding.get((source_key, owner_evidence_id)) or {}
+        )
+        payload = (
+            dict(claim.get("source_payload") or {})
+            if isinstance(claim.get("source_payload"), dict)
+            else {}
+        )
+        manifest = dict(fact.get("target_contracts_by_lot") or {})
+        anchor = {
+            **original,
+            "evidence_id": owner_evidence_id,
+            "case_id": str(lifecycle_case.get("case_id") or ""),
+            "source_event_id": source_key,
+            "evidence_type": "option_zero_price_close",
+            "account": payload.get("account"),
+            "futu_account_id": payload.get("futu_account_id"),
+            "symbol": payload.get("symbol"),
+            "option_type": payload.get("option_type"),
+            "position_side": payload.get("position_side"),
+            "strike": payload.get("strike"),
+            "expiration_ymd": payload.get("expiration_ymd"),
+            "contracts": fact.get("quantity"),
+            "price": payload.get("price"),
+            "event_time_ms": fact.get("execution_time_ms"),
+            "received_at_ms": fact.get("received_at_ms"),
+            "order_id": payload.get("order_id"),
+            "clearing_date": payload.get("clearing_date"),
+            "target_contracts_by_lot": manifest,
+            "target_lot_id": (
+                next(iter(manifest)) if len(manifest) == 1 else None
+            ),
+            "bridge_evidence_id": fact.get("bridge_evidence_id"),
+            "source_owner_case_id": fact.get("source_owner_case_id"),
+            "source_owner_evidence_id": owner_evidence_id,
+            "anchor_fact_id": fact.get("anchor_fact_id"),
+        }
+        anchors.append(anchor)
+        if claim:
+            claims.append(claim)
+    anchors.sort(key=lambda item: str(item.get("anchor_fact_id") or ""))
+    claims.sort(
+        key=lambda item: (
+            str(item.get("source_key") or ""),
+            str(item.get("owner_evidence_id") or ""),
+        )
+    )
+    return anchors, claims
+
+
 def project_trade_event_log(events: list[dict[str, Any]]) -> Any:
     return project_stored_trade_events_to_position_lots(events)
 
@@ -429,6 +664,9 @@ __all__ = [
     "list_position_rows",
     "list_trade_lifecycle_cases",
     "list_trade_lifecycle_evidence",
+    "lifecycle_account_coherent_facts",
+    "lifecycle_case_coherent_facts",
+    "lifecycle_option_close_anchor_facts",
     "lifecycle_reconciliation_facts",
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",

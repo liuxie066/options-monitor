@@ -7,14 +7,21 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from src.application.ledger.api import (
-    lifecycle_reconciliation_facts,
-    lifecycle_evidence_facts,
+    lifecycle_case_coherent_facts,
 )
 from src.application.trades.close_reason_evidence import (
     build_broker_settlement_observation,
     build_settlement_source_receipt,
     canonical_hash,
 )
+
+
+class SettlementObservationDataError(ValueError):
+    """Case-local input prevents a safe broker observation."""
+
+
+class LifecycleObservationGenerationChanged(RuntimeError):
+    """The lifecycle facts changed after the due decision was prepared."""
 
 
 def collect_broker_settlement_observation(
@@ -32,30 +39,55 @@ def collect_broker_settlement_observation(
     account = str(lifecycle_case.get("account") or "").strip().lower()
     account_id = str(futu_account_id or "").strip()
     if not case_id or not account or not account_id:
-        raise ValueError(
+        raise SettlementObservationDataError(
             "settlement observation account identity is incomplete"
         )
     if (
         str(lifecycle_case.get("futu_account_id") or "").strip()
         != account_id
     ):
-        raise ValueError(
+        raise SettlementObservationDataError(
             "lifecycle case Futu account binding mismatch"
         )
-    timing_policy = repo.get_trade_lifecycle_timing_policy(case_id)
+    facts = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    prepared_token = str(
+        read_model.get("lifecycle_generation_token") or ""
+    ).strip()
+    observed_token = str(
+        facts["generation_token"].get("generation_token") or ""
+    ).strip()
+    if not prepared_token or prepared_token != observed_token:
+        raise LifecycleObservationGenerationChanged(
+            "lifecycle generation changed before provider collection"
+        )
+    frozen_case = dict(facts["lifecycle_case"])
+    if frozen_case != lifecycle_case:
+        raise LifecycleObservationGenerationChanged(
+            "lifecycle case changed before provider collection"
+        )
+    timing_policy = facts.get("timing_policy")
     if not isinstance(timing_policy, dict):
-        raise ValueError("lifecycle timing policy is unavailable")
+        raise SettlementObservationDataError(
+            "lifecycle timing policy is unavailable"
+        )
     deadline_ms = int(
         timing_policy.get("settlement_deadline_ms") or 0
     )
     if deadline_ms <= 0:
-        raise ValueError("settlement deadline is unavailable")
-
-    facts = lifecycle_reconciliation_facts(repo, case_id=case_id)
+        raise SettlementObservationDataError(
+            "settlement deadline is unavailable"
+        )
+    case_resolution = dict(facts["case_resolution"])
+    if case_resolution.get("status") == "conflict":
+        raise SettlementObservationDataError(
+            "option close anchor is invalid: "
+            + ",".join(
+                str(item)
+                for item in case_resolution.get("reason_codes") or []
+            )
+        )
     evidence_rows = [
-        dict(item)
-        for item in facts.get("evidence") or []
-        if isinstance(item, dict)
+        dict(item) for item in facts["validated_anchors"]
     ]
     option_rows = sorted(
         (
@@ -70,10 +102,14 @@ def collect_broker_settlement_observation(
         ),
     )
     if not option_rows:
-        raise ValueError("option close anchor evidence is unavailable")
+        raise SettlementObservationDataError(
+            "option close anchor evidence is unavailable"
+        )
     anchor = option_rows[0]
     if str(anchor.get("futu_account_id") or "").strip() != account_id:
-        raise ValueError("option close anchor account mismatch")
+        raise SettlementObservationDataError(
+            "option close anchor account mismatch"
+        )
     anchor_key = str(anchor.get("source_event_id") or "").strip()
     anchor_execution_ms = int(
         anchor.get("event_time_ms")
@@ -81,7 +117,9 @@ def collect_broker_settlement_observation(
         or 0
     )
     if not anchor_key or anchor_execution_ms <= 0:
-        raise ValueError("option close anchor identity is incomplete")
+        raise SettlementObservationDataError(
+            "option close anchor identity is incomplete"
+        )
 
     timezone = ZoneInfo(str(timing_policy.get("timezone") or "UTC"))
     anchor_local = datetime.fromtimestamp(
@@ -285,7 +323,7 @@ def collect_broker_settlement_observation(
     }
     allocations = [
         dict(item)
-        for item in facts.get("allocations") or []
+        for item in facts.get("case_allocations") or []
         if isinstance(item, dict)
     ]
     void_event_ids = tuple(
@@ -316,15 +354,10 @@ def collect_broker_settlement_observation(
         )
         for lot_id in target_manifest
     }
-    evidence_facts = lifecycle_evidence_facts(
-        evidence=evidence_rows,
-        allocations=allocations,
-        void_event_ids=void_event_ids,
-    )
     reservation_exclusive = (
-        evidence_facts.reservation_contracts_by_lot
+        dict(case_resolution.get("effective_reservations_by_lot") or {})
         == frozen_remaining
-        and bool(evidence_facts.reservation_evidence_ids)
+        and bool(case_resolution.get("anchor_facts"))
     )
     extra_incomplete: set[str] = set()
     extra_incomplete.update(anchor_reason_codes)
@@ -405,9 +438,11 @@ def collect_broker_settlement_observation(
         and _nonzero_position(item)
         for item in list(positions.get("rows") or [])
     )
-    source_claims = repo.list_trade_lifecycle_source_consumptions(
-        case_id=case_id
-    )
+    source_claims = [
+        dict(item)
+        for item in facts.get("anchor_source_claims") or []
+        if isinstance(item, dict)
+    ]
     option_claims = [
         item
         for item in source_claims
@@ -418,9 +453,16 @@ def collect_broker_settlement_observation(
         for item in option_claims
         if (
             str(item.get("source_key") or "").strip() == anchor_key
-            and str(item.get("case_id") or "").strip() == case_id
+            and str(item.get("case_id") or "").strip()
+            == str(
+                anchor.get("source_owner_case_id") or case_id
+            ).strip()
             and str(item.get("owner_evidence_id") or "").strip()
-            == str(anchor.get("evidence_id") or "").strip()
+            == str(
+                anchor.get("source_owner_evidence_id")
+                or anchor.get("evidence_id")
+                or ""
+            ).strip()
             and isinstance(item.get("source_payload"), dict)
             and str(item.get("source_payload_hash") or "").strip()
             == canonical_hash(item["source_payload"])
@@ -437,9 +479,9 @@ def collect_broker_settlement_observation(
         )
     competing_consumption = (
         resolution.status != "ok"
-        or bool(evidence_facts.orphan_evidence_ids)
+        or case_resolution.get("status") == "conflict"
     )
-    return build_broker_settlement_observation(
+    observation = build_broker_settlement_observation(
         case_id=case_id,
         account=account,
         futu_account_id=account_id,
@@ -474,6 +516,10 @@ def collect_broker_settlement_observation(
         normal_order_present=normal_order_present,
         additional_incomplete_reason_codes=extra_incomplete,
     )
+    return {
+        **observation,
+        "expected_lifecycle_generation_token": observed_token,
+    }
 
 
 def build_settlement_observation_collector(

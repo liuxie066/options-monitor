@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.ledger.api import (
+    validate_position_fact_snapshot_contract,
+)
 from src.application.position_advice_source_receipts import publish_source_receipt
 
 
@@ -89,6 +92,14 @@ def publish_ledger_source_snapshot(
         or len(str(snapshot.get("decision_state_fingerprint") or "")) != 64
     ):
         raise ValueError("ledger decision state snapshot is not trusted")
+    position_fact_reasons = validate_position_fact_snapshot_contract(
+        snapshot
+    )
+    if position_fact_reasons:
+        raise ValueError(
+            "ledger decision state position facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
     payload = {
         "schema_version": LEDGER_SOURCE_SCHEMA,
         "decision_state_snapshot": snapshot,

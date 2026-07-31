@@ -15,8 +15,13 @@ from domain.domain.lifecycle_allocation import (
 )
 from domain.domain.option_lifecycle import build_lifecycle_case
 from domain.domain.position_advice_authority import scope_for
-from src.application.ledger.decision_snapshot import decision_state_snapshot
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot,
+    validate_position_fact_snapshot_contract,
+)
 from src.application.ledger.api import (
+    adopt_existing_combo_identity,
     record_combo_trade_open,
     record_lifecycle_allocation,
 )
@@ -76,6 +81,48 @@ def _open_event(*, event_id: str, option_type: str = "put") -> TradeEvent:
     )
 
 
+def _group_adjust_event(
+    *,
+    event_id: str,
+    target_lot_id: str,
+    strategy_group_id: str,
+    option_type: str = "put",
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type="adjust",
+        event_time_ms=1_700_000_000_100,
+        contract_key=_contract(option_type=option_type),
+        contracts=0,
+        price=0,
+        currency="USD",
+        source="test",
+        target_lot_id=target_lot_id,
+        raw_payload={
+            "patch": {"strategy_group_id": strategy_group_id}
+        },
+    )
+
+
+def _close_event(
+    *,
+    event_id: str,
+    target_lot_id: str,
+    option_type: str = "put",
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type="close",
+        event_time_ms=1_700_000_000_200,
+        contract_key=_contract(option_type=option_type),
+        contracts=2,
+        price=1,
+        currency="USD",
+        source="test",
+        target_lot_id=target_lot_id,
+    )
+
+
 def test_repository_enables_foreign_keys_and_creates_v2_additive_tables(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
 
@@ -102,6 +149,11 @@ def test_decision_snapshot_reprojects_inside_coherent_ledger_read(tmp_path: Path
     assert trusted["snapshot_status"] == "trusted"
     assert trusted["actionable"] is True
     assert trusted["decision_state_fingerprint"]
+    assert (
+        trusted["position_fact_contract_version"]
+        == POSITION_FACT_SNAPSHOT_CONTRACT
+    )
+    assert validate_position_fact_snapshot_contract(trusted) == ()
     assert trusted["projection_comparison"]["summary"] == {"matched": 1}
 
     with repo._connect() as conn:  # noqa: SLF001 - deterministic drift fixture
@@ -340,6 +392,234 @@ def test_duplicate_second_leg_without_identity_requires_review_not_backfill(tmp_
             combo_identity_intent=intent,
         )
     assert repo.get_strategy_group_identity("combo:lx:1") is None
+
+
+def test_existing_combo_identity_adoption_is_insert_only_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    put_event = _open_event(event_id="put-open")
+    call_event = _open_event(
+        event_id="call-open",
+        option_type="call",
+    )
+    persist_trade_event_object(repo, put_event)
+    persist_trade_event_object(repo, call_event)
+    events_before = repo.list_trade_events()
+    lots_before = repo.list_position_lots()
+    adoption_args = {
+        "strategy_group_id": "combo:lx:1",
+        "funding_put_record_id": "lot-put-open",
+        "funding_put_open_event_id": "put-open",
+        "participation_call_record_id": "lot-call-open",
+        "participation_call_open_event_id": "call-open",
+        "expected_contracts": 2,
+    }
+
+    preview = adopt_existing_combo_identity(
+        repo,
+        **adoption_args,
+    )
+
+    assert preview["status"] == "dry_run"
+    assert preview["identity_created"] is False
+    assert preview["projection_summary"] == {"matched": 2}
+    assert repo.get_strategy_group_identity("combo:lx:1") is None
+    assert repo.list_trade_events() == events_before
+    assert repo.list_position_lots() == lots_before
+
+    applied = adopt_existing_combo_identity(
+        repo,
+        **adoption_args,
+        apply_changes=True,
+    )
+
+    assert applied["status"] == "adopted"
+    assert applied["identity_created"] is True
+    assert repo.get_strategy_group_identity("combo:lx:1") == applied["identity"]
+    assert repo.list_trade_events() == events_before
+    assert repo.list_position_lots() == lots_before
+
+    replay = adopt_existing_combo_identity(
+        repo,
+        **adoption_args,
+        apply_changes=True,
+    )
+
+    assert replay["status"] == "existing"
+    assert replay["identity_created"] is False
+    assert repo.list_trade_events() == events_before
+    assert repo.list_position_lots() == lots_before
+
+
+def test_existing_combo_identity_adoption_rejects_projection_drift(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_object(
+        repo,
+        _open_event(event_id="put-open"),
+    )
+    persist_trade_event_object(
+        repo,
+        _open_event(
+            event_id="call-open",
+            option_type="call",
+        ),
+    )
+    with repo._connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT fields_json FROM position_lots WHERE record_id = ?",
+            ("lot-call-open",),
+        ).fetchone()
+        fields = json.loads(row["fields_json"])
+        fields["contracts_open"] = 1
+        conn.execute(
+            "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
+            (
+                json.dumps(fields, sort_keys=True),
+                "lot-call-open",
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(
+        ValueError,
+        match="matching trade_events projection",
+    ):
+        adopt_existing_combo_identity(
+            repo,
+            strategy_group_id="combo:lx:1",
+            funding_put_record_id="lot-put-open",
+            funding_put_open_event_id="put-open",
+            participation_call_record_id="lot-call-open",
+            participation_call_open_event_id="call-open",
+            expected_contracts=2,
+            apply_changes=True,
+        )
+
+    assert repo.get_strategy_group_identity("combo:lx:1") is None
+
+
+def test_combo_identity_adoption_rejects_historical_third_member(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_object(repo, _open_event(event_id="put-open"))
+    persist_trade_event_object(
+        repo,
+        _open_event(event_id="call-open", option_type="call"),
+    )
+    persist_trade_event_object(repo, _open_event(event_id="third-open"))
+    persist_trade_event_object(
+        repo,
+        _group_adjust_event(
+            event_id="third-retag",
+            target_lot_id="lot-third-open",
+            strategy_group_id="another-group",
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="combo identity membership conflict",
+    ):
+        adopt_existing_combo_identity(
+            repo,
+            strategy_group_id="combo:lx:1",
+            funding_put_record_id="lot-put-open",
+            funding_put_open_event_id="put-open",
+            participation_call_record_id="lot-call-open",
+            participation_call_open_event_id="call-open",
+            expected_contracts=2,
+            apply_changes=True,
+        )
+
+    assert repo.get_strategy_group_identity("combo:lx:1") is None
+
+
+def test_combo_identity_apply_rechecks_after_successful_dry_run(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_object(repo, _open_event(event_id="put-open"))
+    persist_trade_event_object(
+        repo,
+        _open_event(event_id="call-open", option_type="call"),
+    )
+    arguments = {
+        "strategy_group_id": "combo:lx:1",
+        "funding_put_record_id": "lot-put-open",
+        "funding_put_open_event_id": "put-open",
+        "participation_call_record_id": "lot-call-open",
+        "participation_call_open_event_id": "call-open",
+        "expected_contracts": 2,
+    }
+    preview = adopt_existing_combo_identity(repo, **arguments)
+    assert preview["status"] == "dry_run"
+    persist_trade_event_object(repo, _open_event(event_id="third-open"))
+
+    with pytest.raises(
+        ValueError,
+        match="combo identity membership conflict",
+    ):
+        adopt_existing_combo_identity(
+            repo,
+            **arguments,
+            apply_changes=True,
+        )
+
+    assert repo.get_strategy_group_identity("combo:lx:1") is None
+
+
+def test_existing_combo_identity_replay_allows_terminal_legs_but_no_drift(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_object(repo, _open_event(event_id="put-open"))
+    persist_trade_event_object(
+        repo,
+        _open_event(event_id="call-open", option_type="call"),
+    )
+    arguments = {
+        "strategy_group_id": "combo:lx:1",
+        "funding_put_record_id": "lot-put-open",
+        "funding_put_open_event_id": "put-open",
+        "participation_call_record_id": "lot-call-open",
+        "participation_call_open_event_id": "call-open",
+        "expected_contracts": 2,
+    }
+    adopted = adopt_existing_combo_identity(
+        repo,
+        **arguments,
+        apply_changes=True,
+    )
+    assert adopted["status"] == "adopted"
+    persist_trade_event_object(
+        repo,
+        _close_event(
+            event_id="put-close",
+            target_lot_id="lot-put-open",
+        ),
+    )
+    persist_trade_event_object(
+        repo,
+        _close_event(
+            event_id="call-close",
+            target_lot_id="lot-call-open",
+            option_type="call",
+        ),
+    )
+
+    replay = adopt_existing_combo_identity(
+        repo,
+        **arguments,
+        apply_changes=True,
+    )
+
+    assert replay["status"] == "existing"
+    assert replay["membership"]["status"] == "exact"
+    assert replay["identity_created"] is False
 
 
 def test_lifecycle_evidence_event_projection_and_allocation_are_atomic(tmp_path: Path) -> None:

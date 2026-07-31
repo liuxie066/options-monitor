@@ -91,6 +91,7 @@ from src.application.ledger.results import (
 )
 from src.application.ledger.writer import (
     accept_option_close_evidence_atomically,
+    adopt_existing_combo_identity_atomically,
     advance_lifecycle_case_state_atomically,
     apply_lifecycle_allocation_atomically,
     discover_expired_lifecycle_cases_atomically,
@@ -2014,6 +2015,29 @@ def record_combo_trade_open(
     )
 
 
+def adopt_existing_combo_identity(
+    repo: Any,
+    *,
+    strategy_group_id: str,
+    funding_put_record_id: str,
+    funding_put_open_event_id: str,
+    participation_call_record_id: str,
+    participation_call_open_event_id: str,
+    expected_contracts: int,
+    apply_changes: bool = False,
+) -> dict[str, Any]:
+    return adopt_existing_combo_identity_atomically(
+        repo,
+        group_id=strategy_group_id,
+        funding_put_record_id=funding_put_record_id,
+        funding_put_open_event_id=funding_put_open_event_id,
+        participation_call_record_id=participation_call_record_id,
+        participation_call_open_event_id=(participation_call_open_event_id),
+        expected_contracts=expected_contracts,
+        apply_changes=apply_changes,
+    )
+
+
 def record_lifecycle_allocation(
     repo: Any,
     *,
@@ -2024,6 +2048,7 @@ def record_lifecycle_allocation(
     derived_status: str,
     derived_summary: dict[str, Any],
     expected_resolution_revision: int | None = None,
+    expected_lifecycle_generation_token: str | None = None,
     correction_void_events: list[Any] | None = None,
     notification_transition_type: str | None = None,
 ) -> dict[str, Any]:
@@ -2036,6 +2061,9 @@ def record_lifecycle_allocation(
         derived_status=derived_status,
         derived_summary=derived_summary,
         expected_resolution_revision=expected_resolution_revision,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
         correction_void_events=list(
             correction_void_events or []
         ),
@@ -2080,6 +2108,7 @@ def record_lifecycle_evidence_issue(
     evidence: dict[str, Any],
     status: str,
     reason_codes: list[str],
+    expected_lifecycle_generation_token: str | None = None,
 ) -> dict[str, Any]:
     return record_lifecycle_evidence_issue_atomically(
         repo,
@@ -2087,6 +2116,9 @@ def record_lifecycle_evidence_issue(
         evidence=evidence,
         status=status,
         reason_codes=reason_codes,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
 
 
@@ -2097,6 +2129,7 @@ def advance_lifecycle_case_state(
     status: str,
     derived_summary: dict[str, Any],
     public_transition: str | None,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> dict[str, Any]:
     return advance_lifecycle_case_state_atomically(
         repo,
@@ -2104,6 +2137,9 @@ def advance_lifecycle_case_state(
         status=status,
         derived_summary=derived_summary,
         public_transition=public_transition,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
     )
 
 
@@ -2200,6 +2236,7 @@ def verify_position_lot_projection(
 
 
 __all__ = [
+    "adopt_existing_combo_identity",
     "BrokerTradeOpenPreviewResult",
     "BrokerTradeOperation",
     "ExpiredCloseDecision",

@@ -247,6 +247,29 @@ funding_ratio = put_net_credit / call_total_cost
 
 该入口校验同账户、同 canonical symbol、Short Put/Long Call 方向、开放合约数、1:1、multiplier、到期顺序和 strike 顺序。确认写入时，两条 immutable adjustment event 在同一 SQLite 事务中提交；不按合约条件搜索或猜测 lot。
 
+对于已经带有完整 `combo_yield`、`strategy_group_id` 和两腿角色，
+但尚未建立 immutable identity 的历史持仓（包括同到期组合），必须显式给出
+两条 open event 和 lot 的精确身份：
+
+```bash
+./om option-positions adopt-combo-identity \
+  --strategy-group-id <group_id> \
+  --funding-put-record-id <put_lot_id> \
+  --funding-put-open-event-id <put_open_event_id> \
+  --participation-call-record-id <call_lot_id> \
+  --participation-call-open-event-id <call_open_event_id> \
+  --expected-contracts <contracts> \
+  --dry-run
+```
+
+该入口先完整重放 `trade_events`，并要求结果与当前 `position_lots`
+逐字段一致；随后核对同 broker、同账户、同 canonical symbol、币种、
+multiplier、数量、方向、角色、group id、Put/Call strike 顺序、到期顺序，
+以及 lot 与 open event 的精确绑定。
+apply 只在单一 SQLite 事务中新增 `strategy_group_identities`，不会搜索相似
+合约、补写 adjustment event、改写 open event 或替换 position lot。相同
+identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
+
 ### 配置示例边界
 
 错期配置只接受相对间隔，例如 `min_expiry_gap_days=30`、`max_expiry_gap_days=90`；该数值是示例，不是通用最优值。`combo_yield.call.min_dte/max_dte` 已拒绝，避免 Put 窗口变化后出现两套期限配置漂移。默认仍是 `same_expiry_pair`。

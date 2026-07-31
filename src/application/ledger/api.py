@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.application.ledger.commands import (
     accept_option_close_evidence,
+    adopt_existing_combo_identity,
     advance_lifecycle_case_state,
     BrokerTradeOpenPreviewResult,
     BrokerTradeOperation,
@@ -77,6 +78,9 @@ from src.application.ledger.queries import (
     list_position_rows,
     list_trade_lifecycle_cases,
     list_trade_lifecycle_evidence,
+    lifecycle_account_coherent_facts,
+    lifecycle_case_coherent_facts,
+    lifecycle_option_close_anchor_facts,
     lifecycle_reconciliation_facts,
     normalize_position_lot_fields,
     normalize_position_lot_snapshot,
@@ -104,7 +108,22 @@ from src.application.ledger.store_resolution import (
     resolve_ledger_store,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
-from src.application.ledger.decision_snapshot import decision_state_snapshot
+from src.application.ledger.decision_snapshot import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
+    decision_state_snapshot,
+    decision_state_snapshot_fingerprint,
+    validate_position_fact_snapshot_contract,
+)
+from src.application.ledger.combo_membership import (
+    validate_combo_group_membership,
+)
+from src.application.ledger.combo_reconciliation import (
+    adopt_post_trade_combo_pair,
+    list_combo_pair_inferences,
+    reject_post_trade_combo_pair,
+    reconcile_combo_pair_inferences,
+    supersede_post_trade_combo_pair,
+)
 from src.application.ledger.lifecycle_migration import (
     apply_lifecycle_migration_manifest,
     build_lifecycle_migration_inventory,
@@ -112,6 +131,7 @@ from src.application.ledger.lifecycle_migration import (
 )
 from src.application.ledger.lifecycle_overlay import (
     lifecycle_evidence_facts,
+    validate_account_lifecycle_resolution,
 )
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
@@ -121,6 +141,7 @@ from src.application.ledger.repository import (
     with_sqlite_repo_transaction,
 )
 from src.application.ledger.source_consumption import (
+    build_source_consumption_claim,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
 )
@@ -129,7 +150,10 @@ __all__ = [
     "AssignedStockEventLog",
     "assigned_stock_event_log",
     "accept_option_close_evidence",
+    "adopt_existing_combo_identity",
+    "adopt_post_trade_combo_pair",
     "advance_lifecycle_case_state",
+    "build_source_consumption_claim",
     "apply_lifecycle_migration_manifest",
     "CashConversionBackfillResult",
     "backfill_cash_conversions",
@@ -168,8 +192,12 @@ __all__ = [
     "list_position_rows",
     "list_trade_lifecycle_cases",
     "list_trade_lifecycle_evidence",
+    "lifecycle_account_coherent_facts",
+    "lifecycle_case_coherent_facts",
+    "lifecycle_option_close_anchor_facts",
     "lifecycle_reconciliation_facts",
     "lifecycle_evidence_facts",
+    "list_combo_pair_inferences",
     "ledger_store_payload",
     "ledger_store_write_guard",
     "normalize_position_lot_fields",
@@ -214,6 +242,8 @@ __all__ = [
     "record_normalized_trade_event",
     "record_trade_event_repair",
     "record_trade_event_void",
+    "reject_post_trade_combo_pair",
+    "reconcile_combo_pair_inferences",
     "resolve_ledger_store",
     "refresh_position_lot_projection",
     "resolve_broker_trade_close_lots",
@@ -224,10 +254,16 @@ __all__ = [
     "select_lifecycle_migration_targets",
     "summarize_position_lot_shadow_status",
     "summarize_broker_trade_close_candidates",
+    "supersede_post_trade_combo_pair",
     "trade_event_economic_allocations",
     "trade_event_log",
     "trade_event_projection_preview",
     "valid_void_target_event_id",
+    "validate_account_lifecycle_resolution",
+    "validate_combo_group_membership",
+    "validate_position_fact_snapshot_contract",
     "verify_position_lot_projection",
     "with_sqlite_repo_transaction",
+    "POSITION_FACT_SNAPSHOT_CONTRACT",
+    "decision_state_snapshot_fingerprint",
 ]

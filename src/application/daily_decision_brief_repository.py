@@ -17,6 +17,10 @@ from domain.domain.daily_decision_brief import (
     normalize_daily_decision_brief,
     reconcile_daily_decision_brief_evidence,
 )
+from domain.domain.combo_candidate_evidence import (
+    combo_exposure_render_context,
+    derive_combo_candidate_exposures,
+)
 from domain.storage import paths
 from domain.storage.json_io import atomic_write_json, atomic_write_text
 from src.application.channels.feishu_notification_renderer import (
@@ -330,6 +334,12 @@ def prepare_daily_decision_brief_delivery(
         revision_norm = None
     if source_brief is not None and not set(identities).issubset(_candidate_identity_set(source_brief)):
         raise ValueError("candidate_identities must come from the referenced successful brief")
+    if source_brief is not None:
+        _validate_optional_combo_render_context(
+            context,
+            brief=source_brief,
+            candidate_identities=identities,
+        )
     if kind_norm == "fixed_failure" and identities:
         raise ValueError("fixed_failure must not include candidate_identities")
 
@@ -414,6 +424,12 @@ def prepare_daily_decision_brief_delivery(
                 and existing.get("status") == "confirmed"
                 and existing.get("delivery_key") != envelope["delivery_key"]
             ):
+                history = day["candidate_delivery_history"]
+                if not any(
+                    item.get("delivery_key") == existing.get("delivery_key")
+                    for item in history
+                ):
+                    history.append(dict(existing))
                 existing = None
             persisted, prepared = _resolve_prepared_envelope(
                 existing=existing,
@@ -1299,6 +1315,101 @@ def list_daily_decision_brief_revisions(
     }
 
 
+def read_combo_candidate_exposures(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+) -> dict[str, Any]:
+    """Rebuild exact Combo exposure facts from frozen Brief and delivery state."""
+
+    base_path = Path(base).resolve()
+    account_norm = _normalize_account(account)
+    market_norm = _normalize_market(market)
+    date_norm = _normalize_market_date(market_trading_date)
+    listed = list_daily_decision_brief_revisions(
+        base=base_path,
+        account=account_norm,
+        market=market_norm,
+        market_trading_date=date_norm,
+    )
+    if not listed.get("available"):
+        return {**listed, "exposures": []}
+    delivery_result = read_daily_decision_brief_delivery_state(
+        base=base_path,
+        account=account_norm,
+        market=market_norm,
+    )
+    delivery_day = (
+        (delivery_result.get("state") or {}).get("days", {}).get(date_norm)
+        if delivery_result.get("available")
+        else None
+    )
+    envelopes: list[dict[str, Any]] = []
+    if isinstance(delivery_day, Mapping):
+        envelopes.extend(
+            dict(item)
+            for item in (delivery_day.get("fixed_reports") or {}).values()
+            if isinstance(item, Mapping)
+        )
+        candidate = delivery_day.get("candidate_delivery")
+        if isinstance(candidate, Mapping):
+            envelopes.append(dict(candidate))
+        envelopes.extend(
+            dict(item)
+            for item in (delivery_day.get("candidate_delivery_history") or [])
+            if isinstance(item, Mapping)
+        )
+
+    out_by_id: dict[str, dict[str, Any]] = {}
+    invalid_revisions: list[int] = []
+    for revision in listed["revisions"]:
+        result = read_daily_decision_brief(
+            base=base_path,
+            account=account_norm,
+            market=market_norm,
+            market_trading_date=date_norm,
+            revision=int(revision),
+        )
+        if not result.get("available"):
+            invalid_revisions.append(int(revision))
+            continue
+        brief = result["brief"]
+        digest = daily_brief_digest(brief)
+        exposures = derive_combo_candidate_exposures(brief)
+        for exposure in exposures:
+            item = dict(exposure)
+            confirmed_envelopes = [
+                envelope
+                for envelope in envelopes
+                if envelope.get("status") == "confirmed"
+                and envelope.get("source_kind") == "successful_brief"
+                and envelope.get("revision") is not None
+                and int(envelope["revision"]) == int(revision)
+                and str(envelope.get("source_digest") or "") == digest
+                and str(item["candidate_exposure_id"])
+                in set((envelope.get("render_context") or {}).get("candidate_exposure_ids") or [])
+                and str(item["candidate_occurrence_id"])
+                in set((envelope.get("render_context") or {}).get("candidate_occurrence_ids") or [])
+            ]
+            item["delivery_confirmed"] = bool(confirmed_envelopes)
+            item["confirmed_delivery_keys"] = sorted(
+                {str(envelope.get("delivery_key") or "") for envelope in confirmed_envelopes}
+                - {""}
+            )
+            out_by_id[str(item["candidate_exposure_id"])] = item
+    return {
+        "available": True,
+        "reason": "partial" if invalid_revisions else "ok",
+        "account": account_norm,
+        "market": market_norm,
+        "market_trading_date": date_norm,
+        "invalid_revisions": invalid_revisions,
+        "exposures": [out_by_id[key] for key in sorted(out_by_id)],
+    }
+
+
 def read_daily_decision_brief_delivery(*, base: Path, account: str, market: str) -> dict[str, Any]:
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -1416,6 +1527,7 @@ def _delivery_day(state: dict[str, Any], market_date: str) -> dict[str, Any]:
             "pending_candidates": {},
             "alerted_candidates": {},
             "candidate_delivery": None,
+            "candidate_delivery_history": [],
         },
     )
 
@@ -1561,11 +1673,45 @@ def _normalize_delivery_state(
                 expected_target=None,
                 expected_candidate=True,
             )
+        history_raw = raw_day.get("candidate_delivery_history", [])
+        if not isinstance(history_raw, list):
+            raise DailyDecisionBriefStateError(
+                f"daily brief candidate delivery history is invalid: {path}: {market_date}"
+            )
+        history: list[dict[str, Any]] = []
+        history_keys: set[str] = set()
+        for raw_envelope in history_raw:
+            normalized_envelope = _normalize_delivery_envelope(
+                raw_envelope,
+                base=base,
+                path=path,
+                account=account,
+                market=market,
+                market_date=market_date,
+                expected_target=None,
+                expected_candidate=True,
+            )
+            if normalized_envelope["status"] != "confirmed":
+                raise DailyDecisionBriefStateError(
+                    f"daily brief candidate delivery history must be confirmed: {path}: {market_date}"
+                )
+            delivery_key = str(normalized_envelope["delivery_key"])
+            if delivery_key in history_keys:
+                raise DailyDecisionBriefStateError(
+                    f"daily brief candidate delivery history contains duplicate keys: {path}: {market_date}"
+                )
+            history_keys.add(delivery_key)
+            history.append(normalized_envelope)
+        if candidate is not None and str(candidate["delivery_key"]) in history_keys:
+            raise DailyDecisionBriefStateError(
+                f"daily brief current candidate delivery duplicates history: {path}: {market_date}"
+            )
         days[market_date] = {
             "fixed_reports": fixed,
             "pending_candidates": pending,
             "alerted_candidates": alerted,
             "candidate_delivery": candidate,
+            "candidate_delivery_history": history,
         }
         if set(pending) & set(alerted):
             raise DailyDecisionBriefStateError(
@@ -1694,6 +1840,16 @@ def _normalize_delivery_envelope(
             raise DailyDecisionBriefStateError(
                 f"daily brief delivery candidates are absent from the source revision: {path}"
             )
+        try:
+            _validate_optional_combo_render_context(
+                render_context,
+                brief=source_brief,
+                candidate_identities=candidate_identities,
+            )
+        except ValueError as exc:
+            raise DailyDecisionBriefStateError(
+                f"daily brief delivery Combo evidence is invalid: {path}: {exc}"
+            ) from exc
     else:
         if envelope.get("revision") is not None or not source_reference:
             raise DailyDecisionBriefStateError(f"scan failure delivery source is invalid: {path}")
@@ -1786,6 +1942,50 @@ def _normalize_legacy_confirmation(
     }
 
 
+def _validate_optional_combo_render_context(
+    context: Mapping[str, Any],
+    *,
+    brief: Mapping[str, Any],
+    candidate_identities: list[str] | tuple[str, ...],
+) -> None:
+    occurrence_raw = context.get("candidate_occurrence_ids")
+    exposure_raw = context.get("candidate_exposure_ids")
+    rendered_identity_raw = context.get("rendered_combo_candidate_identities")
+    if occurrence_raw is None and exposure_raw is None:
+        return
+    if (
+        not isinstance(occurrence_raw, list)
+        or not isinstance(exposure_raw, list)
+        or not isinstance(rendered_identity_raw, list)
+    ):
+        raise ValueError("Combo evidence IDs must be lists")
+    rendered_identities = sorted(
+        {
+            str(item).strip()
+            for item in rendered_identity_raw
+            if str(item).strip()
+        }
+    )
+    if not set(rendered_identities).issubset(set(candidate_identities)):
+        raise ValueError("rendered Combo identities must be delivered candidate identities")
+    expected = combo_exposure_render_context(
+        derive_combo_candidate_exposures(
+            brief,
+            candidate_identities=rendered_identities,
+        )
+    )
+    observed = {
+        "candidate_occurrence_ids": sorted(
+            {str(item).strip() for item in occurrence_raw if str(item).strip()}
+        ),
+        "candidate_exposure_ids": sorted(
+            {str(item).strip() for item in exposure_raw if str(item).strip()}
+        ),
+    }
+    if observed != expected:
+        raise ValueError("Combo evidence IDs do not match the frozen Brief revision")
+
+
 @contextmanager
 def _locked_delivery_envelope(
     *,
@@ -1832,6 +2032,15 @@ def _locked_delivery_envelope(
         candidate = day.get("candidate_delivery")
         if envelope is None and isinstance(candidate, Mapping) and candidate.get("delivery_key") == key_norm:
             envelope = candidate
+        if envelope is None:
+            envelope = next(
+                (
+                    item
+                    for item in day.get("candidate_delivery_history") or []
+                    if item.get("delivery_key") == key_norm
+                ),
+                None,
+            )
         if envelope is None:
             raise DailyDecisionBriefStateError("daily brief delivery key does not reference a prepared envelope")
         if envelope["source_digest"] != digest_norm:
@@ -2515,6 +2724,7 @@ __all__ = [
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery",
     "read_daily_decision_brief_delivery_state",
+    "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",
     "record_daily_decision_brief_candidates",

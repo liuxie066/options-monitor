@@ -13,6 +13,9 @@ from domain.domain.position_advice_authority import (
     normalize_portfolio_source,
     scope_for,
 )
+from src.application.ledger.api import (
+    validate_position_fact_snapshot_contract,
+)
 from src.application.position_advice_authority_service import (
     read_authority_resolution_under_lock,
 )
@@ -80,6 +83,14 @@ def build_immutable_input(
         raise PositionAdviceInputError("decision state snapshot is not trusted")
     if len(fingerprint) != 64:
         raise PositionAdviceInputError("decision state fingerprint is missing")
+    position_fact_reasons = validate_position_fact_snapshot_contract(
+        snapshot
+    )
+    if position_fact_reasons:
+        raise PositionAdviceInputError(
+            "decision state position facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
 
     if authority_resolution.portfolio_scope_id != portfolio_scope_id:
         raise PositionAdviceInputError("authority resolution scope mismatch")

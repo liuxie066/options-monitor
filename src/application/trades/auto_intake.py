@@ -21,6 +21,10 @@ from domain.domain.trade_account_identity import extract_primary_account_id
 from src.application.config_loader import load_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.trades.combo_reconciliation import (
+    reconcile_account_post_trade_combos,
+    trade_combo_runtime_environment,
+)
 from src.application.trades.normalizer import normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state import (
@@ -99,6 +103,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _log(message: str) -> None:
     print(message, flush=True)
+
+
+def _attach_combo_reconciliation_after_open(
+    result: dict[str, Any],
+    *,
+    apply_changes: bool,
+    mode: str,
+    reconcile_fn: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach post-commit diagnostics without changing the trade outcome."""
+
+    mode_value = str(mode or "off").strip().lower()
+    if (
+        not apply_changes
+        or mode_value == "off"
+        or str(result.get("status") or "").strip().lower() != "applied"
+        or str(result.get("action") or "").strip().lower() != "open"
+    ):
+        return result
+    try:
+        result["combo_reconciliation"] = reconcile_fn()
+    except Exception as exc:
+        result["combo_reconciliation"] = {
+            "ok": False,
+            "status": "failed",
+            "mode": mode_value,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return result
 
 
 def _process_payload(
@@ -489,6 +522,28 @@ def main(argv: list[str] | None = None) -> int:
                     source="manual",
                     allow_external_lookup=bool(apply_changes),
                 )
+                combo_mode = str(
+                    manual_source.get("combo_reconciliation_mode") or "off"
+                ).strip().lower()
+                _attach_combo_reconciliation_after_open(
+                    result,
+                    apply_changes=apply_changes,
+                    mode=combo_mode,
+                    reconcile_fn=lambda: reconcile_account_post_trade_combos(
+                        repo=repo,
+                        runtime_root=runtime_root,
+                        account=str(
+                            result.get("account")
+                            or manual_source.get("account")
+                            or ""
+                        ),
+                        runtime_environment=trade_combo_runtime_environment(
+                            host=manual_host,
+                            port=manual_port,
+                        ),
+                        mode=combo_mode,
+                    ),
+                )
         finally:
             if holdings_sync_dispatcher is not None:
                 holdings_sync_dispatcher.close()
@@ -819,6 +874,9 @@ def _source_status_payload(source: dict[str, Any]) -> dict[str, Any]:
         "backfill_checkpoint_path": str(source.get("backfill_checkpoint_path")),
         "mapped_accounts": sorted(dict(source.get("account_mapping") or {}).values()),
         "futu_account_ids": list(source.get("futu_account_ids") or []),
+        "combo_reconciliation_mode": str(
+            source.get("combo_reconciliation_mode") or "off"
+        ),
     }
 
 
@@ -854,6 +912,9 @@ def _status_base_for_source(
         runtime_root_source=runtime_root_source,
     )
     out["source_id"] = source.get("id")
+    out["combo_reconciliation_mode"] = str(
+        source.get("combo_reconciliation_mode") or "off"
+    )
     out["inbox_path"] = str(inbox_path)
     out["backfill_checkpoint_path"] = str(
         backfill_checkpoint_path
@@ -890,6 +951,13 @@ def _run_listener_source_loop(
     ) or Path(state_path).with_name("trade_intake_backfill_checkpoint.json")
     host = str(source.get("host") or "127.0.0.1")
     port = int(source.get("port") or 11111)
+    combo_mode = str(
+        source.get("combo_reconciliation_mode") or "off"
+    ).strip().lower()
+    combo_runtime_environment = trade_combo_runtime_environment(
+        host=host,
+        port=port,
+    )
     account_mapping = dict(source.get("account_mapping") or {})
     futu_account_ids = list(source.get("futu_account_ids") or [])
     status_state = _status_base_for_source(
@@ -911,6 +979,15 @@ def _run_listener_source_loop(
         is_option_chain_cache_enabled=False,
     )
 
+    def _run_combo_reconciliation() -> dict[str, Any]:
+        return reconcile_account_post_trade_combos(
+            repo=repo,
+            runtime_root=runtime_root,
+            account=str(source.get("account") or ""),
+            runtime_environment=combo_runtime_environment,
+            mode=combo_mode,
+        )
+
     def _process_payload_with_lifecycle_runtime(
         payload: dict[str, Any],
         **kwargs: Any,
@@ -918,6 +995,13 @@ def _run_listener_source_loop(
         result = _process_payload(payload, **kwargs)
         if not apply_changes:
             return result
+        if str(kwargs.get("source") or "").strip().lower() != "backfill":
+            _attach_combo_reconciliation_after_open(
+                result,
+                apply_changes=apply_changes,
+                mode=combo_mode,
+                reconcile_fn=_run_combo_reconciliation,
+            )
         try:
             timing = ensure_lifecycle_timing_after_intake(
                 repo,
@@ -1105,6 +1189,11 @@ def _run_listener_source_loop(
                     else None
                 ),
                 "inbox": trade_inbox_summary(inbox_path),
+                "last_combo_reconciliation": (
+                    dict(result.get("combo_reconciliation"))
+                    if isinstance(result.get("combo_reconciliation"), dict)
+                    else status_state.get("last_combo_reconciliation")
+                ),
             }
         )
         _refresh_lifecycle_delivery_status(
@@ -1123,6 +1212,7 @@ def _run_listener_source_loop(
     last_inbox_retry_monotonic: float | None = None
     last_outbox_dispatch_monotonic: float | None = None
     last_lifecycle_due_monotonic: float | None = None
+    last_combo_reconciliation_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
@@ -1254,6 +1344,25 @@ def _run_listener_source_loop(
                             "last_lifecycle_due_error"
                         ] = f"{type(exc).__name__}: {exc}"
                     last_lifecycle_due_monotonic = now_mono
+                combo_reconciliation_due = (
+                    bool(apply_changes)
+                    and combo_mode != "off"
+                    and (
+                        last_combo_reconciliation_monotonic is None
+                        or now_mono - last_combo_reconciliation_monotonic >= 60
+                    )
+                )
+                if combo_reconciliation_due:
+                    try:
+                        with process_lock:
+                            combo_result = _run_combo_reconciliation()
+                        status_state["last_combo_reconciliation"] = combo_result
+                        status_state.pop("last_combo_reconciliation_error", None)
+                    except Exception as exc:
+                        status_state["last_combo_reconciliation_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    last_combo_reconciliation_monotonic = now_mono
                 should_backfill = bool(backfill_cfg.get("enabled", True))
                 if should_backfill:
                     interval_sec = int(backfill_cfg.get("interval_sec") or 300)
@@ -1306,6 +1415,26 @@ def _run_listener_source_loop(
                                     "error": result["error"],
                                 },
                             )
+                        if apply_changes and combo_mode != "off":
+                            try:
+                                with process_lock:
+                                    combo_result = _run_combo_reconciliation()
+                                result["combo_reconciliation"] = combo_result
+                                status_state["last_combo_reconciliation"] = combo_result
+                                status_state.pop(
+                                    "last_combo_reconciliation_error",
+                                    None,
+                                )
+                            except Exception as exc:
+                                error = f"{type(exc).__name__}: {exc}"
+                                result["combo_reconciliation"] = {
+                                    "ok": False,
+                                    "status": "failed",
+                                    "mode": combo_mode,
+                                    "error": error,
+                                }
+                                status_state["last_combo_reconciliation_error"] = error
+                            last_combo_reconciliation_monotonic = time.monotonic()
                         last_backfill_monotonic = time.monotonic()
                         status_state.update(_update_status_from_backfill(status_state, result))
                         _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
@@ -1411,6 +1540,9 @@ def _status_base_payload(
         "backfill": dict(intake_cfg.get("backfill") or {}),
         "holdings_sync": _holdings_sync_status_payload(
             intake_cfg.get("holdings_sync")
+        ),
+        "combo_reconciliation": dict(
+            intake_cfg.get("combo_reconciliation") or {}
         ),
         "started_at_utc": utc_now(),
     }

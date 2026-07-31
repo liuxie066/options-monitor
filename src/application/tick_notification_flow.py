@@ -8,6 +8,11 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.daily_decision_brief import decide_daily_brief_notification, diff_daily_decision_briefs
+from domain.domain.combo_candidate_evidence import (
+    combo_candidate_identities_for_rendered_rows,
+    combo_exposure_render_context,
+    derive_combo_candidate_exposures,
+)
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, evaluate_dnd_quiet_hours
 from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
 from domain.domain.engine import (
@@ -23,6 +28,7 @@ from src.application.daily_decision_brief_renderer import (
     render_fixed_report,
     render_fixed_report_card_markdown,
     resolve_daily_brief_render_limits,
+    select_rendered_combo_candidate_rows,
 )
 from src.application.daily_decision_brief_repository import (
     confirm_daily_decision_brief_delivery_v2,
@@ -934,14 +940,40 @@ def _prepare_daily_brief_notification(
                             if action == "fixed_report"
                             else pending
                         )
+                        rendered_combo_rows = select_rendered_combo_candidate_rows(
+                            persisted["brief"],
+                            delivery_kind=action,
+                            candidate_identities=identities,
+                            diff=diff,
+                            limits=daily_limits,
+                        )
+                        rendered_combo_identities = (
+                            combo_candidate_identities_for_rendered_rows(
+                                persisted["brief"],
+                                rendered_combo_rows,
+                            )
+                        )
+                        render_context.update(
+                            combo_exposure_render_context(
+                                derive_combo_candidate_exposures(
+                                    persisted["brief"],
+                                    candidate_identities=rendered_combo_identities,
+                                )
+                            )
+                        )
+                        render_context["rendered_combo_candidate_identities"] = (
+                            rendered_combo_identities
+                        )
                         if action == "fixed_report":
                             message = render_fixed_report(
                                 persisted["brief"],
+                                diff=diff,
                                 limits=daily_limits,
                                 context=render_context,
                             )
                             card_markdown = render_fixed_report_card_markdown(
                                 persisted["brief"],
+                                diff=diff,
                                 limits=daily_limits,
                                 context=render_context,
                             )

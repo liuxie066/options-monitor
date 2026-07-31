@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.lifecycle_allocation import (
@@ -16,6 +16,8 @@ from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
     lifecycle_evidence_facts,
+    lifecycle_case_coherent_facts,
+    lifecycle_option_close_anchor_facts,
     lifecycle_reconciliation_facts,
     record_lifecycle_allocation,
     record_lifecycle_evidence_issue,
@@ -27,6 +29,10 @@ from src.application.trades.close_reason_evidence import (
 
 
 EARLY_SETTLEMENT_TOLERANCE_MS = 5 * 60 * 1000
+
+
+class LifecycleCaseDataError(ValueError):
+    """A malformed case-local fact that may be isolated by a batch reader."""
 
 
 @dataclass(frozen=True)
@@ -85,122 +91,288 @@ def lifecycle_case_read_model(
     case_id: str,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
-    facts = lifecycle_reconciliation_facts(repo, case_id=case_id)
-    lifecycle_case = next(iter(facts["cases"]), None)
-    if lifecycle_case is None:
-        raise ValueError(f"lifecycle case not found: {case_id}")
-    allocations = list(facts["allocations"])
-    evidence = list(facts["evidence"])
-    void_event_ids = tuple(facts.get("effective_void_event_ids") or ())
-    lot_fields_by_id = dict(facts["position_lot_fields_by_id"])
-    evidence_facts = lifecycle_evidence_facts(
-        evidence=evidence,
-        allocations=allocations,
-        void_event_ids=void_event_ids,
+    facts = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    return build_lifecycle_case_read_model_from_resolved_facts(
+        lifecycle_case=dict(facts["lifecycle_case"]),
+        case_resolution=dict(facts["case_resolution"]),
+        generation_token=dict(facts["generation_token"]),
+        allocations=list(facts["case_allocations"]),
+        timing_policy=(
+            dict(facts["timing_policy"])
+            if isinstance(facts.get("timing_policy"), dict)
+            else None
+        ),
+        position_lot_fields_by_id=dict(
+            facts["position_lot_fields_by_id"]
+        ),
+        void_event_ids=tuple(facts["effective_void_event_ids"]),
+        now_ms=now_ms,
     )
-    orphan_evidence_ids = list(evidence_facts.orphan_evidence_ids)
-    resolution = resolve_allocations(
-        dict(lifecycle_case.get("target_contracts_by_lot") or {}),
-        allocations,
-        void_event_ids=void_event_ids,
-    )
-    quantity_drift = False
-    for lot_id, expected_remaining in resolution.remaining_contracts_by_lot.items():
+
+
+def build_lifecycle_read_models_from_resolved_account(
+    *,
+    cases: list[dict[str, Any]],
+    allocations: list[dict[str, Any]],
+    timing_policies: list[dict[str, Any]],
+    position_lots: list[dict[str, Any]],
+    account_resolution: Mapping[str, Any],
+    void_event_ids: tuple[str, ...] | list[str] = (),
+    now_ms: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build lot models from one already-resolved account generation."""
+
+    cases_by_id = {
+        str(item.get("case_id") or "").strip(): dict(item)
+        for item in cases
+        if isinstance(item, dict)
+        and str(item.get("case_id") or "").strip()
+    }
+    allocations_by_case: dict[str, list[dict[str, Any]]] = {}
+    for item in allocations:
+        if not isinstance(item, dict):
+            continue
+        allocations_by_case.setdefault(
+            str(item.get("case_id") or "").strip(),
+            [],
+        ).append(dict(item))
+    timing_by_case = {
+        str(item.get("case_id") or "").strip(): dict(item)
+        for item in timing_policies
+        if isinstance(item, dict)
+        and str(item.get("case_id") or "").strip()
+    }
+    lots_by_id = {
+        str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
+        for item in position_lots
+        if isinstance(item, dict)
+        and str(item.get("record_id") or "").strip()
+    }
+    tokens_by_case = {
+        str(item.get("case_id") or "").strip(): dict(item)
+        for item in account_resolution.get("generation_tokens") or []
+        if isinstance(item, Mapping)
+        and str(item.get("case_id") or "").strip()
+    }
+    output: dict[str, dict[str, Any]] = {}
+    for raw_resolution in account_resolution.get("case_resolutions") or []:
+        if not isinstance(raw_resolution, Mapping):
+            continue
+        case_resolution = dict(raw_resolution)
+        case_id = str(case_resolution.get("case_id") or "").strip()
+        lifecycle_case = cases_by_id.get(case_id)
+        generation_token = tokens_by_case.get(case_id)
+        if lifecycle_case is None or generation_token is None:
+            continue
+        target_ids = sorted(
+            str(item or "").strip()
+            for item in dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            )
+            if str(item or "").strip()
+        )
         try:
-            fields = lot_fields_by_id[lot_id]
-            actual_remaining = int(fields.get("contracts_open") or 0)
-        except (KeyError, TypeError, ValueError):
-            quantity_drift = True
-            break
-        if actual_remaining != expected_remaining:
-            quantity_drift = True
-            break
-    persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
-    derived_summary = dict(lifecycle_case.get("derived_summary") or {})
-    timing_policy = repo.get_trade_lifecycle_timing_policy(case_id)
+            model = build_lifecycle_case_read_model_from_resolved_facts(
+                lifecycle_case=lifecycle_case,
+                case_resolution=case_resolution,
+                generation_token=generation_token,
+                allocations=allocations_by_case.get(case_id, []),
+                timing_policy=timing_by_case.get(case_id),
+                position_lot_fields_by_id=lots_by_id,
+                void_event_ids=tuple(void_event_ids),
+                now_ms=now_ms,
+            )
+        except LifecycleCaseDataError as exc:
+            model = _isolated_case_error_model(
+                lifecycle_case=lifecycle_case,
+                case_id=case_id,
+                generation_token=generation_token,
+                error=exc,
+            )
+        for lot_id in target_ids:
+            if lot_id not in output:
+                output[lot_id] = dict(model)
+                continue
+            prior = output[lot_id]
+            case_ids = sorted(
+                {
+                    str(prior.get("lifecycle_case_id") or ""),
+                    case_id,
+                }
+                - {""}
+            )
+            output[lot_id] = {
+                **prior,
+                "lifecycle_state": "conflict",
+                "lifecycle_case_ids": case_ids,
+                "lifecycle_evidence_status": "conflict",
+                "lifecycle_reason_codes": sorted(
+                    {
+                        *prior.get("lifecycle_reason_codes", []),
+                        *model.get("lifecycle_reason_codes", []),
+                        "reservation_target_overlap",
+                    }
+                ),
+                "reason_state": "conflict",
+                "actionable": False,
+            }
+    return output
+
+
+def build_lifecycle_case_read_model_from_resolved_facts(
+    *,
+    lifecycle_case: dict[str, Any],
+    case_resolution: dict[str, Any],
+    generation_token: dict[str, Any],
+    allocations: list[dict[str, Any]],
+    timing_policy: dict[str, Any] | None,
+    position_lot_fields_by_id: dict[str, dict[str, Any]],
+    void_event_ids: tuple[str, ...] | list[str],
+    now_ms: int | None,
+) -> dict[str, Any]:
+    case_id = str(lifecycle_case.get("case_id") or "").strip()
+    if not case_id or str(case_resolution.get("case_id") or "") != case_id:
+        raise LifecycleCaseDataError("lifecycle_case_resolution_mismatch")
+    try:
+        target_manifest = {
+            str(key): int(value)
+            for key, value in dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            ).items()
+        }
+        resolution = resolve_allocations(
+            target_manifest,
+            allocations,
+            void_event_ids=void_event_ids,
+        )
+        quantity_drift = any(
+            lot_id not in position_lot_fields_by_id
+            or int(
+                position_lot_fields_by_id[lot_id].get("contracts_open")
+                or 0
+            )
+            != expected_remaining
+            for lot_id, expected_remaining in (
+                resolution.remaining_contracts_by_lot.items()
+            )
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise LifecycleCaseDataError(
+            "lifecycle_case_quantity_invalid"
+        ) from exc
+
+    anchor_facts = [
+        dict(item)
+        for item in case_resolution.get("anchor_facts") or []
+        if isinstance(item, Mapping)
+    ]
     effective_timing: dict[str, Any] | None = None
     timing_error: str | None = None
-    if isinstance(timing_policy, dict):
+    if timing_policy is not None and anchor_facts:
         try:
             effective_timing = derive_effective_lifecycle_timing(
                 policy=timing_policy,
-                option_close_evidence=evidence,
+                option_close_evidence=[
+                    {
+                        "evidence_type": "option_zero_price_close",
+                        "received_at_ms": item.get("received_at_ms"),
+                    }
+                    for item in anchor_facts
+                ],
             )
-        except ValueError as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             timing_error = str(exc)
-    conflict_reasons = (
-        tuple(str(item) for item in derived_summary.get("lifecycle_reason_codes") or ())
-        if persisted_status == "conflict"
-        else ()
+
+    persisted_status = str(
+        lifecycle_case.get("status") or ""
+    ).strip().lower()
+    summary = (
+        dict(lifecycle_case.get("derived_summary") or {})
+        if isinstance(lifecycle_case.get("derived_summary"), dict)
+        else {}
     )
-    read_model = derive_lifecycle_read_model(
-        expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
-        market=str(
-            lifecycle_case.get("market")
-            or symbol_market(lifecycle_case.get("symbol"))
-            or ""
-        ),
-        target_contracts_by_lot=dict(
-            lifecycle_case.get("target_contracts_by_lot") or {}
-        ),
-        allocations=allocations,
-        void_event_ids=void_event_ids,
-        accepted_option_close_contracts_by_lot=(
-            evidence_facts.reservation_contracts_by_lot
-        ),
-        now_ms=now_ms,
-        conflict_reason_codes=conflict_reasons,
-        orphan_evidence=bool(orphan_evidence_ids),
-        quantity_drift=quantity_drift,
-        observation_start_ms_override=(
-            int(lifecycle_case["observation_start_ms"])
-            if lifecycle_case.get("observation_start_ms") is not None
-            else None
-        ),
-        pending_until_ms_override=(
-            int(
-                (
-                    effective_timing
-                    or timing_policy
-                    or {}
-                ).get("settlement_deadline_ms")
-            )
-            if (
-                effective_timing
-                or timing_policy
-                or {}
-            ).get("settlement_deadline_ms")
-            is not None
-            else None
-        ),
-    )
-    terminal_event_ids = sorted(
-        str(item.get("canonical_terminal_event_id") or "").strip()
-        for item in evidence_facts.effective_allocations
-        if str(item.get("canonical_terminal_event_id") or "").strip()
+    conflict_reasons = set(
+        str(item)
+        for item in case_resolution.get("reason_codes") or []
+        if str(item or "").strip()
     )
     if persisted_status == "conflict":
+        conflict_reasons.update(
+            str(item)
+            for item in summary.get("lifecycle_reason_codes") or []
+            if str(item or "").strip()
+        )
+    if timing_error and case_resolution.get("status") in {"direct", "bridged"}:
+        conflict_reasons.add("lifecycle_effective_timing_invalid")
+
+    try:
+        read_model = derive_lifecycle_read_model(
+            expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
+            market=str(
+                lifecycle_case.get("market")
+                or symbol_market(lifecycle_case.get("symbol"))
+                or ""
+            ),
+            target_contracts_by_lot=target_manifest,
+            allocations=allocations,
+            void_event_ids=void_event_ids,
+            accepted_option_close_contracts_by_lot=dict(
+                case_resolution.get("effective_reservations_by_lot") or {}
+            ),
+            now_ms=now_ms,
+            conflict_reason_codes=tuple(sorted(conflict_reasons)),
+            quantity_drift=quantity_drift,
+            observation_start_ms_override=(
+                int(lifecycle_case["observation_start_ms"])
+                if lifecycle_case.get("observation_start_ms") is not None
+                else None
+            ),
+            pending_until_ms_override=(
+                int(
+                    (effective_timing or timing_policy or {}).get(
+                        "settlement_deadline_ms"
+                    )
+                )
+                if (effective_timing or timing_policy or {}).get(
+                    "settlement_deadline_ms"
+                )
+                is not None
+                else None
+            ),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise LifecycleCaseDataError(
+            "lifecycle_case_read_model_invalid"
+        ) from exc
+
+    effective_allocations = [
+        item
+        for item in allocations
+        if not bool(item.get("voided"))
+        and str(item.get("canonical_terminal_event_id") or "").strip()
+        not in set(void_event_ids)
+    ]
+    anchor_status = str(case_resolution.get("status") or "missing")
+    if read_model.lifecycle_state == "conflict":
         evidence_status = "conflict"
-    elif orphan_evidence_ids:
-        evidence_status = "evidence_without_allocation"
-    elif not evidence:
-        evidence_status = "missing"
-    elif evidence_facts.reservation_evidence_ids:
-        evidence_status = "closure_observed_cause_pending"
-    elif read_model.remaining_contracts_by_lot and any(
-        read_model.remaining_contracts_by_lot.values()
+    elif anchor_status in {"direct", "bridged"} and any(
+        read_model.reserved_contracts_by_lot.values()
     ):
+        evidence_status = "closure_observed_cause_pending"
+    elif anchor_status == "missing" and not effective_allocations:
+        evidence_status = "missing"
+    elif any(read_model.remaining_contracts_by_lot.values()):
         evidence_status = "partial"
     else:
         evidence_status = "complete"
+
     persisted_reason_state = str(
-        derived_summary.get("reason_state") or ""
+        summary.get("reason_state") or ""
     ).strip().lower()
     effective_reason_state = (
         persisted_reason_state
         if persisted_status in {"needs_review", "conflict"}
-        and persisted_reason_state
-        in {"needs_review", "conflict"}
+        and persisted_reason_state in {"needs_review", "conflict"}
         else read_model.reason_state
     )
     effective_reason_codes = sorted(
@@ -208,25 +380,20 @@ def lifecycle_case_read_model(
             *read_model.lifecycle_reason_codes,
             *(
                 str(item)
-                for item in (
-                    derived_summary.get(
-                        "lifecycle_reason_codes"
-                    )
-                    or []
-                )
+                for item in summary.get("lifecycle_reason_codes") or []
                 if str(item or "").strip()
             ),
         }
     )
     effective_close_reason = (
-        str(derived_summary.get("close_reason") or "").strip()
+        str(summary.get("close_reason") or "").strip()
         if effective_reason_state in {"needs_review", "conflict"}
         else ""
     ) or read_model.close_reason
     return {
         "schema_version": "option_lifecycle_read_model.v3",
         "lifecycle_state": read_model.lifecycle_state,
-        "lifecycle_case_id": str(lifecycle_case.get("case_id") or ""),
+        "lifecycle_case_id": case_id,
         "lifecycle_evidence_status": evidence_status,
         "lifecycle_reason_codes": effective_reason_codes,
         "observation_start_ms": read_model.observation_start_ms,
@@ -237,11 +404,7 @@ def lifecycle_case_read_model(
             else None
         ),
         "first_option_close_received_at_ms": (
-            int(
-                effective_timing[
-                    "first_option_close_received_at_ms"
-                ]
-            )
+            int(effective_timing["first_option_close_received_at_ms"])
             if effective_timing is not None
             else None
         ),
@@ -250,15 +413,17 @@ def lifecycle_case_read_model(
             if effective_timing is not None
             else (
                 canonical_hash(timing_policy)
-                if isinstance(timing_policy, dict)
+                if timing_policy is not None
                 else None
             )
         ),
         "timing_error": timing_error,
-        "terminal_event_ids": terminal_event_ids,
-        "target_contracts_by_lot": dict(
-            lifecycle_case.get("target_contracts_by_lot") or {}
+        "terminal_event_ids": sorted(
+            str(item.get("canonical_terminal_event_id") or "").strip()
+            for item in effective_allocations
+            if str(item.get("canonical_terminal_event_id") or "").strip()
         ),
+        "target_contracts_by_lot": target_manifest,
         "resolved_contracts_by_lot": read_model.resolved_contracts_by_lot,
         "remaining_contracts_by_lot": read_model.remaining_contracts_by_lot,
         "resolved_contracts_by_terminal_type": (
@@ -270,7 +435,7 @@ def lifecycle_case_read_model(
         "close_reason": effective_close_reason,
         "allocation_ids": sorted(
             str(item.get("allocation_id") or "").strip()
-            for item in evidence_facts.effective_allocations
+            for item in effective_allocations
             if str(item.get("allocation_id") or "").strip()
         ),
         "voided_terminal_event_ids": sorted(
@@ -281,10 +446,16 @@ def lifecycle_case_read_model(
                 in set(void_event_ids)
             }
         ),
-        "reservation_evidence_ids": list(
-            evidence_facts.reservation_evidence_ids
+        "reservation_evidence_ids": sorted(
+            str(item.get("source_owner_evidence_id") or "").strip()
+            for item in anchor_facts
+            if str(item.get("source_owner_evidence_id") or "").strip()
+            and any(read_model.reserved_contracts_by_lot.values())
         ),
-        "orphan_evidence_ids": orphan_evidence_ids,
+        "orphan_evidence_ids": [],
+        "lifecycle_generation_token": str(
+            generation_token.get("generation_token") or ""
+        ),
         "actionable": (
             read_model.actionable
             and effective_reason_state
@@ -298,6 +469,44 @@ def lifecycle_case_read_model(
     }
 
 
+def _isolated_case_error_model(
+    *,
+    lifecycle_case: dict[str, Any],
+    case_id: str,
+    generation_token: dict[str, Any],
+    error: LifecycleCaseDataError,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "option_lifecycle_read_model.v3",
+        "lifecycle_state": "conflict",
+        "lifecycle_case_id": case_id,
+        "lifecycle_evidence_status": "conflict",
+        "lifecycle_reason_codes": [str(error)],
+        "target_contracts_by_lot": dict(
+            lifecycle_case.get("target_contracts_by_lot") or {}
+        ),
+        "resolved_contracts_by_lot": {},
+        "remaining_contracts_by_lot": {},
+        "resolved_contracts_by_terminal_type": {},
+        "reserved_contracts_by_lot": {},
+        "closure_fact": "unknown",
+        "reason_state": "conflict",
+        "close_reason": None,
+        "allocation_ids": [],
+        "terminal_event_ids": [],
+        "voided_terminal_event_ids": [],
+        "reservation_evidence_ids": [],
+        "orphan_evidence_ids": [],
+        "pairing_until_ms": None,
+        "pending_until_ms": None,
+        "timing_error": str(error),
+        "lifecycle_generation_token": str(
+            generation_token.get("generation_token") or ""
+        ),
+        "actionable": False,
+    }
+
+
 def reconcile_lifecycle_evidence(
     repo: Any,
     *,
@@ -307,6 +516,7 @@ def reconcile_lifecycle_evidence(
     apply_changes: bool = False,
     now_ms: int | None = None,
     expected_resolution_revision: int | None = None,
+    expected_lifecycle_generation_token: str | None = None,
     correction_void_events: tuple[Any, ...] = (),
     notification_transition_type: str | None = None,
 ) -> LifecycleReconciliationResult:
@@ -389,6 +599,9 @@ def reconcile_lifecycle_evidence(
             reason_codes=validation_reasons,
             apply_changes=apply_changes,
             now_ms=now_ms,
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
         )
 
     allocations = list(facts["allocations"])
@@ -441,6 +654,9 @@ def reconcile_lifecycle_evidence(
             reason_codes=("evidence_without_allocation",),
             apply_changes=apply_changes,
             now_ms=now_ms,
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
         )
 
     resolution = resolve_allocations(
@@ -511,6 +727,9 @@ def reconcile_lifecycle_evidence(
                 expected_resolution_revision=(
                     expected_resolution_revision
                 ),
+                expected_lifecycle_generation_token=(
+                    expected_lifecycle_generation_token
+                ),
                 correction_void_events=list(
                     correction_void_events
                 ),
@@ -548,6 +767,9 @@ def reconcile_lifecycle_evidence(
             reason_codes=("late_settlement_conflicts_with_expire_close",),
             apply_changes=apply_changes,
             now_ms=now_ms,
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
         )
     plan = plan_evidence_allocation(
         case_id=matched_case_id,
@@ -567,6 +789,9 @@ def reconcile_lifecycle_evidence(
             apply_changes=apply_changes,
             now_ms=now_ms,
             plan=plan,
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
         )
     event_rows = [
         _terminal_event(
@@ -625,6 +850,9 @@ def reconcile_lifecycle_evidence(
         derived_status=derived_status,
         derived_summary=derived_summary,
         expected_resolution_revision=expected_resolution_revision,
+        expected_lifecycle_generation_token=(
+            expected_lifecycle_generation_token
+        ),
         correction_void_events=list(correction_void_events),
         notification_transition_type=notification_transition_type,
     )
@@ -674,6 +902,7 @@ def _record_issue_result(
     apply_changes: bool,
     now_ms: int | None,
     plan: AllocationPlan | None = None,
+    expected_lifecycle_generation_token: str | None = None,
 ) -> LifecycleReconciliationResult:
     case_id = str(lifecycle_case.get("case_id") or "")
     ledger_result = None
@@ -684,6 +913,9 @@ def _record_issue_result(
             evidence=evidence,
             status=status,
             reason_codes=list(reason_codes),
+            expected_lifecycle_generation_token=(
+                expected_lifecycle_generation_token
+            ),
         )
     return LifecycleReconciliationResult(
         status=status,
