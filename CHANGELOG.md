@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.8.1 - 2026-08-01
+
+### Bug Fixes
+- Restored IQ option-position validation by enriching missing OpenD contract multipliers from authoritative market snapshots and treating only exact, in-deadline lifecycle-owned quantity differences as non-blocking partial evidence, while unresolved evidence and true divergences remain fail closed.
+- Canonicalized broker option roots when matching lifecycle contracts, preventing supported aliases such as `TCH` and `POP` from creating false contract conflicts.
+- Resolved broker identity from nested lifecycle evidence so unrelated historical stock-settlement facts no longer create false blockers for expired-position maintenance.
+
 ## 1.8.0 - 2026-07-31
 
 ### New Features
