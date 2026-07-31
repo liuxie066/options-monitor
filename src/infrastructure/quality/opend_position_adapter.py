@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -11,6 +12,13 @@ from src.application.account_config import resolve_futu_account_ids
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.opend_utils import market_to_futu_trade_date_market
 from src.infrastructure.futu_gateway import build_ready_futu_gateway
+
+
+_MARKET_SNAPSHOT_BATCH_SIZE = 200
+
+
+class OpenDOptionEvidenceError(RuntimeError):
+    code = "OPEND_OPTION_MULTIPLIER_EVIDENCE_INCOMPLETE"
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -154,6 +162,10 @@ class OpenDOptionPositionAdapter:
                 if parsed is not None
             ]
             option_rows = [row for row in position_rows if _looks_like_option(row)]
+            option_rows = _enrich_option_multipliers(
+                gateway,
+                option_rows,
+            )
             return OpenDOptionSnapshot(
                 account=account,
                 market=market,
@@ -194,6 +206,89 @@ def _looks_like_option(row: dict[str, Any]) -> bool:
     code = str(row.get("code") or row.get("symbol") or row.get("stock_code") or "").strip().upper()
     sec_type = str(row.get("sec_type") or row.get("security_type") or "").strip().upper()
     return bool(code and (sec_type in {"DRVT", "OPTION"} or OPTION_CODE_RE.match(code)))
+
+
+def _positive_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _position_quantity(row: Mapping[str, Any]) -> float | None:
+    raw = row.get("qty") if "qty" in row else row.get("quantity")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_multiplier(row: Mapping[str, Any]) -> float | None:
+    for key in (
+        "options_per_contract",
+        "option_contract_multiplier",
+        "option_contract_size",
+        "contract_multiplier",
+        "lot_size",
+        "multiplier",
+    ):
+        value = _positive_number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _enrich_option_multipliers(
+    gateway: Any,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    required_codes = sorted(
+        {
+            str(row.get("code") or row.get("symbol") or row.get("stock_code") or "")
+            .strip()
+            .upper()
+            for row in rows
+            if _position_quantity(row) not in (None, 0.0)
+            and _row_multiplier(row) is None
+        }
+        - {""}
+    )
+    multiplier_by_code: dict[str, float] = {}
+    for start in range(0, len(required_codes), _MARKET_SNAPSHOT_BATCH_SIZE):
+        batch = required_codes[start : start + _MARKET_SNAPSHOT_BATCH_SIZE]
+        snapshot_rows = _rows(gateway.get_snapshot(batch))
+        for snapshot_row in snapshot_rows:
+            code = str(snapshot_row.get("code") or "").strip().upper()
+            multiplier = _row_multiplier(snapshot_row)
+            if code and multiplier is not None:
+                multiplier_by_code[code] = multiplier
+
+    enriched: list[dict[str, Any]] = []
+    missing_codes: list[str] = []
+    for row in rows:
+        item = dict(row)
+        quantity = _position_quantity(item)
+        if quantity in (None, 0.0) or _row_multiplier(item) is not None:
+            enriched.append(item)
+            continue
+        code = str(
+            item.get("code") or item.get("symbol") or item.get("stock_code") or ""
+        ).strip().upper()
+        multiplier = multiplier_by_code.get(code)
+        if multiplier is None:
+            missing_codes.append(code or "unknown")
+            enriched.append(item)
+            continue
+        item["options_per_contract"] = multiplier
+        enriched.append(item)
+
+    if missing_codes:
+        raise OpenDOptionEvidenceError(
+            "OpenD market snapshot did not provide multiplier evidence for "
+            f"{len(missing_codes)} non-zero option position(s)."
+        )
+    return enriched
 
 
 def _parse_trading_day(row: dict[str, Any]) -> date | None:

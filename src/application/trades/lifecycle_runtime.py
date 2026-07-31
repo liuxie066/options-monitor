@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from domain.domain.symbol_identity import OPTION_CODE_RE
+from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol
 from src.application.ledger.api import advance_lifecycle_case_state
 from src.application.trades.close_reason_reconciliation import (
     reconcile_due_lifecycle_cases,
@@ -214,16 +214,9 @@ def _registry_contract_metadata(
             "standard broker option contract class is unproven"
         )
     market = str(match.group("market") or "").strip().upper()
-    case_symbol = str(
-        lifecycle_case.get("symbol") or ""
-    ).strip().upper()
-    root = str(match.group("root") or "").strip().upper()
-    case_root = (
-        case_symbol[:-3]
-        if case_symbol.endswith(".HK")
-        else case_symbol.removeprefix("US.")
-    )
-    if not case_root or case_root != root:
+    broker_symbol = canonical_symbol(raw_code)
+    case_symbol = canonical_symbol(lifecycle_case.get("symbol"))
+    if not broker_symbol or not case_symbol or broker_symbol != case_symbol:
         raise ValueError(
             "broker option code conflicts with lifecycle contract"
         )
