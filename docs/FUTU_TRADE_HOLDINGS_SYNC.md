@@ -181,6 +181,9 @@ trade-intake status 将 Inbox、生命周期原因状态和 Outbox 状态分开�
 # 历史切换：先 inventory，再显式选择 exact target
 ./om option-positions lifecycle migration inventory
 ./om option-positions lifecycle migration inventory \
+  --mapping-manifest <lifecycle-explicit-mapping.json>
+./om option-positions lifecycle migration inventory \
+  --mapping-manifest <lifecycle-explicit-mapping.json> \
   --select-target <target-key>
 ./om option-positions lifecycle migration apply \
   --manifest <frozen-manifest.json> --dry-run
@@ -202,3 +205,27 @@ observation。
 和 migration receipt；重复 apply 相同 manifest 为 no-op，源状态漂移或 claim
 owner 冲突则失败关闭。切换完成后仍需独立验证 projection、Outbox、状态文件
 和重复消息计数；启动服务与真实发送属于另一次明确授权。
+
+旧 lifecycle case 只能通过 operator-curated
+`lifecycle_explicit_mapping.v1` 进入自动迁移。每行必须给出：
+
+- `legacy_case_id` 和 `disposition`：`terminal_frozen` 或
+  `bridge_to_v2`；
+- 完整 `canonical_contract`、逐 lot 的
+  `target_contracts_by_lot`；
+- 每条 broker 证据的 `evidence_id`、canonical
+  `futu:<account>:<futu-account-id>:<deal-id>` source key 和 role；
+- `terminal_frozen` 必须引用已经存在且未 void 的 terminal event；
+  assignment/exercise 还必须引用同账户、同 Futu 账户、同标的、正确方向、
+  数量和执行价的股票交割证据，并冻结 `settlement_window`；
+- legacy case 的 multiplier 与 canonical terminal event/lot 不一致时，只允许
+  用 `legacy_case_exceptions.multiplier` 精确冻结 legacy 值、canonical 值和
+  operator reason；其它 case 合约字段不接受豁免；
+- `bridge_to_v2` 必须引用已经存在的 v2 case 和完整
+  `lifecycle_timing_policy.v1`。
+
+迁移器逐项核对 case、broker source、terminal event、lot projection 和
+账户/合约身份。`terminal_frozen` 只绑定既有证据、写 source claim、suppression
+与 migration receipt；不会新增或改写经济 terminal event，也不会改动仓位。
+`bridge_to_v2` 只绑定 Futu account、timing policy、非 allocating bridge
+evidence 和 supersession；不会生成 terminal event。

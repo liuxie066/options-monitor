@@ -170,6 +170,195 @@ def _case_with_option_anchor(
     return repo, case_id, observed_at_ms
 
 
+def _legacy_terminal_mapping_fixture(
+    tmp_path: Path,
+    *,
+    stock_price: int = 100,
+    adopted_event: bool = False,
+    case_multiplier: int = 100,
+) -> tuple[
+    SQLiteOptionPositionsRepository,
+    str,
+    dict,
+    str,
+]:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    open_event = _open_event()
+    persist_trade_event_object(repo, open_event)
+    observed_at_ms = expiration_observation_start_ms(
+        EXPIRATION_YMD,
+        "US",
+    )
+    assert observed_at_ms is not None
+    case_id = "legacy-terminal-case-1"
+    terminal_event_id = "legacy-assignment-event-1"
+    option_raw = {
+        "internal_account": "lx",
+        "futu_account_id": "1001",
+        "deal_id": "legacy-option-deal-1",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "currency": "USD",
+        "multiplier": 100,
+        "price": 0,
+        "trade_time_ms": observed_at_ms,
+        "visible_account_fields": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+        },
+        "raw_payload": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+            "deal_id": "legacy-option-deal-1",
+        },
+    }
+    assert repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": case_id,
+            "case_key": "legacy-terminal-case-key-1",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 100,
+            "expiration_ymd": EXPIRATION_YMD,
+            "currency": "USD",
+            "multiplier": case_multiplier,
+            "contracts": 1,
+            "decision_type": "assignment",
+            "status": "ledger_written",
+            "target_lot_ids": ["lot-1"],
+            "adopted_event_ids": (
+                [terminal_event_id] if adopted_event else []
+            ),
+            "raw": {"option_deal": option_raw},
+        }
+    )
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "legacy-option-evidence-1",
+            "case_id": case_id,
+            "source_type": "futu_trade_push",
+            "source_event_id": "legacy-option-deal-1",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "NVDA",
+            "trade_time_ms": observed_at_ms,
+            "raw": option_raw,
+        }
+    )
+    stock_time_ms = observed_at_ms + 2_000
+    stock_raw = {
+        "internal_account": "lx",
+        "futu_account_id": "1001",
+        "deal_id": "legacy-stock-deal-1",
+        "symbol": "NVDA",
+        "contracts": 100,
+        "price": stock_price,
+        "side": "buy",
+        "trade_time_ms": stock_time_ms,
+        "visible_account_fields": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+        },
+        "raw_payload": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+            "deal_id": "legacy-stock-deal-1",
+        },
+    }
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "legacy-stock-evidence-1",
+            "case_id": None,
+            "source_type": "futu_trade_push",
+            "source_event_id": "legacy-stock-deal-1",
+            "evidence_type": "stock_settlement_leg",
+            "account": "lx",
+            "symbol": "NVDA",
+            "side": "buy",
+            "stock_qty": 100,
+            "stock_price": stock_price,
+            "trade_time_ms": stock_time_ms,
+            "raw": stock_raw,
+        }
+    )
+    persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id=terminal_event_id,
+            event_type="assignment",
+            event_time_ms=stock_time_ms,
+            contract_key=open_event.contract_key,
+            contracts=1,
+            price=0,
+            currency="USD",
+            source="legacy_lifecycle",
+            multiplier=100,
+            target_lot_id="lot-1",
+            raw_payload={
+                **(
+                    {}
+                    if adopted_event
+                    else {"case_id": case_id}
+                ),
+                "target_lot_id": "lot-1",
+            },
+        ),
+    )
+    mapping = {
+        "schema_version": "lifecycle_explicit_mapping.v1",
+        "rows": [
+            {
+                "legacy_case_id": case_id,
+                "disposition": "terminal_frozen",
+                "canonical_contract": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "position_side": "short",
+                    "strike": 100,
+                    "expiration_ymd": EXPIRATION_YMD,
+                    "currency": "USD",
+                    "multiplier": 100,
+                },
+                "target_contracts_by_lot": {"lot-1": 1},
+                "terminal_type": "assignment",
+                "terminal_event_ids": [terminal_event_id],
+                "evidence_sources": [
+                    {
+                        "evidence_id": "legacy-option-evidence-1",
+                        "source_key": (
+                            "futu:lx:1001:legacy-option-deal-1"
+                        ),
+                        "source_role": "option_anchor",
+                    },
+                    {
+                        "evidence_id": "legacy-stock-evidence-1",
+                        "source_key": (
+                            "futu:lx:1001:legacy-stock-deal-1"
+                        ),
+                        "source_role": "stock_settlement",
+                    },
+                ],
+                "settlement_window": {
+                    "start_ms": observed_at_ms,
+                    "end_ms": observed_at_ms + 10_000,
+                    "source": "frozen_broker_settlement_window",
+                },
+            }
+        ],
+    }
+    return repo, case_id, mapping, terminal_event_id
+
+
 def test_source_claim_hash_ignores_push_poll_transport() -> None:
     base = {
         "account": "lx",
@@ -555,6 +744,464 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
     assert [item["evidence_type"] for item in bridges] == [
         "migration_bridge"
     ]
+
+
+def test_explicit_terminal_frozen_mapping_only_links_existing_facts(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, terminal_event_id = (
+        _legacy_terminal_mapping_fixture(tmp_path)
+    )
+    before_events = repo.list_trade_events()
+    before_lots = repo.list_position_lots()
+    before_cases = repo.list_trade_lifecycle_cases()
+
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    target_key = f"lifecycle:{case_id}"
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == target_key
+    )
+    assert row["mapping_status"] == "exact", row[
+        "review_reason_codes"
+    ]
+    assert row["legacy_terminal_frozen"] is True
+    assert row["terminal_event_ids"] == [terminal_event_id]
+    assert len(row["planned_source_claims"]) == 2
+    assert row["planned_evidence_bindings"] == [
+        {
+            "evidence_id": "legacy-stock-evidence-1",
+            "case_id": case_id,
+        }
+    ]
+
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[target_key],
+    )
+    applied = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+
+    assert applied["applied_count"] == 1
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+    assert repo.list_trade_lifecycle_cases() == before_cases
+    assert len(
+        repo.list_trade_lifecycle_source_consumptions(
+            case_id=case_id
+        )
+    ) == 2
+    assert (
+        repo.get_trade_lifecycle_evidence(
+            "legacy-stock-evidence-1"
+        )["case_id"]
+        == case_id
+    )
+    assert repo.get_trade_lifecycle_timing_policy(case_id) is None
+    outbox = repo.list_trade_lifecycle_notifications(
+        case_id=case_id
+    )
+    assert len(outbox) == 1
+    assert outbox[0]["status"] == "suppressed"
+
+    replay = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+    assert replay["applied_count"] == 0
+    assert replay["existing_count"] == 1
+
+
+def test_explicit_terminal_mapping_fails_closed_without_terminal_event(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, _terminal_event_id = (
+        _legacy_terminal_mapping_fixture(tmp_path)
+    )
+    mapping["rows"][0]["terminal_event_ids"] = []
+
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+
+    assert row["mapping_status"] == "needs_review"
+    assert "explicit_terminal_event_missing" in (
+        row["review_reason_codes"]
+    )
+    assert "explicit_terminal_quantity_mismatch" in (
+        row["review_reason_codes"]
+    )
+
+
+def test_explicit_terminal_mapping_accepts_case_adopted_event(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, terminal_event_id = (
+        _legacy_terminal_mapping_fixture(
+            tmp_path,
+            adopted_event=True,
+        )
+    )
+
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+
+    assert row["mapping_status"] == "exact", row[
+        "review_reason_codes"
+    ]
+    assert row["terminal_event_ids"] == [terminal_event_id]
+
+
+def test_explicit_terminal_mapping_requires_exact_multiplier_exception(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, _terminal_event_id = (
+        _legacy_terminal_mapping_fixture(
+            tmp_path,
+            case_multiplier=200,
+        )
+    )
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    blocked = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+    assert blocked["mapping_status"] == "needs_review"
+    assert "explicit_case_contract_mismatch" in (
+        blocked["review_reason_codes"]
+    )
+
+    mapping["rows"][0]["legacy_case_exceptions"] = {
+        "multiplier": {
+            "legacy_value": "200",
+            "canonical_value": "100",
+            "reason": (
+                "canonical terminal event and target lot agree"
+            ),
+        }
+    }
+    accepted = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    row = next(
+        item
+        for item in accepted["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+    assert row["mapping_status"] == "exact", row[
+        "review_reason_codes"
+    ]
+
+
+def test_explicit_assignment_mapping_rejects_cross_account_and_window(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, _terminal_event_id = (
+        _legacy_terminal_mapping_fixture(tmp_path)
+    )
+    mapping["rows"][0]["evidence_sources"][1][
+        "source_key"
+    ] = "futu:sy:2002:legacy-stock-deal-1"
+    mapping["rows"][0]["settlement_window"]["end_ms"] = (
+        mapping["rows"][0]["settlement_window"]["start_ms"] + 1
+    )
+
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+
+    assert row["mapping_status"] == "needs_review"
+    assert "explicit_broker_source_identity_mismatch" in (
+        row["review_reason_codes"]
+    )
+    assert "explicit_stock_settlement_window_mismatch" in (
+        row["review_reason_codes"]
+    )
+
+
+def test_explicit_assignment_mapping_rejects_wrong_settlement_price(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, _terminal_event_id = (
+        _legacy_terminal_mapping_fixture(
+            tmp_path,
+            stock_price=99,
+        )
+    )
+
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == f"lifecycle:{case_id}"
+    )
+
+    assert row["mapping_status"] == "needs_review"
+    assert "explicit_stock_settlement_economics_mismatch" in (
+        row["review_reason_codes"]
+    )
+
+
+def test_explicit_mapping_apply_rejects_source_drift(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, mapping, _terminal_event_id = (
+        _legacy_terminal_mapping_fixture(tmp_path)
+    )
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[f"lifecycle:{case_id}"],
+    )
+    assert repo.insert_trade_lifecycle_source_consumption_once(
+        build_source_consumption_claim(
+            source_key=(
+                "futu:lx:1001:legacy-option-deal-1"
+            ),
+            case_id=case_id,
+            owner_evidence_id="legacy-option-evidence-1",
+            source_role="option_anchor",
+            economic_payload={
+                "account": "lx",
+                "futu_account_id": "1001",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "position_side": "short",
+                "strike": 100,
+                "expiration_ymd": EXPIRATION_YMD,
+                "multiplier": 100,
+                "contracts": 1,
+                "price": 1,
+                "event_time_ms": 1,
+            },
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="lifecycle migration source drift",
+    ):
+        apply_lifecycle_migration_manifest(
+            repo,
+            manifest=manifest,
+            apply_changes=True,
+        )
+    assert repo.list_trade_lifecycle_migration_receipts() == []
+    assert repo.list_trade_lifecycle_notifications() == []
+
+
+def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(
+        tmp_path / "ledger.sqlite3"
+    )
+    persist_trade_event_object(repo, _open_event())
+    observed_at_ms = expiration_observation_start_ms(
+        EXPIRATION_YMD,
+        "US",
+    )
+    assert observed_at_ms is not None
+    canonical_case_id = discover_lifecycle_cases(
+        repo,
+        account="lx",
+        observed_at_ms=observed_at_ms,
+    )["created_case_ids"][0]
+    option_raw = {
+        "internal_account": "lx",
+        "futu_account_id": "1001",
+        "deal_id": "bridge-option-deal-1",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "currency": "USD",
+        "multiplier": 100,
+        "price": 0,
+        "trade_time_ms": observed_at_ms,
+        "visible_account_fields": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+        },
+        "raw_payload": {
+            "futu_account_id": "1001",
+            "trd_acc_id": "1001",
+            "deal_id": "bridge-option-deal-1",
+        },
+    }
+    legacy_case_id = "legacy-waiting-case-1"
+    canonical_case = repo.get_trade_lifecycle_case(
+        canonical_case_id
+    )
+    assert canonical_case is not None
+    assert repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": legacy_case_id,
+            "case_key": "legacy-waiting-key-1",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 100,
+            "expiration_ymd": EXPIRATION_YMD,
+            "currency": "USD",
+            "multiplier": 100,
+            "contracts": 1,
+            "decision_type": None,
+            "status": "waiting_settlement_evidence",
+            "target_lot_ids": ["lot-1"],
+            "raw": {"option_deal": option_raw},
+        }
+    )
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "bridge-option-evidence-1",
+            "case_id": legacy_case_id,
+            "source_type": "futu_trade_push",
+            "source_event_id": "bridge-option-deal-1",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "NVDA",
+            "trade_time_ms": observed_at_ms,
+            "raw": option_raw,
+        }
+    )
+    policy = build_lifecycle_timing_policy(
+        case_id=canonical_case_id,
+        market="US",
+        expiration_ymd=EXPIRATION_YMD,
+        contract_metadata={
+            "settlement_style": "physical",
+            "underlying_security_type": "equity",
+            "last_trade_cutoff_ms": observed_at_ms - 1,
+            "last_trade_cutoff_source": (
+                "instrument_policy_registry"
+            ),
+        },
+        trading_days=[
+            {"date": "2026-08-21", "type": "TRADING"},
+            {"date": "2026-08-24", "type": "TRADING"},
+            {"date": "2026-08-25", "type": "TRADING"},
+        ],
+        calendar_source="test_calendar",
+        calendar_observed_at_ms=observed_at_ms,
+    )
+    mapping = {
+        "schema_version": "lifecycle_explicit_mapping.v1",
+        "rows": [
+            {
+                "legacy_case_id": legacy_case_id,
+                "disposition": "bridge_to_v2",
+                "canonical_case_id": canonical_case_id,
+                "canonical_contract": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "position_side": "short",
+                    "strike": 100,
+                    "expiration_ymd": EXPIRATION_YMD,
+                    "currency": "USD",
+                    "multiplier": 100,
+                },
+                "target_contracts_by_lot": {"lot-1": 1},
+                "evidence_sources": [
+                    {
+                        "evidence_id": "bridge-option-evidence-1",
+                        "source_key": (
+                            "futu:lx:1001:bridge-option-deal-1"
+                        ),
+                        "source_role": "option_anchor",
+                    }
+                ],
+                "timing_policy": policy,
+            }
+        ],
+    }
+    before_event_count = len(repo.list_trade_events())
+    before_case_count = len(repo.list_trade_lifecycle_cases())
+    inventory = build_lifecycle_migration_inventory(
+        repo,
+        explicit_mapping=mapping,
+    )
+    target_key = f"lifecycle:{legacy_case_id}"
+    row = next(
+        item
+        for item in inventory["rows"]
+        if item["target_key"] == target_key
+    )
+    assert row["mapping_status"] == "exact", row[
+        "review_reason_codes"
+    ]
+
+    manifest = select_lifecycle_migration_targets(
+        inventory,
+        target_keys=[target_key],
+    )
+    applied = apply_lifecycle_migration_manifest(
+        repo,
+        manifest=manifest,
+        apply_changes=True,
+    )
+
+    assert applied["applied_count"] == 1
+    assert len(repo.list_trade_events()) == before_event_count
+    assert len(repo.list_trade_lifecycle_cases()) == before_case_count
+    legacy = repo.get_trade_lifecycle_case(legacy_case_id)
+    assert legacy is not None
+    assert legacy["status"] == "superseded"
+    assert legacy["superseded_by_case_id"] == canonical_case_id
+    canonical = repo.get_trade_lifecycle_case(
+        canonical_case_id
+    )
+    assert canonical is not None
+    assert canonical["futu_account_id"] == "1001"
+    assert repo.get_trade_lifecycle_timing_policy(
+        canonical_case_id
+    ) == policy
+    assert repo.list_trade_lifecycle_allocations(
+        case_id=canonical_case_id
+    ) == []
 
 
 def test_outbox_stale_boundaries_and_resend_revision_split(
