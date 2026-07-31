@@ -5,7 +5,7 @@ from typing import Any
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_lifecycle import build_lifecycle_case
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
@@ -23,10 +23,16 @@ from src.application.ledger.source_consumption import (
 
 MIGRATION_SCHEMA = "lifecycle_cutover_manifest.v1"
 MIGRATION_RECEIPT_SCHEMA = "lifecycle_cutover_receipt.v1"
+EXPLICIT_MAPPING_SCHEMA = "lifecycle_explicit_mapping.v1"
 
 
-def build_lifecycle_migration_inventory(repo: Any) -> dict[str, Any]:
+def build_lifecycle_migration_inventory(
+    repo: Any,
+    *,
+    explicit_mapping: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
+    explicit_by_case = _explicit_mappings_by_case(explicit_mapping)
     cases = [
         dict(item)
         for item in sqlite_repo.list_trade_lifecycle_cases()
@@ -90,11 +96,42 @@ def build_lifecycle_migration_inventory(repo: Any) -> dict[str, Any]:
         }
     )
     rows: list[dict[str, Any]] = []
+    known_case_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in cases
+    }
+    unknown_mapped_cases = sorted(
+        set(explicit_by_case) - known_case_ids
+    )
+    if unknown_mapped_cases:
+        raise ValueError(
+            "explicit lifecycle mapping references unknown cases: "
+            + ",".join(unknown_mapped_cases)
+        )
     for lifecycle_case in sorted(
         cases,
         key=lambda item: str(item.get("case_id") or ""),
     ):
         case_id = str(lifecycle_case.get("case_id") or "").strip()
+        explicit_row = explicit_by_case.get(case_id)
+        if explicit_row is not None:
+            rows.append(
+                _build_explicit_mapped_lifecycle_row(
+                    lifecycle_case=lifecycle_case,
+                    mapping=explicit_row,
+                    all_cases=cases,
+                    all_evidence=evidence,
+                    all_allocations=allocations,
+                    all_events=events,
+                    events_by_id=events_by_id,
+                    lot_fields_by_id=lot_fields_by_id,
+                    all_claims=claims,
+                    all_notifications=notifications,
+                    timing_policies=timing_policies,
+                    void_ids=void_ids,
+                )
+            )
+            continue
         case_evidence = [
             item
             for item in evidence
@@ -386,6 +423,1449 @@ def build_lifecycle_migration_inventory(repo: Any) -> dict[str, Any]:
             for item in rows
             if item.get("mapping_status") != "exact"
         ),
+    }
+
+
+def _explicit_mappings_by_case(
+    payload: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if payload is None:
+        return {}
+    mapping = dict(payload or {})
+    if (
+        str(mapping.get("schema_version") or "").strip()
+        != EXPLICIT_MAPPING_SCHEMA
+    ):
+        raise ValueError(
+            "explicit lifecycle mapping schema is invalid"
+        )
+    raw_rows = mapping.get("rows")
+    if not isinstance(raw_rows, list):
+        raise ValueError(
+            "explicit lifecycle mapping rows must be a list"
+        )
+    by_case: dict[str, dict[str, Any]] = {}
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise ValueError(
+                "explicit lifecycle mapping row must be an object"
+            )
+        row = dict(raw)
+        case_id = str(
+            row.get("legacy_case_id") or ""
+        ).strip()
+        disposition = str(
+            row.get("disposition") or ""
+        ).strip().lower()
+        if (
+            not case_id
+            or disposition
+            not in {"terminal_frozen", "bridge_to_v2"}
+        ):
+            raise ValueError(
+                "explicit lifecycle mapping identity is invalid"
+            )
+        if case_id in by_case:
+            raise ValueError(
+                "explicit lifecycle mapping case is duplicated: "
+                + case_id
+            )
+        row["legacy_case_id"] = case_id
+        row["disposition"] = disposition
+        by_case[case_id] = row
+    return by_case
+
+
+def _build_explicit_mapped_lifecycle_row(
+    *,
+    lifecycle_case: dict[str, Any],
+    mapping: dict[str, Any],
+    all_cases: list[dict[str, Any]],
+    all_evidence: list[dict[str, Any]],
+    all_allocations: list[dict[str, Any]],
+    all_events: list[dict[str, Any]],
+    events_by_id: dict[str, dict[str, Any]],
+    lot_fields_by_id: dict[str, dict[str, Any]],
+    all_claims: list[dict[str, Any]],
+    all_notifications: list[dict[str, Any]],
+    timing_policies: dict[str, dict[str, Any]],
+    void_ids: list[str],
+) -> dict[str, Any]:
+    case_id = str(lifecycle_case.get("case_id") or "").strip()
+    disposition = str(
+        mapping.get("disposition") or ""
+    ).strip().lower()
+    review_reasons: set[str] = set()
+    contract = _explicit_contract(
+        mapping.get("canonical_contract"),
+        review_reasons=review_reasons,
+    )
+    target = _explicit_target_manifest(
+        mapping.get("target_contracts_by_lot"),
+        review_reasons=review_reasons,
+    )
+    _validate_explicit_case_contract(
+        lifecycle_case,
+        contract=contract,
+        mismatch_exceptions=(
+            mapping.get("legacy_case_exceptions")
+        ),
+        review_reasons=review_reasons,
+    )
+
+    evidence_by_id = {
+        str(item.get("evidence_id") or "").strip(): item
+        for item in all_evidence
+        if str(item.get("evidence_id") or "").strip()
+    }
+    case_allocations = [
+        item
+        for item in all_allocations
+        if str(item.get("case_id") or "").strip() == case_id
+    ]
+    (
+        mapped_evidence,
+        planned_bindings,
+        planned_claims,
+    ) = _plan_explicit_evidence_sources(
+        lifecycle_case=lifecycle_case,
+        mapping=mapping,
+        contract=contract,
+        target_contracts_by_lot=target,
+        evidence_by_id=evidence_by_id,
+        existing_claims=all_claims,
+        review_reasons=review_reasons,
+    )
+
+    legacy_upgrade: dict[str, Any] | None = None
+    resolution_payload: dict[str, Any] = {}
+    terminal_event_ids: list[str] = []
+    canonical_case_id: str | None = None
+    explicit_case_ids = [case_id]
+    if disposition == "terminal_frozen":
+        terminal_event_ids, resolution_payload = (
+            _validate_explicit_terminal_frozen(
+                lifecycle_case=lifecycle_case,
+                mapping=mapping,
+                contract=contract,
+                target_contracts_by_lot=target,
+                mapped_evidence=mapped_evidence,
+                case_allocations=case_allocations,
+                events_by_id=events_by_id,
+                lot_fields_by_id=lot_fields_by_id,
+                void_ids=void_ids,
+                review_reasons=review_reasons,
+            )
+        )
+    elif disposition == "bridge_to_v2":
+        canonical_case_id, legacy_upgrade = (
+            _plan_explicit_legacy_bridge(
+                lifecycle_case=lifecycle_case,
+                mapping=mapping,
+                contract=contract,
+                target_contracts_by_lot=target,
+                all_cases=all_cases,
+                all_allocations=all_allocations,
+                all_events=all_events,
+                lot_fields_by_id=lot_fields_by_id,
+                review_reasons=review_reasons,
+            )
+        )
+        if canonical_case_id:
+            explicit_case_ids.append(canonical_case_id)
+
+    evidence_ids = sorted(
+        str(item.get("evidence_id") or "")
+        for item in mapped_evidence
+    )
+    target_lot_ids = sorted(target)
+    source_keys = sorted(
+        str(item.get("source_key") or "")
+        for item in planned_claims
+    )
+    source_keys.extend(
+        sorted(
+            {
+                str(item.get("source_key") or "")
+                for item in all_claims
+                if str(item.get("owner_evidence_id") or "")
+                in evidence_ids
+            }
+            - set(source_keys)
+        )
+    )
+    state = _explicit_inventory_state(
+        mapping=mapping,
+        case_ids=explicit_case_ids,
+        evidence_ids=evidence_ids,
+        terminal_event_ids=terminal_event_ids,
+        target_lot_ids=target_lot_ids,
+        source_keys=source_keys,
+        all_cases=all_cases,
+        all_evidence=all_evidence,
+        all_allocations=all_allocations,
+        all_events=all_events,
+        lot_fields_by_id=lot_fields_by_id,
+        all_claims=all_claims,
+        all_notifications=all_notifications,
+        timing_policies=timing_policies,
+        void_ids=void_ids,
+    )
+    notification_case_id = canonical_case_id or case_id
+    return {
+        "target_key": f"lifecycle:{case_id}",
+        "kind": "lifecycle_case",
+        "selected": False,
+        "mapping_status": (
+            "exact" if not review_reasons else "needs_review"
+        ),
+        "review_reason_codes": sorted(review_reasons),
+        "case_id": case_id,
+        "account": contract.get("account"),
+        "futu_account_ids": sorted(
+            {
+                binding[1]
+                for item in mapping.get("evidence_sources") or []
+                if isinstance(item, dict)
+                for binding in [
+                    _canonical_futu_binding(
+                        str(item.get("source_key") or "")
+                    )
+                ]
+                if binding is not None
+            }
+        ),
+        "contract_key": lifecycle_case.get("contract_key"),
+        "target_contracts_by_lot": target,
+        "resolution": resolution_payload,
+        "evidence_ids": evidence_ids,
+        "allocation_ids": sorted(
+            str(item.get("allocation_id") or "")
+            for item in case_allocations
+        ),
+        "terminal_event_ids": terminal_event_ids,
+        "effective_void_event_ids": void_ids,
+        "existing_source_claims": [
+            item
+            for item in all_claims
+            if str(item.get("source_key") or "") in source_keys
+        ],
+        "planned_source_claims": planned_claims,
+        "planned_evidence_bindings": planned_bindings,
+        "receipt_states": [
+            {
+                "outbox_id": item.get("outbox_id"),
+                "transition_type": item.get("transition_type"),
+                "status": item.get("status"),
+            }
+            for item in all_notifications
+            if str(item.get("case_id") or "")
+            in explicit_case_ids
+        ],
+        "timing_policy_bound": (
+            bool(canonical_case_id)
+            and canonical_case_id in timing_policies
+        ),
+        "timing_policy": (
+            dict(legacy_upgrade or {}).get("timing_policy")
+            if legacy_upgrade
+            else None
+        ),
+        "planned_futu_account_binding": None,
+        "legacy_upgrade": legacy_upgrade,
+        "legacy_terminal_frozen": (
+            disposition == "terminal_frozen"
+        ),
+        "explicit_mapping": mapping,
+        "explicit_state_case_ids": explicit_case_ids,
+        "explicit_state_evidence_ids": evidence_ids,
+        "explicit_state_terminal_event_ids": terminal_event_ids,
+        "explicit_state_target_lot_ids": target_lot_ids,
+        "explicit_state_source_keys": source_keys,
+        "notification_case_id": notification_case_id,
+        "suppress_option_leg_closed": True,
+        "seed_final_intent": False,
+        "inventory_state_hash": canonical_payload_hash(state),
+    }
+
+
+def _explicit_contract(
+    raw: Any,
+    *,
+    review_reasons: set[str],
+) -> dict[str, Any]:
+    contract = dict(raw or {}) if isinstance(raw, dict) else {}
+    required = (
+        "account",
+        "broker",
+        "symbol",
+        "option_type",
+        "position_side",
+        "strike",
+        "expiration_ymd",
+        "currency",
+        "multiplier",
+    )
+    if any(contract.get(key) in (None, "") for key in required):
+        review_reasons.add("explicit_contract_mapping_incomplete")
+        return contract
+    account = str(contract.get("account") or "").strip().lower()
+    symbol = canonical_symbol(contract.get("symbol"))
+    option_type = str(
+        contract.get("option_type") or ""
+    ).strip().lower()
+    position_side = str(
+        contract.get("position_side") or ""
+    ).strip().lower()
+    currency = str(contract.get("currency") or "").strip().upper()
+    try:
+        strike = _canonical_decimal(contract.get("strike"))
+        multiplier = _canonical_decimal(contract.get("multiplier"))
+    except ValueError:
+        review_reasons.add("explicit_contract_mapping_invalid")
+        return contract
+    if (
+        not account
+        or not symbol
+        or option_type not in {"put", "call"}
+        or position_side not in {"short", "long"}
+        or currency not in {"USD", "HKD", "CNY"}
+        or Decimal(multiplier) <= 0
+    ):
+        review_reasons.add("explicit_contract_mapping_invalid")
+        return contract
+    return {
+        **contract,
+        "account": account,
+        "broker": str(contract.get("broker") or "").strip(),
+        "symbol": symbol,
+        "option_type": option_type,
+        "position_side": position_side,
+        "strike": strike,
+        "expiration_ymd": str(
+            contract.get("expiration_ymd") or ""
+        ).strip(),
+        "currency": currency,
+        "multiplier": multiplier,
+    }
+
+
+def _explicit_target_manifest(
+    raw: Any,
+    *,
+    review_reasons: set[str],
+) -> dict[str, int]:
+    if not isinstance(raw, dict) or not raw:
+        review_reasons.add("explicit_target_mapping_missing")
+        return {}
+    normalized: dict[str, int] = {}
+    for lot_id_raw, contracts_raw in raw.items():
+        lot_id = str(lot_id_raw or "").strip()
+        try:
+            contracts = int(contracts_raw)
+        except (TypeError, ValueError, OverflowError):
+            review_reasons.add("explicit_target_mapping_invalid")
+            return {}
+        if not lot_id or contracts <= 0:
+            review_reasons.add("explicit_target_mapping_invalid")
+            return {}
+        normalized[lot_id] = contracts
+    return normalized
+
+
+def _validate_explicit_case_contract(
+    lifecycle_case: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+    mismatch_exceptions: Any = None,
+    review_reasons: set[str],
+) -> None:
+    if not contract:
+        return
+    text_fields = {
+        "account": lambda value: str(value or "").strip().lower(),
+        "broker": lambda value: str(value or "").strip(),
+        "symbol": lambda value: canonical_symbol(value) or "",
+        "option_type": lambda value: str(value or "").strip().lower(),
+        "position_side": lambda value: str(value or "").strip().lower(),
+        "expiration_ymd": lambda value: str(value or "").strip(),
+    }
+    for key, normalize in text_fields.items():
+        observed = normalize(lifecycle_case.get(key))
+        canonical = normalize(contract.get(key))
+        if observed != canonical and not _explicit_case_exception_matches(
+            mismatch_exceptions,
+            field=key,
+            observed=observed,
+            canonical=canonical,
+        ):
+            review_reasons.add("explicit_case_contract_mismatch")
+    try:
+        observed_strike = _canonical_decimal(
+            lifecycle_case.get("strike")
+        )
+        canonical_strike = _canonical_decimal(
+            contract.get("strike")
+        )
+        if (
+            observed_strike != canonical_strike
+            and not _explicit_case_exception_matches(
+                mismatch_exceptions,
+                field="strike",
+                observed=observed_strike,
+                canonical=canonical_strike,
+            )
+        ):
+            review_reasons.add("explicit_case_contract_mismatch")
+        observed_multiplier = _canonical_decimal(
+            lifecycle_case.get("multiplier")
+        )
+        canonical_multiplier = _canonical_decimal(
+            contract.get("multiplier")
+        )
+        if (
+            observed_multiplier != canonical_multiplier
+            and not _explicit_case_exception_matches(
+                mismatch_exceptions,
+                field="multiplier",
+                observed=observed_multiplier,
+                canonical=canonical_multiplier,
+            )
+        ):
+            review_reasons.add("explicit_case_contract_mismatch")
+    except ValueError:
+        review_reasons.add("explicit_case_contract_mismatch")
+
+
+def _explicit_case_exception_matches(
+    raw: Any,
+    *,
+    field: str,
+    observed: str,
+    canonical: str,
+) -> bool:
+    exceptions = dict(raw or {}) if isinstance(raw, dict) else {}
+    item = (
+        dict(exceptions.get(field) or {})
+        if isinstance(exceptions.get(field), dict)
+        else {}
+    )
+    return (
+        field in {"multiplier"}
+        and str(item.get("legacy_value") or "").strip()
+        == observed
+        and str(item.get("canonical_value") or "").strip()
+        == canonical
+        and bool(str(item.get("reason") or "").strip())
+    )
+
+
+def _plan_explicit_evidence_sources(
+    *,
+    lifecycle_case: dict[str, Any],
+    mapping: dict[str, Any],
+    contract: dict[str, Any],
+    target_contracts_by_lot: dict[str, int],
+    evidence_by_id: dict[str, dict[str, Any]],
+    existing_claims: list[dict[str, Any]],
+    review_reasons: set[str],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, str]],
+    list[dict[str, Any]],
+]:
+    raw_sources = mapping.get("evidence_sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        review_reasons.add("explicit_evidence_mapping_missing")
+        return [], [], []
+    case_id = str(lifecycle_case.get("case_id") or "")
+    mapped: list[dict[str, Any]] = []
+    bindings: list[dict[str, str]] = []
+    claims: list[dict[str, Any]] = []
+    seen_evidence_ids: set[str] = set()
+    seen_source_keys: set[str] = set()
+    existing_by_key = {
+        str(item.get("source_key") or ""): item
+        for item in existing_claims
+    }
+    case_option_deal = (
+        dict(
+            dict(lifecycle_case.get("raw") or {}).get(
+                "option_deal"
+            )
+            or {}
+        )
+        if isinstance(lifecycle_case.get("raw"), dict)
+        else {}
+    )
+    for raw_source in raw_sources:
+        if not isinstance(raw_source, dict):
+            review_reasons.add("explicit_evidence_mapping_invalid")
+            continue
+        source = dict(raw_source)
+        evidence_id = str(
+            source.get("evidence_id") or ""
+        ).strip()
+        source_key = str(
+            source.get("source_key") or ""
+        ).strip()
+        source_role = str(
+            source.get("source_role") or ""
+        ).strip().lower()
+        evidence = evidence_by_id.get(evidence_id)
+        if (
+            not evidence_id
+            or evidence_id in seen_evidence_ids
+            or source_key in seen_source_keys
+            or source_role
+            not in {"option_anchor", "stock_settlement"}
+            or evidence is None
+        ):
+            review_reasons.add("explicit_evidence_mapping_invalid")
+            continue
+        seen_evidence_ids.add(evidence_id)
+        seen_source_keys.add(source_key)
+        mapped.append(evidence)
+        expected_type = {
+            "option_anchor": "option_zero_price_close",
+            "stock_settlement": "stock_settlement_leg",
+        }[source_role]
+        if (
+            str(evidence.get("evidence_type") or "")
+            .strip()
+            .lower()
+            != expected_type
+        ):
+            review_reasons.add("explicit_evidence_role_mismatch")
+        derived = _legacy_evidence_source_identity(evidence)
+        binding = _canonical_futu_binding(source_key)
+        if (
+            derived is None
+            or binding is None
+            or source_key != derived["source_key"]
+            or binding
+            != (
+                str(contract.get("account") or ""),
+                derived["futu_account_id"],
+            )
+        ):
+            review_reasons.add(
+                "explicit_broker_source_identity_mismatch"
+            )
+        current_case_id = str(evidence.get("case_id") or "").strip()
+        if current_case_id not in {"", case_id}:
+            review_reasons.add(
+                "explicit_evidence_case_owner_conflict"
+            )
+        elif not current_case_id:
+            bindings.append(
+                {
+                    "evidence_id": evidence_id,
+                    "case_id": case_id,
+                }
+            )
+        if (
+            source_role == "option_anchor"
+            and not _option_anchor_matches_legacy_case(
+                evidence,
+                case_option_deal=case_option_deal,
+                lifecycle_case=lifecycle_case,
+            )
+        ):
+            review_reasons.add(
+                "explicit_option_anchor_case_mismatch"
+            )
+        economic_payload = _explicit_claim_payload(
+            evidence,
+            source_key=source_key,
+            source_role=source_role,
+            contract=contract,
+            target_contracts_by_lot=target_contracts_by_lot,
+        )
+        try:
+            claim = build_source_consumption_claim(
+                source_key=source_key,
+                case_id=case_id,
+                owner_evidence_id=evidence_id,
+                source_role=source_role,
+                economic_payload=economic_payload,
+            )
+        except ValueError as exc:
+            review_reasons.add(
+                "source_claim_unprovable:" + str(exc)
+            )
+            continue
+        existing = existing_by_key.get(source_key)
+        if existing is None:
+            claims.append(claim)
+        elif not _same_source_claim_owner(existing, claim):
+            review_reasons.add(
+                "source_claim_existing_owner_conflict"
+            )
+    return mapped, bindings, claims
+
+
+def _option_anchor_matches_legacy_case(
+    evidence: dict[str, Any],
+    *,
+    case_option_deal: dict[str, Any],
+    lifecycle_case: dict[str, Any],
+) -> bool:
+    if not case_option_deal:
+        return False
+    case_identity = _legacy_evidence_source_identity(
+        {
+            "account": lifecycle_case.get("account"),
+            "source_event_id": case_option_deal.get("deal_id"),
+            "raw": case_option_deal,
+        }
+    )
+    evidence_identity = _legacy_evidence_source_identity(evidence)
+    raw = (
+        dict(evidence.get("raw") or {})
+        if isinstance(evidence.get("raw"), dict)
+        else {}
+    )
+    try:
+        return (
+            case_identity is not None
+            and case_identity == evidence_identity
+            and canonical_symbol(raw.get("symbol"))
+            == canonical_symbol(lifecycle_case.get("symbol"))
+            and str(raw.get("option_type") or "").strip().lower()
+            == str(lifecycle_case.get("option_type") or "")
+            .strip()
+            .lower()
+            and str(raw.get("expiration_ymd") or "").strip()
+            == str(
+                lifecycle_case.get("expiration_ymd") or ""
+            ).strip()
+            and _canonical_decimal(raw.get("strike"))
+            == _canonical_decimal(lifecycle_case.get("strike"))
+            and int(raw.get("contracts") or 0)
+            == int(lifecycle_case.get("contracts") or 0)
+            and _canonical_decimal(raw.get("price")) == "0"
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _legacy_evidence_source_identity(
+    evidence: dict[str, Any],
+) -> dict[str, str] | None:
+    raw = (
+        dict(evidence.get("raw") or {})
+        if isinstance(evidence.get("raw"), dict)
+        else {}
+    )
+    raw_payload = (
+        dict(raw.get("raw_payload") or {})
+        if isinstance(raw.get("raw_payload"), dict)
+        else {}
+    )
+    visible = (
+        dict(raw.get("visible_account_fields") or {})
+        if isinstance(raw.get("visible_account_fields"), dict)
+        else {}
+    )
+    accounts = {
+        str(value or "").strip().lower()
+        for value in (
+            evidence.get("account"),
+            raw.get("internal_account"),
+        )
+        if str(value or "").strip()
+    }
+    futu_ids = {
+        str(value or "").strip()
+        for value in (
+            evidence.get("futu_account_id"),
+            raw.get("futu_account_id"),
+            raw_payload.get("futu_account_id"),
+            raw_payload.get("trd_acc_id"),
+            visible.get("futu_account_id"),
+            visible.get("trd_acc_id"),
+        )
+        if str(value or "").strip()
+    }
+    deal_ids = {
+        str(value or "").strip()
+        for value in (
+            raw.get("deal_id"),
+            raw_payload.get("deal_id"),
+            _source_key_deal_id(evidence.get("source_event_id")),
+        )
+        if str(value or "").strip()
+    }
+    if (
+        len(accounts) != 1
+        or len(futu_ids) != 1
+        or len(deal_ids) != 1
+    ):
+        return None
+    account = next(iter(accounts))
+    futu_account_id = next(iter(futu_ids))
+    deal_id = next(iter(deal_ids))
+    return {
+        "account": account,
+        "futu_account_id": futu_account_id,
+        "deal_id": deal_id,
+        "source_key": (
+            f"futu:{account}:{futu_account_id}:{deal_id}"
+        ),
+    }
+
+
+def _source_key_deal_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if _is_canonical_futu_key(text):
+        return text.split(":", 3)[3]
+    return text
+
+
+def _explicit_claim_payload(
+    evidence: dict[str, Any],
+    *,
+    source_key: str,
+    source_role: str,
+    contract: dict[str, Any],
+    target_contracts_by_lot: dict[str, int],
+) -> dict[str, Any]:
+    raw = (
+        dict(evidence.get("raw") or {})
+        if isinstance(evidence.get("raw"), dict)
+        else {}
+    )
+    binding = _canonical_futu_binding(source_key) or ("", "")
+    contracts = sum(target_contracts_by_lot.values())
+    payload = {
+        **raw,
+        **evidence,
+        "account": binding[0],
+        "internal_account": binding[0],
+        "futu_account_id": binding[1],
+        "symbol": contract.get("symbol"),
+        "option_type": contract.get("option_type"),
+        "position_side": contract.get("position_side"),
+        "strike": contract.get("strike"),
+        "expiration_ymd": contract.get("expiration_ymd"),
+        "multiplier": contract.get("multiplier"),
+        "currency": contract.get("currency"),
+        "contracts": contracts,
+    }
+    if source_role == "stock_settlement":
+        payload["shares"] = (
+            evidence.get("stock_qty")
+            or evidence.get("shares")
+            or raw.get("contracts")
+        )
+        payload["price"] = (
+            evidence.get("stock_price")
+            if evidence.get("stock_price") is not None
+            else raw.get("price")
+        )
+    return payload
+
+
+def _validate_explicit_terminal_frozen(
+    *,
+    lifecycle_case: dict[str, Any],
+    mapping: dict[str, Any],
+    contract: dict[str, Any],
+    target_contracts_by_lot: dict[str, int],
+    mapped_evidence: list[dict[str, Any]],
+    case_allocations: list[dict[str, Any]],
+    events_by_id: dict[str, dict[str, Any]],
+    lot_fields_by_id: dict[str, dict[str, Any]],
+    void_ids: list[str],
+    review_reasons: set[str],
+) -> tuple[list[str], dict[str, Any]]:
+    if (
+        str(lifecycle_case.get("status") or "")
+        .strip()
+        .lower()
+        != "ledger_written"
+    ):
+        review_reasons.add(
+            "explicit_terminal_case_not_ledger_written"
+        )
+    terminal_type = str(
+        mapping.get("terminal_type") or ""
+    ).strip().lower()
+    if terminal_type not in {
+        "close",
+        "expire_close",
+        "assignment",
+        "exercise",
+    }:
+        review_reasons.add("explicit_terminal_type_invalid")
+    if (
+        str(lifecycle_case.get("decision_type") or "")
+        .strip()
+        .lower()
+        != terminal_type
+    ):
+        review_reasons.add(
+            "explicit_terminal_decision_mismatch"
+        )
+    terminal_event_ids = sorted(
+        {
+            str(item or "").strip()
+            for item in mapping.get("terminal_event_ids") or []
+            if str(item or "").strip()
+        }
+    )
+    if not terminal_event_ids:
+        review_reasons.add("explicit_terminal_event_missing")
+    if any(item in void_ids for item in terminal_event_ids):
+        review_reasons.add("explicit_terminal_event_voided")
+    if case_allocations:
+        _validate_case_allocations(
+            case_allocations,
+            events_by_id=events_by_id,
+            review_reasons=review_reasons,
+        )
+        allocation_event_ids = {
+            str(
+                item.get("canonical_terminal_event_id") or ""
+            ).strip()
+            for item in case_allocations
+            if str(
+                item.get("canonical_terminal_event_id") or ""
+            ).strip()
+        }
+        if not allocation_event_ids.issubset(
+            set(terminal_event_ids)
+        ):
+            review_reasons.add(
+                "explicit_terminal_allocation_event_mismatch"
+            )
+        try:
+            allocation_resolution = resolve_allocations(
+                target_contracts_by_lot,
+                case_allocations,
+                void_event_ids=void_ids,
+            )
+        except ValueError:
+            allocation_resolution = None
+        if (
+            allocation_resolution is None
+            or allocation_resolution.status != "ok"
+        ):
+            review_reasons.add(
+                "explicit_terminal_allocation_invalid"
+            )
+    resolved_by_lot = {
+        lot_id: 0 for lot_id in target_contracts_by_lot
+    }
+    case_id = str(lifecycle_case.get("case_id") or "")
+    adopted_event_ids = {
+        str(item or "").strip()
+        for item in lifecycle_case.get("adopted_event_ids") or []
+        if str(item or "").strip()
+    }
+    for event_id in terminal_event_ids:
+        event = events_by_id.get(event_id)
+        if event is None:
+            review_reasons.add("explicit_terminal_event_missing")
+            continue
+        lot_id = str(event.get("target_lot_id") or "").strip()
+        raw_payload = (
+            dict(event.get("raw_payload") or {})
+            if isinstance(event.get("raw_payload"), dict)
+            else {}
+        )
+        try:
+            contracts = int(event.get("contracts") or 0)
+        except (TypeError, ValueError, OverflowError):
+            contracts = 0
+        if (
+            str(event.get("event_type") or "").strip().lower()
+            != terminal_type
+            or lot_id not in resolved_by_lot
+            or contracts <= 0
+            or (
+                str(raw_payload.get("case_id") or "").strip()
+                != case_id
+                and event_id not in adopted_event_ids
+            )
+            or not _event_matches_explicit_contract(
+                event,
+                contract=contract,
+            )
+        ):
+            review_reasons.add(
+                "explicit_terminal_event_contract_mismatch"
+            )
+            continue
+        resolved_by_lot[lot_id] += contracts
+    if resolved_by_lot != target_contracts_by_lot:
+        review_reasons.add(
+            "explicit_terminal_quantity_mismatch"
+        )
+    for lot_id in target_contracts_by_lot:
+        fields = lot_fields_by_id.get(lot_id)
+        if fields is None:
+            review_reasons.add("explicit_target_lot_missing")
+            continue
+        try:
+            open_contracts = int(fields.get("contracts_open") or 0)
+            closed_contracts = int(
+                fields.get("contracts_closed") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            review_reasons.add(
+                "explicit_target_lot_projection_invalid"
+            )
+            continue
+        if (
+            open_contracts != 0
+            or closed_contracts
+            < target_contracts_by_lot[lot_id]
+            or not _lot_matches_explicit_contract(
+                fields,
+                contract=contract,
+            )
+        ):
+            review_reasons.add(
+                "explicit_target_lot_projection_mismatch"
+            )
+    _validate_terminal_evidence_roles(
+        terminal_type=terminal_type,
+        lifecycle_case=lifecycle_case,
+        mapping=mapping,
+        contract=contract,
+        target_contracts_by_lot=target_contracts_by_lot,
+        evidence=mapped_evidence,
+        review_reasons=review_reasons,
+    )
+    return terminal_event_ids, {
+        "status": (
+            "ok"
+            if (
+                terminal_event_ids
+                and resolved_by_lot == target_contracts_by_lot
+            )
+            else "invalid"
+        ),
+        "resolved_contracts_by_lot": resolved_by_lot,
+        "remaining_contracts_by_lot": {
+            lot_id: max(
+                0,
+                expected - resolved_by_lot.get(lot_id, 0),
+            )
+            for lot_id, expected in target_contracts_by_lot.items()
+        },
+        "resolved_contracts_by_terminal_type": {
+            terminal_type: sum(resolved_by_lot.values())
+        }
+        if terminal_type
+        else {},
+        "reason_codes": [],
+    }
+
+
+def _validate_terminal_evidence_roles(
+    *,
+    terminal_type: str,
+    lifecycle_case: dict[str, Any],
+    mapping: dict[str, Any],
+    contract: dict[str, Any],
+    target_contracts_by_lot: dict[str, int],
+    evidence: list[dict[str, Any]],
+    review_reasons: set[str],
+) -> None:
+    option_rows = [
+        item
+        for item in evidence
+        if str(item.get("evidence_type") or "").strip().lower()
+        == "option_zero_price_close"
+    ]
+    stock_rows = [
+        item
+        for item in evidence
+        if str(item.get("evidence_type") or "").strip().lower()
+        == "stock_settlement_leg"
+    ]
+    if len(option_rows) != 1:
+        review_reasons.add("explicit_option_anchor_count_invalid")
+    requires_stock = terminal_type in {"assignment", "exercise"}
+    if (
+        (requires_stock and len(stock_rows) != 1)
+        or (not requires_stock and stock_rows)
+    ):
+        review_reasons.add(
+            "explicit_stock_settlement_count_invalid"
+        )
+        return
+    if not requires_stock or len(option_rows) != 1:
+        return
+    stock = stock_rows[0]
+    option = option_rows[0]
+    raw_stock = (
+        dict(stock.get("raw") or {})
+        if isinstance(stock.get("raw"), dict)
+        else {}
+    )
+    stock_symbol = canonical_symbol(
+        stock.get("symbol") or raw_stock.get("symbol")
+    )
+    expected_side = {
+        ("assignment", "put", "short"): "buy",
+        ("assignment", "call", "short"): "sell",
+        ("exercise", "call", "long"): "buy",
+        ("exercise", "put", "long"): "sell",
+    }.get(
+        (
+            terminal_type,
+            str(contract.get("option_type") or ""),
+            str(contract.get("position_side") or ""),
+        )
+    )
+    try:
+        stock_qty = int(
+            stock.get("stock_qty")
+            or stock.get("shares")
+            or raw_stock.get("contracts")
+            or 0
+        )
+        expected_qty = int(
+            Decimal(str(contract.get("multiplier")))
+            * sum(target_contracts_by_lot.values())
+        )
+        stock_price = _canonical_decimal(
+            stock.get("stock_price")
+            if stock.get("stock_price") is not None
+            else raw_stock.get("price")
+        )
+        option_time = int(
+            option.get("trade_time_ms")
+            or option.get("event_time_ms")
+            or dict(option.get("raw") or {}).get(
+                "trade_time_ms"
+            )
+            or 0
+        )
+        stock_time = int(
+            stock.get("trade_time_ms")
+            or stock.get("event_time_ms")
+            or raw_stock.get("trade_time_ms")
+            or 0
+        )
+    except (
+        InvalidOperation,
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        review_reasons.add(
+            "explicit_stock_settlement_economics_invalid"
+        )
+        return
+    side = str(
+        stock.get("side") or raw_stock.get("side") or ""
+    ).strip().lower()
+    if (
+        not expected_side
+        or side != expected_side
+        or stock_symbol != contract.get("symbol")
+        or stock_qty != expected_qty
+        or stock_price
+        != _canonical_decimal(contract.get("strike"))
+    ):
+        review_reasons.add(
+            "explicit_stock_settlement_economics_mismatch"
+        )
+    window = (
+        dict(mapping.get("settlement_window") or {})
+        if isinstance(mapping.get("settlement_window"), dict)
+        else {}
+    )
+    try:
+        start_ms = int(window.get("start_ms") or 0)
+        end_ms = int(window.get("end_ms") or 0)
+    except (TypeError, ValueError, OverflowError):
+        start_ms = 0
+        end_ms = 0
+    if (
+        not str(window.get("source") or "").strip()
+        or start_ms <= 0
+        or end_ms < start_ms
+        or option_time <= 0
+        or stock_time < max(start_ms, option_time)
+        or stock_time > end_ms
+    ):
+        review_reasons.add(
+            "explicit_stock_settlement_window_mismatch"
+        )
+
+
+def _plan_explicit_legacy_bridge(
+    *,
+    lifecycle_case: dict[str, Any],
+    mapping: dict[str, Any],
+    contract: dict[str, Any],
+    target_contracts_by_lot: dict[str, int],
+    all_cases: list[dict[str, Any]],
+    all_allocations: list[dict[str, Any]],
+    all_events: list[dict[str, Any]],
+    lot_fields_by_id: dict[str, dict[str, Any]],
+    review_reasons: set[str],
+) -> tuple[str | None, dict[str, Any] | None]:
+    legacy_id = str(lifecycle_case.get("case_id") or "")
+    if (
+        str(lifecycle_case.get("status") or "")
+        .strip()
+        .lower()
+        not in {"waiting", "waiting_settlement_evidence"}
+    ):
+        review_reasons.add("explicit_bridge_legacy_status_invalid")
+    canonical_case_id = str(
+        mapping.get("canonical_case_id") or ""
+    ).strip()
+    canonical_case = next(
+        (
+            item
+            for item in all_cases
+            if str(item.get("case_id") or "").strip()
+            == canonical_case_id
+        ),
+        None,
+    )
+    if (
+        not canonical_case_id
+        or canonical_case is None
+        or canonical_case_id == legacy_id
+        or str(canonical_case.get("schema_version") or "")
+        != "lifecycle_case.v2"
+    ):
+        review_reasons.add("explicit_bridge_target_invalid")
+        return canonical_case_id or None, None
+    _validate_explicit_case_contract(
+        canonical_case,
+        contract=contract,
+        review_reasons=review_reasons,
+    )
+    canonical_target = _explicit_target_manifest(
+        canonical_case.get("target_contracts_by_lot"),
+        review_reasons=review_reasons,
+    )
+    if canonical_target != target_contracts_by_lot:
+        review_reasons.add("explicit_bridge_target_manifest_mismatch")
+    case_ids = {legacy_id, canonical_case_id}
+    if any(
+        str(item.get("case_id") or "") in case_ids
+        for item in all_allocations
+    ):
+        review_reasons.add("explicit_bridge_has_terminal_allocation")
+    if any(
+        str(dict(item.get("raw_payload") or {}).get("case_id") or "")
+        in case_ids
+        and str(item.get("event_type") or "").strip().lower()
+        in {"close", "expire_close", "assignment", "exercise"}
+        for item in all_events
+        if isinstance(item.get("raw_payload"), dict)
+    ):
+        review_reasons.add("explicit_bridge_has_terminal_event")
+    for lot_id, expected in target_contracts_by_lot.items():
+        fields = lot_fields_by_id.get(lot_id)
+        try:
+            open_contracts = int(
+                dict(fields or {}).get("contracts_open") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            open_contracts = 0
+        if (
+            fields is None
+            or open_contracts < expected
+            or not _lot_matches_explicit_contract(
+                fields,
+                contract=contract,
+            )
+        ):
+            review_reasons.add(
+                "explicit_bridge_target_lot_mismatch"
+            )
+    source_bindings = {
+        binding[1]
+        for item in mapping.get("evidence_sources") or []
+        if isinstance(item, dict)
+        for binding in [
+            _canonical_futu_binding(
+                str(item.get("source_key") or "")
+            )
+        ]
+        if binding is not None
+    }
+    if len(source_bindings) != 1:
+        review_reasons.add(
+            "explicit_bridge_futu_account_ambiguous"
+        )
+        futu_account_id = ""
+    else:
+        futu_account_id = next(iter(source_bindings))
+    existing_futu = str(
+        canonical_case.get("futu_account_id") or ""
+    ).strip()
+    if existing_futu and existing_futu != futu_account_id:
+        review_reasons.add(
+            "explicit_bridge_futu_account_conflict"
+        )
+    policy = (
+        dict(mapping.get("timing_policy") or {})
+        if isinstance(mapping.get("timing_policy"), dict)
+        else {}
+    )
+    try:
+        cutoff_ms = int(policy.get("last_trade_cutoff_ms") or 0)
+        deadline_ms = int(
+            policy.get("settlement_deadline_ms") or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        cutoff_ms = 0
+        deadline_ms = 0
+    if (
+        str(policy.get("policy_schema") or "")
+        != "lifecycle_timing_policy.v1"
+        or str(policy.get("case_id") or "") != canonical_case_id
+        or str(policy.get("market") or "").strip().upper()
+        != str(canonical_case.get("market") or "").strip().upper()
+        or cutoff_ms <= 0
+        or deadline_ms <= 0
+        or not str(policy.get("calendar_hash") or "").strip()
+    ):
+        review_reasons.add("explicit_bridge_timing_policy_invalid")
+    canonical_payload = {
+        **canonical_case,
+        "futu_account_id": existing_futu or futu_account_id,
+    }
+    bridge_evidence = [
+        {
+            "schema_version": "migration_bridge_evidence.v1",
+            "evidence_id": "migration_bridge_"
+            + canonical_payload_hash(
+                {
+                    "legacy_case_id": legacy_id,
+                    "canonical_case_id": canonical_case_id,
+                    "referenced_legacy_evidence_id": (
+                        item.get("evidence_id")
+                    ),
+                }
+            )[:24],
+            "case_id": canonical_case_id,
+            "source_type": "lifecycle_migration",
+            "source_event_id": None,
+            "evidence_type": "migration_bridge",
+            "account": contract.get("account"),
+            "symbol": contract.get("symbol"),
+            "referenced_legacy_case_id": legacy_id,
+            "referenced_legacy_evidence_id": str(
+                item.get("evidence_id") or ""
+            ),
+            "allocating": False,
+        }
+        for item in mapping.get("evidence_sources") or []
+        if isinstance(item, dict)
+        and str(item.get("evidence_id") or "").strip()
+    ]
+    return canonical_case_id, {
+        "schema_version": "legacy_lifecycle_upgrade.v1",
+        "legacy_case_id": legacy_id,
+        "canonical_case": canonical_payload,
+        "timing_policy": policy,
+        "bridge_evidence": bridge_evidence,
+        "reuse_existing_canonical_case": True,
+    }
+
+
+def _event_matches_explicit_contract(
+    event: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+) -> bool:
+    event_contract = (
+        dict(event.get("contract_key") or {})
+        if isinstance(event.get("contract_key"), dict)
+        else {}
+    )
+    return (
+        str(event_contract.get("account") or "").strip().lower()
+        == str(contract.get("account") or "")
+        and str(event_contract.get("broker") or "").strip()
+        == str(contract.get("broker") or "")
+        and canonical_symbol(
+            event_contract.get("underlying_symbol")
+            or event_contract.get("symbol")
+        )
+        == contract.get("symbol")
+        and str(event_contract.get("option_type") or "")
+        .strip()
+        .lower()
+        == contract.get("option_type")
+        and str(event_contract.get("position_side") or "")
+        .strip()
+        .lower()
+        == contract.get("position_side")
+        and str(event_contract.get("expiration_ymd") or "").strip()
+        == contract.get("expiration_ymd")
+        and _decimal_equal(
+            event_contract.get("strike"),
+            contract.get("strike"),
+        )
+        and str(event.get("currency") or "").strip().upper()
+        == contract.get("currency")
+        and _decimal_equal(
+            event.get("multiplier"),
+            contract.get("multiplier"),
+        )
+    )
+
+
+def _lot_matches_explicit_contract(
+    fields: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+) -> bool:
+    return (
+        str(fields.get("account") or "").strip().lower()
+        == str(contract.get("account") or "")
+        and str(fields.get("broker") or "").strip()
+        == str(contract.get("broker") or "")
+        and canonical_symbol(fields.get("symbol"))
+        == contract.get("symbol")
+        and str(fields.get("option_type") or "").strip().lower()
+        == contract.get("option_type")
+        and str(
+            fields.get("position_side")
+            or fields.get("side")
+            or ""
+        )
+        .strip()
+        .lower()
+        == contract.get("position_side")
+        and str(fields.get("expiration_ymd") or "").strip()
+        == contract.get("expiration_ymd")
+        and _decimal_equal(
+            fields.get("strike"),
+            contract.get("strike"),
+        )
+        and str(fields.get("currency") or "").strip().upper()
+        == contract.get("currency")
+        and _decimal_equal(
+            fields.get("multiplier"),
+            contract.get("multiplier"),
+        )
+    )
+
+
+def _canonical_decimal(value: Any) -> str:
+    if value in (None, "") or isinstance(value, bool):
+        raise ValueError("decimal value is missing")
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("decimal value is invalid") from exc
+    if not number.is_finite():
+        raise ValueError("decimal value is invalid")
+    normalized = number.normalize()
+    return "0" if normalized == 0 else format(normalized, "f")
+
+
+def _decimal_equal(left: Any, right: Any) -> bool:
+    try:
+        return _canonical_decimal(left) == _canonical_decimal(right)
+    except ValueError:
+        return False
+
+
+def _explicit_inventory_state(
+    *,
+    mapping: dict[str, Any],
+    case_ids: list[str],
+    evidence_ids: list[str],
+    terminal_event_ids: list[str],
+    target_lot_ids: list[str],
+    source_keys: list[str],
+    all_cases: list[dict[str, Any]],
+    all_evidence: list[dict[str, Any]],
+    all_allocations: list[dict[str, Any]],
+    all_events: list[dict[str, Any]],
+    lot_fields_by_id: dict[str, dict[str, Any]],
+    all_claims: list[dict[str, Any]],
+    all_notifications: list[dict[str, Any]],
+    timing_policies: dict[str, dict[str, Any]],
+    void_ids: list[str],
+) -> dict[str, Any]:
+    case_id_set = set(case_ids)
+    evidence_id_set = set(evidence_ids)
+    event_id_set = set(terminal_event_ids)
+    source_key_set = set(source_keys)
+    return {
+        "explicit_mapping": mapping,
+        "cases": sorted(
+            [
+                item
+                for item in all_cases
+                if str(item.get("case_id") or "") in case_id_set
+            ],
+            key=lambda item: str(item.get("case_id") or ""),
+        ),
+        "evidence": sorted(
+            [
+                item
+                for item in all_evidence
+                if str(item.get("evidence_id") or "")
+                in evidence_id_set
+            ],
+            key=lambda item: str(item.get("evidence_id") or ""),
+        ),
+        "allocations": sorted(
+            [
+                item
+                for item in all_allocations
+                if str(item.get("case_id") or "") in case_id_set
+            ],
+            key=lambda item: str(item.get("allocation_id") or ""),
+        ),
+        "terminal_events": sorted(
+            [
+                item
+                for item in all_events
+                if str(item.get("event_id") or "") in event_id_set
+            ],
+            key=lambda item: str(item.get("event_id") or ""),
+        ),
+        "target_lots": {
+            lot_id: lot_fields_by_id.get(lot_id)
+            for lot_id in sorted(target_lot_ids)
+        },
+        "effective_void_event_ids": void_ids,
+        "claims": sorted(
+            [
+                item
+                for item in all_claims
+                if (
+                    str(item.get("case_id") or "") in case_id_set
+                    or str(item.get("source_key") or "")
+                    in source_key_set
+                )
+            ],
+            key=lambda item: str(item.get("source_key") or ""),
+        ),
+        "notifications": sorted(
+            [
+                item
+                for item in all_notifications
+                if str(item.get("case_id") or "") in case_id_set
+            ],
+            key=lambda item: str(item.get("outbox_id") or ""),
+        ),
+        "timing_policies": {
+            case_id: timing_policies.get(case_id)
+            for case_id in sorted(case_id_set)
+        },
     }
 
 
@@ -686,6 +2166,7 @@ def _apply_manifest_row(
                 "target_key": target_key,
                 "receipt_created": False,
                 "source_claims_created": [],
+                "evidence_bindings_created": [],
                 "timing_policy_created": False,
                 "outbox_rows_created": [],
             }
@@ -725,12 +2206,28 @@ def _apply_manifest_row(
                 raise ValueError(
                     "legacy migration canonical case is missing"
                 )
-            case_created = (
-                sqlite_repo.insert_trade_lifecycle_case_once(
-                    canonical_case,
-                    conn=conn,
+            if bool(
+                legacy_upgrade.get(
+                    "reuse_existing_canonical_case"
                 )
-            )
+            ):
+                if not isinstance(
+                    sqlite_repo.get_trade_lifecycle_case(
+                        canonical_case_id,
+                        conn=conn,
+                    ),
+                    dict,
+                ):
+                    raise ValueError(
+                        "legacy migration canonical case is missing"
+                    )
+            else:
+                case_created = (
+                    sqlite_repo.insert_trade_lifecycle_case_once(
+                        canonical_case,
+                        conn=conn,
+                    )
+                )
             sqlite_repo.bind_trade_lifecycle_case_futu_account_once(
                 case_id=canonical_case_id,
                 futu_account_id=str(
@@ -766,6 +2263,15 @@ def _apply_manifest_row(
                 futu_account_id=planned_binding,
                 conn=conn,
             )
+        evidence_bindings_created = [
+            sqlite_repo.bind_trade_lifecycle_evidence_case_once(
+                evidence_id=str(item.get("evidence_id") or ""),
+                case_id=str(item.get("case_id") or ""),
+                conn=conn,
+            )
+            for item in row.get("planned_evidence_bindings") or []
+            if isinstance(item, dict)
+        ]
         claims_created = [
             sqlite_repo.insert_trade_lifecycle_source_consumption_once(
                 dict(item),
@@ -809,6 +2315,7 @@ def _apply_manifest_row(
             )
         if (
             row.get("kind") == "lifecycle_case"
+            and not bool(row.get("legacy_terminal_frozen"))
             and not isinstance(
                 sqlite_repo.get_trade_lifecycle_timing_policy(
                     effective_timing_case_id,
@@ -852,6 +2359,16 @@ def _apply_manifest_row(
             ),
             "canonical_case_id": canonical_case_id or None,
             "legacy_superseded": bool(legacy_upgrade),
+            "explicit_mapping_disposition": (
+                dict(row.get("explicit_mapping") or {}).get(
+                    "disposition"
+                )
+                if isinstance(
+                    row.get("explicit_mapping"),
+                    dict,
+                )
+                else None
+            ),
         }
         receipt_created = (
             sqlite_repo.insert_trade_lifecycle_migration_receipt_once(
@@ -864,6 +2381,7 @@ def _apply_manifest_row(
             "target_key": target_key,
             "receipt_created": receipt_created,
             "source_claims_created": claims_created,
+            "evidence_bindings_created": evidence_bindings_created,
             "canonical_case_created": case_created,
             "bridge_evidence_created": bridge_created,
             "legacy_superseded": legacy_superseded,
@@ -1354,6 +2872,127 @@ def _current_inventory_state_hash(
                 "notifications": notifications,
             }
         )
+    if isinstance(row.get("explicit_mapping"), dict):
+        all_cases = [
+            dict(item)
+            for item in sqlite_repo.list_trade_lifecycle_cases(
+                conn=conn
+            )
+            if isinstance(item, dict)
+        ]
+        all_evidence = [
+            dict(item)
+            for item in sqlite_repo.list_trade_lifecycle_evidence(
+                conn=conn
+            )
+            if isinstance(item, dict)
+        ]
+        all_allocations = [
+            dict(item)
+            for item in sqlite_repo.list_trade_lifecycle_allocations(
+                conn=conn
+            )
+            if isinstance(item, dict)
+        ]
+        all_events = [
+            dict(item)
+            for item in sqlite_repo.list_trade_events(conn=conn)
+            if isinstance(item, dict)
+        ]
+        lots = {
+            str(item.get("record_id") or ""): dict(
+                item.get("fields") or {}
+            )
+            for item in sqlite_repo.list_position_lots(conn=conn)
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "")
+            and isinstance(item.get("fields"), dict)
+        }
+        all_claims = [
+            dict(item)
+            for item in (
+                sqlite_repo.list_trade_lifecycle_source_consumptions(
+                    conn=conn
+                )
+            )
+            if isinstance(item, dict)
+        ]
+        all_notifications = [
+            dict(item)
+            for item in (
+                sqlite_repo.list_trade_lifecycle_notifications(
+                    conn=conn
+                )
+            )
+            if isinstance(item, dict)
+        ]
+        timing_policies = {
+            str(item.get("case_id") or ""): dict(item)
+            for item in (
+                sqlite_repo.list_trade_lifecycle_timing_policies(
+                    conn=conn
+                )
+            )
+            if isinstance(item, dict)
+            and str(item.get("case_id") or "")
+        }
+        void_ids = sorted(
+            {
+                target
+                for item in all_events
+                for target in [valid_void_target_event_id(item)]
+                if target
+            }
+        )
+        return canonical_payload_hash(
+            _explicit_inventory_state(
+                mapping=dict(row["explicit_mapping"]),
+                case_ids=[
+                    str(item)
+                    for item in row.get(
+                        "explicit_state_case_ids"
+                    )
+                    or []
+                ],
+                evidence_ids=[
+                    str(item)
+                    for item in row.get(
+                        "explicit_state_evidence_ids"
+                    )
+                    or []
+                ],
+                terminal_event_ids=[
+                    str(item)
+                    for item in row.get(
+                        "explicit_state_terminal_event_ids"
+                    )
+                    or []
+                ],
+                target_lot_ids=[
+                    str(item)
+                    for item in row.get(
+                        "explicit_state_target_lot_ids"
+                    )
+                    or []
+                ],
+                source_keys=[
+                    str(item)
+                    for item in row.get(
+                        "explicit_state_source_keys"
+                    )
+                    or []
+                ],
+                all_cases=all_cases,
+                all_evidence=all_evidence,
+                all_allocations=all_allocations,
+                all_events=all_events,
+                lot_fields_by_id=lots,
+                all_claims=all_claims,
+                all_notifications=all_notifications,
+                timing_policies=timing_policies,
+                void_ids=void_ids,
+            )
+        )
     case_id = str(row.get("case_id") or "")
     lifecycle_case = sqlite_repo.get_trade_lifecycle_case(
         case_id,
@@ -1445,6 +3084,7 @@ def _is_canonical_futu_key(value: str) -> bool:
 
 
 __all__ = [
+    "EXPLICIT_MAPPING_SCHEMA",
     "MIGRATION_RECEIPT_SCHEMA",
     "MIGRATION_SCHEMA",
     "apply_lifecycle_migration_manifest",
