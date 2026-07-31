@@ -1,0 +1,59 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.5",
+  "base": {
+    "tag": "v1.7.4",
+    "commit": "dcd0a7b04ed56ba51df08ed6c0432409624eceea"
+  },
+  "reviewed_head": "9006b91e77b0f337ed9efc4279939f5203e0e809",
+  "commits": [
+    {
+      "sha": "76a7561851b24b6fe466ea0fa2b1ca96328358fd",
+      "subject": "fix: correct daily brief price and review display"
+    },
+    {
+      "sha": "c7104a9c0dfb17822c0d6489412231ee3418eba6",
+      "subject": "fix option expiry lifecycle and evidence delivery"
+    },
+    {
+      "sha": "9006b91e77b0f337ed9efc4279939f5203e0e809",
+      "subject": "Merge pull request #125 from liuxie066/agent/fix-option-expiry-lifecycle"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Split expired-option handling into independently auditable close-fact and close-reason phases, unifying Futu push and history polling under account-scoped immutable evidence, frozen settlement observations, and a durable notification Outbox.",
+      "commits": [
+        "c7104a9c0dfb17822c0d6489412231ee3418eba6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented cross-account, ambiguous, price-mismatched, or out-of-window stock settlements from being recorded as assignment or exercise, and required canonical terminal events, allocations, and projection changes before marking lifecycle cases written or creating final receipts.",
+      "commits": [
+        "c7104a9c0dfb17822c0d6489412231ee3418eba6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made expiry, assignment, and exercise reconciliation fail closed on incomplete or conflicting broker evidence while preserving idempotency across Push/Poll arrival order, so repeated scans cannot repeatedly emit the same final Feishu receipt.",
+      "commits": [
+        "c7104a9c0dfb17822c0d6489412231ee3418eba6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Corrected Daily Brief price presentation and separated non-actionable position fact reviews from trading actions, preventing review-only rows from being shown as close or roll recommendations.",
+      "commits": [
+        "76a7561851b24b6fe466ea0fa2b1ca96328358fd"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9006b91e77b0f337ed9efc4279939f5203e0e809",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation commit release notes."
+    }
+  ]
+}

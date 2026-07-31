@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.7.5 - 2026-07-31
+
+### Improvements
+- Split expired-option handling into independently auditable close-fact and close-reason phases, unifying Futu push and history polling under account-scoped immutable evidence, frozen settlement observations, and a durable notification Outbox.
+
+### Bug Fixes
+- Prevented cross-account, ambiguous, price-mismatched, or out-of-window stock settlements from being recorded as assignment or exercise, and required canonical terminal events, allocations, and projection changes before marking lifecycle cases written or creating final receipts.
+- Made expiry, assignment, and exercise reconciliation fail closed on incomplete or conflicting broker evidence while preserving idempotency across Push/Poll arrival order, so repeated scans cannot repeatedly emit the same final Feishu receipt.
+- Corrected Daily Brief price presentation and separated non-actionable position fact reviews from trading actions, preventing review-only rows from being shown as close or roll recommendations.
+
 ## 1.7.4 - 2026-07-30
 
 ### Bug Fixes
