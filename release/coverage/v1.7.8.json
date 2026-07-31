@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.7.8",
+  "base": {
+    "tag": "v1.7.7",
+    "commit": "d579683d45f976f38e3ba22b03748fcd1d5a9bff"
+  },
+  "reviewed_head": "3ced7a8524e0ab7c66ed530f47661ff44edb543c",
+  "commits": [
+    {
+      "sha": "3ced7a8524e0ab7c66ed530f47661ff44edb543c",
+      "subject": "fix: correct IQ producer blocking classification"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Corrected the IQ quality producer to treat Strategy Lab units as auxiliary, scope lifecycle and option-position evidence by market, and distinguish canonical lifecycle-owned intake rows from actionable stale state while failing closed on ambiguous ownership.",
+      "commits": [
+        "3ced7a8524e0ab7c66ed530f47661ff44edb543c"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
