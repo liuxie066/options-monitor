@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -10,8 +12,10 @@ from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.opend_symbol_outputs import (
+    REQUIRED_DATA_COLUMNS,
     REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
     resolve_exact_fresh_required_data_quote_receipt,
+    validate_required_data_source_outcome,
 )
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
@@ -335,7 +339,9 @@ def _ready_manifest_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise RequiredDataSnapshotError(f"{symbol} quote bundle is invalid")
-    _validate_complete_required_data_bundle(bundle)
+    source_outcome, reason_code = _validate_complete_required_data_bundle(
+        bundle
+    )
     fetch_policy_hash = str(
         bundle.get("fetch_policy_hash")
         or receipt.get("producer_policy_hash")
@@ -343,7 +349,7 @@ def _ready_manifest_entry(
     ).strip()
     if not _is_sha256(fetch_policy_hash):
         raise RequiredDataSnapshotError(f"{symbol} fetch policy hash is invalid")
-    return {
+    entry = {
         "status": "ready",
         "fetch_plan": dict(bundle.get("fetch_plan") or plan_item.get("fetch_plan") or {}),
         "fetch_policy_hash": fetch_policy_hash,
@@ -358,7 +364,11 @@ def _ready_manifest_entry(
             bundle.get("required_data_csv_relpath"),
             "required_data_csv_relpath",
         ),
+        "source_outcome": source_outcome,
     }
+    if reason_code:
+        entry["reason_code"] = reason_code
+    return entry
 
 
 def _validate_ready_entry(
@@ -404,7 +414,9 @@ def _validate_ready_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise PositionAdviceSourceError("required-data quote bundle mismatch")
-    _validate_complete_required_data_bundle(bundle)
+    source_outcome, reason_code = _validate_complete_required_data_bundle(
+        bundle
+    )
     raw_relpath = _required_text(entry.get("raw_json_relpath"), "raw_json_relpath")
     csv_relpath = _required_text(
         entry.get("required_data_csv_relpath"),
@@ -420,6 +432,14 @@ def _validate_ready_entry(
         bundle.get("fetch_policy_hash") or ""
     ):
         raise PositionAdviceSourceError("required-data fetch policy mismatch")
+    if str(entry.get("source_outcome") or "") != source_outcome:
+        raise PositionAdviceSourceError(
+            "required-data source outcome mismatch"
+        )
+    if str(entry.get("reason_code") or "") != str(reason_code or ""):
+        raise PositionAdviceSourceError(
+            "required-data reason code mismatch"
+        )
     raw_bytes = safe_existing_relative_path(root, raw_relpath).read_bytes()
     csv_bytes = safe_existing_relative_path(root, csv_relpath).read_bytes()
     captured_raw = base64.b64decode(
@@ -443,12 +463,16 @@ def _validate_ready_entry(
             "raw_json_relpath": raw_relpath,
             "required_data_csv_relpath": csv_relpath,
             "required_data_root": str(root),
+            "source_outcome": source_outcome,
+            "reason_code": reason_code,
         },
         captured_csv,
     )
 
 
-def _validate_complete_required_data_bundle(bundle: Mapping[str, Any]) -> None:
+def _validate_complete_required_data_bundle(
+    bundle: Mapping[str, Any],
+) -> tuple[str, str | None]:
     try:
         raw_bytes = base64.b64decode(
             _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
@@ -469,6 +493,50 @@ def _validate_complete_required_data_bundle(bundle: Mapping[str, Any]) -> None:
         raise PositionAdviceSourceError(
             "required-data bundle is not complete"
         )
+    rows = raw_payload.get("rows") if isinstance(raw_payload, dict) else None
+    if not isinstance(rows, list):
+        raise PositionAdviceSourceError(
+            "required-data bundle rows are invalid"
+        )
+    source_outcome, reason_code = validate_required_data_source_outcome(
+        rows=rows,
+        source_outcome=(meta or {}).get("source_outcome"),
+        reason_code=(meta or {}).get("reason_code"),
+        subject="bundle",
+    )
+    if not rows:
+        try:
+            csv_bytes = base64.b64decode(
+                _required_text(
+                    bundle.get("required_data_csv_base64"),
+                    "required_data_csv_base64",
+                ),
+                validate=True,
+            )
+            csv_rows = list(
+                csv.reader(
+                    io.StringIO(csv_bytes.decode("utf-8"))
+                )
+            )
+        except (
+            ValueError,
+            UnicodeDecodeError,
+            csv.Error,
+            binascii.Error,
+        ) as exc:
+            raise PositionAdviceSourceError(
+                "success-empty required-data CSV is unreadable"
+            ) from exc
+        if (
+            not csv_rows
+            or csv_rows[0] != REQUIRED_DATA_COLUMNS
+            or len(csv_rows) != 1
+        ):
+            raise PositionAdviceSourceError(
+                "success-empty required-data CSV is not header-only"
+            )
+        return source_outcome, reason_code
+    return source_outcome, reason_code
 
 
 def _prefetch_result_index(summary: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

@@ -196,6 +196,21 @@ def test_regression_eleven_overdue_lifecycle_cases_are_classified_stale() -> Non
         now=now,
         trading_days=[date(2026, 7, 7), date(2026, 7, 8)],
         first_deep_by_case=first_deep,
+        timing_policies_by_case={
+            item["case_id"]: {
+                "settlement_deadline_ms": int(
+                    datetime(
+                        2026,
+                        7,
+                        7,
+                        15,
+                        tzinfo=timezone.utc,
+                    ).timestamp()
+                    * 1000
+                )
+            }
+            for item in cases
+        },
     )
     assert len(datasets) == 11
     assert {item["status"] for item in datasets} == {"untrusted"}

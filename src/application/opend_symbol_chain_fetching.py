@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
+
+import pandas as pd
 
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.opend_call_coordinator import rate_limited_opend_call
@@ -23,6 +25,47 @@ from src.infrastructure.futu_gateway import build_ready_futu_gateway, retry_futu
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+ExpirationDiscoveryOutcome = Literal[
+    "success_rows",
+    "success_empty",
+    "provider_error",
+    "parse_error",
+]
+
+
+class OptionExpirationParseError(RuntimeError):
+    """The provider call completed but its expiration payload was invalid."""
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class OptionExpirationDiscoveryResult:
+    outcome: ExpirationDiscoveryOutcome
+    reason_code: str | None
+    expirations: list[str]
+    observed_at_utc: str | None
+    completed_at_utc: str
+    request_identity: dict[str, Any]
+    error: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.outcome in {"success_rows", "success_empty"}
+
+    def to_debug_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "reason_code": self.reason_code,
+            "expirations": list(self.expirations),
+            "observed_at_utc": self.observed_at_utc,
+            "completed_at_utc": self.completed_at_utc,
+            "request_identity": dict(self.request_identity),
+            "error": self.error,
+        }
 
 
 @dataclass(frozen=True)
@@ -80,6 +123,108 @@ def list_option_expirations(
             pass
 
 
+def discover_option_expirations(
+    symbol: str,
+    *,
+    source: str = "futu",
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    base_dir: Path | None = None,
+    expiration_max_wait_sec: float = 30.0,
+    expiration_window_sec: float = 30.0,
+    expiration_max_calls: int = 60,
+    list_expirations_fn: Callable[..., list[str]] | None = None,
+) -> OptionExpirationDiscoveryResult:
+    """Return the typed result of the scheduled expiration observation."""
+
+    effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
+    try:
+        underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
+        trading_date = get_trading_date(underlier.market).isoformat()
+    except Exception as exc:
+        completed_at = _utc_now_iso()
+        return OptionExpirationDiscoveryResult(
+            outcome="parse_error",
+            reason_code="request_identity_invalid",
+            expirations=[],
+            observed_at_utc=None,
+            completed_at_utc=completed_at,
+            request_identity={
+                "symbol": str(symbol or "").strip().upper(),
+                "underlier": None,
+                "source": str(source or "").strip().lower(),
+                "host": str(host),
+                "port": int(port),
+                "trading_date": None,
+            },
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    identity = {
+        "symbol": str(symbol or "").strip().upper(),
+        "underlier": underlier.code,
+        "source": str(source or "").strip().lower(),
+        "host": str(host),
+        "port": int(port),
+        "trading_date": trading_date,
+    }
+    fetch = list_expirations_fn or list_option_expirations
+    try:
+        raw_expirations = fetch(
+            symbol,
+            host=host,
+            port=int(port),
+            base_dir=effective_base_dir,
+            expiration_max_wait_sec=expiration_max_wait_sec,
+            expiration_window_sec=expiration_window_sec,
+            expiration_max_calls=expiration_max_calls,
+        )
+        observed_at = _utc_now_iso()
+        if not isinstance(raw_expirations, list):
+            raise OptionExpirationParseError(
+                "option expiration discovery did not return a list"
+            )
+        expirations: list[str] = []
+        for value in raw_expirations:
+            normalized = normalize_expiration_ymd(value)
+            if not normalized:
+                raise OptionExpirationParseError(
+                    f"invalid option expiration value: {value!r}"
+                )
+            if normalized not in expirations:
+                expirations.append(normalized)
+        expirations.sort()
+        completed_at = _utc_now_iso()
+        return OptionExpirationDiscoveryResult(
+            outcome=("success_rows" if expirations else "success_empty"),
+            reason_code=(None if expirations else "no_expirations"),
+            expirations=expirations,
+            observed_at_utc=observed_at,
+            completed_at_utc=completed_at,
+            request_identity=identity,
+        )
+    except OptionExpirationParseError as exc:
+        return OptionExpirationDiscoveryResult(
+            outcome="parse_error",
+            reason_code="expiration_response_invalid",
+            expirations=[],
+            observed_at_utc=None,
+            completed_at_utc=_utc_now_iso(),
+            request_identity=identity,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    except Exception as exc:
+        return OptionExpirationDiscoveryResult(
+            outcome="provider_error",
+            reason_code="expiration_discovery_failed",
+            expirations=[],
+            observed_at_utc=None,
+            completed_at_utc=_utc_now_iso(),
+            request_identity=identity,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
 def list_option_expirations_with_gateway(
     gateway: Any,
     *,
@@ -124,13 +269,26 @@ def list_option_expirations_with_gateway(
         retry_max_delay_sec=retry_max_delay_sec,
         quiet=False,
     )
-    if df_e is None or df_e.empty:
+    if not isinstance(df_e, pd.DataFrame):
+        raise OptionExpirationParseError(
+            "option expiration response must be a DataFrame"
+        )
+    if df_e.empty:
         return []
-    expirations = sorted({
-        exp
-        for exp in (normalize_expiration_ymd(value) for value in df_e.get("strike_time").tolist())
-        if exp
-    })
+    if "strike_time" not in df_e.columns:
+        raise OptionExpirationParseError(
+            "option expiration response is missing strike_time"
+        )
+    expirations: list[str] = []
+    for value in df_e["strike_time"].tolist():
+        normalized = normalize_expiration_ymd(value)
+        if not normalized:
+            raise OptionExpirationParseError(
+                f"invalid option expiration value: {value!r}"
+            )
+        if normalized not in expirations:
+            expirations.append(normalized)
+    expirations.sort()
     if cache_path is not None and asof_date:
         save_option_expiration_cache(
             cache_path,
@@ -194,24 +352,21 @@ def fetch_symbol_option_chain(
     if explicit_expirations_norm:
         expirations_all = list(explicit_expirations_norm)
     else:
-        try:
-            expirations_all = list_option_expirations_with_gateway(
-                gateway,
-                underlier_code=underlier_code,
-                base_dir=request.effective_base_dir,
-                expiration_limit=limits.option_expiration,
-                no_retry=bool(request.no_retry),
-                retry_max_attempts=int(request.retry_max_attempts),
-                retry_time_budget_sec=float(request.retry_time_budget_sec),
-                retry_base_delay_sec=float(request.retry_base_delay_sec),
-                retry_max_delay_sec=float(request.retry_max_delay_sec),
-                retry_call=retry_call,
-                rate_limited_call=rate_limited_call,
-                asof_date=today.isoformat(),
-                metrics=expiration_fetch_meta,
-            )
-        except Exception:
-            expirations_all = []
+        expirations_all = list_option_expirations_with_gateway(
+            gateway,
+            underlier_code=underlier_code,
+            base_dir=request.effective_base_dir,
+            expiration_limit=limits.option_expiration,
+            no_retry=bool(request.no_retry),
+            retry_max_attempts=int(request.retry_max_attempts),
+            retry_time_budget_sec=float(request.retry_time_budget_sec),
+            retry_base_delay_sec=float(request.retry_base_delay_sec),
+            retry_max_delay_sec=float(request.retry_max_delay_sec),
+            retry_call=retry_call,
+            rate_limited_call=rate_limited_call,
+            asof_date=today.isoformat(),
+            metrics=expiration_fetch_meta,
+        )
 
     expirations_pick = select_symbol_expirations(
         expirations_all=expirations_all,
@@ -252,6 +407,9 @@ def fetch_symbol_option_chain(
 
     fetch_meta = dict(fetch_result.to_meta())
     fetch_meta.update(expiration_fetch_meta)
+    completed_at = datetime.now(timezone.utc).isoformat()
+    fetch_meta["source_observed_at"] = completed_at
+    fetch_meta["completed_at_utc"] = completed_at
     return SymbolOptionChainResult(
         rows=fetch_result.rows,
         expirations_all=expirations_all,

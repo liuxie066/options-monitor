@@ -64,7 +64,12 @@ def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         {
             "symbol": "NVDA",
             "rows": [],
-            "meta": {"status": "ok", "source": "opend"},
+            "meta": {
+                "status": "ok",
+                "source": "opend",
+                "source_outcome": "success_empty",
+                "reason_code": "no_expirations",
+            },
         },
         output_root=quotes,
     )

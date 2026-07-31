@@ -17,6 +17,13 @@ from src.infrastructure.io_utils import atomic_write_json
 
 
 FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
+OptionChainSourceOutcome = Literal[
+    "success_rows",
+    "success_empty",
+    "provider_error",
+    "parse_error",
+    "not_attempted",
+]
 
 DEFAULT_OPTION_CHAIN_WINDOW_SEC = 30.0
 DEFAULT_OPTION_CHAIN_MAX_CALLS = 10
@@ -66,6 +73,9 @@ class OptionChainFetchResult:
     error_code: str | None
     errors: list[dict[str, Any]]
     expiration_statuses: dict[str, str]
+    source_outcome: OptionChainSourceOutcome
+    reason_code: str | None = None
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
     stale_cache_expirations: list[str] = field(default_factory=list)
     stale_cache_asof_dates: dict[str, str] = field(default_factory=dict)
     frame: pd.DataFrame | None = None
@@ -80,6 +90,9 @@ class OptionChainFetchResult:
             "rate_gate_wait_sec": float(self.rate_gate_wait_sec),
             "expiration_statuses": dict(self.expiration_statuses),
             "errors": list(self.errors),
+            "source_outcome": self.source_outcome,
+            "reason_code": self.reason_code,
+            "diagnostics": list(self.diagnostics),
             "stale_cache_expirations": list(self.stale_cache_expirations),
             "stale_cache_asof_dates": dict(self.stale_cache_asof_dates),
         }
@@ -337,6 +350,7 @@ def fetch_option_chains(
     freshness_policy = str(request.freshness_policy or "cache_first")
     force_refresh = request.is_force_refresh or freshness_policy == "force_refresh"
     targets: list[str | None] = list(request.expirations or [])
+    explicit_target_scope = bool(targets)
     if not targets:
         targets = [None]
 
@@ -352,6 +366,7 @@ def fetch_option_chains(
     from_cache: list[str] = []
     fetched: list[str] = []
     errors: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
     statuses: dict[str, str] = {}
     stale_cache: list[str] = []
     stale_cache_asof_dates: dict[str, str] = {}
@@ -448,11 +463,35 @@ def fetch_option_chains(
             statuses[exp_key] = "error"
             continue
 
-        chain_frame = _chain_value_to_frame(chain)
-        chain_rows = _chain_value_to_records(chain, frame=chain_frame)
+        try:
+            chain_frame = _chain_value_to_frame(chain)
+            chain_rows = _chain_value_to_records(chain, frame=chain_frame)
+        except (TypeError, ValueError) as exc:
+            errors.append(
+                {
+                    "expiration": exp_norm,
+                    "error_code": "PARSE_ERROR",
+                    "message": str(exc),
+                }
+            )
+            statuses[exp_key] = "error"
+            continue
         if not chain_rows:
             statuses[exp_key] = "empty"
-            errors.append({"expiration": exp_norm, "error_code": "EMPTY_CHAIN", "message": "empty_chain"})
+            empty_diagnostic = {
+                "expiration": exp_norm,
+                "diagnostic_code": "EMPTY_CHAIN",
+                "message": "empty_chain",
+            }
+            diagnostics.append(empty_diagnostic)
+            if not explicit_target_scope:
+                errors.append(
+                    {
+                        "expiration": exp_norm,
+                        "error_code": "EMPTY_CHAIN",
+                        "message": "empty_chain",
+                    }
+                )
             if request.chain_cache and asof_date:
                 save_option_chain_diagnostic(
                     option_chain_diagnostic_path(
@@ -484,7 +523,21 @@ def fetch_option_chains(
                 rows=chain_rows,
             )
 
-    status = _result_status(rows=rows, errors=errors, target_count=len(targets))
+    source_outcome, reason_code = _source_outcome(
+        rows=rows,
+        errors=errors,
+        statuses=statuses,
+        explicit_target_scope=explicit_target_scope,
+    )
+    status = (
+        "ok"
+        if source_outcome in {"success_rows", "success_empty"}
+        else _result_status(
+            rows=rows,
+            errors=errors,
+            target_count=len(targets),
+        )
+    )
     return OptionChainFetchResult(
         rows=rows,
         from_cache_expirations=from_cache,
@@ -495,6 +548,9 @@ def fetch_option_chains(
         error_code=_primary_error_code(errors),
         errors=errors,
         expiration_statuses=statuses,
+        source_outcome=source_outcome,
+        reason_code=reason_code,
+        diagnostics=diagnostics,
         stale_cache_expirations=stale_cache,
         stale_cache_asof_dates=stale_cache_asof_dates,
         frame=_concat_frames(frame_parts),
@@ -555,32 +611,36 @@ def _fetch_one_chain(
 
 
 def _chain_value_to_frame(value: Any) -> pd.DataFrame | None:
-    try:
-        if value is None:
-            return None
-        if isinstance(value, pd.DataFrame):
-            return value if not value.empty else None
-        if isinstance(value, list):
-            return _records_to_frame(value)
-        if getattr(value, "empty", False):
-            return None
-        if hasattr(value, "to_dict"):
+    if value is None:
+        raise TypeError("option chain response is None")
+    if isinstance(value, pd.DataFrame):
+        return value
+    if isinstance(value, list):
+        if any(not isinstance(row, dict) for row in value):
+            raise TypeError("option chain list contains non-object rows")
+        return pd.DataFrame(value)
+    if hasattr(value, "to_dict"):
+        try:
             frame = pd.DataFrame(value.to_dict(orient="records"))
-            return frame if not frame.empty else None
-        return None
-    except Exception:
-        return None
+        except Exception as exc:
+            raise ValueError("option chain response conversion failed") from exc
+        return frame
+    raise TypeError(
+        f"unsupported option chain response type: {type(value).__name__}"
+    )
 
 
 def _chain_value_to_records(value: Any, *, frame: pd.DataFrame | None = None) -> list[dict[str, Any]]:
     if frame is not None:
         return [dict(row) for row in frame.to_dict(orient="records")]
     if isinstance(value, list):
-        return [dict(row) for row in value if isinstance(row, dict)]
+        if any(not isinstance(row, dict) for row in value):
+            raise TypeError("option chain list contains non-object rows")
+        return [dict(row) for row in value]
     try:
         return [dict(row) for row in value.to_dict(orient="records")]
-    except Exception:
-        return []
+    except Exception as exc:
+        raise ValueError("option chain response conversion failed") from exc
 
 
 def _records_to_frame(rows: list[dict[str, Any]]) -> pd.DataFrame | None:
@@ -609,7 +669,7 @@ def _primary_error_code(errors: list[dict[str, Any]]) -> str | None:
     if not errors:
         return None
     codes = [str(item.get("error_code") or "UNKNOWN") for item in errors if isinstance(item, dict)]
-    for code in ("RATE_LIMIT", "TRANSIENT", "EMPTY_CHAIN"):
+    for code in ("RATE_LIMIT", "TRANSIENT", "PARSE_ERROR", "EMPTY_CHAIN"):
         if code in codes:
             return code
     return codes[0] if codes else "UNKNOWN"
@@ -621,6 +681,33 @@ def _result_status(*, rows: list[dict[str, Any]], errors: list[dict[str, Any]], 
     if rows:
         return "partial"
     return "error" if errors or target_count > 0 else "ok"
+
+
+def _source_outcome(
+    *,
+    rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    statuses: dict[str, str],
+    explicit_target_scope: bool,
+) -> tuple[OptionChainSourceOutcome, str | None]:
+    if errors:
+        codes = {
+            str(item.get("error_code") or "").strip().upper()
+            for item in errors
+            if isinstance(item, dict)
+        }
+        if "PARSE_ERROR" in codes:
+            return "parse_error", "chain_response_invalid"
+        return "provider_error", _primary_error_code(errors)
+    if rows:
+        return "success_rows", None
+    if (
+        explicit_target_scope
+        and statuses
+        and set(statuses.values()) == {"empty"}
+    ):
+        return "success_empty", "no_contract_rows"
+    return "provider_error", "EMPTY_CHAIN"
 
 
 def _cache_expiration_key(expiration: str | None) -> str:

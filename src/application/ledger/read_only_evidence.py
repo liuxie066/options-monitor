@@ -66,6 +66,20 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
     def list_trade_lifecycle_cases(self) -> list[dict[str, Any]]:
         return self._read_json_column("trade_lifecycle_cases", "raw_json")
 
+    def get_trade_lifecycle_case(
+        self,
+        case_id: str,
+    ) -> dict[str, Any] | None:
+        wanted = str(case_id or "").strip()
+        return next(
+            (
+                item
+                for item in self.list_trade_lifecycle_cases()
+                if str(item.get("case_id") or "").strip() == wanted
+            ),
+            None,
+        )
+
     def list_trade_lifecycle_evidence(
         self,
         *,
@@ -91,6 +105,64 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
                 == str(symbol).strip().upper()
             ]
         return rows
+
+    def list_trade_lifecycle_allocations(
+        self,
+        *,
+        case_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_json_column(
+            "trade_lifecycle_allocations",
+            "raw_json",
+        )
+        if case_id:
+            wanted = str(case_id).strip()
+            rows = [
+                item
+                for item in rows
+                if str(item.get("case_id") or "").strip() == wanted
+            ]
+        return rows
+
+    def list_trade_lifecycle_source_consumptions(
+        self,
+        *,
+        case_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_json_column(
+            "trade_lifecycle_source_consumptions",
+            "raw_json",
+        )
+        if case_id:
+            wanted = str(case_id).strip()
+            rows = [
+                item
+                for item in rows
+                if str(item.get("case_id") or "").strip() == wanted
+            ]
+        return rows
+
+    def list_trade_lifecycle_timing_policies(
+        self,
+    ) -> list[dict[str, Any]]:
+        return self._read_json_column(
+            "trade_lifecycle_timing_policies",
+            "raw_json",
+        )
+
+    def get_trade_lifecycle_timing_policy(
+        self,
+        case_id: str,
+    ) -> dict[str, Any] | None:
+        wanted = str(case_id or "").strip()
+        return next(
+            (
+                item
+                for item in self.list_trade_lifecycle_timing_policies()
+                if str(item.get("case_id") or "").strip() == wanted
+            ),
+            None,
+        )
 
     def _read_json_column(self, table: str, column: str) -> list[dict[str, Any]]:
         uri = f"{self.path.as_uri()}?mode=ro"

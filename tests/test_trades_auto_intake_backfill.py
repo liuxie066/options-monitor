@@ -80,16 +80,15 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
     assert out["ok"] is True
     assert out["deal_count"] == 1
     assert out["applied_count"] == 1
-    assert processed == [
-        {
-            "payload": {
-                "deal_id": "deal-1",
-                "code": "HK.TCH260605P440000",
-            },
-            "source": "backfill",
-            "callback": callback,
-        }
-    ]
+    assert len(processed) == 1
+    assert processed[0]["payload"]["deal_id"] == "deal-1"
+    assert processed[0]["payload"]["code"] == "HK.TCH260605P440000"
+    assert processed[0]["payload"]["futu_account_id"] == "REAL_1"
+    assert processed[0]["payload"]["internal_account"] == "lx"
+    assert processed[0]["payload"]["_trade_intake_source"]["transport"] == "poll"
+    assert processed[0]["payload"]["_trade_intake_source"]["opend_port"] == 11111
+    assert processed[0]["source"] == "backfill"
+    assert processed[0]["callback"] is callback
     phases = [event["phase"] for event in _audit_events(tmp_path / "audit.jsonl")]
     assert phases == [
         "backfill_check_started",
@@ -175,7 +174,11 @@ def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path)
 
     assert out["applied_count"] == 1
     assert out["skipped_duplicate_count"] == 0
-    assert processed == [{"payload": {"deal_id": "deal-1"}, "source": "backfill"}]
+    assert len(processed) == 1
+    assert processed[0]["payload"]["deal_id"] == "deal-1"
+    assert processed[0]["payload"]["futu_account_id"] == "REAL_1"
+    assert processed[0]["payload"]["internal_account"] == "lx"
+    assert processed[0]["source"] == "backfill"
 
 
 def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(tmp_path: Path) -> None:
@@ -196,8 +199,12 @@ def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(
     assert out["applied_count"] == 0
     assert out["skipped_duplicate_count"] == 1
     state = load_trade_intake_state(tmp_path / "state.json")
-    assert state["processed_deal_ids"]["deal-1"]["status"] == "reconciled"
-    assert state["processed_deal_ids"]["deal-1"]["reason"] == "ledger_event_already_recorded"
+    assert state["processed_deal_ids"][
+        "futu:lx:REAL_1:deal-1"
+    ]["status"] == "reconciled"
+    assert state["processed_deal_ids"][
+        "futu:lx:REAL_1:deal-1"
+    ]["reason"] == "ledger_event_already_recorded"
 
 
 def test_backfill_does_not_dedupe_same_deal_id_across_accounts(
@@ -252,7 +259,11 @@ def test_backfill_does_not_dedupe_same_deal_id_across_accounts(
 
     assert out["applied_count"] == 1
     assert out["skipped_duplicate_count"] == 0
-    assert processed == [{"deal_id": "same-id", "futu_account_id": "REAL_2"}]
+    assert len(processed) == 1
+    assert processed[0]["deal_id"] == "same-id"
+    assert processed[0]["futu_account_id"] == "REAL_2"
+    assert processed[0]["internal_account"] == "sy"
+    assert processed[0]["_trade_intake_source"]["transport"] == "poll"
 
 
 def test_run_history_backfill_does_not_treat_numeric_lot_lineage_as_deal_id(
@@ -458,7 +469,7 @@ def test_history_backfill_keeps_unexpected_pipeline_exception_in_durable_inbox(
     assert "unexpected pipeline crash" in retry_rows[0]["last_error"]
 
 
-def test_history_backfill_keeps_retryable_unresolved_result_in_durable_inbox(
+def test_history_backfill_handles_lifecycle_pending_in_durable_inbox(
     tmp_path: Path,
 ) -> None:
     inbox_path = tmp_path / "trade_inbox.sqlite3"
@@ -473,11 +484,14 @@ def test_history_backfill_keeps_retryable_unresolved_result_in_durable_inbox(
             "reason": "waiting_settlement_evidence",
             "deal_id": "deal-waiting",
             "account": "lx",
-            "diagnostics": {"retryable": True},
+            "diagnostics": {
+                "retryable": True,
+                "broker_evidence_accepted": True,
+            },
         },
     )
 
     assert out["unresolved_count"] == 1
-    assert trade_inbox_summary(inbox_path)["pending_count"] == 1
-    retry_rows = list_retryable_trade_payloads(inbox_path, retry_delay_sec=0)
-    assert retry_rows[0]["deal_id"] == "deal-waiting"
+    assert trade_inbox_summary(inbox_path)["pending_count"] == 0
+    assert trade_inbox_summary(inbox_path)["handled_count"] == 1
+    assert list_retryable_trade_payloads(inbox_path, retry_delay_sec=0) == []
