@@ -7,9 +7,13 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 
 import src.application.quality.service as service_module
+from domain.domain.option_lifecycle import build_lifecycle_case
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.position_records import PositionLotRecord
 from src.application.quality.service import OMQualityService
+from src.application.trades.close_reason_evidence import (
+    build_lifecycle_timing_policy,
+)
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
 from src.infrastructure.quality.opend_position_adapter import OpenDOptionSnapshot
@@ -121,6 +125,136 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
         )
     )
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload)
+
+
+def test_service_uses_account_coherent_lifecycle_read_for_position_coverage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(ledger_path)
+    repo.replace_position_lots(
+        [
+            PositionLotRecord(
+                record_id="lot-nvda",
+                fields={
+                    "account": "lx",
+                    "broker": "futu",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "currency": "USD",
+                    "strike": 100,
+                    "multiplier": 100,
+                    "expiration": 1784246400000,
+                    "expiration_ymd": "2026-07-17",
+                    "status": "open",
+                },
+            )
+        ]
+    )
+    lifecycle_case = build_lifecycle_case(
+        account="lx",
+        broker="futu",
+        contract_key="futu|lx|NVDA|put|short|100|2026-07-17",
+        position_side="short",
+        expiration_ymd="2026-07-17",
+        market="US",
+        target_contracts_by_lot={"lot-nvda": 1},
+    )
+    lifecycle_case.update(
+        {
+            "market": "US",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "strike": 100,
+            "multiplier": 100,
+        }
+    )
+    assert repo.upsert_trade_lifecycle_case(lifecycle_case)
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    assert repo.insert_trade_lifecycle_timing_policy_once(
+        build_lifecycle_timing_policy(
+            case_id=str(lifecycle_case["case_id"]),
+            market="US",
+            expiration_ymd="2026-07-17",
+            contract_metadata={
+                "settlement_style": "physical",
+                "underlying_security_type": "equity",
+                "last_trade_cutoff_ms": int(now.timestamp() * 1000),
+                "last_trade_cutoff_source": "instrument_policy_registry",
+            },
+            trading_days=[
+                {"date": "2026-07-17", "type": "TRADING"},
+                {"date": "2026-07-20", "type": "TRADING"},
+                {"date": "2026-07-21", "type": "TRADING"},
+            ],
+            calendar_source="test_calendar",
+            calendar_observed_at_ms=int(now.timestamp() * 1000),
+        )
+    )
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}", encoding="utf-8")
+    cfg = {
+        "accounts": ["lx"],
+        "account_settings": {
+            "lx": {
+                "type": "futu",
+                "futu": {
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                    "account_id": "123456",
+                    "trd_env": "REAL",
+                },
+            }
+        },
+    }
+    monkeypatch.setattr(
+        service_module,
+        "load_runtime_config",
+        lambda **_kwargs: (config_path, cfg),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "infer_runtime_config_market",
+        lambda **_kwargs: "US",
+    )
+    runtime = {
+        "config": {"config_key": "us"},
+        "summary": {"ok": True},
+        "ledger_store": {"sqlite_path": str(ledger_path)},
+        "trade_intake": {
+            "holdings_sync": {"enabled": False},
+            "sources": [],
+        },
+        "service_profile": {"loaded": True},
+    }
+    payload = OMQualityService(
+        artifact_repository=QualityArtifactRepository(
+            tmp_path / "status.v1.json"
+        ),
+        control_repository=QualityControlStateRepository(
+            tmp_path / "control.v1.json"
+        ),
+        opend_adapter=_OpenD(),
+        runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
+        now_fn=lambda: now,
+        instance_id="test-instance",
+    ).refresh(config_keys=["us"], day_end_strict=True)
+
+    position = next(
+        item
+        for item in payload["datasets"]
+        if item["dataset_id"] == "om.option_positions"
+    )
+    assert position["status"] == "partial"
+    assert position["checks"][1]["reason_code"] == (
+        "POSITIONS_PENDING_LIFECYCLE"
+    )
+    assert position["blocked_consumers"] == []
 
 
 def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(

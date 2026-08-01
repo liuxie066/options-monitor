@@ -318,6 +318,29 @@ def _binding() -> dict[str, object]:
     )
 
 
+def _rewrite_position_fact_contract(
+    path: Path,
+    *,
+    legacy: bool,
+) -> None:
+    input_path = path.parent / "state" / "position_advice_input.v2.json"
+    immutable_input = json.loads(input_path.read_text())
+    decision_snapshot = immutable_input["decision_state_snapshot"]
+    if legacy:
+        decision_snapshot.pop("position_fact_contract_version")
+    else:
+        decision_snapshot.pop("account_lifecycle_cases")
+    immutable_input.pop("input_hash")
+    immutable_input["input_hash"] = canonical_sha256(immutable_input)
+    _write_json(input_path, immutable_input)
+
+    plan = json.loads(path.read_text())
+    plan["input_hash"] = immutable_input["input_hash"]
+    plan.pop("artifact_hash")
+    plan["artifact_hash"] = canonical_sha256(plan)
+    _write_json(path, plan)
+
+
 def test_promotion_aggregator_builds_non_vacuous_passing_evidence(
     tmp_path: Path,
 ) -> None:
@@ -385,6 +408,133 @@ def test_legacy_v2_position_fact_snapshot_is_promotion_ineligible(
                 for name in REQUIRED_CRITICAL_REPLAY_FIXTURES
             },
             generated_at=NOW,
+        )
+
+
+def test_refresh_waits_when_only_legacy_position_fact_source_is_available(
+    tmp_path: Path,
+) -> None:
+    applied = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
+        identity_binding_evidence=_binding(),
+    )
+    policy = dict(applied["policy"])
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+    )
+    _rewrite_position_fact_contract(path, legacy=True)
+
+    result = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+        confirm=True,
+    )
+
+    assert result["status"] == "waiting_for_compatible_shadow_plans"
+    assert result["reason_codes"] == [
+        "current_contract_shadow_plan_set_empty"
+    ]
+    assert result["source_plan_count"] == 0
+    assert result["discovered_source_plan_count"] == 1
+    assert result["compatible_source_plan_count"] == 0
+    assert result["incompatible_source_plan_count"] == 1
+    assert result["published"] is False
+    assert len(
+        list(
+            (
+                tmp_path
+                / "output_shared"
+                / "state"
+                / "position_advice"
+                / scope_for("lx")
+                / "promotion_sources"
+            ).glob("*/position_advice.v2.json.gz")
+        )
+    ) == 1
+
+
+def test_refresh_uses_only_compatible_position_fact_sources(
+    tmp_path: Path,
+) -> None:
+    applied = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
+        identity_binding_evidence=_binding(),
+    )
+    policy = dict(applied["policy"])
+    paths = _plans(
+        tmp_path,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+    )
+    _rewrite_position_fact_contract(paths[0], legacy=True)
+
+    result = refresh_position_advice_promotion(
+        base=tmp_path,
+        normalized_account="lx",
+    )
+
+    assert result["source_plan_count"] == 29
+    assert result["discovered_source_plan_count"] == 30
+    assert result["compatible_source_plan_count"] == 29
+    assert result["incompatible_source_plan_count"] == 1
+    assert len(result["evidence"]["opportunities"]) == 29
+    assert result["published"] is False
+
+
+def test_refresh_rejects_malformed_current_position_fact_source(
+    tmp_path: Path,
+) -> None:
+    applied = apply_authority_change(
+        base=tmp_path,
+        normalized_account="lx",
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash=IDENTITY,
+        target_mode="v2_shadow",
+        expected_policy_hash="absent",
+        actor="operator@example",
+        requested_at=NOW,
+        confirm=True,
+        identity_binding_evidence=_binding(),
+    )
+    policy = dict(applied["policy"])
+    path = _plan(
+        tmp_path,
+        index=0,
+        selected=True,
+        alternative=False,
+        authority_generation=int(policy["generation"]),
+        authority_policy_hash=str(policy["policy_hash"]),
+    )
+    _rewrite_position_fact_contract(path, legacy=False)
+
+    with pytest.raises(
+        PositionAdvicePromotionError,
+        match="position advice input decision facts are invalid",
+    ):
+        refresh_position_advice_promotion(
+            base=tmp_path,
+            normalized_account="lx",
         )
 
 
