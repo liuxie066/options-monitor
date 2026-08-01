@@ -1922,6 +1922,8 @@ def test_outbox_v1_schema_upgrade_preserves_delivery_state(
     assert row["delivery_revision"] == 0
     assert row["transition_key"] == "legacy:legacy-outbox-1"
     assert row["state_fingerprint"] == "legacy-payload-hash"
+    assert row["delivery_batch_id"] is None
+    assert repo.list_trade_lifecycle_notification_batches() == []
 
 
 def test_lifecycle_delivery_status_separates_case_and_outbox_states(
