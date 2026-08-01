@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.8.3 - 2026-08-01
+
+### Bug Fixes
+- Bounded Strategy Lab OpenD sampling after the first confirmed provider rate limit, deferring the remaining collection work instead of exhausting the service runtime budget while preserving fail-closed handling for other collection errors.
+- Made IQ stock-refresh evidence trust explicit no-trigger, option-only, dry-run, and already-synchronized outcomes while keeping observed activity without an intent unavailable and rejected or failed refreshes partial.
+
 ## 1.8.2 - 2026-08-01
 
 ### Bug Fixes
