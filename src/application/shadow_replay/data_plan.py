@@ -25,6 +25,8 @@ SUPPORTED_ACTIONS = ("collect_marks", "settle")
 def run_shadow_replay_data_plan(
     *,
     repo_root: str | Path,
+    opend_base_root: str | Path | None = None,
+    opend_fetch_config: dict[str, float | int] | None = None,
     dataset_root: str | Path | None = None,
     required_data_root: str | Path | None = None,
     source: str = "local",
@@ -53,6 +55,11 @@ def run_shadow_replay_data_plan(
     """
 
     base = Path(repo_root).expanduser().resolve()
+    opend_base = (
+        Path(opend_base_root).expanduser().resolve()
+        if opend_base_root is not None and text(opend_base_root)
+        else base
+    )
     generated_at = text(now_utc) or utc_now()
     source_norm = text(source).lower() or "local"
     if source_norm not in {"local", "opend"}:
@@ -79,6 +86,8 @@ def run_shadow_replay_data_plan(
     action_results = _run_plan_rows(
         before.get("data_plan") if isinstance(before, dict) else [],
         repo_root=base,
+        opend_base_root=opend_base,
+        opend_fetch_config=opend_fetch_config,
         required_data_root=required_root,
         source=source_norm,
         action_set=action_set,
@@ -107,6 +116,7 @@ def run_shadow_replay_data_plan(
         "generated_at_utc": generated_at,
         "write": bool(write),
         "source": source_norm,
+        "opend_base_root": str(opend_base) if source_norm == "opend" else None,
         "dataset_root": before.get("dataset_root"),
         "required_data_root": str(required_root),
         "actions_enabled": sorted(action_set),
@@ -149,6 +159,8 @@ def _run_plan_rows(
     rows: Any,
     *,
     repo_root: Path,
+    opend_base_root: Path,
+    opend_fetch_config: dict[str, float | int] | None,
     required_data_root: Path,
     source: str,
     action_set: set[str],
@@ -196,6 +208,8 @@ def _run_plan_rows(
         result = _execute_plan_row(
             row,
             repo_root=repo_root,
+            opend_base_root=opend_base_root,
+            opend_fetch_config=opend_fetch_config,
             required_data_root=required_data_root,
             source=source,
             settle_after_collect=settle_after_collect,
@@ -219,6 +233,8 @@ def _execute_plan_row(
     row: dict[str, Any],
     *,
     repo_root: Path,
+    opend_base_root: Path,
+    opend_fetch_config: dict[str, float | int] | None,
     required_data_root: Path,
     source: str,
     settle_after_collect: bool,
@@ -244,6 +260,8 @@ def _execute_plan_row(
                 required_data_root=required_data_root,
                 source=source,
                 repo_root=repo_root,
+                opend_base_root=opend_base_root,
+                opend_fetch_config=opend_fetch_config,
                 as_of=None,
                 write=True,
                 replace=False,
