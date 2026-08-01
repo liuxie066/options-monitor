@@ -122,30 +122,60 @@ date cash flow、交易日历和合约元数据的查询输入、返回码、覆
 payload hash。任一来源不完整、日历 hash 变化、零价锚点无法在历史成交中
 唯一复核、source claim 不匹配或数量超出冻结余量，统一进入人工复核。
 
-## 通知 Outbox
+## 通知 Outbox 与批量回执
 
-业务事务只写冻结的通知意图，不在 ledger 事务内调用飞书。dispatcher 使用
-CAS 状态流转：
+业务事务仍然一条状态变化写一条冻结通知意图，用于案件级审计；它不在 ledger
+事务内调用飞书。外部发送单位改为 delivery batch：同一
+provider/channel/target 的 `lx`、`sy` 等账户意图可进入同一批次，一条意图不会
+因批量发送而丢失或改写。只有 enabled source 且 receipt enabled 的账户可被
+绑定；禁用账户的历史意图保持可见、pending、unbound。
+
+planner 等待最新意图安静 10 秒，但最老意图最多等待 60 秒；到点后把当时所有
+符合条件的意图一次性冻结到一个批次，不按成员数拆分。批次只保存目标指纹，
+不保存或输出原始 target。绑定后的成员状态为 `batched`，旧版逐行 dispatcher
+不会重新认领这些行。
+
+批次使用 CAS 状态流转：
 
 ```text
 pending -> claimed -> send_started
 send_started -> confirmed | accepted | explicit_failed | unknown
 ```
 
-- `claimed` 在发送前租约过期可安全退回 `pending`。
-- `send_started` 后进程失联必须冻结为 `unknown`，不能自动重发。
-- `explicit_failed` 只按有限退避重试，达到上限后保持可观测。
+- `claimed` 在发送前租约过期可安全退回 `pending`；成员保持 `batched`。
+- `send_started` 后进程失联、超时、瞬时错误或 fallback 歧义必须把整个批次
+  冻结为 `unknown`，不能自动重发。
+- 明确的发送前失败、HTTP 4xx 或无歧义的 provider 拒绝才进入
+  `explicit_failed`；最多尝试三次，退避 60 秒、5 分钟。
+- 每次尝试都以稳定 `batch_id` 作为 transport idempotency key；同一路由
+  60 秒内最多开始一次发送。
 - `accepted` 表示 provider 已接受但尚无强确认；不能伪装成 `confirmed`。
-- `unknown` 只能由操作员依据 provider 证据标记确认，或创建增加
-  `delivery_revision` 的补偿发送；原记录不重开。
+- `confirmed`、`accepted`、`unknown` 或耗尽重试的失败会原子投影到全部成员。
+- `unknown` 只能由操作员依据 provider 证据确认，或为每个原成员创建增加
+  `delivery_revision` 的补偿意图；原批次和原记录都不重开。
 
-trade-intake status 将 Inbox、生命周期原因状态和 Outbox 状态分开显示，并
-保留 source 的 `pid`、`source_id`、OpenD host/port、账户以及启动时间。
+单成员批次沿用原有回执文本。多成员批次按案件选代表，最多展开 12 个案件，
+其余只显示数量；展示截断不改变批次完整成员集合。trade-intake status 将
+Inbox、生命周期原因、逐意图 Outbox 与 delivery batch 分开显示，并提供未绑定
+意图、未知批次、批次成员数及已减少消息数，同时保留 source 的 `pid`、
+`source_id`、OpenD host/port、账户和启动时间。
+
+监听进程只创建一个全局 `LifecycleReceiptBatchDispatcher`，统一领取全部启用账户
+的同路由批次；source listener 不再按账户发送回执。dispatcher 每秒进行一次可
+取消轮询，每轮最多尝试一个批次，并在所有 source listener 停止后、运行时资源
+关闭前退出。provider I/O 位于 `process_lock` 和 SQLite 事务之外，慢发送不会
+阻塞新的成交、Inbox 或生命周期事实写入。
+
+每个 source 的 status 在 `lifecycle_delivery.dispatcher` 下显示全局调度器状态、
+允许账户、最近一次批次结果或错误及 provider/channel/route 指纹；这里不会显示
+原始 target。`dry-run`、所有 receipt 均禁用或路由不可用时不会启动 dispatcher，
+状态分别显示 `dry_run`、`receipt_disabled` 或 `route_unavailable`。
 
 ## 运维命令
 
-以下命令均以 dry-run 为默认。这里只列只读或预览形式；实际写入必须同时给出
-`--apply` 和 `--confirm`（或 `--yes`），发送通知还需要明确授权真实发送。
+以下命令均以 dry-run 为默认。示例同时列出预览和显式 one-shot applied 形式；
+实际写入必须同时给出 `--apply` 和 `--confirm`（或 `--yes`），发送通知还需要
+明确授权真实发送。
 
 ```bash
 # 查看 case、证据和当前 revision
@@ -169,13 +199,23 @@ trade-intake status 将 Inbox、生命周期原因状态和 Outbox 状态分开�
   --broker-ref <canonical-broker-ref> \
   --note "<correction evidence>" --dry-run
 
-# 查看或预览处理通知
+# 查看逐意图及其所属批次，或直接查看完整批次
 ./om option-positions lifecycle receipts inspect \
   --outbox-id <outbox-id>
+./om option-positions lifecycle receipts inspect \
+  --batch-id <batch-id>
+
+# 发送预览可按账户观察，但不会绑定或发送
 ./om option-positions lifecycle receipts dispatch \
   --once --account lx --config config.us.json --dry-run
+
+# applied dispatch 必须是全局的，不能带 --account
+./om option-positions lifecycle receipts dispatch \
+  --once --config config.us.json --apply --confirm
+
+# 多成员批次只能用 batch-id 整体收敛
 ./om option-positions lifecycle receipts reconcile \
-  --outbox-id <outbox-id> --mark confirmed \
+  --batch-id <batch-id> --mark confirmed \
   --broker-ref <provider-ref> --note "<verification>" --dry-run
 
 # 历史切换：先 inventory，再显式选择 exact target
@@ -189,9 +229,10 @@ trade-intake status 将 Inbox、生命周期原因状态和 Outbox 状态分开�
   --manifest <frozen-manifest.json> --dry-run
 ```
 
-`accepted` 只能人工收敛为 `confirmed` 或 `unknown`，不能直接 resend；
-进入 `unknown` 后才允许显式 `--mark resend`。人工收敛会保留原始
-provider receipt。
+`--outbox-id` 仍可处理 legacy 未绑定记录和单成员批次；如果成员属于多成员
+批次，命令会拒绝并提示准确的 `--batch-id`。`accepted` 只能人工收敛为
+`confirmed` 或 `unknown`，不能直接 resend；进入 `unknown` 后才允许显式
+`--mark resend`。人工收敛会保留原始 provider receipt。
 
 `lifecycle confirm-expired` 已退役。禁止用人工按钮直接制造
 `expiration_no_settlement`；该结论必须来自完整且冻结的 broker settlement

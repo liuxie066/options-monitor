@@ -46,8 +46,11 @@ from src.application.positions.context_builder import (
 )
 from src.application.trades.lifecycle_outbox import (
     CLAIM_LEASE_MS,
+    QUIET_WINDOW_MS,
+    build_notification_batch_route,
     claim_next_notification,
     complete_notification_attempt,
+    dispatch_notification_batch_once,
     enqueue_notification_intent,
     mark_notification_send_started,
     reconcile_unknown_notification,
@@ -1922,6 +1925,8 @@ def test_outbox_v1_schema_upgrade_preserves_delivery_state(
     assert row["delivery_revision"] == 0
     assert row["transition_key"] == "legacy:legacy-outbox-1"
     assert row["state_fingerprint"] == "legacy-payload-hash"
+    assert row["delivery_batch_id"] is None
+    assert repo.list_trade_lifecycle_notification_batches() == []
 
 
 def test_lifecycle_delivery_status_separates_case_and_outbox_states(
@@ -1953,8 +1958,82 @@ def test_lifecycle_delivery_status_separates_case_and_outbox_states(
         account="lx",
         now_ms=observed_at_ms + 1_000,
     )
+    assert status["schema_version"] == (
+        "trade_lifecycle_delivery_status.v2"
+    )
     assert status["reason_state_counts"]["cause_pending"] == 1
     assert status["overdue_pending_count"] == 1
     assert status["oldest_pending_case"]["case_id"] == case_id
     assert status["outbox_status_counts"]["pending"] == 1
+    assert status["unbound_eligible_count"] == 1
+    assert status["oldest_unbound_eligible"]["case_id"] == case_id
+    assert status["delivery_batch_count"] == 0
+    assert status["batched_member_count"] == 0
+    assert status["messages_avoided"]["total"] == 0
     assert status["oldest_unknown_outbox"] is None
+
+
+def test_lifecycle_delivery_status_reports_batch_scope_without_target(
+    tmp_path: Path,
+) -> None:
+    repo, case_id, _observed_at_ms = _case_with_option_anchor(
+        tmp_path
+    )
+    for revision, transition in (
+        (1, "option_leg_closed"),
+        (2, "needs_review"),
+    ):
+        intent = build_notification_intent(
+            case_id=case_id,
+            transition_type=transition,
+            resolution_revision=revision,
+            transition_key=(
+                f"lifecycle:{case_id}:{transition}:{revision}"
+            ),
+            state_fingerprint=f"batch-status-{revision}",
+            payload={
+                "account": "lx",
+                "case_id": case_id,
+                "transition_type": transition,
+            },
+        )
+        assert repo.insert_trade_lifecycle_notification_once(intent)
+    rows = repo.list_trade_lifecycle_notifications(case_id=case_id)
+    dispatch_at = max(
+        int(row["created_at_ms"]) for row in rows
+    ) + QUIET_WINDOW_MS
+    target = "sensitive-target-must-not-appear"
+    result = dispatch_notification_batch_once(
+        repo,
+        route=build_notification_batch_route(
+            provider="feishu_app",
+            channel="feishu_app",
+            target=target,
+        ),
+        send_fn=lambda _payload: {
+            "status": "confirmed",
+            "delivery_confirmed": True,
+            "message_id": "provider-message",
+        },
+        now_ms=dispatch_at,
+    )
+    assert result["status"] == "confirmed"
+
+    status = _lifecycle_delivery_status(
+        repo,
+        account="lx",
+        now_ms=dispatch_at + 1,
+    )
+
+    assert status["batch_status_counts"]["confirmed"] == 1
+    assert status["delivery_batch_count"] == 1
+    assert status["batched_member_count"] == 2
+    assert status["active_batched_member_count"] == 0
+    assert status["messages_avoided"] == {
+        "scope": "full_delivery_batches_touching_account",
+        "confirmed": 1,
+        "accepted": 0,
+        "total": 1,
+    }
+    assert status["oldest_unknown_batch"] is None
+    assert target not in str(status)
