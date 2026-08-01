@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.8.5 - 2026-08-01
+
+### Bug Fixes
+- Skipped legacy Shadow Replay datasets without verifiable integrity before consuming Strategy Lab sampling quota or OpenD capacity, while preserving them as read-only evidence and validating direct write collection before provider or cache activity.
+
 ## 1.8.4 - 2026-08-01
 
 ### Bug Fixes

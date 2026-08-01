@@ -1,0 +1,82 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.5",
+  "base": {
+    "tag": "v1.8.4",
+    "commit": "8d4672823d2f6c5aab5506fec8d438ea217e83fe"
+  },
+  "reviewed_head": "c5a3b9e1f0671bceea998b7f3a62a9a909ef8bcc",
+  "commits": [
+    {
+      "sha": "26270b6b481543319e75d331c5e2f798772146ed",
+      "subject": "gateflow: accept plan for om-shadow-replay-integrity-selection"
+    },
+    {
+      "sha": "8937f1eb647a87382662fd0bab6b75bca11eabc9",
+      "subject": "gateflow: accept om-shadow-replay-integrity-selection S1"
+    },
+    {
+      "sha": "6c78401a666e405a0bb2f495114905facb7993d1",
+      "subject": "gateflow: accept deepreview for om-shadow-replay-integrity-selection"
+    },
+    {
+      "sha": "7cb76b32909d45d9892c11ec669c8313e7496e82",
+      "subject": "gateflow: accept deepreview fix for om-shadow-replay-integrity-selection"
+    },
+    {
+      "sha": "27b709512cc09b0a9b993b0a647721fb6548a1fe",
+      "subject": "gateflow: record om-shadow-replay-integrity-selection validation"
+    },
+    {
+      "sha": "9439c234056240cd374e886cf53c0ede35941c98",
+      "subject": "gateflow: accept PR review for om-shadow-replay-integrity-selection"
+    },
+    {
+      "sha": "77d6f5603ef24dd28bffc833100bc705028c5ef8",
+      "subject": "gateflow: close om-shadow-replay-integrity-selection"
+    },
+    {
+      "sha": "c5a3b9e1f0671bceea998b7f3a62a9a909ef8bcc",
+      "subject": "Merge pull request #129 from liuxie066/codex/fix-shadow-replay-integrity-selection"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Skipped legacy Shadow Replay datasets without verifiable integrity before consuming Strategy Lab sampling quota or OpenD capacity, while preserving them as read-only evidence and validating direct write collection before provider or cache activity.",
+      "commits": [
+        "8937f1eb647a87382662fd0bab6b75bca11eabc9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "26270b6b481543319e75d331c5e2f798772146ed",
+      "reason": "Internal Gateflow goal, plan, and adversarial plan-review evidence; no runtime behavior beyond the implementation release note."
+    },
+    {
+      "commit": "6c78401a666e405a0bb2f495114905facb7993d1",
+      "reason": "Internal aggregate DeepReview acceptance evidence; no runtime behavior change."
+    },
+    {
+      "commit": "7cb76b32909d45d9892c11ec669c8313e7496e82",
+      "reason": "Test-fixture compatibility and aggregate review evidence only; no production runtime behavior change."
+    },
+    {
+      "commit": "27b709512cc09b0a9b993b0a647721fb6548a1fe",
+      "reason": "Internal pre-PR validation evidence; no runtime behavior change."
+    },
+    {
+      "commit": "9439c234056240cd374e886cf53c0ede35941c98",
+      "reason": "Internal PR review evidence; no runtime behavior change."
+    },
+    {
+      "commit": "77d6f5603ef24dd28bffc833100bc705028c5ef8",
+      "reason": "Internal Gateflow final closeout evidence; no runtime behavior change."
+    },
+    {
+      "commit": "c5a3b9e1f0671bceea998b7f3a62a9a909ef8bcc",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation commit release note."
+    }
+  ]
+}
