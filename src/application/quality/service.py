@@ -10,12 +10,15 @@ from zoneinfo import ZoneInfo
 
 from src.application.account_config import accounts_from_config
 from src.application.agent_tool_config import load_runtime_config, repo_base
-from src.application.ledger.api import open_trade_reconciliation_evidence_repo
+from src.application.ledger.api import (
+    lifecycle_account_coherent_facts,
+    open_trade_reconciliation_evidence_repo,
+)
 from src.application.quality.intake_checks import build_trade_intake_datasets
 from src.application.quality.ledger_checks import build_ledger_datasets
 from src.application.quality.lifecycle_checks import build_lifecycle_datasets
 from src.application.trades.lifecycle_reconciliation import (
-    lifecycle_case_read_model,
+    build_lifecycle_read_models_from_resolved_account,
 )
 from src.application.quality.model import (
     POLICY_VERSION,
@@ -57,6 +60,73 @@ _MARKET_TIMEZONES = {
 }
 _DAY_END_REFRESH_TIME = time(hour=16, minute=30)
 _DAY_END_GRACE = timedelta(minutes=15)
+
+
+def _coherent_account_lifecycle_inputs(
+    repo: Any,
+    *,
+    account: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    facts = lifecycle_account_coherent_facts(repo, account=account)
+    cases = [
+        dict(item)
+        for item in facts.get("account_lifecycle_cases") or []
+        if isinstance(item, dict)
+    ]
+    evidence_rows = [
+        dict(item)
+        for item in facts.get("account_lifecycle_evidence") or []
+        if isinstance(item, dict)
+    ]
+    timing_policies = [
+        dict(item)
+        for item in facts.get("account_lifecycle_timing_policies") or []
+        if isinstance(item, dict)
+    ]
+    local_lots = [
+        dict(item)
+        for item in facts.get("account_position_lots") or []
+        if isinstance(item, dict)
+    ]
+    models_by_lot = build_lifecycle_read_models_from_resolved_account(
+        cases=cases,
+        allocations=[
+            dict(item)
+            for item in facts.get("account_lifecycle_allocations") or []
+            if isinstance(item, dict)
+        ],
+        timing_policies=timing_policies,
+        position_lots=local_lots,
+        account_resolution=dict(
+            facts.get("account_lifecycle_resolution") or {}
+        ),
+        void_event_ids=list(facts.get("effective_void_event_ids") or []),
+        now_ms=now_ms,
+    )
+    models_by_case: dict[str, dict[str, Any]] = {}
+    for model in models_by_lot.values():
+        case_ids = {
+            str(item or "").strip()
+            for item in model.get("lifecycle_case_ids") or []
+            if str(item or "").strip()
+        }
+        case_id = str(model.get("lifecycle_case_id") or "").strip()
+        if case_id:
+            case_ids.add(case_id)
+        for model_case_id in case_ids:
+            models_by_case[model_case_id] = dict(model)
+    return {
+        "cases": cases,
+        "evidence_rows": evidence_rows,
+        "timing_policies_by_case": {
+            str(item.get("case_id") or "").strip(): item
+            for item in timing_policies
+            if str(item.get("case_id") or "").strip()
+        },
+        "local_lots": local_lots,
+        "read_models_by_case": models_by_case,
+    }
 
 
 class OMQualityService:
@@ -135,6 +205,9 @@ class OMQualityService:
         datasets: list[dict[str, Any]] = []
         control_state = self.control_repository.read()
         ledger_cache: dict[Path, Any] = {}
+        lifecycle_account_cache: dict[
+            tuple[Path, str], tuple[dict[str, Any] | None, str | None]
+        ] = {}
         authoritative_refresh_scopes: list[dict[str, str]] = []
 
         for key, _path, cfg, market in configs:
@@ -192,34 +265,92 @@ class OMQualityService:
                 if repo is not None
                 else {}
             )
-            read_models_by_case: dict[str, dict[str, Any]] = {}
-            if repo is not None:
-                for item in cases:
-                    case_id = str(
-                        item.get("case_id") or ""
-                    ).strip()
-                    if not case_id:
-                        continue
-                    try:
-                        read_models_by_case[case_id] = (
-                            lifecycle_case_read_model(
-                                repo,
-                                case_id=case_id,
-                                now_ms=int(now.timestamp() * 1000),
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        continue
             local_lots = repo.list_position_lots() if repo is not None else []
             calendar_start = self._calendar_start(cases, now=now)
             for account in accounts:
+                account_cases = [
+                    dict(item)
+                    for item in cases
+                    if str(item.get("account") or "").strip().lower()
+                    == account
+                ]
+                account_evidence_rows = [
+                    dict(item)
+                    for item in evidence_rows
+                    if str(item.get("account") or "").strip().lower()
+                    == account
+                ]
+                account_case_ids = {
+                    str(item.get("case_id") or "").strip()
+                    for item in account_cases
+                    if str(item.get("case_id") or "").strip()
+                }
+                account_timing_policies_by_case = {
+                    case_id: dict(item)
+                    for case_id, item in timing_policies_by_case.items()
+                    if case_id in account_case_ids
+                }
+                account_local_lots = local_lots
+                account_read_models_by_case: dict[str, dict[str, Any]] = {}
+                lifecycle_coherent_read_available = repo is not None
+                if repo is not None and ledger_path is not None:
+                    cache_key = (ledger_path, account)
+                    if cache_key not in lifecycle_account_cache:
+                        try:
+                            lifecycle_account_cache[cache_key] = (
+                                _coherent_account_lifecycle_inputs(
+                                    repo,
+                                    account=account,
+                                    now_ms=int(now.timestamp() * 1000),
+                                ),
+                                None,
+                            )
+                        except (
+                            sqlite3.Error,
+                            TypeError,
+                            ValueError,
+                            OverflowError,
+                        ) as exc:
+                            lifecycle_account_cache[cache_key] = (
+                                None,
+                                str(exc),
+                            )
+                    account_inputs, lifecycle_read_error = (
+                        lifecycle_account_cache[cache_key]
+                    )
+                    if account_inputs is None:
+                        lifecycle_coherent_read_available = False
+                        runtime_errors.append(
+                            {
+                                "config_key": key,
+                                "account": account,
+                                "reason": (
+                                    lifecycle_read_error
+                                    or "coherent lifecycle account read unavailable"
+                                ),
+                            }
+                        )
+                    else:
+                        account_cases = list(account_inputs["cases"])
+                        account_evidence_rows = list(
+                            account_inputs["evidence_rows"]
+                        )
+                        account_timing_policies_by_case = dict(
+                            account_inputs["timing_policies_by_case"]
+                        )
+                        account_local_lots = list(
+                            account_inputs["local_lots"]
+                        )
+                        account_read_models_by_case = dict(
+                            account_inputs["read_models_by_case"]
+                        )
                 previous_position = previous_positions.get((account, market))
                 refresh_authoritative = bool(
                     deep
                     or day_end_strict
                     or self._authoritative_refresh_required(
                         previous=previous_position,
-                        local_lots=local_lots,
+                        local_lots=account_local_lots,
                         account=account,
                         market=market,
                         now=now,
@@ -260,16 +391,21 @@ class OMQualityService:
                     )
                     position_dataset, control_state = build_position_dataset(
                         snapshot=snapshot,
-                        local_lots=local_lots,
+                        local_lots=account_local_lots,
                         account=account,
                         market=market,
                         observed_at_utc=observed_at,
                         now=now,
                         control_state=control_state,
-                        lifecycle_cases=cases,
-                        lifecycle_read_models_by_case=read_models_by_case,
+                        lifecycle_cases=account_cases,
+                        lifecycle_read_models_by_case=(
+                            account_read_models_by_case
+                        ),
                         lifecycle_timing_policies_by_case=(
-                            timing_policies_by_case
+                            account_timing_policies_by_case
+                        ),
+                        lifecycle_coherent_read_available=(
+                            lifecycle_coherent_read_available
                         ),
                         day_end_strict=day_end_strict,
                         next_authoritative_refresh_due_utc=(
@@ -296,8 +432,8 @@ class OMQualityService:
                 datasets.append(position_dataset)
                 datasets.extend(
                     build_lifecycle_datasets(
-                        cases=cases,
-                        evidence_rows=evidence_rows,
+                        cases=account_cases,
+                        evidence_rows=account_evidence_rows,
                         account=account,
                         market=market,
                         observed_at_utc=observed_at,
@@ -307,9 +443,9 @@ class OMQualityService:
                             control_state.get("lifecycle_first_deep_reconcile") or {}
                         ),
                         timing_policies_by_case=(
-                            timing_policies_by_case
+                            account_timing_policies_by_case
                         ),
-                        read_models_by_case=read_models_by_case,
+                        read_models_by_case=account_read_models_by_case,
                     )
                 )
                 datasets.append(
