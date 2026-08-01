@@ -29,6 +29,7 @@ from domain.domain.position_advice_promotion import (
     unique_decision_opportunity_key,
 )
 from src.application.ledger.api import (
+    POSITION_FACT_SNAPSHOT_CONTRACT,
     validate_position_fact_snapshot_contract,
 )
 from src.application.position_advice_authority_service import (
@@ -456,12 +457,38 @@ def refresh_position_advice_promotion(
             confirm=confirm,
             policy=policy,
         )
+    compatible_plan_paths, incompatible_plan_paths = (
+        _classify_promotion_plan_paths(
+            plan_paths,
+            expected_account=account,
+            expected_scope_id=scope_for(account),
+            expected_portfolio_source=str(
+                policy["normalized_portfolio_source"]
+            ),
+            expected_identity_hash=str(
+                policy["portfolio_account_identity_hash"]
+            ),
+            expected_generation=int(policy["generation"]),
+            expected_policy_hash=str(policy["policy_hash"]),
+        )
+    )
+    if not compatible_plan_paths:
+        return _inactive_refresh(
+            account=account,
+            status="waiting_for_compatible_shadow_plans",
+            reason_code="current_contract_shadow_plan_set_empty",
+            confirm=confirm,
+            policy=policy,
+            discovered_source_plan_count=len(plan_paths),
+            compatible_source_plan_count=0,
+            incompatible_source_plan_count=len(incompatible_plan_paths),
+        )
     generated_at = max(
         _timestamp(_read_json_object(path).get("advice_checked_at"))
-        for path in plan_paths
+        for path in compatible_plan_paths
     )
     kwargs = {
-        "plan_paths": plan_paths,
+        "plan_paths": compatible_plan_paths,
         "normalized_account": account,
         "normalized_portfolio_source": str(
             policy["normalized_portfolio_source"]
@@ -484,7 +511,12 @@ def refresh_position_advice_promotion(
             **result,
             "schema_version": PROMOTION_REFRESH_SCHEMA,
             "normalized_account": account,
-            "source_plan_count": len(plan_paths),
+            "source_plan_count": len(compatible_plan_paths),
+            "discovered_source_plan_count": len(plan_paths),
+            "compatible_source_plan_count": len(compatible_plan_paths),
+            "incompatible_source_plan_count": len(
+                incompatible_plan_paths
+            ),
             "dry_run": False,
             "published": True,
         }
@@ -499,7 +531,10 @@ def refresh_position_advice_promotion(
         "status": gate["status"],
         "normalized_account": account,
         "portfolio_scope_id": policy["portfolio_scope_id"],
-        "source_plan_count": len(plan_paths),
+        "source_plan_count": len(compatible_plan_paths),
+        "discovered_source_plan_count": len(plan_paths),
+        "compatible_source_plan_count": len(compatible_plan_paths),
+        "incompatible_source_plan_count": len(incompatible_plan_paths),
         "promotion_evidence_hash": canonical_sha256(evidence),
         "promotion_gate_hash": gate["gate_hash"],
         "evidence": evidence,
@@ -831,7 +866,7 @@ def archive_current_shadow_plans(
         )
         _ensure_safe_archive_directory(archive_root)
         for path in canonical_paths:
-            plan, immutable_input = _read_bound_plan(
+            plan, immutable_input = _read_bound_plan_envelope(
                 path,
                 expected_account=account,
                 expected_scope_id=scope_id,
@@ -959,6 +994,9 @@ def _inactive_refresh(
     reason_code: str,
     confirm: bool,
     policy: Mapping[str, Any] | None = None,
+    discovered_source_plan_count: int = 0,
+    compatible_source_plan_count: int = 0,
+    incompatible_source_plan_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "schema_version": PROMOTION_REFRESH_SCHEMA,
@@ -969,7 +1007,10 @@ def _inactive_refresh(
             dict(policy or {}).get("portfolio_scope_id")
             or scope_for(account)
         ),
-        "source_plan_count": 0,
+        "source_plan_count": compatible_source_plan_count,
+        "discovered_source_plan_count": discovered_source_plan_count,
+        "compatible_source_plan_count": compatible_source_plan_count,
+        "incompatible_source_plan_count": incompatible_source_plan_count,
         "dry_run": not confirm,
         "published": False,
     }
@@ -1038,7 +1079,7 @@ def _covered_strategy_families(
     return sorted(families)
 
 
-def _read_bound_plan(
+def _read_bound_plan_envelope(
     path: Path,
     *,
     expected_account: str,
@@ -1092,14 +1133,6 @@ def _read_bound_plan(
     immutable_input["input_hash"] = input_hash
     if immutable_input.get("schema_version") != POSITION_ADVICE_INPUT_SCHEMA:
         raise PositionAdvicePromotionError("position advice input schema is invalid")
-    position_fact_reasons = validate_position_fact_snapshot_contract(
-        dict(immutable_input.get("decision_state_snapshot") or {})
-    )
-    if position_fact_reasons:
-        raise PositionAdvicePromotionError(
-            "position advice input decision facts are invalid: "
-            + ",".join(position_fact_reasons)
-        )
     for field in (
         "account_run_id",
         "normalized_account",
@@ -1119,6 +1152,80 @@ def _read_bound_plan(
     if plan.get("input_hash") != input_hash:
         raise PositionAdvicePromotionError("position advice plan input hash mismatch")
     return plan, immutable_input
+
+
+def _read_bound_plan(
+    path: Path,
+    *,
+    expected_account: str,
+    expected_scope_id: str,
+    expected_portfolio_source: str,
+    expected_identity_hash: str,
+    expected_generation: int,
+    expected_policy_hash: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan, immutable_input = _read_bound_plan_envelope(
+        path,
+        expected_account=expected_account,
+        expected_scope_id=expected_scope_id,
+        expected_portfolio_source=expected_portfolio_source,
+        expected_identity_hash=expected_identity_hash,
+        expected_generation=expected_generation,
+        expected_policy_hash=expected_policy_hash,
+    )
+    position_fact_reasons = validate_position_fact_snapshot_contract(
+        dict(immutable_input.get("decision_state_snapshot") or {})
+    )
+    if position_fact_reasons:
+        raise PositionAdvicePromotionError(
+            "position advice input decision facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
+    return plan, immutable_input
+
+
+def _classify_promotion_plan_paths(
+    plan_paths: Iterable[Path],
+    *,
+    expected_account: str,
+    expected_scope_id: str,
+    expected_portfolio_source: str,
+    expected_identity_hash: str,
+    expected_generation: int,
+    expected_policy_hash: str,
+) -> tuple[list[Path], list[Path]]:
+    compatible: list[Path] = []
+    incompatible: list[Path] = []
+    for path in sorted({Path(item).resolve() for item in plan_paths}, key=str):
+        _plan, immutable_input = _read_bound_plan_envelope(
+            path,
+            expected_account=expected_account,
+            expected_scope_id=expected_scope_id,
+            expected_portfolio_source=expected_portfolio_source,
+            expected_identity_hash=expected_identity_hash,
+            expected_generation=expected_generation,
+            expected_policy_hash=expected_policy_hash,
+        )
+        decision_snapshot = dict(
+            immutable_input.get("decision_state_snapshot") or {}
+        )
+        position_fact_reasons = validate_position_fact_snapshot_contract(
+            decision_snapshot
+        )
+        if not position_fact_reasons:
+            compatible.append(path)
+            continue
+        if (
+            decision_snapshot.get("position_fact_contract_version")
+            != POSITION_FACT_SNAPSHOT_CONTRACT
+        ):
+            incompatible.append(path)
+            continue
+        raise PositionAdvicePromotionError(
+            "position advice input decision facts are invalid: "
+            + ",".join(position_fact_reasons)
+        )
+    return compatible, incompatible
 
 
 def _canonical_promotion_plan_paths(

@@ -19,6 +19,7 @@ from src.application.position_advice_source_receipts import (
     publish_source_receipt,
     sha256_bytes,
 )
+import src.interfaces.cli.position_advice_ops as position_advice_ops
 from src.interfaces.cli.position_advice_ops import main
 
 
@@ -281,3 +282,45 @@ def test_position_advice_promotion_cli_is_safe_without_authority(
     status = json.loads(capsys.readouterr().out)
     assert status["status"] == "not_applicable"
     assert status["ready_for_final_cas"] is False
+
+
+def test_position_advice_promotion_cli_treats_compatible_source_wait_as_success(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        position_advice_ops,
+        "refresh_position_advice_promotion",
+        lambda **_kwargs: {
+            "schema_version": "position_advice_promotion_refresh.v1",
+            "status": "waiting_for_compatible_shadow_plans",
+            "reason_codes": ["current_contract_shadow_plan_set_empty"],
+            "normalized_account": "lx",
+            "source_plan_count": 0,
+            "discovered_source_plan_count": 4,
+            "compatible_source_plan_count": 0,
+            "incompatible_source_plan_count": 4,
+            "dry_run": False,
+            "published": False,
+        },
+    )
+
+    result = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "promotion",
+            "refresh",
+            "--accounts",
+            "lx",
+            "--confirm",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["status"] == "completed"
+    assert payload["results"][0]["status"] == (
+        "waiting_for_compatible_shadow_plans"
+    )
