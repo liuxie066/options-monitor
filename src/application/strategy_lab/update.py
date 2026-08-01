@@ -26,6 +26,8 @@ UPDATE_SCHEMA_VERSION = "strategy_lab_update.v1"
 def run_strategy_lab_update(
     *,
     repo_root: str | Path,
+    opend_base_root: str | Path | None = None,
+    opend_fetch_config: dict[str, float | int] | None = None,
     dataset_root: str | Path | None = None,
     required_data_root: str | Path | None = None,
     source: str = "local",
@@ -97,6 +99,8 @@ def run_strategy_lab_update(
     )
     data_plan = run_shadow_replay_data_plan(
         repo_root=repo_root,
+        opend_base_root=opend_base_root,
+        opend_fetch_config=opend_fetch_config,
         dataset_root=dataset_root,
         required_data_root=required_data_root,
         source=source,
