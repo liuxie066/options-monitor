@@ -116,6 +116,7 @@ def run_strategy_lab_update(
         chain_cache_force_refresh=bool(chain_cache_force_refresh),
         include_realized_volatility=bool(include_realized_volatility),
         max_symbols=max_symbols,
+        fail_fast_on_opend_rate_limit=text(source).lower() == "opend",
     )
     status = data_plan.get("status_after") if write and data_plan.get("status_after") else data_plan.get("status_before")
     result: dict[str, Any] = {
@@ -390,6 +391,7 @@ def _summary(
     error_count = int(plan_summary.get("error_count") or 0)
     executed_count = int(plan_summary.get("executed_count") or 0)
     planned_count = int(plan_summary.get("planned_count") or 0)
+    deferred_count = int(plan_summary.get("deferred_count") or 0)
     build_requested = bool(dataset_build.get("requested"))
     build_executed = bool(dataset_build.get("executed"))
     close_build_requested = bool(close_dataset_build.get("requested"))
@@ -398,6 +400,8 @@ def _summary(
         "status": (
             "error"
             if error_count
+            else "deferred"
+            if deferred_count
             else (
                 "updated"
                 if write and (executed_count or build_executed or close_build_executed)
@@ -421,6 +425,7 @@ def _summary(
         "planned_count": planned_count,
         "executed_count": executed_count,
         "skipped_count": int(plan_summary.get("skipped_count") or 0),
+        "deferred_count": deferred_count,
         "error_count": error_count,
         "ready_for_experiment_count": status_summary.get("review_queue_count"),
         "sampling_due_count": status_summary.get("sampling_due_count"),
@@ -455,6 +460,8 @@ def _next_action(
     summary = data_plan.get("summary") or {}
     if int(summary.get("error_count") or 0) > 0:
         return "inspect_data_plan_errors"
+    if int(summary.get("deferred_count") or 0) > 0:
+        return "retry_after_opend_rate_limit_window"
     if bool(dataset_build.get("requested")) and not write:
         return "rerun_with_write_to_build_latest_dataset"
     if not write and int(summary.get("planned_count") or 0) > 0:

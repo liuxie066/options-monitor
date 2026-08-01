@@ -1641,6 +1641,48 @@ def test_strategy_lab_update_dry_run_wraps_shadow_replay_data_plan(tmp_path: Pat
     assert result["safety"]["sends_notifications"] is False
 
 
+def test_strategy_lab_update_treats_opend_rate_limit_as_deferred(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.shadow_replay.data_plan as data_plan_module
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "case-update"
+    _write_update_dataset(dataset)
+    observed: dict[str, object] = {}
+
+    def _rate_limited_collect(**kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "shadow_replay_mark_collection.v1",
+            "summary": {
+                "status": "deferred",
+                "opend_fetch_error_count": 1,
+                "opend_rate_limit_count": 1,
+                "opend_non_rate_limit_error_count": 0,
+                "opend_rate_limit_circuit_open": True,
+            },
+            "safety": {"writes_local_dataset": True},
+        }
+
+    monkeypatch.setattr(data_plan_module, "collect_shadow_replay_marks", _rate_limited_collect)
+
+    result = run_strategy_lab_update(
+        repo_root=tmp_path,
+        source="opend",
+        min_sample=1,
+        write=True,
+    )
+
+    assert observed["fail_fast_on_opend_rate_limit"] is True
+    assert result["summary"]["status"] == "deferred"
+    assert result["summary"]["deferred_count"] == 1
+    assert result["summary"]["error_count"] == 0
+    assert result["strategy_lab"]["next_action"] == "retry_after_opend_rate_limit_window"
+    assert result["strategy_lab"]["data_plan_actions"][0]["reason"] == "opend_rate_limited"
+
+
 def test_strategy_lab_update_build_dataset_dry_run_does_not_write(tmp_path: Path) -> None:
     from src.application.strategy_lab import run_strategy_lab_update
 
@@ -2167,6 +2209,41 @@ def test_cli_strategy_lab_update_latest_dry_run(capsys, monkeypatch, tmp_path: P
     assert payload["data"]["schema_version"] == "strategy_lab_update.v1"
     assert payload["data"]["summary"]["planned_count"] == 1
     assert payload["data"]["safety"]["runtime_config_write_allowed"] is False
+
+
+def test_cli_strategy_lab_update_opend_rate_limit_deferred_exits_success(
+    capsys,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.strategy_lab as strategy_lab
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(
+        strategy_lab,
+        "run_strategy_lab_update",
+        lambda **_kwargs: {
+            "schema_version": "strategy_lab_update.v1",
+            "summary": {"status": "deferred", "deferred_count": 1, "error_count": 0},
+        },
+    )
+
+    rc = cli.main(
+        [
+            "research",
+            "strategy-lab",
+            "update",
+            "--source",
+            "opend",
+            "--write",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["status"] == "deferred"
 
 
 def test_cli_strategy_lab_update_builds_latest_dataset(capsys, monkeypatch, tmp_path: Path) -> None:

@@ -39,6 +39,90 @@ class _OpenD:
         )
 
 
+def test_holdings_sync_quality_treats_no_activity_as_not_triggered() -> None:
+    runtime = {
+        "trade_intake": {
+            "holdings_sync": {"enabled": True},
+            "sources": [
+                {
+                    "account": "lx",
+                    "summary": {
+                        "last_push_received_utc": None,
+                        "last_backfill_deal_count": 0,
+                        "last_backfill_applied_count": 0,
+                        "last_stock_holdings_sync_intent": None,
+                    },
+                }
+            ],
+        }
+    }
+
+    dataset = OMQualityService._holdings_sync_dataset(
+        runtime_for_config=[runtime],
+        account="lx",
+        market="us",
+        observed_at="2026-08-01T00:00:00Z",
+    )
+
+    assert dataset["status"] == "trusted"
+    assert dataset["reason_codes"] == []
+    assert dataset["checks"][0]["status"] == "pass"
+    assert dataset["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_NOT_TRIGGERED"
+    assert dataset["checks"][0]["observed"] == {
+        "intent_count": 0,
+        "activity_observed": False,
+    }
+
+
+def test_holdings_sync_quality_preserves_missing_and_failed_evidence() -> None:
+    def _dataset(summary: dict) -> dict:
+        return OMQualityService._holdings_sync_dataset(
+            runtime_for_config=[
+                {
+                    "trade_intake": {
+                        "holdings_sync": {"enabled": True},
+                        "sources": [{"account": "lx", "summary": summary}],
+                    }
+                }
+            ],
+            account="lx",
+            market="us",
+            observed_at="2026-08-01T00:00:00Z",
+        )
+
+    missing = _dataset(
+        {
+            "last_push_received_utc": "2026-08-01T00:00:00Z",
+            "last_stock_holdings_sync_intent": None,
+        }
+    )
+    not_applicable = _dataset(
+        {
+            "last_push_received_utc": "2026-08-01T00:00:00Z",
+            "last_stock_holdings_sync_intent": {
+                "status": "skipped",
+                "reason": "option_deal",
+            },
+        }
+    )
+    failed = _dataset(
+        {
+            "last_push_received_utc": "2026-08-01T00:00:00Z",
+            "last_stock_holdings_sync_intent": {
+                "status": "rejected",
+                "reason": "queue_full",
+            },
+        }
+    )
+
+    assert missing["status"] == "unavailable"
+    assert missing["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_EVIDENCE_MISSING"
+    assert not_applicable["status"] == "trusted"
+    assert not_applicable["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_NOT_TRIGGERED"
+    assert failed["status"] == "partial"
+    assert failed["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_DELAYED"
+
+
 def test_service_publishes_schema_valid_artifact_without_business_writes(
     monkeypatch,
     tmp_path: Path,
