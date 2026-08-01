@@ -43,6 +43,7 @@ from src.application.trades.push_listener import (
     TradeIntakeStartCancelled,
 )
 from src.application.trades.lifecycle_outbox import (
+    MAX_ATTEMPTS,
     dispatch_notifications_once,
 )
 from src.application.trades.lifecycle_runtime import (
@@ -1668,6 +1669,73 @@ def _lifecycle_delivery_status(
         str(item.get("status") or "").strip().lower() or "unknown"
         for item in notifications
     )
+    eligible_unbound_rows = [
+        item
+        for item in notifications
+        if not str(item.get("delivery_batch_id") or "").strip()
+        and str(item.get("status") or "").strip().lower()
+        in {"pending", "explicit_failed"}
+        and int(item.get("attempt_count") or 0) < MAX_ATTEMPTS
+        and (
+            item.get("next_attempt_at_ms") is None
+            or int(item.get("next_attempt_at_ms") or 0)
+            <= int(now_ms)
+        )
+    ]
+    eligible_unbound_rows.sort(
+        key=lambda item: (
+            int(item.get("created_at_ms") or 0),
+            str(item.get("outbox_id") or ""),
+        )
+    )
+    delivery_batch_ids = {
+        str(item.get("delivery_batch_id") or "").strip()
+        for item in notifications
+        if str(item.get("delivery_batch_id") or "").strip()
+    }
+    all_batches = (
+        repo.list_trade_lifecycle_notification_batches()
+        if callable(
+            getattr(
+                repo,
+                "list_trade_lifecycle_notification_batches",
+                None,
+            )
+        )
+        else []
+    )
+    delivery_batches = [
+        dict(item)
+        for item in all_batches
+        if isinstance(item, dict)
+        and str(item.get("batch_id") or "").strip()
+        in delivery_batch_ids
+    ]
+    batch_states = Counter(
+        str(item.get("status") or "").strip().lower() or "unknown"
+        for item in delivery_batches
+    )
+    unknown_batches = [
+        item
+        for item in delivery_batches
+        if str(item.get("status") or "").strip().lower()
+        == "unknown"
+    ]
+    unknown_batches.sort(
+        key=lambda item: (
+            int(item.get("created_at_ms") or 0),
+            str(item.get("batch_id") or ""),
+        )
+    )
+    messages_avoided_by_status = {
+        status: sum(
+            max(int(item.get("member_count") or 0) - 1, 0)
+            for item in delivery_batches
+            if str(item.get("status") or "").strip().lower()
+            == status
+        )
+        for status in ("confirmed", "accepted")
+    }
     unknown_rows = [
         item
         for item in notifications
@@ -1725,7 +1793,20 @@ def _lifecycle_delivery_status(
             "confirmed",
             "explicit_failed",
             "unknown",
+            "batched",
             "suppressed",
+        )
+    }
+    batch_status_counts = {
+        name: int(batch_states.get(name, 0))
+        for name in (
+            "pending",
+            "claimed",
+            "send_started",
+            "accepted",
+            "confirmed",
+            "explicit_failed",
+            "unknown",
         )
     }
     pending_cases.sort(
@@ -1741,7 +1822,7 @@ def _lifecycle_delivery_status(
         )
     )
     return {
-        "schema_version": "trade_lifecycle_delivery_status.v1",
+        "schema_version": "trade_lifecycle_delivery_status.v2",
         "status": "ok",
         "account": account_value,
         "observed_at_ms": int(now_ms),
@@ -1762,6 +1843,68 @@ def _lifecycle_delivery_status(
             if count > 1
         ),
         "outbox_status_counts": outbox_status_counts,
+        "unbound_eligible_count": len(eligible_unbound_rows),
+        "oldest_unbound_eligible": (
+            {
+                "outbox_id": eligible_unbound_rows[0].get(
+                    "outbox_id"
+                ),
+                "case_id": eligible_unbound_rows[0].get("case_id"),
+                "created_at_ms": eligible_unbound_rows[0].get(
+                    "created_at_ms"
+                ),
+                "age_ms": max(
+                    0,
+                    int(now_ms)
+                    - int(
+                        eligible_unbound_rows[0].get(
+                            "created_at_ms"
+                        )
+                        or 0
+                    ),
+                ),
+            }
+            if eligible_unbound_rows
+            else None
+        ),
+        "batch_status_counts": batch_status_counts,
+        "delivery_batch_count": len(delivery_batches),
+        "batched_member_count": len(
+            [
+                item
+                for item in notifications
+                if str(item.get("delivery_batch_id") or "").strip()
+            ]
+        ),
+        "active_batched_member_count": int(
+            outbox_states.get("batched", 0)
+        ),
+        "oldest_unknown_batch": (
+            {
+                "batch_id": unknown_batches[0].get("batch_id"),
+                "provider": unknown_batches[0].get("provider"),
+                "channel": unknown_batches[0].get("channel"),
+                "route_fingerprint": unknown_batches[0].get(
+                    "route_fingerprint"
+                ),
+                "target_fingerprint": unknown_batches[0].get(
+                    "target_fingerprint"
+                ),
+                "member_count": unknown_batches[0].get(
+                    "member_count"
+                ),
+                "created_at_ms": unknown_batches[0].get(
+                    "created_at_ms"
+                ),
+            }
+            if unknown_batches
+            else None
+        ),
+        "messages_avoided": {
+            "scope": "full_delivery_batches_touching_account",
+            **messages_avoided_by_status,
+            "total": sum(messages_avoided_by_status.values()),
+        },
         "oldest_unknown_outbox": (
             {
                 "outbox_id": unknown_rows[0].get("outbox_id"),
@@ -1801,7 +1944,7 @@ def _refresh_lifecycle_delivery_status(
         )
     except Exception as exc:
         status_state["lifecycle_delivery"] = {
-            "schema_version": "trade_lifecycle_delivery_status.v1",
+            "schema_version": "trade_lifecycle_delivery_status.v2",
             "status": "unavailable",
             "account": str(account or "").strip().lower() or None,
             "error": f"{type(exc).__name__}: {exc}",

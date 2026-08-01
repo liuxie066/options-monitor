@@ -3,13 +3,320 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
+from src.application.trades.lifecycle_outbox import (
+    BATCH_RENDERER_VERSION,
+    build_notification_batch_route,
+)
 from src.application.trades.receipt import (
+    build_trade_lifecycle_notification_batch_message,
+    build_trade_lifecycle_notification_message,
     build_trade_intake_receipt_message,
+    classify_trade_lifecycle_delivery_result,
     decide_trade_intake_receipt,
+    send_trade_lifecycle_outbox_payload,
     send_trade_intake_receipt,
 )
+from src.application.channels.wechat_clawbot.notification import (
+    normalize_wechat_clawbot_send_output,
+)
+
+
+def _lifecycle_batch_member(
+    index: int,
+    *,
+    case_id: str | None = None,
+    resolution_revision: int = 1,
+    transition_type: str = "needs_review",
+    account: str = "lx",
+    symbol: str | None = None,
+) -> dict:
+    resolved_case_id = case_id or f"case-{index:02d}"
+    payload = {
+        "account": account,
+        "case_id": resolved_case_id,
+        "transition_type": transition_type,
+        "symbol": symbol or f"SYM{index:02d}",
+        "expiration_ymd": "2026-08-21",
+        "strike": 100 + index,
+        "option_type": "put",
+    }
+    return {
+        "outbox_id": f"outbox-{index:02d}",
+        "case_id": resolved_case_id,
+        "transition_type": transition_type,
+        "resolution_revision": resolution_revision,
+        "delivery_revision": 0,
+        "transition_key": (
+            f"lifecycle:{resolved_case_id}:{transition_type}"
+        ),
+        "state_fingerprint": f"state-{index:02d}",
+        "payload_hash": f"payload-{index:02d}",
+        "created_at_ms": 1_000 + index,
+        "payload": payload,
+    }
+
+
+def _lifecycle_batch_payload(
+    members: list[dict],
+    *,
+    target: str = "wechat:ops",
+) -> dict:
+    route = build_notification_batch_route(
+        provider="wechat_clawbot",
+        channel="wechat_clawbot",
+        target=target,
+    )
+    return {
+        "schema_version": BATCH_RENDERER_VERSION,
+        "batch_id": "tlb_0123456789abcdef0123456789abcdef",
+        "route": {
+            key: route[key]
+            for key in (
+                "provider",
+                "channel",
+                "target_fingerprint",
+                "route_fingerprint",
+            )
+        },
+        "members": members,
+    }
+
+
+def test_lifecycle_batch_single_member_preserves_existing_message() -> None:
+    member = _lifecycle_batch_member(1)
+
+    assert build_trade_lifecycle_notification_batch_message(
+        _lifecycle_batch_payload([member])
+    ) == build_trade_lifecycle_notification_message(member["payload"])
+
+
+def test_lifecycle_batch_digest_is_deterministic_and_top_twelve_only() -> None:
+    members = [
+        _lifecycle_batch_member(
+            index,
+            account="lx" if index < 15 else "sy",
+        )
+        for index in range(24)
+    ]
+
+    forward = build_trade_lifecycle_notification_batch_message(
+        _lifecycle_batch_payload(members)
+    )
+    reverse = build_trade_lifecycle_notification_batch_message(
+        _lifecycle_batch_payload(list(reversed(members)))
+    )
+
+    assert forward == reverse
+    assert "范围｜24 条意图 · 24 个案件" in forward
+    assert "另有 12 个案件未展开" in forward
+    assert forward.count("`case-") == 12
+    assert "wechat:ops" not in forward
+
+
+def test_lifecycle_batch_digest_collapses_case_to_latest_revision() -> None:
+    older = _lifecycle_batch_member(
+        1,
+        case_id="case-shared",
+        resolution_revision=1,
+        symbol="OLD",
+    )
+    newer = _lifecycle_batch_member(
+        2,
+        case_id="case-shared",
+        resolution_revision=2,
+        transition_type="conflict",
+        symbol="NEW",
+    )
+    another = _lifecycle_batch_member(3, symbol="OTHER")
+
+    message = build_trade_lifecycle_notification_batch_message(
+        _lifecycle_batch_payload([older, another, newer])
+    )
+
+    assert "范围｜3 条意图 · 2 个案件" in message
+    assert "NEW" in message
+    assert "OLD" not in message
+    assert message.index("NEW") < message.index("OTHER")
+
+
+def test_lifecycle_batch_single_representative_preserves_message() -> None:
+    older = _lifecycle_batch_member(
+        1,
+        case_id="case-shared",
+        resolution_revision=1,
+        symbol="OLD",
+    )
+    newer = _lifecycle_batch_member(
+        2,
+        case_id="case-shared",
+        resolution_revision=2,
+        transition_type="conflict",
+        symbol="NEW",
+    )
+
+    assert build_trade_lifecycle_notification_batch_message(
+        _lifecycle_batch_payload([older, newer])
+    ) == build_trade_lifecycle_notification_message(newer["payload"])
+
+
+def test_lifecycle_batch_route_mismatch_fails_before_send(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    payload = _lifecycle_batch_payload(
+        [_lifecycle_batch_member(1)],
+        target="wechat:old",
+    )
+
+    result = send_trade_lifecycle_outbox_payload(
+        base=tmp_path,
+        config={
+            "notifications": {
+                "provider": "wechat_clawbot",
+                "target": "wechat:new",
+            }
+        },
+        receipt_config={},
+        payload=payload,
+        send_fn=lambda **kwargs: calls.append(dict(kwargs)),
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert result["status"] == "explicit_failed"
+    assert result["explicit_pre_acceptance_failure"] is True
+    assert result["classification_evidence"]["preflight"] == (
+        "route_fingerprint_mismatch"
+    )
+    assert calls == []
+    assert "wechat:old" not in str(result)
+    assert "wechat:new" not in str(result)
+
+
+def test_lifecycle_batch_sender_reuses_batch_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    payload = _lifecycle_batch_payload(
+        [_lifecycle_batch_member(1), _lifecycle_batch_member(2)]
+    )
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": f"message-{len(calls)}",
+            "idempotency_key": kwargs["idempotency_key"],
+        }
+
+    for _attempt in range(2):
+        result = send_trade_lifecycle_outbox_payload(
+            base=tmp_path,
+            config={
+                "notifications": {
+                    "provider": "wechat_clawbot",
+                    "target": "wechat:ops",
+                }
+            },
+            receipt_config={},
+            payload=payload,
+            send_fn=_send,
+            normalize_fn=lambda send_result: send_result,
+        )
+        assert result["status"] == "confirmed"
+
+    assert [call["idempotency_key"] for call in calls] == [
+        payload["batch_id"],
+        payload["batch_id"],
+    ]
+    assert all("期权平仓批次" in call["message"] for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("normalized", "expected"),
+    (
+        (
+            {
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "http_status": 400,
+                "provider_response_code": 230001,
+            },
+            "explicit_failed",
+        ),
+        (
+            {
+                "command_ok": True,
+                "delivery_confirmed": False,
+                "http_status": 200,
+                "provider_response_code": 230001,
+            },
+            "explicit_failed",
+        ),
+        (
+            {
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "http_status": 500,
+                "provider_response_code": 999,
+            },
+            "unknown",
+        ),
+        (
+            {
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "http_status": 400,
+                "ambiguous_send": True,
+            },
+            "unknown",
+        ),
+        (
+            {
+                "command_ok": True,
+                "delivery_confirmed": False,
+                "fallback_used": True,
+            },
+            "unknown",
+        ),
+        (
+            {
+                "command_ok": True,
+                "delivery_confirmed": False,
+            },
+            "accepted",
+        ),
+    ),
+)
+def test_lifecycle_delivery_classifier_is_fail_closed(
+    normalized: dict,
+    expected: str,
+) -> None:
+    assert classify_trade_lifecycle_delivery_result(normalized)[
+        "outcome"
+    ] == expected
+
+
+def test_lifecycle_classifier_retries_real_wechat_business_rejection() -> None:
+    normalized = normalize_wechat_clawbot_send_output(
+        send_result={
+            "ok": False,
+            "http_status": 200,
+            "response_json": {"code": 230001, "message": "rejected"},
+            "response_tail": '{"code":230001}',
+        }
+    )
+
+    assert normalized["command_ok"] is True
+    assert normalized["delivery_confirmed"] is False
+    assert normalized["provider_response_code"] == 230001
+    assert classify_trade_lifecycle_delivery_result(normalized)[
+        "outcome"
+    ] == "explicit_failed"
 
 
 def test_receipt_decision_defaults_send_applied() -> None:
