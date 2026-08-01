@@ -1154,6 +1154,67 @@ def test_shadow_replay_data_plan_dry_run_is_read_only(tmp_path: Path) -> None:
     assert result["safety"]["sends_notifications"] is False
 
 
+def test_shadow_replay_data_plan_defers_remaining_collects_after_opend_rate_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.shadow_replay.data_plan as data_plan_module
+
+    plan_rows = [
+        {
+            "dataset_id": dataset_id,
+            "dataset_dir": str(tmp_path / dataset_id),
+            "action": "collect_marks",
+            "reason": "sampling_due",
+        }
+        for dataset_id in ("first", "second")
+    ]
+    monkeypatch.setattr(
+        data_plan_module,
+        "shadow_replay_dataset_status",
+        lambda **_kwargs: {
+            "dataset_root": str(tmp_path),
+            "summary": {"dataset_count": 2},
+            "data_plan": plan_rows,
+            "datasets": [],
+        },
+    )
+    calls: list[dict] = []
+
+    def _rate_limited_collect(**kwargs):
+        calls.append(kwargs)
+        return {
+            "schema_version": "shadow_replay_mark_collection.v1",
+            "summary": {
+                "status": "deferred",
+                "opend_fetch_error_count": 1,
+                "opend_rate_limit_count": 1,
+                "opend_non_rate_limit_error_count": 0,
+                "opend_rate_limit_circuit_open": True,
+            },
+            "safety": {"writes_local_dataset": True},
+        }
+
+    monkeypatch.setattr(data_plan_module, "collect_shadow_replay_marks", _rate_limited_collect)
+
+    result = data_plan_module.run_shadow_replay_data_plan(
+        repo_root=tmp_path,
+        source="opend",
+        write=True,
+        fail_fast_on_opend_rate_limit=True,
+        now_utc="2026-08-01T00:00:00Z",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["fail_fast_on_opend_rate_limit"] is True
+    assert result["summary"]["status"] == "deferred"
+    assert result["summary"]["deferred_count"] == 2
+    assert result["summary"]["error_count"] == 0
+    assert [row["result_status"] for row in result["actions"]] == ["deferred", "deferred"]
+    assert result["actions"][0]["reason"] == "opend_rate_limited"
+    assert result["actions"][1]["reason"] == "opend_rate_limit_circuit_open"
+
+
 def test_shadow_replay_data_plan_rejects_review_and_dry_run_receipt_writes(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_data_plan
 
@@ -1782,6 +1843,80 @@ def test_shadow_replay_collect_marks_does_not_reuse_stale_cache_after_partial_op
     assert marks["NVDA260619P00100000"]["point_in_time_status"] == "verified_fresh_collection"
     assert marks["AMD260619P00080000"]["quote_status"] == "missing_quote"
     assert marks["AMD260619P00080000"]["point_in_time_status"] == "missing_quote"
+
+
+def test_shadow_replay_collect_marks_fail_fast_on_opend_rate_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    dataset_dir = (
+        tmp_path
+        / "output_shared"
+        / "research"
+        / "shadow_replay"
+        / "datasets"
+        / "case-rate-limit"
+    )
+    _write_jsonl(
+        dataset_dir / "candidate_snapshots.jsonl",
+        [
+            {
+                "symbol": symbol,
+                "contract_symbol": contract,
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "strike": strike,
+                "status": "accepted",
+            }
+            for symbol, contract, strike in (
+                ("AMD", "AMD260619P00080000", 80),
+                ("NVDA", "NVDA260619P00100000", 100),
+            )
+        ],
+    )
+    _seal_dataset(dataset_dir)
+    calls = []
+
+    def _rate_limited_fetch(*, base: Path, request):
+        calls.append(request)
+        return {
+            "symbol": request.symbol,
+            "expiration_count": 0,
+            "expirations": [],
+            "rows": [],
+            "meta": {
+                "source": "opend",
+                "status": "error",
+                "error_code": "RATE_LIMIT",
+                "error": "every 30 seconds at most 10 calls",
+                "source_outcome": "provider_error",
+                "reason_code": "RATE_LIMIT",
+            },
+        }
+
+    monkeypatch.setattr(collection, "execute_required_data_opend", _rate_limited_fetch)
+
+    result = collect_shadow_replay_marks(
+        dataset=dataset_dir,
+        required_data_root=tmp_path / "output_shared" / "required_data",
+        source="opend",
+        repo_root=tmp_path,
+        write=True,
+        fail_fast_on_opend_rate_limit=True,
+    )
+
+    assert [request.symbol for request in calls] == ["AMD"]
+    assert calls[0].no_retry is True
+    assert result["summary"]["status"] == "deferred"
+    assert result["summary"]["opend_rate_limit_count"] == 1
+    assert result["summary"]["opend_non_rate_limit_error_count"] == 0
+    assert result["fetch"]["summary"]["requested_symbol_count"] == 1
+    assert result["fetch"]["summary"]["skipped_symbol_count"] == 1
+    assert result["fetch"]["skipped_symbols"] == ["NVDA"]
+    assert result["fetch"]["stop_reason"] == "opend_rate_limited"
 
 
 def test_shadow_replay_collect_marks_opend_preview_does_not_persist(monkeypatch, tmp_path: Path) -> None:
