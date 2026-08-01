@@ -394,6 +394,7 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         sampling = dataset["sampling"]
+        integrity = _data_plan_integrity(dataset.get("dataset_integrity"))
         if sampling["action"] in {"collect_marks", "settle"}:
             rows.append(
                 {
@@ -409,6 +410,7 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "last_mark_at": dataset["last_mark_at"],
                     "mark_age_hours": sampling["mark_age_hours"],
                     "usable_mark_point_count": sampling["usable_mark_point_count"],
+                    "dataset_integrity": integrity,
                     "outcome_gaps": dataset["outcome_gaps"],
                     "suggested_command": sampling["suggested_command"],
                     "suggested_opend_command": sampling["suggested_opend_command"],
@@ -455,6 +457,7 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     if isinstance(close.get("summary"), dict)
                     else None
                 ),
+                "dataset_integrity": integrity,
                 "outcome_gaps": None,
                 "suggested_command": commands.get("suggested_command"),
                 "suggested_opend_command": (
@@ -465,6 +468,16 @@ def _data_plan_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return sorted(rows, key=_plan_sort_key)
+
+
+def _data_plan_integrity(value: Any) -> dict[str, Any]:
+    integrity = value if isinstance(value, dict) else {}
+    return {
+        "status": text(integrity.get("status")) or "unknown",
+        "reason": text(integrity.get("reason")) or None,
+        "generation_id": integrity.get("generation_id"),
+        "revision": integrity.get("revision"),
+    }
 
 
 def _review_queue_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
