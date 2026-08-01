@@ -1683,7 +1683,7 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
     calls = []
 
     def _fake_execute_required_data_opend(*, base: Path, request):
-        calls.append(request)
+        calls.append((base, request))
         contract = "NVDA260619P00100000" if request.symbol == "NVDA" else "AMD260619P00080000"
         strike = 100 if request.symbol == "NVDA" else 80
         bid = 0.7 if request.symbol == "NVDA" else 1.4
@@ -1719,13 +1719,24 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
         required_data_root=tmp_path / "output_shared" / "required_data",
         source="opend",
         repo_root=tmp_path,
+        opend_base_root=tmp_path / "runtime",
+        opend_fetch_config={
+            "option_chain_max_calls": 9,
+            "option_chain_window_sec": 30.0,
+            "max_wait_sec": 600.0,
+        },
         write=True,
     )
     marks = _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
     outcomes = _jsonl(dataset_dir / "outcome_facts.jsonl")
 
-    assert [request.symbol for request in calls] == ["AMD", "NVDA"]
-    assert {tuple(request.explicit_expirations or []) for request in calls} == {("2026-06-19",)}
+    assert [request.symbol for _, request in calls] == ["AMD", "NVDA"]
+    assert {base for base, _ in calls} == {(tmp_path / "runtime").resolve()}
+    assert {tuple(request.explicit_expirations or []) for _, request in calls} == {("2026-06-19",)}
+    assert {request.option_chain_max_calls for _, request in calls} == {9}
+    assert {request.option_chain_window_sec for _, request in calls} == {30.0}
+    assert {request.max_wait_sec for _, request in calls} == {600.0}
+    assert result["fetch"]["opend_fetch_config"]["option_chain_max_calls"] == 9
     assert result["summary"]["opend_fetch_ok_count"] == 2
     assert result["summary"]["generated_mark_snapshot_count"] == 2
     assert result["summary"]["usable_mark_snapshot_count"] == 2
@@ -1743,6 +1754,71 @@ def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, t
     assert {row["quote_status"] for row in marks} == {"matched"}
     assert outcomes == []
     assert (tmp_path / "output_shared" / "required_data" / "parsed" / "NVDA_required_data.csv").exists()
+
+
+def test_shadow_replay_opend_dry_run_keeps_runtime_root_read_only(monkeypatch, tmp_path: Path) -> None:
+    from src.application.shadow_replay import collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    dataset = tmp_path / "dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_family": "sell_put",
+                "strike": 100,
+            }
+        ],
+    )
+    _seal_dataset(dataset)
+    observed: dict[str, object] = {}
+
+    def _fake_fetch(_rows, **kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "shadow_replay_required_data_fetch.v1",
+            "source": "opend",
+            "summary": {
+                "candidate_snapshot_count": 1,
+                "symbol_count": 1,
+                "requested_symbol_count": 0,
+                "ok_count": 0,
+                "partial_count": 0,
+                "error_count": 0,
+                "rate_limit_count": 0,
+                "non_rate_limit_error_count": 0,
+                "rate_limit_circuit_open": False,
+                "row_count": 0,
+                "skipped_symbol_count": 0,
+            },
+            "requests": [],
+            "skipped_symbols": [],
+            "stop_reason": None,
+        }
+
+    monkeypatch.setattr(collection, "_fetch_required_data_from_opend", _fake_fetch)
+    runtime = tmp_path / "runtime"
+
+    result = collect_shadow_replay_marks(
+        dataset=dataset,
+        required_data_root=runtime / "output_shared" / "required_data",
+        source="opend",
+        repo_root=tmp_path,
+        opend_base_root=runtime,
+        write=False,
+    )
+
+    temporary_base = Path(observed["base"])
+    assert temporary_base != runtime.resolve()
+    assert temporary_base.name.startswith("shadow-replay-opend-base-")
+    assert not temporary_base.exists()
+    assert not runtime.exists()
+    assert result["safety"]["writes_persistent_outputs"] is False
 
 
 def test_shadow_replay_collect_marks_does_not_reuse_stale_cache_after_partial_opend_failure(
