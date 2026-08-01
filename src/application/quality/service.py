@@ -988,6 +988,7 @@ class OMQualityService:
     ) -> dict[str, Any]:
         intents: list[dict[str, Any]] = []
         enabled = False
+        activity_observed = False
         for runtime in runtime_for_config:
             intake = runtime.get("trade_intake") if isinstance(runtime.get("trade_intake"), dict) else {}
             for source in intake.get("sources") or []:
@@ -1000,9 +1001,23 @@ class OMQualityService:
                 intent = summary.get("last_stock_holdings_sync_intent")
                 if isinstance(intent, dict):
                     intents.append(intent)
+                activity_observed = activity_observed or bool(
+                    summary.get("last_push_received_utc")
+                    or summary.get("last_deal_result")
+                    or summary.get("last_backfill_result")
+                    or summary.get("last_backfill_deal_count") not in (None, "", 0, "0")
+                    or summary.get("last_backfill_applied_count") not in (None, "", 0, "0")
+                )
                 enabled = enabled or bool(intake.get("holdings_sync", {}).get("enabled"))
         if not enabled and not intents:
             status, reason, message = "pass", "STOCK_REFRESH_INTENT_NOT_APPLICABLE", "PM stock-refresh intent is not enabled for this source."
+            verdict = "trusted"
+        elif not intents and not activity_observed:
+            status, reason, message = (
+                "pass",
+                "STOCK_REFRESH_INTENT_NOT_TRIGGERED",
+                "No trade activity requiring a PM stock-refresh intent has been observed.",
+            )
             verdict = "trusted"
         elif not intents:
             status, reason, message = "unknown", "STOCK_REFRESH_INTENT_EVIDENCE_MISSING", "Stock-refresh intent is enabled but no result evidence is available."
@@ -1010,13 +1025,40 @@ class OMQualityService:
         else:
             latest = intents[-1]
             result_status = str(latest.get("status") or "").strip().lower()
-            ok = result_status in {"succeeded", "success", "queued", "debounced", "scheduled"}
-            status, reason, message = (
-                ("pass", "STOCK_REFRESH_INTENT_CONFIRMED", "Stock-refresh intent has a PM handoff result.")
-                if ok
-                else ("warn", "STOCK_REFRESH_INTENT_DELAYED", "Stock-refresh intent has not reached a successful PM handoff.")
-            )
-            verdict = "trusted" if ok else "partial"
+            result_reason = str(latest.get("reason") or "").strip().lower()
+            not_triggered = result_status == "skipped" and result_reason in {
+                "dry_run",
+                "option_deal",
+            }
+            ok = result_status in {
+                "coalesced",
+                "debounced",
+                "queued",
+                "scheduled",
+                "succeeded",
+                "success",
+            } or (result_status == "skipped" and result_reason == "already_synchronized")
+            if not_triggered:
+                status, reason, message = (
+                    "pass",
+                    "STOCK_REFRESH_INTENT_NOT_TRIGGERED",
+                    "The observed trade does not require a PM stock refresh.",
+                )
+                verdict = "trusted"
+            elif ok:
+                status, reason, message = (
+                    "pass",
+                    "STOCK_REFRESH_INTENT_CONFIRMED",
+                    "Stock-refresh intent has a PM handoff result.",
+                )
+                verdict = "trusted"
+            else:
+                status, reason, message = (
+                    "warn",
+                    "STOCK_REFRESH_INTENT_DELAYED",
+                    "Stock-refresh intent has not reached a successful PM handoff.",
+                )
+                verdict = "partial"
         check = check_result(
             check_id="OM-HSYNC-001",
             status=status,
@@ -1024,8 +1066,11 @@ class OMQualityService:
             observed_at_utc=observed_at,
             reason_code=reason,
             message=message,
-            observed={"intent_count": len(intents)},
-            expected={"latest_intent_result": "successful"},
+            observed={
+                "intent_count": len(intents),
+                "activity_observed": activity_observed,
+            },
+            expected={"latest_intent_result": "successful_or_not_applicable"},
             evidence_refs=[],
         )
         return dataset_status(

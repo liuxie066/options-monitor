@@ -45,6 +45,7 @@ def run_shadow_replay_data_plan(
     include_realized_volatility: bool = False,
     max_symbols: int | None = None,
     now_utc: str | None = None,
+    fail_fast_on_opend_rate_limit: bool = False,
 ) -> dict[str, Any]:
     """Dry-run or execute local Shadow Replay data-maintenance actions.
 
@@ -92,6 +93,7 @@ def run_shadow_replay_data_plan(
         include_realized_volatility=bool(include_realized_volatility),
         max_symbols=max_symbols,
         generated_at=generated_at,
+        fail_fast_on_opend_rate_limit=bool(fail_fast_on_opend_rate_limit),
     )
     receipt_path = _resolve_receipt_path(
         base=base,
@@ -161,9 +163,11 @@ def _run_plan_rows(
     include_realized_volatility: bool,
     max_symbols: int | None,
     generated_at: str,
+    fail_fast_on_opend_rate_limit: bool,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     executed_or_planned = 0
+    opend_rate_limit_circuit_open = False
     plan_rows = rows if isinstance(rows, list) else []
     for row in plan_rows:
         if not isinstance(row, dict):
@@ -173,6 +177,15 @@ def _run_plan_rows(
         if action not in action_set:
             out.append({**base, "result_status": "skipped", "reason": "action_not_enabled"})
             continue
+        if action == "collect_marks" and opend_rate_limit_circuit_open:
+            out.append(
+                {
+                    **base,
+                    "result_status": "deferred",
+                    "reason": "opend_rate_limit_circuit_open",
+                }
+            )
+            continue
         if max_datasets is not None and executed_or_planned >= max_datasets:
             out.append({**base, "result_status": "skipped", "reason": "max_datasets_reached"})
             continue
@@ -180,23 +193,25 @@ def _run_plan_rows(
         if not write:
             out.append({**base, "result_status": "planned", "reason": "dry_run"})
             continue
-        out.append(
-            _execute_plan_row(
-                row,
-                repo_root=repo_root,
-                required_data_root=required_data_root,
-                source=source,
-                settle_after_collect=settle_after_collect,
-                opend_host=opend_host,
-                opend_port=opend_port,
-                limit_expirations=limit_expirations,
-                chain_cache=chain_cache,
-                chain_cache_force_refresh=chain_cache_force_refresh,
-                include_realized_volatility=include_realized_volatility,
-                max_symbols=max_symbols,
-                generated_at=generated_at,
-            )
+        result = _execute_plan_row(
+            row,
+            repo_root=repo_root,
+            required_data_root=required_data_root,
+            source=source,
+            settle_after_collect=settle_after_collect,
+            opend_host=opend_host,
+            opend_port=opend_port,
+            limit_expirations=limit_expirations,
+            chain_cache=chain_cache,
+            chain_cache_force_refresh=chain_cache_force_refresh,
+            include_realized_volatility=include_realized_volatility,
+            max_symbols=max_symbols,
+            generated_at=generated_at,
+            fail_fast_on_opend_rate_limit=fail_fast_on_opend_rate_limit,
         )
+        out.append(result)
+        if result.get("reason") == "opend_rate_limited":
+            opend_rate_limit_circuit_open = True
     return out
 
 
@@ -215,6 +230,7 @@ def _execute_plan_row(
     include_realized_volatility: bool,
     max_symbols: int | None,
     generated_at: str,
+    fail_fast_on_opend_rate_limit: bool,
 ) -> dict[str, Any]:
     base = _action_base(row)
     dataset_dir = text(row.get("dataset_dir"))
@@ -239,6 +255,7 @@ def _execute_plan_row(
                 chain_cache_force_refresh=chain_cache_force_refresh,
                 include_realized_volatility=include_realized_volatility,
                 max_symbols=max_symbols,
+                fail_fast_on_opend_rate_limit=fail_fast_on_opend_rate_limit,
             )
         elif action == "settle":
             payload = settle_shadow_replay_dataset(dataset=dataset_dir, write=True, replace=False)
@@ -253,6 +270,17 @@ def _execute_plan_row(
         }
     operation = _operation_payload(payload)
     operation_summary = operation.get("summary") or {}
+    operation_deferred = (
+        text(operation_summary.get("status")).lower() == "deferred"
+        and int(operation_summary.get("opend_non_rate_limit_error_count") or 0) == 0
+    )
+    if operation_deferred:
+        return {
+            **base,
+            "result_status": "deferred",
+            "reason": "opend_rate_limited",
+            "operation": operation,
+        }
     operation_failed = (
         text(operation_summary.get("status")).lower()
         in {"error", "failed", "partial_failed"}
@@ -321,12 +349,15 @@ def _summary(
     rows = plan_rows if isinstance(plan_rows, list) else []
     counts = Counter(text(row.get("result_status")) for row in action_results)
     error_count = counts.get("error", 0)
+    deferred_count = counts.get("deferred", 0)
     return {
         "status": (
             "failed"
             if error_count and counts.get("ok", 0) == 0
             else "partial_failed"
             if error_count
+            else "deferred"
+            if deferred_count
             else "success"
         ),
         "plan_action_count": len(rows),
@@ -334,6 +365,7 @@ def _summary(
         "planned_count": counts.get("planned", 0),
         "executed_count": counts.get("ok", 0),
         "skipped_count": counts.get("skipped", 0),
+        "deferred_count": deferred_count,
         "error_count": error_count,
         "receipt_written": receipt_path is not None,
         "receipt_path": str(receipt_path) if receipt_path is not None else None,
@@ -379,14 +411,16 @@ def _safety(
     dataset_wrote = bool(
         write
         and any(
-            row.get("action") in {"collect_marks", "settle"} and row.get("result_status") == "ok"
+            row.get("action") in {"collect_marks", "settle"}
+            and row.get("result_status") in {"ok", "deferred"}
             for row in action_results
         )
     )
     collect_attempted = bool(
         write
         and any(
-            row.get("action") == "collect_marks" and row.get("result_status") in {"ok", "error"}
+            row.get("action") == "collect_marks"
+            and row.get("result_status") in {"ok", "error", "deferred"}
             for row in action_results
         )
     )

@@ -38,6 +38,7 @@ class RequiredDataFetchRequest:
     expiration_window_sec: float = 30.0
     expiration_max_calls: int = 60
     include_realized_volatility: bool = False
+    no_retry: bool = False
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -74,6 +75,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             expiration_window_sec=float(request.expiration_window_sec),
             expiration_max_calls=int(request.expiration_max_calls),
             include_realized_volatility=bool(request.include_realized_volatility),
+            no_retry=bool(request.no_retry),
         )
     )
 

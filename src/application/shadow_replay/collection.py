@@ -6,6 +6,7 @@ import tempfile
 from typing import Any
 
 from src.application.opend_symbol_outputs import save_outputs
+from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.required_data_fetching import RequiredDataFetchRequest, execute_required_data_opend
 from src.application.shadow_replay.common import (
     OPTIONAL_CLOSE_DATASET_FILES,
@@ -40,6 +41,7 @@ def collect_shadow_replay_marks(
     chain_cache_force_refresh: bool = False,
     include_realized_volatility: bool = False,
     max_symbols: int | None = None,
+    fail_fast_on_opend_rate_limit: bool = False,
 ) -> dict[str, Any]:
     """Collect one replay mark sample from local cache or a fresh OpenD pull."""
 
@@ -80,6 +82,7 @@ def collect_shadow_replay_marks(
                 chain_cache_force_refresh=chain_cache_force_refresh,
                 include_realized_volatility=include_realized_volatility,
                 max_symbols=max_symbols,
+                fail_fast_on_rate_limit=bool(fail_fast_on_opend_rate_limit),
             )
 
         marking = mark_shadow_replay_dataset(
@@ -128,6 +131,11 @@ def collect_shadow_replay_marks(
         "generated_at_utc": utc_now(),
         "summary": {
             "status": (
+                "deferred"
+                if source_norm == "opend"
+                and bool(fetch_summary["summary"].get("rate_limit_circuit_open"))
+                and int(fetch_summary["summary"].get("non_rate_limit_error_count") or 0) == 0
+                else
                 "failed"
                 if source_norm == "opend"
                 and int(fetch_summary["summary"]["ok_count"] or 0) == 0
@@ -145,6 +153,13 @@ def collect_shadow_replay_marks(
             "opend_fetch_attempted": source_norm == "opend",
             "opend_fetch_ok_count": fetch_summary["summary"]["ok_count"],
             "opend_fetch_error_count": fetch_summary["summary"]["error_count"],
+            "opend_rate_limit_count": fetch_summary["summary"].get("rate_limit_count", 0),
+            "opend_non_rate_limit_error_count": fetch_summary["summary"].get(
+                "non_rate_limit_error_count", 0
+            ),
+            "opend_rate_limit_circuit_open": bool(
+                fetch_summary["summary"].get("rate_limit_circuit_open")
+            ),
             "opend_fetch_persisted": source_norm == "opend" and bool(write),
             "generated_mark_snapshot_count": marking["summary"]["generated_mark_snapshot_count"],
             "usable_mark_snapshot_count": marking["summary"]["usable_mark_snapshot_count"],
@@ -265,6 +280,9 @@ def _empty_fetch_summary(*, source: str, candidate_snapshots: list[dict[str, Any
             "error_count": 0,
             "row_count": 0,
             "skipped_symbol_count": 0,
+            "rate_limit_count": 0,
+            "non_rate_limit_error_count": 0,
+            "rate_limit_circuit_open": False,
         },
         "requests": [],
     }
@@ -282,6 +300,7 @@ def _fetch_required_data_from_opend(
     chain_cache_force_refresh: bool,
     include_realized_volatility: bool,
     max_symbols: int | None,
+    fail_fast_on_rate_limit: bool,
 ) -> dict[str, Any]:
     plans = _fetch_plans_from_candidates(
         candidate_snapshots,
@@ -309,6 +328,7 @@ def _fetch_required_data_from_opend(
             chain_cache_force_refresh=bool(chain_cache_force_refresh),
             freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
             include_realized_volatility=bool(include_realized_volatility),
+            no_retry=bool(fail_fast_on_rate_limit),
         )
         item = {
             "symbol": plan["symbol"],
@@ -321,6 +341,9 @@ def _fetch_required_data_from_opend(
             "raw_path": None,
             "csv_path": None,
             "error": None,
+            "error_code": None,
+            "source_outcome": None,
+            "reason_code": None,
         }
         try:
             payload = execute_required_data_opend(base=base, request=request)
@@ -336,30 +359,51 @@ def _fetch_required_data_from_opend(
                     "raw_path": str(raw_path),
                     "csv_path": str(csv_path),
                     "error": meta.get("error"),
+                    "error_code": meta.get("error_code"),
+                    "source_outcome": meta.get("source_outcome"),
+                    "reason_code": meta.get("reason_code"),
                 }
             )
         except Exception as exc:
             item["error"] = f"{type(exc).__name__}: {exc}"
+            item["error_code"] = classify_option_chain_error(exc)
         requests.append(item)
+        if fail_fast_on_rate_limit and text(item.get("error_code")).upper() == "RATE_LIMIT":
+            skipped.extend(requested[len(requests) :])
+            break
 
     ok_count = sum(1 for item in requests if item["status"] == "ok")
     partial_count = sum(1 for item in requests if item["status"] == "partial")
     error_count = sum(1 for item in requests if item["status"] not in {"ok", "partial"})
+    rate_limit_count = sum(
+        1 for item in requests if text(item.get("error_code")).upper() == "RATE_LIMIT"
+    )
+    non_rate_limit_error_count = sum(
+        1
+        for item in requests
+        if item["status"] not in {"ok", "partial"}
+        and text(item.get("error_code")).upper() != "RATE_LIMIT"
+    )
+    rate_limit_circuit_open = bool(fail_fast_on_rate_limit and rate_limit_count)
     return {
         "schema_version": "shadow_replay_required_data_fetch.v1",
         "source": "opend",
         "summary": {
             "candidate_snapshot_count": len(candidate_snapshots),
             "symbol_count": len(plans),
-            "requested_symbol_count": len(requested),
+            "requested_symbol_count": len(requests),
             "ok_count": ok_count,
             "partial_count": partial_count,
             "error_count": error_count,
+            "rate_limit_count": rate_limit_count,
+            "non_rate_limit_error_count": non_rate_limit_error_count,
+            "rate_limit_circuit_open": rate_limit_circuit_open,
             "row_count": sum(int(item.get("rows") or 0) for item in requests),
             "skipped_symbol_count": len(skipped),
         },
         "requests": requests,
         "skipped_symbols": [plan["symbol"] for plan in skipped],
+        "stop_reason": "opend_rate_limited" if rate_limit_circuit_open else None,
     }
 
 
