@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 905 (`src`: 492, `domain`: 76, `scripts`: 8, `tests`: 329)
-- Internal import edges: 5545 total, 2460 production/script edges excluding tests
+- Python files scanned: 907 (`src`: 493, `domain`: 76, `scripts`: 8, `tests`: 330)
+- Internal import edges: 5565 total, 2463 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -45,11 +45,11 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2203| application
+  tests -->|2219| application
   tests -->|481| domain
   tests -->|2| domain_services
   tests -->|133| infrastructure
-  tests -->|208| interfaces
+  tests -->|209| interfaces
   tests -->|13| scripts
   tests -->|16| storage
 ```
@@ -77,9 +77,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2203 |
+| tests | application | 2219 |
 | tests | domain | 481 |
-| tests | interfaces | 208 |
+| tests | interfaces | 209 |
 | tests | infrastructure | 133 |
 | tests | storage | 16 |
 | tests | scripts | 13 |
@@ -200,7 +200,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tools.analysis | 28 |
 | src.application.close_advice_runner | 28 |
 | src.interfaces.cli.main | 28 |
-| src.application.trades.auto_intake | 26 |
+| src.application.trades.auto_intake | 27 |
 | src.application.agent_tools.materialization | 25 |
 | src.application.daily_decision_brief_service | 24 |
 | src.application.multi_account_tick | 24 |
