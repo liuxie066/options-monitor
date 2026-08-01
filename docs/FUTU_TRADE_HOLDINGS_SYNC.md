@@ -160,6 +160,17 @@ Inbox、生命周期原因、逐意图 Outbox 与 delivery batch 分开显示，
 意图、未知批次、批次成员数及已减少消息数，同时保留 source 的 `pid`、
 `source_id`、OpenD host/port、账户和启动时间。
 
+监听进程只创建一个全局 `LifecycleReceiptBatchDispatcher`，统一领取全部启用账户
+的同路由批次；source listener 不再按账户发送回执。dispatcher 每秒进行一次可
+取消轮询，每轮最多尝试一个批次，并在所有 source listener 停止后、运行时资源
+关闭前退出。provider I/O 位于 `process_lock` 和 SQLite 事务之外，慢发送不会
+阻塞新的成交、Inbox 或生命周期事实写入。
+
+每个 source 的 status 在 `lifecycle_delivery.dispatcher` 下显示全局调度器状态、
+允许账户、最近一次批次结果或错误及 provider/channel/route 指纹；这里不会显示
+原始 target。`dry-run`、所有 receipt 均禁用或路由不可用时不会启动 dispatcher，
+状态分别显示 `dry_run`、`receipt_disabled` 或 `route_unavailable`。
+
 ## 运维命令
 
 以下命令均以 dry-run 为默认。示例同时列出预览和显式 one-shot applied 形式；

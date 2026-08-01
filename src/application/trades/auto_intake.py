@@ -44,13 +44,18 @@ from src.application.trades.push_listener import (
 )
 from src.application.trades.lifecycle_outbox import (
     MAX_ATTEMPTS,
-    dispatch_notifications_once,
+)
+from src.application.trades.lifecycle_batch_dispatcher import (
+    LifecycleReceiptBatchDispatcher,
+    lifecycle_receipt_dispatcher_status,
+    resolve_lifecycle_receipt_dispatch_scope,
 )
 from src.application.trades.lifecycle_runtime import (
     ensure_lifecycle_timing_after_intake,
     reconcile_due_lifecycle_cases_for_source,
 )
 from src.application.trades.receipt import (
+    resolve_trade_lifecycle_notification_batch_route,
     send_trade_lifecycle_outbox_payload,
 )
 from src.application.trades.inbox import (
@@ -597,7 +602,22 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     process_lock = threading.RLock()
+    lifecycle_receipt_dispatcher: (
+        LifecycleReceiptBatchDispatcher | None
+    ) = None
     try:
+        (
+            lifecycle_receipt_dispatcher,
+            lifecycle_dispatcher_status_fn,
+        ) = _build_lifecycle_receipt_batch_dispatcher(
+            repo=repo,
+            base=base,
+            cfg=cfg,
+            intake_cfg=intake_cfg,
+            apply_changes=apply_changes,
+        )
+        if lifecycle_receipt_dispatcher is not None:
+            lifecycle_receipt_dispatcher.start()
         if len(sources) == 1:
             return _run_listener_source_loop(
                 source=sources[0],
@@ -611,6 +631,9 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_callback=receipt_callback,
                 stock_holdings_sync_callback=holdings_sync_callback,
                 process_lock=process_lock,
+                lifecycle_dispatcher_status_fn=(
+                    lifecycle_dispatcher_status_fn
+                ),
             )
 
         return _coordinate_listener_sources(
@@ -628,11 +651,18 @@ def main(argv: list[str] | None = None) -> int:
                 stock_holdings_sync_callback=holdings_sync_callback,
                 process_lock=process_lock,
                 stop_event=stop_event,
+                lifecycle_dispatcher_status_fn=(
+                    lifecycle_dispatcher_status_fn
+                ),
             ),
         )
     finally:
-        if holdings_sync_dispatcher is not None:
-            holdings_sync_dispatcher.close()
+        try:
+            if lifecycle_receipt_dispatcher is not None:
+                lifecycle_receipt_dispatcher.close()
+        finally:
+            if holdings_sync_dispatcher is not None:
+                holdings_sync_dispatcher.close()
 
 
 def _build_receipt_callback(
@@ -651,6 +681,64 @@ def _build_receipt_callback(
         }
 
     return _callback
+
+
+def _build_lifecycle_receipt_batch_dispatcher(
+    *,
+    repo: Any,
+    base: Path,
+    cfg: dict[str, Any],
+    intake_cfg: dict[str, Any],
+    apply_changes: bool,
+) -> tuple[
+    LifecycleReceiptBatchDispatcher | None,
+    Callable[[], dict[str, Any]],
+]:
+    scope = resolve_lifecycle_receipt_dispatch_scope(intake_cfg)
+    allowed_accounts = list(scope["allowed_accounts"])
+    if not apply_changes:
+        status = lifecycle_receipt_dispatcher_status(
+            status="disabled",
+            reason="dry_run",
+            allowed_accounts=allowed_accounts,
+        )
+        return None, lambda: dict(status)
+    if not allowed_accounts:
+        status = lifecycle_receipt_dispatcher_status(
+            status="disabled",
+            reason="receipt_disabled",
+        )
+        return None, lambda: dict(status)
+
+    route = resolve_trade_lifecycle_notification_batch_route(
+        config=cfg,
+    )
+    if not bool(route.get("route_available")):
+        status = lifecycle_receipt_dispatcher_status(
+            status="unavailable",
+            reason="route_unavailable",
+            allowed_accounts=allowed_accounts,
+            route=route,
+        )
+        return None, lambda: dict(status)
+
+    receipt_config = dict(scope["receipt_config"])
+    dispatcher = LifecycleReceiptBatchDispatcher(
+        repo=repo,
+        route=route,
+        allowed_accounts=allowed_accounts,
+        send_fn=lambda frozen_payload: (
+            send_trade_lifecycle_outbox_payload(
+                base=base,
+                config=cfg,
+                receipt_config=receipt_config,
+                payload=frozen_payload,
+            )
+        ),
+        poll_interval_sec=1.0,
+        log_fn=_log,
+    )
+    return dispatcher, dispatcher.snapshot
 
 
 def _build_stock_holdings_sync_dispatcher(
@@ -940,6 +1028,9 @@ def _run_listener_source_loop(
     process_lock: threading.RLock,
     stock_holdings_sync_callback: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     stop_event: threading.Event | None = None,
+    lifecycle_dispatcher_status_fn: (
+        Callable[[], dict[str, Any]] | None
+    ) = None,
 ) -> int:
     state_path = source["state_path"]
     audit_path = source["audit_path"]
@@ -972,6 +1063,7 @@ def _run_listener_source_loop(
         status_state,
         repo=repo,
         account=str(source.get("account") or ""),
+        dispatcher_status_fn=lifecycle_dispatcher_status_fn,
     )
     stop = stop_event or threading.Event()
     settlement_gateway = build_futu_gateway(
@@ -1201,6 +1293,7 @@ def _run_listener_source_loop(
             status_state,
             repo=repo,
             account=str(source.get("account") or ""),
+            dispatcher_status_fn=lifecycle_dispatcher_status_fn,
         )
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
@@ -1211,7 +1304,6 @@ def _run_listener_source_loop(
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
     last_inbox_retry_monotonic: float | None = None
-    last_outbox_dispatch_monotonic: float | None = None
     last_lifecycle_due_monotonic: float | None = None
     last_combo_reconciliation_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
@@ -1263,55 +1355,6 @@ def _run_listener_source_loop(
                         status_state.pop("last_error", None)
                     if int(status_state["inbox"].get("pending_count") or 0) == 0:
                         status_state.pop("last_inbox_retry_error", None)
-                outbox_dispatch_due = (
-                    bool(apply_changes)
-                    and bool(
-                        (
-                            source.get("receipt")
-                            or intake_cfg.get("receipt")
-                            or {}
-                        ).get("enabled", True)
-                    )
-                    and (
-                        last_outbox_dispatch_monotonic is None
-                        or now_mono - last_outbox_dispatch_monotonic >= 5
-                    )
-                )
-                if outbox_dispatch_due:
-                    try:
-                        with process_lock:
-                            outbox_dispatch = dispatch_notifications_once(
-                                repo,
-                                send_fn=lambda frozen_payload: (
-                                    send_trade_lifecycle_outbox_payload(
-                                        base=repo_base,
-                                        config=cfg,
-                                        receipt_config=(
-                                            source.get("receipt")
-                                            or intake_cfg.get("receipt")
-                                            or {}
-                                        ),
-                                        payload=frozen_payload,
-                                    )
-                                ),
-                                now_ms=int(time.time() * 1000),
-                                account=str(
-                                    source.get("account") or ""
-                                ).strip().lower()
-                                or None,
-                            )
-                        status_state[
-                            "last_outbox_dispatch"
-                        ] = outbox_dispatch
-                        status_state.pop(
-                            "last_outbox_dispatch_error",
-                            None,
-                        )
-                    except Exception as exc:
-                        status_state[
-                            "last_outbox_dispatch_error"
-                        ] = f"{type(exc).__name__}: {exc}"
-                    last_outbox_dispatch_monotonic = now_mono
                 lifecycle_due = (
                     bool(apply_changes)
                     and (
@@ -1444,6 +1487,9 @@ def _run_listener_source_loop(
                         status_state,
                         repo=repo,
                         account=str(source.get("account") or ""),
+                        dispatcher_status_fn=(
+                            lifecycle_dispatcher_status_fn
+                        ),
                     )
                     _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                     last_heartbeat_monotonic = now_mono
@@ -1933,7 +1979,24 @@ def _refresh_lifecycle_delivery_status(
     *,
     repo: Any,
     account: str,
+    dispatcher_status_fn: (
+        Callable[[], dict[str, Any]] | None
+    ) = None,
 ) -> None:
+    dispatcher_status: dict[str, Any] | None = None
+    if dispatcher_status_fn is not None:
+        try:
+            value = dispatcher_status_fn()
+            if isinstance(value, dict):
+                dispatcher_status = dict(value)
+        except Exception as exc:
+            dispatcher_status = lifecycle_receipt_dispatcher_status(
+                status="unavailable",
+                reason="status_snapshot_failed",
+            )
+            dispatcher_status["error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
     try:
         status_state["lifecycle_delivery"] = (
             _lifecycle_delivery_status(
@@ -1949,6 +2012,10 @@ def _refresh_lifecycle_delivery_status(
             "account": str(account or "").strip().lower() or None,
             "error": f"{type(exc).__name__}: {exc}",
         }
+    if dispatcher_status is not None:
+        status_state["lifecycle_delivery"]["dispatcher"] = (
+            dispatcher_status
+        )
 
 
 def _is_canonical_broker_source_key(value: str) -> bool:
