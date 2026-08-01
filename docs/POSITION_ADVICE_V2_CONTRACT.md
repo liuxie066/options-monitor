@@ -300,6 +300,13 @@ automatic reports bind the exact same source-plan hash set and match the
 top-level counters. Caller-supplied zero counters or `true` fixture flags
 without those reports remain `insufficient_evidence`.
 
+Promotion eligibility also requires the current position-fact snapshot
+contract. Integrity-valid sources from an older contract remain in the
+immutable archive but are excluded from evidence. If no compatible source is
+available, refresh reports `waiting_for_compatible_shadow_plans` and publishes
+nothing. A source that declares the current contract but fails its validation
+remains a hard error.
+
 The fixed promotion gate (`position_advice_promotion_gate.v1`) requires:
 
 - all safety counters equal zero;

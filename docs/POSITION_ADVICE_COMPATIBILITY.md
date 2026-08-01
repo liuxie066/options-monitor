@@ -39,7 +39,10 @@ Run, Daily Brief, and notification consumers support
 6. The mandatory daily promotion timer accumulates immutable shadow evidence.
    v2 rows remain non-authoritative and v1 continues to notify. Only canonical
    plans beneath the same runtime `output_runs` tree and bound to the exact
-   current shadow generation may enter persisted promotion evidence. The timer
+   current shadow generation and current position-fact snapshot contract may
+   enter persisted promotion evidence. Integrity-valid older-contract sources
+   remain archived but are classified incompatible; an all-incompatible set
+   waits for compatible shadow plans instead of failing the timer. The timer
    copies the exact plan/input pairs into a content-addressed gzip archive;
    ordinary output-run cleanup continues without discarding replay evidence.
 7. Use `om position-advice ... promotion status --account <account>` to review
