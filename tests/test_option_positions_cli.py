@@ -2218,3 +2218,538 @@ def test_option_positions_cli_adopt_combo_identity_dry_run(
     assert payload["write_applied"] is False
     assert payload["identity_created"] is False
     assert repo.get_strategy_group_identity("combo:lx:9992") is None
+
+
+def _lifecycle_receipt_cli_context(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    receipt_enabled: bool = True,
+    sy_intake_enabled: bool = True,
+):
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3",
+    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    runtime_config = tmp_path / "runtime.json"
+    runtime_config.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx", "sy"],
+                "account_settings": {
+                    "lx": {
+                        "type": "futu",
+                        "futu": {
+                            "account_id": "REAL_LX",
+                            "host": "127.0.0.1",
+                            "port": 11111,
+                        },
+                    },
+                    "sy": {
+                        "type": "futu",
+                        "trade_intake_enabled": sy_intake_enabled,
+                        "futu": {
+                            "account_id": "REAL_SY",
+                            "host": "127.0.0.1",
+                            "port": 11112,
+                        },
+                    },
+                },
+                "notifications": {
+                    "provider": "wechat_clawbot",
+                    "target": "wechat:ops",
+                },
+                "trade_intake": {
+                    "receipt": {"enabled": receipt_enabled}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_config, repo),
+    )
+    return cli_mod, data_config, runtime_config, repo
+
+
+def _enqueue_lifecycle_cli_intents(
+    repo,
+    *,
+    count: int = 2,
+    accounts: list[str] | None = None,
+) -> list[dict]:
+    from src.application.ledger.notification_outbox import (
+        build_notification_intent,
+    )
+
+    rows = []
+    for index in range(count):
+        account = (
+            accounts[index % len(accounts)]
+            if accounts
+            else "lx"
+        )
+        intent = build_notification_intent(
+            case_id=f"case-cli-{index}",
+            transition_type="needs_review",
+            resolution_revision=1,
+            transition_key=(
+                f"lifecycle:case-cli-{index}:needs_review"
+            ),
+            state_fingerprint=f"state-cli-{index}",
+            payload={
+                "account": account,
+                "case_id": f"case-cli-{index}",
+                "transition_type": "needs_review",
+                "symbol": f"SYM{index}",
+            },
+        )
+        assert repo.insert_trade_lifecycle_notification_once(intent)
+        row = repo.get_trade_lifecycle_notification(intent["outbox_id"])
+        assert row is not None
+        rows.append(row)
+    return rows
+
+
+def _create_lifecycle_cli_batch(repo, rows: list[dict]) -> dict:
+    from src.application.trades.lifecycle_outbox import (
+        QUIET_WINDOW_MS,
+        build_notification_batch_route,
+        plan_notification_batch,
+    )
+
+    result = plan_notification_batch(
+        repo,
+        route=build_notification_batch_route(
+            provider="wechat_clawbot",
+            channel="wechat_clawbot",
+            target="wechat:ops",
+        ),
+        now_ms=(
+            max(int(row["created_at_ms"]) for row in rows)
+            + QUIET_WINDOW_MS
+        ),
+    )
+    assert result["status"] == "created"
+    return result["batch"]
+
+
+def test_lifecycle_receipt_cli_inspects_batch_and_members(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    cli_mod, data_config, _runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    rows = _enqueue_lifecycle_cli_intents(repo)
+    batch = _create_lifecycle_cli_batch(repo, rows)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "inspect",
+            "--batch-id",
+            str(batch["batch_id"]),
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["batch"]["batch_id"] == batch["batch_id"]
+    assert len(payload["members"]) == 2
+    assert payload["outbox"] is None
+    assert "wechat:ops" not in str(payload)
+
+
+def test_lifecycle_receipt_cli_refuses_multi_member_reconcile_by_outbox(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cli_mod, data_config, _runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    rows = _enqueue_lifecycle_cli_intents(repo)
+    batch = _create_lifecycle_cli_batch(repo, rows)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "reconcile",
+            "--outbox-id",
+            str(rows[0]["outbox_id"]),
+            "--mark",
+            "confirmed",
+            "--broker-ref",
+            "provider-check",
+            "--note",
+            "verified",
+            "--dry-run",
+        ],
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match=f"re-run with --batch-id {batch['batch_id']}",
+    ):
+        cli_mod.main()
+
+
+def test_lifecycle_receipt_cli_batch_reconcile_dry_run_is_no_write(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from src.application.trades.lifecycle_outbox import (
+        QUIET_WINDOW_MS,
+        build_notification_batch_route,
+        dispatch_notification_batch_once,
+    )
+
+    cli_mod, data_config, _runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    rows = _enqueue_lifecycle_cli_intents(repo)
+    result = dispatch_notification_batch_once(
+        repo,
+        route=build_notification_batch_route(
+            provider="wechat_clawbot",
+            channel="wechat_clawbot",
+            target="wechat:ops",
+        ),
+        send_fn=lambda _payload: {"status": "unknown"},
+        now_ms=(
+            max(int(row["created_at_ms"]) for row in rows)
+            + QUIET_WINDOW_MS
+        ),
+    )
+    batch_id = str(result["batch"]["batch_id"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "reconcile",
+            "--batch-id",
+            batch_id,
+            "--mark",
+            "confirmed",
+            "--broker-ref",
+            "provider-check",
+            "--note",
+            "verified",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["batch_id"] == batch_id
+    assert payload["member_count"] == 2
+    assert payload["apply_changes"] is False
+    assert payload["write_applied"] is False
+    assert repo.get_trade_lifecycle_notification_batch(batch_id)[
+        "status"
+    ] == "unknown"
+
+
+def test_lifecycle_receipt_cli_dispatch_dry_run_does_not_bind_or_send(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from src.application.trades.lifecycle_outbox import QUIET_WINDOW_MS
+
+    cli_mod, data_config, runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    rows = _enqueue_lifecycle_cli_intents(repo)
+    monkeypatch.setattr(
+        cli_mod,
+        "utc_now_ms",
+        lambda: (
+            max(int(row["created_at_ms"]) for row in rows)
+            + QUIET_WINDOW_MS
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "dispatch",
+            "--once",
+            "--account",
+            "lx",
+            "--config",
+            str(runtime_config),
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["preview"]["status"] == "ready"
+    assert payload["preview"]["candidate_count"] == 2
+    assert payload["write_applied"] is False
+    assert repo.list_trade_lifecycle_notification_batches() == []
+    assert {
+        row["status"]
+        for row in repo.list_trade_lifecycle_notifications()
+    } == {"pending"}
+
+
+def test_lifecycle_receipt_cli_applied_dispatch_rejects_account_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cli_mod, data_config, runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_guard_write",
+        lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "dispatch",
+            "--once",
+            "--account",
+            "lx",
+            "--config",
+            str(runtime_config),
+            "--apply",
+            "--confirm",
+        ],
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="applied lifecycle receipt dispatch is global",
+    ):
+        cli_mod.main()
+    assert repo.list_trade_lifecycle_notification_batches() == []
+
+
+def test_lifecycle_receipt_cli_applied_dispatch_filters_disabled_account(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from src.application.trades.lifecycle_outbox import QUIET_WINDOW_MS
+
+    cli_mod, data_config, runtime_config, repo = (
+        _lifecycle_receipt_cli_context(
+            monkeypatch,
+            tmp_path,
+            sy_intake_enabled=False,
+        )
+    )
+    rows = _enqueue_lifecycle_cli_intents(
+        repo,
+        accounts=["lx", "sy"],
+    )
+    current = (
+        max(int(row["created_at_ms"]) for row in rows)
+        + QUIET_WINDOW_MS
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(cli_mod, "utc_now_ms", lambda: current)
+    monkeypatch.setattr(
+        cli_mod,
+        "_guard_write",
+        lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "send_trade_lifecycle_outbox_payload",
+        lambda **kwargs: calls.append(dict(kwargs))
+        or {
+            "status": "confirmed",
+            "delivery_confirmed": True,
+            "message_id": "provider-message",
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "dispatch",
+            "--once",
+            "--config",
+            str(runtime_config),
+            "--apply",
+            "--confirm",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "confirmed"
+    assert payload["batch"]["member_count"] == 1
+    assert payload["write_applied"] is True
+    assert len(calls) == 1
+    assert {
+        member["payload"]["account"]
+        for member in calls[0]["payload"]["members"]
+    } == {"lx"}
+    stored = {
+        row["payload"]["account"]: row
+        for row in repo.list_trade_lifecycle_notifications()
+    }
+    assert stored["lx"]["status"] == "confirmed"
+    assert stored["sy"]["status"] == "pending"
+    assert stored["sy"]["delivery_batch_id"] is None
+
+
+def test_lifecycle_receipt_cli_disabled_config_is_no_write(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from src.application.trades.lifecycle_outbox import QUIET_WINDOW_MS
+
+    cli_mod, data_config, runtime_config, repo = (
+        _lifecycle_receipt_cli_context(
+            monkeypatch,
+            tmp_path,
+            receipt_enabled=False,
+        )
+    )
+    rows = _enqueue_lifecycle_cli_intents(repo)
+    current = (
+        max(int(row["created_at_ms"]) for row in rows)
+        + QUIET_WINDOW_MS
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(cli_mod, "utc_now_ms", lambda: current)
+    monkeypatch.setattr(
+        cli_mod,
+        "_guard_write",
+        lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "send_trade_lifecycle_outbox_payload",
+        lambda **kwargs: calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "dispatch",
+            "--once",
+            "--config",
+            str(runtime_config),
+            "--apply",
+            "--confirm",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "idle"
+    assert payload["reason"] == "notification_receipt_disabled"
+    assert payload["write_applied"] is False
+    assert calls == []
+    assert repo.list_trade_lifecycle_notification_batches() == []
+    assert {
+        row["status"]
+        for row in repo.list_trade_lifecycle_notifications()
+    } == {"pending"}
+
+
+def test_lifecycle_receipt_cli_applied_idle_reports_no_write(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    cli_mod, data_config, runtime_config, repo = (
+        _lifecycle_receipt_cli_context(monkeypatch, tmp_path)
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_guard_write",
+        lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "send_trade_lifecycle_outbox_payload",
+        lambda **kwargs: calls.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "receipts",
+            "dispatch",
+            "--once",
+            "--config",
+            str(runtime_config),
+            "--apply",
+            "--confirm",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "idle"
+    assert payload["reason"] == "no_eligible_unbound_intents"
+    assert payload["write_applied"] is False
+    assert calls == []
+    assert repo.list_trade_lifecycle_notification_batches() == []
