@@ -1650,6 +1650,9 @@ def test_strategy_lab_update_treats_opend_rate_limit_as_deferred(
 
     dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "case-update"
     _write_update_dataset(dataset)
+    from src.application.shadow_replay.common import refresh_dataset_manifest
+
+    refresh_dataset_manifest(dataset)
     opend_base_root = tmp_path / "runtime"
     opend_fetch_config = {"option_chain_max_calls": 9, "option_chain_window_sec": 30.0}
     observed: dict[str, object] = {}

@@ -1148,6 +1148,14 @@ def test_shadow_replay_data_plan_dry_run_is_read_only(tmp_path: Path) -> None:
     assert result["summary"]["receipt_written"] is False
     assert result["actions"][0]["action"] == "collect_marks"
     assert result["actions"][0]["result_status"] == "planned"
+    assert result["status_before"]["data_plan"][0]["dataset_integrity"] == {
+        "status": "legacy_unverified",
+        "reason": "manifest_missing",
+        "generation_id": None,
+        "revision": None,
+    }
+    assert result["actions"][0]["dataset_integrity_status"] == "legacy_unverified"
+    assert result["actions"][0]["dataset_integrity_reason"] == "manifest_missing"
     assert result["status_after"] is None
     assert result["safety"]["writes_runtime_config"] is False
     assert result["safety"]["writes_trade_state"] is False
@@ -1166,6 +1174,7 @@ def test_shadow_replay_data_plan_defers_remaining_collects_after_opend_rate_limi
             "dataset_dir": str(tmp_path / dataset_id),
             "action": "collect_marks",
             "reason": "sampling_due",
+            "dataset_integrity": {"status": "verified"},
         }
         for dataset_id in ("first", "second")
     ]
@@ -1213,6 +1222,87 @@ def test_shadow_replay_data_plan_defers_remaining_collects_after_opend_rate_limi
     assert [row["result_status"] for row in result["actions"]] == ["deferred", "deferred"]
     assert result["actions"][0]["reason"] == "opend_rate_limited"
     assert result["actions"][1]["reason"] == "opend_rate_limit_circuit_open"
+
+
+def test_shadow_replay_data_plan_skips_unverified_without_consuming_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.shadow_replay.data_plan as data_plan_module
+
+    plan_rows = [
+        {
+            "dataset_id": "legacy",
+            "dataset_dir": str(tmp_path / "legacy"),
+            "action": "collect_marks",
+            "reason": "sampling_due",
+            "dataset_integrity": {
+                "status": "legacy_unverified",
+                "reason": "manifest_missing",
+            },
+        },
+        {
+            "dataset_id": "verified",
+            "dataset_dir": str(tmp_path / "verified"),
+            "action": "collect_marks",
+            "reason": "sampling_due",
+            "dataset_integrity": {"status": "verified"},
+        },
+        {
+            "dataset_id": "overflow",
+            "dataset_dir": str(tmp_path / "overflow"),
+            "action": "collect_marks",
+            "reason": "sampling_due",
+            "dataset_integrity": {"status": "verified"},
+        },
+    ]
+    monkeypatch.setattr(
+        data_plan_module,
+        "shadow_replay_dataset_status",
+        lambda **_kwargs: {
+            "dataset_root": str(tmp_path),
+            "summary": {"dataset_count": 3},
+            "data_plan": plan_rows,
+            "datasets": [],
+        },
+    )
+    calls: list[dict] = []
+
+    def _collect(**kwargs):
+        calls.append(kwargs)
+        return {
+            "schema_version": "shadow_replay_mark_collection.v1",
+            "summary": {
+                "status": "success",
+                "opend_fetch_error_count": 0,
+                "opend_rate_limit_count": 0,
+                "opend_non_rate_limit_error_count": 0,
+                "opend_rate_limit_circuit_open": False,
+            },
+            "safety": {"writes_local_dataset": True},
+        }
+
+    monkeypatch.setattr(data_plan_module, "collect_shadow_replay_marks", _collect)
+
+    result = data_plan_module.run_shadow_replay_data_plan(
+        repo_root=tmp_path,
+        source="opend",
+        write=True,
+        max_datasets=1,
+        now_utc="2026-08-01T00:00:00Z",
+    )
+
+    assert [Path(call["dataset"]).name for call in calls] == ["verified"]
+    assert [row["result_status"] for row in result["actions"]] == ["skipped", "ok", "skipped"]
+    assert [row["reason"] for row in result["actions"]] == [
+        "dataset_integrity_unverified",
+        "executed",
+        "max_datasets_reached",
+    ]
+    assert result["summary"]["status"] == "success"
+    assert result["summary"]["executed_count"] == 1
+    assert result["summary"]["skipped_count"] == 2
+    assert result["summary"]["integrity_skipped_count"] == 1
 
 
 def test_shadow_replay_data_plan_rejects_review_and_dry_run_receipt_writes(tmp_path: Path) -> None:
@@ -1300,8 +1390,10 @@ def test_shadow_replay_data_plan_collects_local_marks_and_receipt(tmp_path: Path
 
     receipt_path = Path(result["receipt_path"])
     assert result["summary"]["executed_count"] == 1
+    assert result["status_before"]["data_plan"][0]["dataset_integrity"]["status"] == "verified"
     assert result["actions"][0]["action"] == "collect_marks"
     assert result["actions"][0]["result_status"] == "ok"
+    assert result["actions"][0]["dataset_integrity_status"] == "verified"
     assert result["actions"][0]["operation"]["summary"]["generated_mark_snapshot_count"] == 2
     assert result["status_after"]["datasets"][0]["next_suggested_action"] == "collect_marks"
     assert result["safety"]["persistent_write_targets"] == ["shadow_replay_dataset", "shadow_replay_receipt"]
@@ -1645,6 +1737,49 @@ def test_shadow_replay_mark_generates_required_data_marks_and_settles(tmp_path: 
     assert marks[0]["quote_flags"] == ["mid_from_bid_ask"]
     assert settlement["summary"]["generated_outcome_fact_count"] == 0
     assert analysis["summary"]["reason"] == "usable_mark_path_snapshots_missing"
+
+
+def test_shadow_replay_collect_marks_rejects_unverified_before_opend_fetch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.shadow_replay import collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    dataset = tmp_path / "legacy-dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "accepted",
+            }
+        ],
+    )
+    calls: list[dict] = []
+
+    def _unexpected_fetch(*_args, **kwargs):
+        calls.append(kwargs)
+        raise AssertionError("OpenD fetch must not run for an unverified dataset")
+
+    monkeypatch.setattr(collection, "_fetch_required_data_from_opend", _unexpected_fetch)
+
+    with pytest.raises(ValueError, match="dataset manifest missing"):
+        collect_shadow_replay_marks(
+            dataset=dataset,
+            required_data_root=tmp_path / "output_shared" / "required_data",
+            source="opend",
+            repo_root=tmp_path,
+            opend_base_root=tmp_path / "runtime",
+            write=True,
+        )
+
+    assert calls == []
+    assert not (tmp_path / "runtime").exists()
+    assert not (tmp_path / "output_shared" / "required_data").exists()
 
 
 def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, tmp_path: Path) -> None:
