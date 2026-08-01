@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.opend_symbol_outputs import save_outputs
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.required_data_fetching import RequiredDataFetchRequest, execute_required_data_opend
@@ -29,6 +30,8 @@ def collect_shadow_replay_marks(
     required_data_root: str | Path,
     source: str = "local",
     repo_root: str | Path | None = None,
+    opend_base_root: str | Path | None = None,
+    opend_fetch_config: dict[str, float | int] | None = None,
     as_of: str | None = None,
     output: str | Path | None = None,
     write: bool = False,
@@ -47,6 +50,11 @@ def collect_shadow_replay_marks(
 
     dataset_dir = dataset_dir_from_arg(dataset)
     base = Path(repo_root).expanduser().resolve() if repo_root is not None else dataset_dir
+    persistent_fetch_base = (
+        Path(opend_base_root).expanduser().resolve()
+        if opend_base_root is not None and text(opend_base_root)
+        else base
+    )
     required_root = resolve_path(required_data_root, base=base)
     source_norm = text(source).lower() or "local"
     if source_norm not in {"local", "opend"}:
@@ -64,7 +72,7 @@ def collect_shadow_replay_marks(
     )
     with ExitStack() as stack:
         effective_required_root = required_root
-        fetch_base = base
+        fetch_base = persistent_fetch_base
         if source_norm == "opend" and not write:
             effective_required_root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="shadow-replay-required-data-")))
             fetch_base = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="shadow-replay-opend-base-")))
@@ -83,6 +91,7 @@ def collect_shadow_replay_marks(
                 include_realized_volatility=include_realized_volatility,
                 max_symbols=max_symbols,
                 fail_fast_on_rate_limit=bool(fail_fast_on_opend_rate_limit),
+                opend_fetch_config=opend_fetch_config,
             )
 
         marking = mark_shadow_replay_dataset(
@@ -301,6 +310,7 @@ def _fetch_required_data_from_opend(
     include_realized_volatility: bool,
     max_symbols: int | None,
     fail_fast_on_rate_limit: bool,
+    opend_fetch_config: dict[str, float | int] | None,
 ) -> dict[str, Any]:
     plans = _fetch_plans_from_candidates(
         candidate_snapshots,
@@ -315,6 +325,7 @@ def _fetch_required_data_from_opend(
         skipped = plans[int(max_symbols) :]
 
     requests: list[dict[str, Any]] = []
+    fetch_kwargs = filter_opend_fetch_kwargs(opend_fetch_config)
     for plan in requested:
         request = RequiredDataFetchRequest(
             symbol=plan["symbol"],
@@ -329,6 +340,7 @@ def _fetch_required_data_from_opend(
             freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
             include_realized_volatility=bool(include_realized_volatility),
             no_retry=bool(fail_fast_on_rate_limit),
+            **fetch_kwargs,
         )
         item = {
             "symbol": plan["symbol"],
@@ -388,6 +400,7 @@ def _fetch_required_data_from_opend(
     return {
         "schema_version": "shadow_replay_required_data_fetch.v1",
         "source": "opend",
+        "opend_fetch_config": fetch_kwargs,
         "summary": {
             "candidate_snapshot_count": len(candidate_snapshots),
             "symbol_count": len(plans),

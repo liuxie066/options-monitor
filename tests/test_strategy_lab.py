@@ -1650,6 +1650,8 @@ def test_strategy_lab_update_treats_opend_rate_limit_as_deferred(
 
     dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "case-update"
     _write_update_dataset(dataset)
+    opend_base_root = tmp_path / "runtime"
+    opend_fetch_config = {"option_chain_max_calls": 9, "option_chain_window_sec": 30.0}
     observed: dict[str, object] = {}
 
     def _rate_limited_collect(**kwargs):
@@ -1670,12 +1672,16 @@ def test_strategy_lab_update_treats_opend_rate_limit_as_deferred(
 
     result = run_strategy_lab_update(
         repo_root=tmp_path,
+        opend_base_root=opend_base_root,
+        opend_fetch_config=opend_fetch_config,
         source="opend",
         min_sample=1,
         write=True,
     )
 
     assert observed["fail_fast_on_opend_rate_limit"] is True
+    assert observed["opend_base_root"] == opend_base_root.resolve()
+    assert observed["opend_fetch_config"] == opend_fetch_config
     assert result["summary"]["status"] == "deferred"
     assert result["summary"]["deferred_count"] == 1
     assert result["summary"]["error_count"] == 0
