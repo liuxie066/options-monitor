@@ -263,6 +263,29 @@ def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None
     assert state["position_mismatches"] == {}
 
 
+def test_position_mismatch_fails_closed_when_coherent_lifecycle_read_is_unavailable() -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    dataset, state = build_position_dataset(
+        snapshot=_snapshot(qty=0),
+        local_lots=[_local_lot()],
+        account="lx",
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=now,
+        control_state={"position_mismatches": {}},
+        lifecycle_coherent_read_available=False,
+        day_end_strict=True,
+    )
+
+    convergence = dataset["checks"][1]
+    assert dataset["status"] == "unavailable"
+    assert convergence["status"] == "unknown"
+    assert convergence["reason_code"] == (
+        "POSITION_LIFECYCLE_COHERENT_READ_UNAVAILABLE"
+    )
+    assert state["position_mismatches"] == {}
+
+
 def test_position_lifecycle_partial_quantity_does_not_hide_divergence() -> None:
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case(contracts=1)

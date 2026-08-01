@@ -286,6 +286,7 @@ def build_position_dataset(
     lifecycle_cases: list[dict[str, Any]] | None = None,
     lifecycle_read_models_by_case: dict[str, dict[str, Any]] | None = None,
     lifecycle_timing_policies_by_case: dict[str, dict[str, Any]] | None = None,
+    lifecycle_coherent_read_available: bool = True,
     day_end_strict: bool = False,
     persistent_after_seconds: int = 300,
     next_authoritative_refresh_due_utc: str | None = None,
@@ -418,6 +419,26 @@ def build_position_dataset(
                 "local_normalization_error_count": 0,
                 "opend_normalization_error_count": 0,
             },
+            evidence_refs=[evidence],
+        )
+        verdict = "unavailable"
+    elif raw_comparison and not lifecycle_coherent_read_available:
+        mismatches.pop(state_key, None)
+        convergence = check_result(
+            check_id="OM-POS-002",
+            status="unknown",
+            scope=scope,
+            observed_at_utc=observed_at_utc,
+            reason_code="POSITION_LIFECYCLE_COHERENT_READ_UNAVAILABLE",
+            message=(
+                "Position convergence cannot classify a mismatch without "
+                "an account-coherent lifecycle read."
+            ),
+            observed={
+                "observed_mismatch_count": len(raw_comparison),
+                "lifecycle_coherent_read_available": False,
+            },
+            expected={"lifecycle_coherent_read_available": True},
             evidence_refs=[evidence],
         )
         verdict = "unavailable"
