@@ -642,6 +642,65 @@ def _shadow_replay_runtime_root(args: argparse.Namespace, *, profile: dict[str, 
     return None
 
 
+def _shadow_replay_opend_fetch_config(
+    *,
+    profile: dict[str, Any],
+    base: Path,
+) -> dict[str, float | int] | None:
+    raw_paths = profile.get("config_paths")
+    if raw_paths is None:
+        return None
+    if not isinstance(raw_paths, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message="profile config_paths must be a JSON object")
+    if not raw_paths:
+        return None
+
+    from src.application.opend_fetch_config import opend_fetch_kwargs
+
+    resolved: list[dict[str, float | int]] = []
+    for config_key, raw_path in sorted(raw_paths.items()):
+        if not str(raw_path or "").strip():
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"profile config path is empty: {config_key}",
+            )
+        path = _resolve_shadow_path(str(raw_path), base=base)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"profile config not found: {path}") from exc
+        except OSError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"profile config unreadable: {path}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"profile config is not valid JSON: {path}") from exc
+        if not isinstance(payload, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message=f"profile config must be a JSON object: {path}")
+        resolved.append(opend_fetch_kwargs(payload))
+
+    return _conservative_opend_fetch_config(resolved)
+
+
+def _conservative_opend_fetch_config(
+    configs: list[dict[str, float | int]],
+) -> dict[str, float | int] | None:
+    if not configs:
+        return None
+    merged: dict[str, float | int] = {}
+    for key in configs[0]:
+        values = [config[key] for config in configs if key in config]
+        if not values:
+            continue
+        if key.endswith("max_calls"):
+            merged[key] = min(int(value) for value in values)
+        elif key.endswith("window_sec"):
+            merged[key] = max(float(value) for value in values)
+        elif key == "max_wait_sec" or key.endswith("max_wait_sec"):
+            merged[key] = min(float(value) for value in values)
+        else:
+            merged[key] = values[0]
+    return merged
+
+
 def _shadow_replay_runs_root(
     args: argparse.Namespace,
     *,
@@ -881,12 +940,27 @@ def handle_research_command(
             base = repo_base_fn()
             profile = _shadow_replay_profile(args, base=base)
             runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
+            if (
+                args.source == "opend"
+                and bool(args.write)
+                and str(args.profile_path or "").strip()
+                and runtime_root is None
+            ):
+                raise AgentToolError(
+                    code="CONFIG_ERROR",
+                    message="profile runtime_root is required for persistent Strategy Lab OpenD sampling",
+                )
             dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
             runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
             required_data_root = _shadow_replay_required_data_root(
                 args.required_data_root,
                 runtime_root=runtime_root,
                 base=base,
+            )
+            opend_fetch_config = (
+                _shadow_replay_opend_fetch_config(profile=profile, base=base)
+                if args.source == "opend"
+                else None
             )
             receipt_dir = (
                 _shadow_replay_receipt_dir(args.receipt_dir, runtime_root=runtime_root, base=base)
@@ -896,6 +970,8 @@ def handle_research_command(
             try:
                 data = run_strategy_lab_update(
                     repo_root=base,
+                    opend_base_root=runtime_root,
+                    opend_fetch_config=opend_fetch_config,
                     dataset_root=dataset_root,
                     required_data_root=required_data_root,
                     source=args.source,

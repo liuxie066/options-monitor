@@ -92,7 +92,7 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert str(repo / "om") + " option-positions auto-close-expired" in files["systemd/options-monitor-auto-close-us.service"]["content"]
     auto_close = files["systemd/options-monitor-auto-close-us.service"]["content"]
     assert "--apply --yes --quiet" in auto_close
-    assert "RuntimeMaxSec=600" in auto_close
+    assert "TimeoutStartSec=600" in auto_close
     assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York" in tick_timer
     assert "OnUnitActiveSec=10min" not in tick_timer
     assert "OnBootSec=2min" not in tick_timer
@@ -106,10 +106,11 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "RestartPreventExitStatus=" not in tick
     assert "RestartPreventExitStatus=" not in runtime_status
     assert "RestartPreventExitStatus=" not in verify
-    assert "RuntimeMaxSec=" not in tick
-    assert "RuntimeMaxSec=" not in runtime_status
-    assert "RuntimeMaxSec=" not in verify
-    assert "RuntimeMaxSec=" not in intake
+    assert "TimeoutStartSec=" not in tick
+    assert "TimeoutStartSec=" not in runtime_status
+    assert "TimeoutStartSec=" not in verify
+    assert "TimeoutStartSec=" not in intake
+    assert "RuntimeMaxSec=" not in "\n".join(item["content"] for item in files.values())
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
     assert "OnCalendar=*-*-* 09:00:00 Asia/Shanghai" in auto_close_timer
@@ -124,7 +125,7 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
         + " promotion refresh --accounts lx --confirm"
         in promotion
     )
-    assert "RuntimeMaxSec=600" in promotion
+    assert "TimeoutStartSec=600" in promotion
     assert (
         "OnCalendar=*-*-* 05:15:00 Asia/Shanghai"
         in promotion_timer
@@ -148,16 +149,16 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
 
 
 
-def test_systemd_unit_rejects_non_positive_runtime_limit(tmp_path: Path) -> None:
+def test_systemd_unit_rejects_non_positive_start_timeout(tmp_path: Path) -> None:
     from src.application.service_deploy import _systemd_unit
 
-    with pytest.raises(ValueError, match="runtime_max_sec must be positive"):
+    with pytest.raises(ValueError, match="timeout_start_sec must be positive"):
         _systemd_unit(
             description="invalid",
             repo_root=tmp_path,
             runtime_root=tmp_path,
             exec_args=["/bin/true"],
-            runtime_max_sec=0,
+            timeout_start_sec=0,
         )
 
 
@@ -1020,12 +1021,14 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     assert "Type=simple" in quality_http
     assert "Restart=always" in quality_http
     assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
-    assert "RuntimeMaxSec=300" in refresh
+    assert "TimeoutStartSec=300" in refresh
     assert "OnUnitActiveSec=15min" in refresh_timer
     assert str(repo / "om") + " quality recheck-due --config-key us --config-key hk" in recheck
     assert "After=network-online.target options-monitor-opend.service" in recheck
+    assert "TimeoutStartSec=300" in recheck
     assert "OnUnitActiveSec=1min" in recheck_timer
     assert str(repo / "om") + " quality refresh --config-key us --day-end-strict" in day_end_us
+    assert "TimeoutStartSec=300" in day_end_us
     assert "OnCalendar=Mon..Fri *-*-* 16:30:00 America/New_York" in day_end_us_timer
     assert "OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong" in day_end_hk_timer
     assert "systemctl enable --now options-monitor-quality-http.service" in bundle["commands"]["enable"]
@@ -1130,7 +1133,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     build_timer = files["systemd/options-monitor-strategy-lab-build.timer"]["content"]
     sample_service = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
     sample_timer = files["systemd/options-monitor-strategy-lab-sample.timer"]["content"]
-    assert "RuntimeMaxSec=600" in sample_service
+    assert "TimeoutStartSec=600" in sample_service
     settle_service = files["systemd/options-monitor-strategy-lab-settle.service"]["content"]
     settle_timer = files["systemd/options-monitor-strategy-lab-settle.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
