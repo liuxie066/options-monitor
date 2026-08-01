@@ -1,0 +1,41 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.2",
+  "base": {
+    "tag": "v1.8.1",
+    "commit": "95d54b570a96369018711a2451b667e93f039909"
+  },
+  "reviewed_head": "616f76de047373fd9f1a20ff589839ac544c3c5c",
+  "commits": [
+    {
+      "sha": "c9d4dc89aed74b7533abd99a82ea32249cba3c0d",
+      "subject": "fix: harden IQ and promotion source reads"
+    },
+    {
+      "sha": "616f76de047373fd9f1a20ff589839ac544c3c5c",
+      "subject": "Merge pull request #126 from liuxie066/agent/fix-iq-coherent-promotion-compatible-source"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Made IQ option-position reconciliation consume lifecycle cases, timing policies, allocations, and position lots from one account-coherent SQLite snapshot, while reporting unavailable evidence instead of a false persistent divergence when that read cannot be proven.",
+      "commits": [
+        "c9d4dc89aed74b7533abd99a82ea32249cba3c0d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made Position Advice promotion retain integrity-valid legacy position-fact sources as incompatible archive evidence, exclude them from the current gate, and wait successfully when no compatible source exists while still rejecting malformed current-contract inputs.",
+      "commits": [
+        "c9d4dc89aed74b7533abd99a82ea32249cba3c0d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "616f76de047373fd9f1a20ff589839ac544c3c5c",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation commit release notes."
+    }
+  ]
+}
