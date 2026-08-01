@@ -1,0 +1,73 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.4",
+  "base": {
+    "tag": "v1.8.3",
+    "commit": "9d5abf3ac0eede84baaf24b31cf9181260f250ff"
+  },
+  "reviewed_head": "a5330be98c589315df1d1d25f072bc7f5af323c7",
+  "commits": [
+    {
+      "sha": "4dd90bb51e8c7d2c85a4ece2e536a94b13195b1c",
+      "subject": "docs: plan OpenD runtime boundary fix"
+    },
+    {
+      "sha": "ceed9794bf25aab1afb8b4f0da96569667969244",
+      "subject": "fix: unify Strategy Lab OpenD runtime state"
+    },
+    {
+      "sha": "ce924aa39e64e48c97bb5832a3b6f35d01a8131b",
+      "subject": "docs: accept OpenD runtime boundary review"
+    },
+    {
+      "sha": "92ef402c39a471918c98dd27bfeb877341d3aa04",
+      "subject": "Merge remote-tracking branch 'origin/main' into codex/fix-opend-runtime-boundary"
+    },
+    {
+      "sha": "add89611354fe667283257a264d5e49b721442dc",
+      "subject": "docs: record PR 128 review"
+    },
+    {
+      "sha": "a5330be98c589315df1d1d25f072bc7f5af323c7",
+      "subject": "Merge pull request #128 from liuxie066/codex/fix-opend-runtime-boundary"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept Strategy Lab OpenD cache and rate-limit state under the configured runtime root and inherited conservative endpoint limits from the service profile, preventing release-local limiter silos and repeated provider throttling.",
+      "commits": [
+        "ceed9794bf25aab1afb8b4f0da96569667969244"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made generated systemd execution bounds effective for controlled one-shot services by using `TimeoutStartSec` instead of the ignored `RuntimeMaxSec` directive.",
+      "commits": [
+        "ceed9794bf25aab1afb8b4f0da96569667969244"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4dd90bb51e8c7d2c85a4ece2e536a94b13195b1c",
+      "reason": "Internal Gateflow plan and adversarial plan-review evidence; no runtime or operator behavior beyond the implementation release notes."
+    },
+    {
+      "commit": "ce924aa39e64e48c97bb5832a3b6f35d01a8131b",
+      "reason": "Internal aggregate DeepReview acceptance evidence; no runtime behavior change."
+    },
+    {
+      "commit": "92ef402c39a471918c98dd27bfeb877341d3aa04",
+      "reason": "Ancestry-only merge of the already released v1.8.3 main commit into the feature branch; no additional target-version behavior."
+    },
+    {
+      "commit": "add89611354fe667283257a264d5e49b721442dc",
+      "reason": "Internal PR review evidence; no runtime behavior change."
+    },
+    {
+      "commit": "a5330be98c589315df1d1d25f072bc7f5af323c7",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation commit release notes."
+    }
+  ]
+}
