@@ -360,6 +360,13 @@ def test_data_plan_keeps_receipt_time_separate_from_actual_mark_time(
         dataset / "filter_decisions.jsonl",
         [{"contract_symbol": "AMD260619P00080000", "status": "rejected"}],
     )
+    from src.application.shadow_replay.common import DATASET_FILES, refresh_dataset_manifest
+
+    for name in DATASET_FILES:
+        path = dataset / name
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+    refresh_dataset_manifest(dataset)
     seen: list[dict[str, object]] = []
 
     def _fake_collect(**kwargs):
