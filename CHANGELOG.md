@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.8.2 - 2026-08-01
+
+### Bug Fixes
+- Made IQ option-position reconciliation consume lifecycle cases, timing policies, allocations, and position lots from one account-coherent SQLite snapshot, while reporting unavailable evidence instead of a false persistent divergence when that read cannot be proven.
+- Made Position Advice promotion retain integrity-valid legacy position-fact sources as incompatible archive evidence, exclude them from the current gate, and wait successfully when no compatible source exists while still rejecting malformed current-contract inputs.
+
 ## 1.8.1 - 2026-08-01
 
 ### Bug Fixes
