@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.8.4 - 2026-08-01
+
+### Bug Fixes
+- Kept Strategy Lab OpenD cache and rate-limit state under the configured runtime root and inherited conservative endpoint limits from the service profile, preventing release-local limiter silos and repeated provider throttling.
+- Made generated systemd execution bounds effective for controlled one-shot services by using `TimeoutStartSec` instead of the ignored `RuntimeMaxSec` directive.
+
 ## 1.8.3 - 2026-08-01
 
 ### Bug Fixes
