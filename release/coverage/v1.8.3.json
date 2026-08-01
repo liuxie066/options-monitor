@@ -1,0 +1,45 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.8.3",
+  "base": {
+    "tag": "v1.8.2",
+    "commit": "74c92022d596c99531ea2fe31d2f822d6c7dbfb3"
+  },
+  "reviewed_head": "c3853c08dfadddd5ea12f762a508308be11d5635",
+  "commits": [
+    {
+      "sha": "9576dbade97c98f40109bdced02bfa5fa80195c6",
+      "subject": "fix: bound Strategy Lab OpenD sampling"
+    },
+    {
+      "sha": "025b115963e060a8d98c18950e726dd881d58b8a",
+      "subject": "fix: classify stock refresh evidence"
+    },
+    {
+      "sha": "c3853c08dfadddd5ea12f762a508308be11d5635",
+      "subject": "Merge pull request #127 from liuxie066/agent/fix-strategy-lab-stock-refresh-quality"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Bounded Strategy Lab OpenD sampling after the first confirmed provider rate limit, deferring the remaining collection work instead of exhausting the service runtime budget while preserving fail-closed handling for other collection errors.",
+      "commits": [
+        "9576dbade97c98f40109bdced02bfa5fa80195c6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made IQ stock-refresh evidence trust explicit no-trigger, option-only, dry-run, and already-synchronized outcomes while keeping observed activity without an intent unavailable and rejected or failed refreshes partial.",
+      "commits": [
+        "025b115963e060a8d98c18950e726dd881d58b8a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c3853c08dfadddd5ea12f762a508308be11d5635",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation commit release notes."
+    }
+  ]
+}
