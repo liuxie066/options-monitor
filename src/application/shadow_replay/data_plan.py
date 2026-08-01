@@ -189,6 +189,15 @@ def _run_plan_rows(
         if action not in action_set:
             out.append({**base, "result_status": "skipped", "reason": "action_not_enabled"})
             continue
+        if write and not _dataset_integrity_verified(row):
+            out.append(
+                {
+                    **base,
+                    "result_status": "skipped",
+                    "reason": "dataset_integrity_unverified",
+                }
+            )
+            continue
         if action == "collect_marks" and opend_rate_limit_circuit_open:
             out.append(
                 {
@@ -314,6 +323,8 @@ def _execute_plan_row(
 
 
 def _action_base(row: dict[str, Any]) -> dict[str, Any]:
+    integrity = row.get("dataset_integrity")
+    integrity = integrity if isinstance(integrity, dict) else {}
     return {
         "dataset_id": row.get("dataset_id"),
         "dataset_dir": row.get("dataset_dir"),
@@ -327,7 +338,14 @@ def _action_base(row: dict[str, Any]) -> dict[str, Any]:
         "last_mark_at": row.get("last_mark_at"),
         "mark_age_hours": row.get("mark_age_hours"),
         "usable_mark_point_count": row.get("usable_mark_point_count"),
+        "dataset_integrity_status": text(integrity.get("status")) or "unknown",
+        "dataset_integrity_reason": text(integrity.get("reason")) or None,
     }
+
+
+def _dataset_integrity_verified(row: dict[str, Any]) -> bool:
+    integrity = row.get("dataset_integrity")
+    return isinstance(integrity, dict) and text(integrity.get("status")).lower() == "verified"
 
 
 def _operation_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -368,6 +386,11 @@ def _summary(
     counts = Counter(text(row.get("result_status")) for row in action_results)
     error_count = counts.get("error", 0)
     deferred_count = counts.get("deferred", 0)
+    integrity_skipped_count = sum(
+        1
+        for row in action_results
+        if row.get("reason") == "dataset_integrity_unverified"
+    )
     return {
         "status": (
             "failed"
@@ -383,6 +406,7 @@ def _summary(
         "planned_count": counts.get("planned", 0),
         "executed_count": counts.get("ok", 0),
         "skipped_count": counts.get("skipped", 0),
+        "integrity_skipped_count": integrity_skipped_count,
         "deferred_count": deferred_count,
         "error_count": error_count,
         "receipt_written": receipt_path is not None,

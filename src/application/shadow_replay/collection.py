@@ -18,6 +18,7 @@ from src.application.shadow_replay.common import (
     safety_payload,
     text,
     utc_now,
+    validate_dataset_integrity,
     write_json,
 )
 from src.application.shadow_replay.marking import mark_shadow_replay_dataset
@@ -59,6 +60,8 @@ def collect_shadow_replay_marks(
     source_norm = text(source).lower() or "local"
     if source_norm not in {"local", "opend"}:
         raise ValueError("--source must be local or opend")
+    if write:
+        validate_dataset_integrity(dataset_dir)
 
     mark_at = text(as_of) or utc_now()
     mark_time_basis = "operator_asserted_as_of" if text(as_of) else "collection_time"
