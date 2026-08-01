@@ -13,6 +13,13 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_shells import render_receipt
+from src.application.trades.lifecycle_outbox import (
+    BATCH_RENDERER_VERSION,
+    build_notification_batch_route,
+)
+
+
+MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
 
 
 def send_trade_intake_receipt(
@@ -189,6 +196,282 @@ def build_trade_lifecycle_notification_message(
     )
 
 
+def _batch_member_payload(member: dict[str, Any]) -> dict[str, Any]:
+    return (
+        dict(member.get("payload") or {})
+        if isinstance(member.get("payload"), dict)
+        else {}
+    )
+
+
+def _batch_member_transition(member: dict[str, Any]) -> str:
+    payload = _batch_member_payload(member)
+    return str(
+        member.get("transition_type")
+        or payload.get("transition_type")
+        or ""
+    ).strip().lower()
+
+
+def _lifecycle_transition_priority(transition: str) -> int:
+    return {
+        "conflict": 5,
+        "needs_review": 4,
+        "resolution_corrected": 3,
+        "resolution_confirmed": 2,
+        "option_leg_closed": 1,
+    }.get(str(transition or "").strip().lower(), 0)
+
+
+def _lifecycle_transition_text(transition: str) -> str:
+    return {
+        "conflict": "⚠️ 证据冲突",
+        "needs_review": "⚠️ 原因待复核",
+        "resolution_corrected": "✅ 结果已更正",
+        "resolution_confirmed": "✅ 结果已确认",
+        "option_leg_closed": "⏳ 期权腿已平仓",
+    }.get(str(transition or "").strip().lower(), "状态更新")
+
+
+def _batch_representatives(
+    members: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for index, member in enumerate(members):
+        payload = _batch_member_payload(member)
+        case_id = str(
+            member.get("case_id") or payload.get("case_id") or ""
+        ).strip()
+        group_key = case_id or str(
+            member.get("outbox_id") or f"missing-{index}"
+        )
+        transition = _batch_member_transition(member)
+        rank = (
+            int(member.get("resolution_revision") or 0),
+            int(member.get("created_at_ms") or 0),
+            _lifecycle_transition_priority(transition),
+            str(member.get("outbox_id") or ""),
+        )
+        previous = selected.get(group_key)
+        if previous is None or rank > previous["_representative_rank"]:
+            selected[group_key] = {
+                **member,
+                "_representative_rank": rank,
+                "_case_group_key": group_key,
+            }
+    representatives = list(selected.values())
+    representatives.sort(
+        key=lambda member: (
+            -_lifecycle_transition_priority(
+                _batch_member_transition(member)
+            ),
+            str(
+                _batch_member_payload(member).get("account") or ""
+            ).strip().lower(),
+            str(
+                _batch_member_payload(member).get("symbol") or ""
+            ).strip().upper(),
+            str(
+                _batch_member_payload(member).get("expiration_ymd")
+                or ""
+            ),
+            str(_batch_member_payload(member).get("strike") or ""),
+            str(member.get("_case_group_key") or ""),
+            str(member.get("outbox_id") or ""),
+        )
+    )
+    return representatives
+
+
+def build_trade_lifecycle_notification_batch_message(
+    payload: dict[str, Any],
+) -> str:
+    frozen = dict(payload or {})
+    raw_members = frozen.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ValueError("lifecycle notification batch has no members")
+    members = [
+        dict(item)
+        if isinstance(item, dict)
+        else {
+            "outbox_id": f"invalid-{index}",
+            "case_id": f"invalid-{index}",
+            "payload": {},
+        }
+        for index, item in enumerate(raw_members)
+    ]
+    representatives = _batch_representatives(members)
+    if len(representatives) == 1:
+        return build_trade_lifecycle_notification_message(
+            _batch_member_payload(representatives[0])
+        )
+    accounts = sorted(
+        {
+            str(_batch_member_payload(member).get("account") or "-")
+            .strip()
+            .lower()
+            or "-"
+            for member in representatives
+        }
+    )
+    highest_transition = (
+        _batch_member_transition(representatives[0])
+        if representatives
+        else ""
+    )
+    rows: list[str] = []
+    for index, member in enumerate(
+        representatives[:MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS],
+        start=1,
+    ):
+        item = _batch_member_payload(member)
+        transition = _batch_member_transition(member)
+        contract = " ".join(
+            str(value)
+            for value in (
+                item.get("expiration_ymd"),
+                item.get("strike"),
+                _option_type_text(_optional_str(item.get("option_type"))),
+            )
+            if value not in (None, "")
+        )
+        rows.append(
+            " · ".join(
+                (
+                    f"{index}.",
+                    _lifecycle_transition_text(transition),
+                    str(item.get("account") or "-"),
+                    str(item.get("symbol") or "-"),
+                    contract or "合约待确认",
+                    f"`{str(item.get('case_id') or member.get('case_id') or '-').strip() or '-'}`",
+                )
+            )
+        )
+    remaining = max(
+        0,
+        len(representatives) - MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS,
+    )
+    if remaining:
+        rows.append(f"另有 {remaining} 个案件未展开")
+    return render_receipt(
+        account=" / ".join(accounts),
+        receipt_type="期权平仓批次",
+        status=_lifecycle_transition_text(highest_transition),
+        fields=(
+            (
+                "范围",
+                f"{len(members)} 条意图 · {len(representatives)} 个案件",
+            ),
+            ("批次", f"`{str(frozen.get('batch_id') or '-').strip()}`"),
+        ),
+        sections=(("明细", rows),),
+    )
+
+
+def resolve_trade_lifecycle_notification_batch_route(
+    *,
+    config: dict[str, Any] | None,
+    route_resolver: Callable[..., dict[str, Any]] = (
+        resolve_notification_route_from_config
+    ),
+) -> dict[str, Any]:
+    route = resolve_notification_delivery_route(
+        config=config or {},
+        route_resolver=route_resolver,
+    )
+    target = str(route.get("target") or "").strip()
+    provider = str(route.get("provider") or "").strip()
+    channel = str(route.get("channel") or "").strip()
+    if not target or not provider or not channel:
+        return {**route, "route_available": False}
+    return {
+        **route,
+        **build_notification_batch_route(
+            provider=provider,
+            channel=channel,
+            target=target,
+        ),
+        "route_available": True,
+    }
+
+
+def classify_trade_lifecycle_delivery_result(
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(normalized or {})
+    delivery_confirmed = bool(
+        result.get("delivery_confirmed")
+        or (result.get("ok") and result.get("message_id"))
+    )
+    command_ok = bool(result.get("command_ok") or result.get("ok"))
+    ambiguous = bool(
+        result.get("ambiguous_send")
+        or result.get("duplicate_risk")
+        or (
+            result.get("fallback_used")
+            and not delivery_confirmed
+        )
+    )
+    http_status = result.get("http_status")
+    provider_code = result.get("provider_response_code")
+    if provider_code is None:
+        provider_code = result.get("feishu_code")
+    provider_rejected = bool(
+        not ambiguous
+        and isinstance(http_status, int)
+        and (
+            400 <= http_status <= 499
+            or (
+                200 <= http_status <= 299
+                and provider_code not in (None, 0, "0")
+            )
+        )
+    )
+    pre_io_failure = bool(
+        result.get("explicit_pre_acceptance_failure")
+        or (
+            result.get("local_error_code")
+            and not result.get("http_attempts")
+            and http_status is None
+        )
+    )
+    if delivery_confirmed:
+        outcome = "confirmed"
+    elif ambiguous:
+        outcome = "unknown"
+    elif provider_rejected or pre_io_failure:
+        outcome = "explicit_failed"
+    elif command_ok:
+        outcome = "accepted"
+    else:
+        outcome = "unknown"
+    return {
+        "outcome": outcome,
+        "delivery_confirmed": delivery_confirmed,
+        "command_ok": command_ok,
+        "explicit_pre_acceptance_failure": (
+            outcome == "explicit_failed"
+        ),
+        "classification_evidence": {
+            "http_status": http_status,
+            "provider_response_code": provider_code,
+            "ambiguous_send": bool(result.get("ambiguous_send")),
+            "duplicate_risk": bool(result.get("duplicate_risk")),
+            "fallback_used": bool(result.get("fallback_used")),
+            "local_error_code": result.get("local_error_code"),
+            "idempotency_key": result.get("idempotency_key"),
+            "effective_idempotency_key": result.get(
+                "effective_idempotency_key"
+            ),
+            "http_attempt_count": len(
+                result.get("http_attempts")
+                if isinstance(result.get("http_attempts"), list)
+                else []
+            ),
+        },
+    }
+
+
 def send_trade_lifecycle_outbox_payload(
     *,
     base: Path,
@@ -210,59 +493,132 @@ def send_trade_lifecycle_outbox_payload(
             "status": "explicit_failed",
             "explicit_pre_acceptance_failure": True,
             "error": "trade receipt delivery is disabled",
+            "classification_evidence": {
+                "preflight": "receipt_disabled"
+            },
         }
-    route = resolve_notification_delivery_route(
+    route = resolve_trade_lifecycle_notification_batch_route(
         config=config or {},
         route_resolver=route_resolver,
     )
     target = route.get("target")
-    if not str(target or "").strip():
+    if not bool(route.get("route_available")):
         return {
             "status": "explicit_failed",
             "explicit_pre_acceptance_failure": True,
             "error": "notification route is unavailable",
+            "classification_evidence": {
+                "preflight": "route_unavailable"
+            },
         }
+    is_batch = (
+        str(payload.get("schema_version") or "").strip()
+        == BATCH_RENDERER_VERSION
+        and isinstance(payload.get("members"), list)
+    )
+    batch_id = str(payload.get("batch_id") or "").strip()
+    if is_batch:
+        frozen_route = (
+            dict(payload.get("route") or {})
+            if isinstance(payload.get("route"), dict)
+            else {}
+        )
+        mismatch = any(
+            str(frozen_route.get(key) or "").strip()
+            != str(route.get(key) or "").strip()
+            for key in (
+                "provider",
+                "channel",
+                "target_fingerprint",
+                "route_fingerprint",
+            )
+        )
+        if not batch_id or mismatch:
+            return {
+                "status": "explicit_failed",
+                "explicit_pre_acceptance_failure": True,
+                "error": (
+                    "notification batch route changed before delivery"
+                    if mismatch
+                    else "notification batch identity is unavailable"
+                ),
+                "batch_id": batch_id or None,
+                "classification_evidence": {
+                    "preflight": (
+                        "route_fingerprint_mismatch"
+                        if mismatch
+                        else "batch_identity_unavailable"
+                    ),
+                    "resolved_route_fingerprint": route.get(
+                        "route_fingerprint"
+                    ),
+                    "frozen_route_fingerprint": frozen_route.get(
+                        "route_fingerprint"
+                    ),
+                },
+            }
     if send_fn is None or normalize_fn is None:
-        adapter = adapter_selector(route.get("provider"))
+        try:
+            adapter = adapter_selector(route.get("provider"))
+        except ValueError as exc:
+            return {
+                "status": "explicit_failed",
+                "explicit_pre_acceptance_failure": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "batch_id": batch_id or None,
+                "classification_evidence": {
+                    "preflight": "adapter_unavailable"
+                },
+            }
         resolved_send_fn = send_fn or adapter.send_fn
         resolved_normalize_fn = normalize_fn or adapter.normalize_fn
     else:
         resolved_send_fn = send_fn
         resolved_normalize_fn = normalize_fn
-    message = build_trade_lifecycle_notification_message(payload)
+    message = (
+        build_trade_lifecycle_notification_batch_message(payload)
+        if is_batch
+        else build_trade_lifecycle_notification_message(payload)
+    )
+    send_kwargs = {
+        "base": base,
+        "channel": str(route.get("channel") or ""),
+        "target": str(target),
+        "message": message,
+        "notifications": route.get("notifications") or {},
+    }
+    if is_batch:
+        send_kwargs["idempotency_key"] = batch_id
     send_result = resolved_send_fn(
-        base=base,
-        channel=str(route.get("channel") or ""),
-        target=str(target),
-        message=message,
-        notifications=route.get("notifications") or {},
+        **send_kwargs,
     )
     normalized = normalize_notification_delivery_result(
         send_result,
         normalize_fn=resolved_normalize_fn,
     )
     message_id = _optional_str(normalized.get("message_id"))
-    delivery_confirmed = bool(
-        normalized.get("delivery_confirmed")
-        or (normalized.get("ok") and message_id)
-    )
-    command_ok = bool(
-        normalized.get("command_ok") or normalized.get("ok")
-    )
+    classification = classify_trade_lifecycle_delivery_result(normalized)
+    delivery_confirmed = bool(classification["delivery_confirmed"])
+    command_ok = bool(classification["command_ok"])
+    outcome = str(classification["outcome"])
     return {
-        "status": (
-            "confirmed"
-            if delivery_confirmed
-            else "accepted"
-            if command_ok
-            else "unknown"
-        ),
+        "status": outcome,
         "delivery_confirmed": delivery_confirmed,
+        "explicit_pre_acceptance_failure": bool(
+            classification["explicit_pre_acceptance_failure"]
+        ),
         "message_id": message_id,
         "command_ok": command_ok,
         "error_code": normalized.get("error_code"),
         "send_message": _optional_str(normalized.get("message")),
         "message_len": len(message),
+        "batch_id": batch_id or None,
+        "transport_idempotency_key": (
+            batch_id if is_batch else None
+        ),
+        "classification_evidence": classification[
+            "classification_evidence"
+        ],
     }
 
 

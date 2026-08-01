@@ -70,13 +70,16 @@ from src.application.trades.lifecycle_runtime import (
     reconcile_due_lifecycle_cases_for_source,
 )
 from src.application.trades.lifecycle_outbox import (
-    dispatch_notifications_once,
+    dispatch_notification_batch_once,
+    plan_notification_batch,
+    reconcile_notification_batch,
     reconcile_unknown_notification,
 )
 from src.application.trades.manual_lifecycle_resolution import (
     resolve_lifecycle_manually,
 )
 from src.application.trades.receipt import (
+    resolve_trade_lifecycle_notification_batch_route,
     send_trade_lifecycle_outbox_payload,
 )
 from src.application.cash_conversion import utc_now_ms
@@ -101,6 +104,62 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SystemExit(f"expected JSON object: {path}")
     return payload
+
+
+def _lifecycle_receipt_enabled_accounts(
+    intake_config: dict[str, Any],
+) -> set[str]:
+    fallback_receipt = (
+        dict(intake_config.get("receipt") or {})
+        if isinstance(intake_config.get("receipt"), dict)
+        else {}
+    )
+    accounts: set[str] = set()
+    for raw_source in intake_config.get("sources") or []:
+        if not isinstance(raw_source, dict) or not bool(
+            raw_source.get("enabled", True)
+        ):
+            continue
+        source_receipt = (
+            dict(raw_source.get("receipt") or {})
+            if isinstance(raw_source.get("receipt"), dict)
+            else fallback_receipt
+        )
+        if not bool(source_receipt.get("enabled", True)):
+            continue
+        account = str(raw_source.get("account") or "").strip().lower()
+        if account:
+            accounts.add(account)
+        mapping = raw_source.get("account_mapping")
+        if isinstance(mapping, dict):
+            accounts.update(
+                str(value or "").strip().lower()
+                for value in mapping.values()
+                if str(value or "").strip()
+            )
+    return accounts
+
+
+def _lifecycle_dispatch_write_applied(
+    result: dict[str, Any],
+) -> bool:
+    if isinstance(result.get("batch"), dict):
+        return True
+    planning = result.get("planning")
+    if isinstance(planning, dict) and str(
+        planning.get("status") or ""
+    ) == "created":
+        return True
+    recovery = result.get("recovery")
+    if not isinstance(recovery, dict):
+        return False
+    return any(
+        int(recovery.get(key) or 0) > 0
+        for key in (
+            "reclaimed_claimed_count",
+            "frozen_unknown_count",
+        )
+    )
 
 
 def _parse_json_object_arg(raw: str | None, *, name: str) -> dict[str, Any] | None:
@@ -524,17 +583,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_receipt_inspect = receipt_sub.add_parser(
         'inspect',
-        help='inspect one Outbox row',
+        help='inspect one Outbox row or delivery batch',
     )
     _add_runtime_root_arg(p_receipt_inspect)
-    p_receipt_inspect.add_argument('--outbox-id', required=True)
+    inspect_identity = p_receipt_inspect.add_mutually_exclusive_group(
+        required=True
+    )
+    inspect_identity.add_argument('--outbox-id')
+    inspect_identity.add_argument('--batch-id')
     p_receipt_inspect.add_argument('--format', default='json', choices=['json'])
     p_receipt_reconcile = receipt_sub.add_parser(
         'reconcile',
         help='reconcile accepted/unknown delivery or create an explicit resend',
     )
     _add_runtime_root_arg(p_receipt_reconcile)
-    p_receipt_reconcile.add_argument('--outbox-id', required=True)
+    reconcile_identity = p_receipt_reconcile.add_mutually_exclusive_group(
+        required=True
+    )
+    reconcile_identity.add_argument('--outbox-id')
+    reconcile_identity.add_argument('--batch-id')
     p_receipt_reconcile.add_argument(
         '--mark',
         '--action',
@@ -548,11 +615,15 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_receipt_reconcile, high_risk=True)
     p_receipt_dispatch = receipt_sub.add_parser(
         'dispatch',
-        help='dispatch at most one due Outbox row',
+        help='dispatch at most one due lifecycle delivery batch',
     )
     _add_runtime_root_arg(p_receipt_dispatch)
     p_receipt_dispatch.add_argument('--once', action='store_true', required=True)
-    p_receipt_dispatch.add_argument('--account', default=None)
+    p_receipt_dispatch.add_argument(
+        '--account',
+        default=None,
+        help='dry-run observation filter only; applied dispatch is global',
+    )
     p_receipt_dispatch.add_argument('--config', required=True)
     p_receipt_dispatch.add_argument('--format', default='json', choices=['json'])
     _add_local_write_flags(p_receipt_dispatch, high_risk=True)
@@ -1698,21 +1769,63 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         if args.lifecycle_cmd == 'receipts':
             if args.receipt_cmd == 'inspect':
-                row = repo.get_trade_lifecycle_notification(
-                    str(args.outbox_id)
-                )
-                if not isinstance(row, dict):
-                    raise SystemExit(
-                        "notification outbox row not found: "
-                        f"{args.outbox_id}"
+                if args.batch_id:
+                    batch = (
+                        repo.get_trade_lifecycle_notification_batch(
+                            str(args.batch_id)
+                        )
                     )
+                    if not isinstance(batch, dict):
+                        raise SystemExit(
+                            "notification delivery batch not found: "
+                            f"{args.batch_id}"
+                        )
+                    members = (
+                        repo.list_trade_lifecycle_notification_batch_members(
+                            str(args.batch_id)
+                        )
+                    )
+                    inspection = {
+                        "batch": batch,
+                        "members": members,
+                        "outbox": None,
+                    }
+                else:
+                    row = repo.get_trade_lifecycle_notification(
+                        str(args.outbox_id)
+                    )
+                    if not isinstance(row, dict):
+                        raise SystemExit(
+                            "notification outbox row not found: "
+                            f"{args.outbox_id}"
+                        )
+                    batch_id = str(
+                        row.get("delivery_batch_id") or ""
+                    ).strip()
+                    inspection = {
+                        "outbox": row,
+                        "batch": (
+                            repo.get_trade_lifecycle_notification_batch(
+                                batch_id
+                            )
+                            if batch_id
+                            else None
+                        ),
+                        "members": (
+                            repo.list_trade_lifecycle_notification_batch_members(
+                                batch_id
+                            )
+                            if batch_id
+                            else []
+                        ),
+                    }
                 print(
                     json.dumps(
                         {
                             "operation": (
                                 "lifecycle_receipt_inspect"
                             ),
-                            "outbox": row,
+                            **inspection,
                             "ledger_store": ledger_store,
                         },
                         ensure_ascii=False,
@@ -1726,15 +1839,55 @@ def main(argv: list[str] | None = None) -> int:
                     "lifecycle:receipts:reconcile"
                 ]
                 dry_run = not bool(control["write_requested"])
-                result = reconcile_unknown_notification(
-                    repo,
-                    outbox_id=str(args.outbox_id),
-                    action=str(args.action),
-                    broker_ref=str(args.broker_ref),
-                    note=str(args.note),
-                    apply_changes=not dry_run,
-                    now_ms=utc_now_ms(),
-                )
+                batch_id = str(args.batch_id or "").strip()
+                if not batch_id:
+                    row = repo.get_trade_lifecycle_notification(
+                        str(args.outbox_id)
+                    )
+                    if not isinstance(row, dict):
+                        raise SystemExit(
+                            "notification outbox row not found: "
+                            f"{args.outbox_id}"
+                        )
+                    batch_id = str(
+                        row.get("delivery_batch_id") or ""
+                    ).strip()
+                    if batch_id:
+                        batch = (
+                            repo.get_trade_lifecycle_notification_batch(
+                                batch_id
+                            )
+                        )
+                        if not isinstance(batch, dict):
+                            raise SystemExit(
+                                "notification delivery batch not found: "
+                                f"{batch_id}"
+                            )
+                        if int(batch.get("member_count") or 0) != 1:
+                            raise SystemExit(
+                                "outbox row belongs to a multi-member batch; "
+                                f"re-run with --batch-id {batch_id}"
+                            )
+                if batch_id:
+                    result = reconcile_notification_batch(
+                        repo,
+                        batch_id=batch_id,
+                        action=str(args.action),
+                        broker_ref=str(args.broker_ref),
+                        note=str(args.note),
+                        apply_changes=not dry_run,
+                        now_ms=utc_now_ms(),
+                    )
+                else:
+                    result = reconcile_unknown_notification(
+                        repo,
+                        outbox_id=str(args.outbox_id),
+                        action=str(args.action),
+                        broker_ref=str(args.broker_ref),
+                        note=str(args.note),
+                        apply_changes=not dry_run,
+                        now_ms=utc_now_ms(),
+                    )
                 payload = attach_write_contract(
                     {
                         "operation": (
@@ -1768,54 +1921,70 @@ def main(argv: list[str] | None = None) -> int:
                 account_value = str(
                     args.account or ""
                 ).strip().lower()
-                if dry_run:
-                    rows = [
-                        row
-                        for row in (
-                            repo.list_trade_lifecycle_notifications()
-                        )
-                        if str(row.get("status") or "")
-                        in {"pending", "explicit_failed"}
-                        and (
-                            not account_value
-                            or str(
-                                (
-                                    row.get("payload")
-                                    or {}
-                                ).get("account")
-                                or ""
-                            ).strip().lower()
-                            == account_value
-                        )
-                    ]
+                if not dry_run and account_value:
+                    raise SystemExit(
+                        "applied lifecycle receipt dispatch is global; "
+                        "remove --account to preserve same-route batching"
+                    )
+                config_path = _resolve_path_under(
+                    str(args.config),
+                    base=base,
+                )
+                cfg = _load_json_object(config_path)
+                intake_config = resolve_trade_intake_config(cfg)
+                receipt_config = dict(
+                    intake_config.get("receipt") or {}
+                )
+                enabled_accounts = (
+                    _lifecycle_receipt_enabled_accounts(intake_config)
+                )
+                dispatch_accounts = (
+                    enabled_accounts & {account_value}
+                    if account_value
+                    else enabled_accounts
+                )
+                route = (
+                    resolve_trade_lifecycle_notification_batch_route(
+                        config=cfg
+                    )
+                    if dispatch_accounts
+                    else {}
+                )
+                if not dispatch_accounts:
+                    result = {
+                        "status": (
+                            "dry_run" if dry_run else "idle"
+                        ),
+                        "reason": (
+                            "requested_account_receipt_disabled"
+                            if account_value
+                            else "notification_receipt_disabled"
+                        ),
+                        "preview": None,
+                    }
+                elif not bool(route.get("route_available")):
+                    result = {
+                        "status": (
+                            "dry_run" if dry_run else "explicit_failed"
+                        ),
+                        "reason": "notification_route_unavailable",
+                        "preview": None,
+                    }
+                elif dry_run:
                     result = {
                         "status": "dry_run",
-                        "candidate": rows[0] if rows else None,
+                        "preview": plan_notification_batch(
+                            repo,
+                            route=route,
+                            now_ms=utc_now_ms(),
+                            allowed_accounts=dispatch_accounts,
+                            apply_changes=False,
+                        ),
                     }
                 else:
-                    config_path = _resolve_path_under(
-                        str(args.config),
-                        base=base,
-                    )
-                    cfg = _load_json_object(config_path)
-                    trade_intake = (
-                        dict(cfg.get("trade_intake") or {})
-                        if isinstance(
-                            cfg.get("trade_intake"),
-                            dict,
-                        )
-                        else {}
-                    )
-                    receipt_config = (
-                        dict(trade_intake.get("receipt") or {})
-                        if isinstance(
-                            trade_intake.get("receipt"),
-                            dict,
-                        )
-                        else {}
-                    )
-                    result = dispatch_notifications_once(
+                    result = dispatch_notification_batch_once(
                         repo,
+                        route=route,
                         send_fn=lambda frozen_payload: (
                             send_trade_lifecycle_outbox_payload(
                                 base=base,
@@ -1825,7 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         ),
                         now_ms=utc_now_ms(),
-                        account=account_value or None,
+                        allowed_accounts=dispatch_accounts,
                     )
                 payload = attach_write_contract(
                     {
@@ -1836,7 +2005,10 @@ def main(argv: list[str] | None = None) -> int:
                         "ledger_store": ledger_store,
                     },
                     dry_run=dry_run,
-                    write_applied=not dry_run,
+                    write_applied=bool(
+                        not dry_run
+                        and _lifecycle_dispatch_write_applied(result)
+                    ),
                     rollback_hint=(
                         "delivery state is durable; unknown must be "
                         "reconciled manually and is never auto-retried"
