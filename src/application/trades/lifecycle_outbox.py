@@ -245,77 +245,6 @@ def complete_notification_attempt(
     return completed
 
 
-def dispatch_notifications_once(
-    repo: Any,
-    *,
-    send_fn: Callable[[dict[str, Any]], dict[str, Any]],
-    now_ms: int,
-    account: str | None = None,
-) -> dict[str, Any]:
-    recovery = recover_stale_notifications(repo, now_ms=now_ms)
-    claimed = claim_next_notification(
-        repo,
-        now_ms=now_ms,
-        account=account,
-    )
-    if claimed is None:
-        return {
-            "status": "idle",
-            "recovery": recovery,
-            "outbox": None,
-        }
-    outbox_id = str(claimed["outbox_id"])
-    claim_id = str(claimed["claim_id"])
-    started = mark_notification_send_started(
-        repo,
-        outbox_id=outbox_id,
-        claim_id=claim_id,
-        now_ms=now_ms,
-    )
-    try:
-        receipt = send_fn(dict(started["payload"]))
-    except Exception as exc:
-        completed = complete_notification_attempt(
-            repo,
-            outbox_id=outbox_id,
-            claim_id=claim_id,
-            outcome="unknown",
-            now_ms=now_ms,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return {
-            "status": "unknown",
-            "recovery": recovery,
-            "outbox": completed,
-        }
-    provider_status = str(receipt.get("status") or "").strip().lower()
-    confirmed = bool(receipt.get("delivery_confirmed"))
-    explicit_failure = bool(receipt.get("explicit_pre_acceptance_failure"))
-    if confirmed or provider_status == "confirmed":
-        outcome = "confirmed"
-    elif provider_status == "accepted":
-        outcome = "accepted"
-    elif explicit_failure:
-        outcome = "explicit_failed"
-    else:
-        outcome = "unknown"
-    completed = complete_notification_attempt(
-        repo,
-        outbox_id=outbox_id,
-        claim_id=claim_id,
-        outcome=outcome,
-        now_ms=now_ms,
-        provider_message_id=receipt.get("message_id"),
-        provider_receipt=receipt,
-        error=receipt.get("send_message") or receipt.get("error"),
-    )
-    return {
-        "status": outcome,
-        "recovery": recovery,
-        "outbox": completed,
-    }
-
-
 def reconcile_unknown_notification(
     repo: Any,
     *,
@@ -1409,7 +1338,6 @@ __all__ = [
     "complete_notification_batch_attempt",
     "complete_notification_attempt",
     "dispatch_notification_batch_once",
-    "dispatch_notifications_once",
     "enqueue_notification_intent",
     "mark_notification_batch_send_started",
     "mark_notification_send_started",

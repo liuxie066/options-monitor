@@ -80,6 +80,12 @@ def _quiet_now(rows: list[dict]) -> int:
     return max(int(row["created_at_ms"]) for row in rows) + QUIET_WINDOW_MS
 
 
+def test_legacy_per_row_delivery_dispatcher_is_removed() -> None:
+    from src.application.trades import lifecycle_outbox
+
+    assert not hasattr(lifecycle_outbox, "dispatch_notifications_once")
+
+
 def test_twenty_four_intents_use_one_batch_and_one_receipt(
     tmp_path: Path,
 ) -> None:
