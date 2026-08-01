@@ -6,6 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import threading
+
+import pytest
+
 import src.application.trades.auto_intake as auto_intake
 
 from src.application.layered_config import build_layered_runtime_config_from_user_config
@@ -14,6 +18,28 @@ from src.application.runtime_config_freshness import GENERATED_KEY, build_inline
 
 BASE = Path(__file__).resolve().parents[1]
 AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
+
+
+def _listener_source(tmp_path: Path, account: str, port: int) -> dict:
+    return {
+        "id": account,
+        "account": account,
+        "enabled": True,
+        "mode": "apply",
+        "host": "127.0.0.1",
+        "port": port,
+        "state_path": Path(f"state/{account}.json"),
+        "audit_path": Path(f"audit/{account}.jsonl"),
+        "status_path": Path(f"status/{account}.json"),
+        "inbox_path": Path(f"inbox/{account}.sqlite3"),
+        "backfill_checkpoint_path": Path(f"backfill/{account}.json"),
+        "reconnect_sec": 5,
+        "receipt": {"enabled": True},
+        "backfill": {"enabled": False},
+        "account_mapping": {f"REAL_{account.upper()}": account},
+        "futu_account_ids": [f"REAL_{account.upper()}"],
+        "combo_reconciliation_mode": "off",
+    }
 
 
 def _write_runtime_config(tmp_path: Path) -> Path:
@@ -228,6 +254,223 @@ def test_auto_trade_intake_once_accepts_explicit_runtime_root_over_env(tmp_path:
     assert payload["state_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_state.json").resolve())
     assert payload["audit_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_audit.jsonl").resolve())
     assert payload["status_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
+
+
+@pytest.mark.parametrize("source_count", (1, 2))
+def test_listener_main_owns_exactly_one_lifecycle_batch_dispatcher(
+    monkeypatch,
+    tmp_path: Path,
+    source_count: int,
+) -> None:
+    sources = [
+        _listener_source(tmp_path, account, 11111 + index)
+        for index, account in enumerate(("lx", "sy")[:source_count])
+    ]
+    intake_cfg = {
+        "enabled": True,
+        "mode": "apply",
+        "state_path": Path("state.json"),
+        "audit_path": Path("audit.jsonl"),
+        "status_path": Path("status.json"),
+        "receipt": {"enabled": True},
+        "backfill": {"enabled": False},
+        "holdings_sync": {"enabled": False},
+        "combo_reconciliation": {
+            "default_mode": "off",
+            "accounts": {},
+        },
+        "account_mapping": {
+            f"REAL_{account.upper()}": account
+            for account in ("lx", "sy")[:source_count]
+        },
+        "futu_account_ids": [
+            f"REAL_{account.upper()}"
+            for account in ("lx", "sy")[:source_count]
+        ],
+        "sources": sources,
+    }
+    instances: list[object] = []
+
+    class _Dispatcher:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.start_count = 0
+            self.close_count = 0
+            instances.append(self)
+
+        def start(self):
+            self.start_count += 1
+
+        def close(self):
+            self.close_count += 1
+
+        def snapshot(self):
+            return {
+                "schema_version": (
+                    "trade_lifecycle_batch_dispatcher_status.v1"
+                ),
+                "status": (
+                    "running" if self.start_count else "initialized"
+                ),
+            }
+
+    observed_statuses: list[dict] = []
+
+    def _run_source(**kwargs):
+        observed_statuses.append(
+            kwargs["lifecycle_dispatcher_status_fn"]()
+        )
+        return 0
+
+    def _run_sources(sources, *, run_source):
+        stop_event = threading.Event()
+        return max(run_source(source, stop_event) for source in sources)
+
+    monkeypatch.setattr(auto_intake, "load_config", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_trade_intake_config",
+        lambda *_args, **_kwargs: intake_cfg,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "open_position_ledger_from_runtime_config",
+        lambda **_kwargs: (None, object()),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_trade_lifecycle_notification_batch_route",
+        lambda **_kwargs: {
+            "provider": "feishu_app",
+            "channel": "bot",
+            "target": "secret-target",
+            "target_fingerprint": "target-fingerprint",
+            "route_fingerprint": "route-fingerprint",
+            "route_available": True,
+        },
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "LifecycleReceiptBatchDispatcher",
+        _Dispatcher,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_run_listener_source_loop",
+        _run_source,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_coordinate_listener_sources",
+        _run_sources,
+    )
+
+    rc = auto_intake.main(
+        [
+            "--config",
+            str(tmp_path / "config.us.json"),
+            "--runtime-root",
+            str(tmp_path),
+            "--mode",
+            "apply",
+            "--confirm",
+        ]
+    )
+
+    assert rc == 0
+    assert len(instances) == 1
+    dispatcher = instances[0]
+    assert dispatcher.start_count == 1
+    assert dispatcher.close_count == 1
+    assert dispatcher.kwargs["allowed_accounts"] == [
+        account for account in ("lx", "sy")[:source_count]
+    ]
+    assert len(observed_statuses) == source_count
+    assert {item["status"] for item in observed_statuses} == {"running"}
+
+
+@pytest.mark.parametrize(
+    ("apply_changes", "receipt_enabled", "reason"),
+    (
+        (False, True, "dry_run"),
+        (True, False, "receipt_disabled"),
+    ),
+)
+def test_lifecycle_dispatcher_is_not_built_for_dry_run_or_disabled_receipts(
+    monkeypatch,
+    tmp_path: Path,
+    apply_changes: bool,
+    receipt_enabled: bool,
+    reason: str,
+) -> None:
+    source = _listener_source(tmp_path, "lx", 11111)
+    source["receipt"] = {"enabled": receipt_enabled}
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_trade_lifecycle_notification_batch_route",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled dispatcher must not resolve a route")
+        ),
+    )
+
+    dispatcher, status_fn = (
+        auto_intake._build_lifecycle_receipt_batch_dispatcher(
+            repo=object(),
+            base=tmp_path,
+            cfg={},
+            intake_cfg={
+                "receipt": {"enabled": receipt_enabled},
+                "sources": [source],
+            },
+            apply_changes=apply_changes,
+        )
+    )
+
+    assert dispatcher is None
+    assert status_fn()["status"] == "disabled"
+    assert status_fn()["reason"] == reason
+
+
+def test_lifecycle_dispatcher_is_not_built_when_route_is_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = _listener_source(tmp_path, "lx", 11111)
+    monkeypatch.setattr(
+        auto_intake,
+        "resolve_trade_lifecycle_notification_batch_route",
+        lambda **_kwargs: {
+            "provider": "feishu_app",
+            "channel": "bot",
+            "route_available": False,
+        },
+    )
+
+    dispatcher, status_fn = (
+        auto_intake._build_lifecycle_receipt_batch_dispatcher(
+            repo=object(),
+            base=tmp_path,
+            cfg={},
+            intake_cfg={
+                "receipt": {"enabled": True},
+                "sources": [source],
+            },
+            apply_changes=True,
+        )
+    )
+
+    assert dispatcher is None
+    assert status_fn()["status"] == "unavailable"
+    assert status_fn()["reason"] == "route_unavailable"
+
+
+def test_source_listener_has_no_lifecycle_provider_send_path() -> None:
+    import inspect
+
+    source = inspect.getsource(auto_intake._run_listener_source_loop)
+
+    assert "send_trade_lifecycle_outbox_payload" not in source
+    assert "dispatch_notification" not in source
 
 
 def test_reconcile_intake_sources_defaults_to_every_account(
