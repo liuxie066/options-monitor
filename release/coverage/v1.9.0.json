@@ -1,0 +1,82 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.9.0",
+  "base": {
+    "tag": "v1.8.5",
+    "commit": "51275d596da30f20c4853e195f88b64dc0660a7c"
+  },
+  "reviewed_head": "945a18a1fa086e3cf893517bc30af744ac85c951",
+  "commits": [
+    {
+      "sha": "3b845f01e54d0eba9f89bf2f227adb351ec96148",
+      "subject": "gateflow: accept plan for lifecycle-receipt-batching"
+    },
+    {
+      "sha": "2adf049b217ab3aa33d7c7911c756240feabe1c9",
+      "subject": "gateflow: accept lifecycle-receipt-batching S1"
+    },
+    {
+      "sha": "032a9dde0fe2fe838d2c28594447f52617b4e158",
+      "subject": "gateflow: accept lifecycle-receipt-batching S2"
+    },
+    {
+      "sha": "8ca39a73f74954c8d351991394a14bb2a8e59e05",
+      "subject": "gateflow: accept lifecycle-receipt-batching S3"
+    },
+    {
+      "sha": "056fa54f1d401b0d04d9260f003a70c4f1f9d97c",
+      "subject": "gateflow: accept lifecycle receipt batching"
+    },
+    {
+      "sha": "0bdde88829380101c0bd89770054dcfb6ebe0616",
+      "subject": "gateflow: accept PR 130 review"
+    },
+    {
+      "sha": "a5ef62c2d6d632bd6d1b989a7ea21dbd10081c4a",
+      "subject": "gateflow: close lifecycle receipt batching"
+    },
+    {
+      "sha": "945a18a1fa086e3cf893517bc30af744ac85c951",
+      "subject": "Merge pull request #130 from liuxie066/codex/lifecycle-receipt-batching"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added durable lifecycle receipt delivery batches that aggregate same-route case transitions across accounts, preserve every case-level audit intent, and expose batch inspection and reconciliation controls.",
+      "commits": [
+        "2adf049b217ab3aa33d7c7911c756240feabe1c9",
+        "032a9dde0fe2fe838d2c28594447f52617b4e158",
+        "8ca39a73f74954c8d351991394a14bb2a8e59e05"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented row-by-row lifecycle receipt storms and automatic duplicate retries by enforcing one paced provider call per route, atomically settling batch members, and freezing ambiguous or stale sends for explicit review.",
+      "commits": [
+        "2adf049b217ab3aa33d7c7911c756240feabe1c9",
+        "032a9dde0fe2fe838d2c28594447f52617b4e158",
+        "8ca39a73f74954c8d351991394a14bb2a8e59e05",
+        "056fa54f1d401b0d04d9260f003a70c4f1f9d97c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "3b845f01e54d0eba9f89bf2f227adb351ec96148",
+      "reason": "Internal Gateflow goal, plan, and adversarial PlanReview evidence; no runtime behavior beyond the implementation release notes."
+    },
+    {
+      "commit": "0bdde88829380101c0bd89770054dcfb6ebe0616",
+      "reason": "Internal PR review evidence only; no production runtime behavior change."
+    },
+    {
+      "commit": "a5ef62c2d6d632bd6d1b989a7ea21dbd10081c4a",
+      "reason": "Internal Gateflow final closeout evidence only; no production runtime behavior change."
+    },
+    {
+      "commit": "945a18a1fa086e3cf893517bc30af744ac85c951",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation release notes."
+    }
+  ]
+}

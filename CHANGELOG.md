@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.9.0 - 2026-08-02
+
+### New Features
+- Added durable lifecycle receipt delivery batches that aggregate same-route case transitions across accounts, preserve every case-level audit intent, and expose batch inspection and reconciliation controls.
+
+### Bug Fixes
+- Prevented row-by-row lifecycle receipt storms and automatic duplicate retries by enforcing one paced provider call per route, atomically settling batch members, and freezing ambiguous or stale sends for explicit review.
+
 ## 1.8.5 - 2026-08-01
 
 ### Bug Fixes
