@@ -35,6 +35,9 @@ from src.application.trades.lifecycle_reconciliation import (
 from src.application.trades.close_reason_evidence import (
     build_lifecycle_timing_policy,
 )
+from src.application.trades.close_reason_reconciliation import (
+    reconcile_due_lifecycle_cases,
+)
 
 
 EXPIRATION_YMD = "2026-08-21"
@@ -197,7 +200,7 @@ def _record_zero_price_close_anchor(
     )
 
 
-def test_discovery_freezes_case_at_observation_start_and_deadline_only_reviews(
+def test_discovery_is_create_only_and_due_owner_reviews_missing_evidence_at_deadline(
     tmp_path: Path,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
@@ -248,10 +251,67 @@ def test_discovery_freezes_case_at_observation_start_and_deadline_only_reviews(
         account="lx",
         observed_at_ms=observation_start + 72 * 60 * 60 * 1000,
     )
-    assert after_deadline["refreshed_case_ids"] == [case_id]
+    assert after_deadline["refreshed_case_ids"] == []
+    assert after_deadline["would_refresh_case_ids"] == []
+    assert repo.get_trade_lifecycle_case(case_id) == lifecycle_case
+
+    deadline_ms = observation_start + 72 * 60 * 60 * 1000
+    dry_run = reconcile_due_lifecycle_cases(
+        repo,
+        account="lx",
+        now_ms=deadline_ms,
+        apply_changes=False,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("missing anchor must not trigger provider collection")
+        ),
+    )
+    assert dry_run["case_count"] == 1
+    assert dry_run["results"][0]["decision"] == {
+        "status": "needs_review",
+        "close_reason": None,
+        "contracts_resolved": 0,
+        "evidence_ids": [],
+        "reason_codes": ["settlement_evidence_deadline_elapsed"],
+        "public_transition": None,
+    }
+    assert repo.get_trade_lifecycle_case(case_id) == lifecycle_case
+    assert repo.list_trade_lifecycle_notifications() == []
+
+    applied = reconcile_due_lifecycle_cases(
+        repo,
+        account="lx",
+        now_ms=deadline_ms,
+        apply_changes=True,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("missing anchor must not trigger provider collection")
+        ),
+    )
+    assert applied["case_count"] == 1
+    assert applied["results"][0]["write_result"]["status"] == "needs_review"
+    assert applied["results"][0]["write_result"]["business_state_changed"] is True
     reviewed = repo.get_trade_lifecycle_case(case_id)
     assert reviewed is not None
     assert reviewed["status"] == "needs_review"
+    assert reviewed["derived_summary"]["reason_state"] == "needs_review"
+    assert reviewed["derived_summary"]["lifecycle_reason_codes"] == [
+        "settlement_evidence_deadline_elapsed"
+    ]
+    assert repo.list_trade_lifecycle_notifications() == []
+
+    replayed = reconcile_due_lifecycle_cases(
+        repo,
+        account="lx",
+        now_ms=deadline_ms,
+        apply_changes=True,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("missing anchor must not trigger provider collection")
+        ),
+    )
+    assert replayed["results"][0]["write_result"]["business_state_changed"] is False
+    assert replayed["results"][0]["write_result"]["resolution_revision"] == (
+        reviewed["derived_summary"]["resolution_revision"]
+    )
+    assert repo.list_trade_lifecycle_notifications() == []
     assert repo.list_trade_events() == [
         item for item in repo.list_trade_events() if item["event_type"] == "open"
     ]
