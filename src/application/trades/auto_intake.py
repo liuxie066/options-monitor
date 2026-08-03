@@ -57,6 +57,7 @@ from src.application.trades.lifecycle_runtime import (
 from src.application.trades.receipt import (
     resolve_trade_lifecycle_notification_batch_route,
     send_trade_lifecycle_outbox_payload,
+    send_trade_intake_receipt,
 )
 from src.application.trades.inbox import (
     enqueue_trade_payload,
@@ -471,12 +472,6 @@ def main(argv: list[str] | None = None) -> int:
             "and may send receipts; use --confirm or --yes"
         )
         return 2
-    receipt_callback = _build_receipt_callback(
-        base=base,
-        cfg=cfg,
-        receipt_config=intake_cfg["receipt"],
-    )
-
     if args.deal_json:
         holdings_sync_dispatcher = _build_stock_holdings_sync_dispatcher(
             intake_cfg=intake_cfg,
@@ -509,6 +504,12 @@ def main(argv: list[str] | None = None) -> int:
                     _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
                 else:
                     repo = _ReplayRepo()
+                receipt_callback = _build_receipt_callback(
+                    base=base,
+                    cfg=cfg,
+                    receipt_config=intake_cfg["receipt"],
+                    repo=repo,
+                )
                 result = _process_payload(
                     payload,
                     repo=repo,
@@ -572,6 +573,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+    receipt_callback = _build_receipt_callback(
+        base=base,
+        cfg=cfg,
+        receipt_config=intake_cfg["receipt"],
+        repo=repo,
+    )
 
     if not bool(intake_cfg["enabled"]):
         for source in sources:
@@ -670,17 +677,196 @@ def _build_receipt_callback(
     base: Path,
     cfg: dict[str, Any],
     receipt_config: dict[str, Any],
+    repo: Any,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def _callback(context: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "enabled": bool(receipt_config.get("enabled", True)),
-            "status": "outbox_managed",
-            "reason": "transactional_outbox",
-            "delivery_confirmed": False,
-            "message_id": None,
-        }
+        result = dict(context.get("result") or {})
+        claimed_outbox_ids = _claimed_lifecycle_notification_outbox_ids(
+            result
+        )
+        if claimed_outbox_ids:
+            return _lifecycle_outbox_receipt_result(
+                repo=repo,
+                receipt_config=receipt_config,
+                outbox_ids=claimed_outbox_ids,
+            )
+
+        if _lifecycle_notification_is_outbox_owned(context):
+            status = str(result.get("status") or "").strip().lower()
+            reason = str(result.get("reason") or "").strip().lower()
+            missing_outbox_is_error = (
+                status == "applied"
+                or (status == "skipped" and reason != "duplicate_deal_id")
+            )
+            return {
+                "enabled": bool(receipt_config.get("enabled", True)),
+                "status": (
+                    "failed"
+                    if missing_outbox_is_error
+                    else "skipped"
+                ),
+                "reason": (
+                    "lifecycle_outbox_missing"
+                    if missing_outbox_is_error
+                    else (
+                        "skipped_duplicate_lifecycle_outbox_owned"
+                        if status == "skipped"
+                        and reason == "duplicate_deal_id"
+                        else "lifecycle_outbox_not_created"
+                    )
+                ),
+                "delivery_confirmed": False,
+                "message_id": None,
+                "error_code": (
+                    "LIFECYCLE_OUTBOX_MISSING"
+                    if missing_outbox_is_error
+                    else None
+                ),
+            }
+
+        return send_trade_intake_receipt(
+            base=base,
+            config=cfg,
+            receipt_config=receipt_config,
+            apply_changes=bool(context.get("apply_changes")),
+            state=(
+                context.get("state")
+                if isinstance(context.get("state"), dict)
+                else {}
+            ),
+            deal=context.get("deal"),
+            result=result,
+            payload=(
+                context.get("effective_payload")
+                if isinstance(context.get("effective_payload"), dict)
+                else {}
+            ),
+        )
 
     return _callback
+
+
+def _claimed_lifecycle_notification_outbox_ids(
+    result: dict[str, Any],
+) -> list[str]:
+    outbox_ids: list[str] = []
+
+    def _append(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        outbox_id = str(value.get("notification_outbox_id") or "").strip()
+        if outbox_id and outbox_id not in outbox_ids:
+            outbox_ids.append(outbox_id)
+
+    operations = result.get("operations")
+    if isinstance(operations, list):
+        for operation in operations:
+            if isinstance(operation, dict):
+                _append(operation.get("result"))
+
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        lifecycle_v2 = diagnostics.get("lifecycle_v2")
+        if isinstance(lifecycle_v2, dict):
+            _append(lifecycle_v2.get("ledger_result"))
+    return outbox_ids
+
+
+def _lifecycle_notification_is_outbox_owned(
+    context: dict[str, Any],
+) -> bool:
+    result = (
+        context.get("result")
+        if isinstance(context.get("result"), dict)
+        else {}
+    )
+    diagnostics = result.get("diagnostics")
+    if (
+        isinstance(diagnostics, dict)
+        and str(diagnostics.get("notification_authority") or "").strip()
+        == "lifecycle_outbox"
+    ):
+        return True
+    deal = context.get("deal")
+    position_effect = str(
+        getattr(deal, "position_effect", "") or ""
+    ).strip().lower()
+    status = str(result.get("status") or "").strip().lower()
+    return position_effect == "close" and status in {"applied", "skipped"}
+
+
+def _lifecycle_outbox_receipt_result(
+    *,
+    repo: Any,
+    receipt_config: dict[str, Any],
+    outbox_ids: list[str],
+) -> dict[str, Any]:
+    getter = getattr(repo, "get_trade_lifecycle_notification", None)
+    if not callable(getter):
+        return {
+            "enabled": bool(receipt_config.get("enabled", True)),
+            "status": "failed",
+            "reason": "lifecycle_outbox_readback_unavailable",
+            "delivery_confirmed": False,
+            "message_id": None,
+            "error_code": "LIFECYCLE_OUTBOX_READBACK_UNAVAILABLE",
+            "claimed_outbox_ids": list(outbox_ids),
+        }
+
+    rows: list[dict[str, Any]] = []
+    missing_ids: list[str] = []
+    try:
+        for outbox_id in outbox_ids:
+            row = getter(outbox_id)
+            if (
+                isinstance(row, dict)
+                and str(row.get("outbox_id") or "").strip() == outbox_id
+            ):
+                rows.append(dict(row))
+            else:
+                missing_ids.append(outbox_id)
+    except Exception as exc:
+        return {
+            "enabled": bool(receipt_config.get("enabled", True)),
+            "status": "failed",
+            "reason": "lifecycle_outbox_readback_failed",
+            "delivery_confirmed": False,
+            "message_id": None,
+            "error_code": "LIFECYCLE_OUTBOX_READBACK_FAILED",
+            "claimed_outbox_ids": list(outbox_ids),
+            "send_message": f"{type(exc).__name__}: {exc}",
+        }
+    if missing_ids:
+        return {
+            "enabled": bool(receipt_config.get("enabled", True)),
+            "status": "failed",
+            "reason": "lifecycle_outbox_readback_missing",
+            "delivery_confirmed": False,
+            "message_id": None,
+            "error_code": "LIFECYCLE_OUTBOX_READBACK_MISSING",
+            "claimed_outbox_ids": list(outbox_ids),
+            "missing_outbox_ids": missing_ids,
+        }
+
+    delivery_confirmed = all(
+        str(row.get("status") or "").strip().lower() == "confirmed"
+        for row in rows
+    )
+    message_id = (
+        str(rows[0].get("provider_message_id") or "").strip() or None
+        if len(rows) == 1
+        else None
+    )
+    return {
+        "enabled": bool(receipt_config.get("enabled", True)),
+        "status": "outbox_managed",
+        "reason": "transactional_outbox",
+        "delivery_confirmed": delivery_confirmed,
+        "message_id": message_id,
+        "outbox_id": outbox_ids[0],
+        "outbox_ids": list(outbox_ids),
+        "outbox_readback_confirmed": True,
+    }
 
 
 def _build_lifecycle_receipt_batch_dispatcher(
@@ -2093,13 +2279,20 @@ def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:
 def _receipt_summary(receipt: object) -> dict[str, Any] | None:
     if not isinstance(receipt, dict):
         return None
-    return {
+    summary = {
         "status": receipt.get("status"),
         "reason": receipt.get("reason"),
         "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
         "message_id": receipt.get("message_id"),
         "error_code": receipt.get("error_code"),
     }
+    outbox_id = str(receipt.get("outbox_id") or "").strip()
+    if outbox_id:
+        summary["outbox_id"] = outbox_id
+        summary["outbox_readback_confirmed"] = bool(
+            receipt.get("outbox_readback_confirmed")
+        )
+    return summary
 
 
 def _format_result_summary(result: dict[str, Any]) -> str:

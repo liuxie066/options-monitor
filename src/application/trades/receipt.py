@@ -13,6 +13,7 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_shells import render_receipt
+from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.lifecycle_outbox import (
     BATCH_RENDERER_VERSION,
     build_notification_batch_route,
@@ -42,7 +43,10 @@ def send_trade_intake_receipt(
         receipt_config=cfg,
         apply_changes=apply_changes,
         state=state,
-        deal_id=_deal_id(deal, result, payload),
+        deal_id=(
+            str(broker_deal_key(deal) or "").strip()
+            or _deal_id(deal, result, payload)
+        ),
         result=result,
     )
     if not decision["should_send"]:
@@ -645,6 +649,11 @@ def decide_trade_intake_receipt(
             return {"should_send": False, "reason": "unresolved_disabled"}
         if _receipt_delivered(state, deal_id):
             return {"should_send": False, "reason": "skipped_unresolved_already_notified"}
+        if _receipt_delivery_is_ambiguous(state, deal_id):
+            return {
+                "should_send": False,
+                "reason": "skipped_unresolved_delivery_unknown",
+            }
         if _receipt_needs_retry(state, deal_id):
             return {"should_send": True, "reason": "unresolved_retry_unconfirmed_receipt"}
         return {"should_send": True, "reason": "unresolved"}
@@ -653,6 +662,11 @@ def decide_trade_intake_receipt(
             return {"should_send": False, "reason": "failed_disabled"}
         if _receipt_delivered(state, deal_id):
             return {"should_send": False, "reason": "skipped_failed_already_notified"}
+        if _receipt_delivery_is_ambiguous(state, deal_id):
+            return {
+                "should_send": False,
+                "reason": "skipped_failed_delivery_unknown",
+            }
         if _receipt_needs_retry(state, deal_id):
             return {"should_send": True, "reason": "failed_retry_unconfirmed_receipt"}
         return {"should_send": True, "reason": "failed"}
@@ -661,6 +675,11 @@ def decide_trade_intake_receipt(
     if status == "skipped" and reason == "duplicate_deal_id":
         if bool(cfg.get("notify_duplicate", False)):
             return {"should_send": True, "reason": "duplicate"}
+        if _receipt_delivery_is_ambiguous(state, deal_id):
+            return {
+                "should_send": False,
+                "reason": "skipped_duplicate_delivery_unknown",
+            }
         if bool(cfg.get("retry_unconfirmed_duplicate", True)) and _receipt_needs_retry(state, deal_id):
             return {"should_send": True, "reason": "duplicate_retry_unconfirmed_receipt"}
         return {"should_send": False, "reason": "skipped_duplicate"}
@@ -764,9 +783,43 @@ def _combo_yield_relation_pending(diagnostics: dict[str, Any]) -> bool:
 
 
 def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> bool:
+    receipt = _stored_receipt(state, deal_id)
+    if receipt is None:
+        return False
+    if not receipt:
+        return True
+    if bool(receipt.get("delivery_confirmed")):
+        return False
+    status = str(receipt.get("status") or "").strip().lower()
+    if status in {"unconfirmed", "outbox_managed"}:
+        return False
+    if bool(receipt.get("ambiguous_send")):
+        return False
+    return status == "failed"
+
+
+def _receipt_delivery_is_ambiguous(
+    state: dict[str, Any] | None,
+    deal_id: str | None,
+) -> bool:
+    receipt = _stored_receipt(state, deal_id)
+    if not receipt or bool(receipt.get("delivery_confirmed")):
+        return False
+    status = str(receipt.get("status") or "").strip().lower()
+    return (
+        status in {"unconfirmed", "outbox_managed"}
+        or bool(receipt.get("command_ok"))
+        or bool(receipt.get("ambiguous_send"))
+    )
+
+
+def _stored_receipt(
+    state: dict[str, Any] | None,
+    deal_id: str | None,
+) -> dict[str, Any] | None:
     key = str(deal_id or "").strip()
     if not key or not isinstance(state, dict):
-        return False
+        return None
     for bucket_name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids"):
         bucket = state.get(bucket_name)
         if not isinstance(bucket, dict):
@@ -776,25 +829,14 @@ def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> b
             continue
         receipt = item.get("receipt")
         if not isinstance(receipt, dict):
-            return True
-        return not bool(receipt.get("delivery_confirmed"))
-    return False
+            return {}
+        return dict(receipt)
+    return None
 
 
 def _receipt_delivered(state: dict[str, Any] | None, deal_id: str | None) -> bool:
-    key = str(deal_id or "").strip()
-    if not key or not isinstance(state, dict):
-        return False
-    for bucket_name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids"):
-        bucket = state.get(bucket_name)
-        if not isinstance(bucket, dict):
-            continue
-        item = bucket.get(key)
-        if not isinstance(item, dict):
-            continue
-        receipt = item.get("receipt")
-        return isinstance(receipt, dict) and bool(receipt.get("delivery_confirmed"))
-    return False
+    receipt = _stored_receipt(state, deal_id)
+    return bool(receipt and receipt.get("delivery_confirmed"))
 
 
 def _deal_id(deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) -> str | None:

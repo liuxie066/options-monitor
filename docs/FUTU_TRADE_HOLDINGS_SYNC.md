@@ -124,6 +124,21 @@ payload hash。任一来源不完整、日历 hash 变化、零价锚点无法�
 
 ## 通知 Outbox 与批量回执
 
+普通开仓成交保留逐 broker deal 的 intake 回执；已处理的 deal 在
+history backfill 中会于 pipeline 之前跳过，不会因回执未确认而重放交易。
+provider 命令已成功但缺少 delivery confirmation 时记为
+`unconfirmed`，后续 duplicate 不自动重发；
+`retry_unconfirmed_duplicate` 只对没有 provider acceptance 或歧义发送证据的
+缺失/`failed` 回执生效。
+
+已形成 lifecycle 状态变更的平仓及其他 lifecycle 通知不走普通
+intake 直发；写入前的普通 intake `unresolved`/`failed` 仍是成交操作回执。只有
+ledger 结果携带 `notification_outbox_id`，且同一 SQLite 仓库能立即读回
+该 outbox row 时，intake 才记录 `receipt.status=outbox_managed`，并保存
+`outbox_id` 与 `outbox_readback_confirmed=true`。声称了 ID 但读回失败，
+或已完成的 lifecycle 结果没有 outbox ID，都会 fail closed，不会
+回退成一次可能重复的直发。
+
 业务事务仍然一条状态变化写一条冻结通知意图，用于案件级审计；它不在 ledger
 事务内调用飞书。外部发送单位改为 delivery batch：同一
 provider/channel/target 的 `lx`、`sy` 等账户意图可进入同一批次，一条意图不会
