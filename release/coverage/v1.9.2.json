@@ -1,0 +1,90 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.9.2",
+  "base": {
+    "tag": "v1.9.1",
+    "commit": "74df9d1a4dbd78ac19ed83d53b21c9d180b50e7e"
+  },
+  "reviewed_head": "f87fb4708b2a991770922814ee7e52dcfdaef4dc",
+  "commits": [
+    {
+      "sha": "ed2531e956f7ff818b3198a6dc3d918bb5328b3f",
+      "subject": "fix: simplify position fact review copy"
+    },
+    {
+      "sha": "ac366c5acc5feea512280304a02254ecfe0148ca",
+      "subject": "gateflow: accept plan for lifecycle-single-source-of-truth"
+    },
+    {
+      "sha": "07934baa18fa45a3474758bdc154b49f8c80f74e",
+      "subject": "gateflow: accept lifecycle-single-source-of-truth S1"
+    },
+    {
+      "sha": "35b5c3ba272307c7d7ad6f49bb2ba9d0df70f34c",
+      "subject": "gateflow: accept lifecycle-single-source-of-truth S2"
+    },
+    {
+      "sha": "c9cd7ce275d84dfecd13d174abde84019df262d1",
+      "subject": "gateflow: accept lifecycle-single-source-of-truth aggregate review"
+    },
+    {
+      "sha": "0acf5fd1f7b8e5a8e49e6815fd8378dc69e9ac59",
+      "subject": "gateflow: accept PR 132 review"
+    },
+    {
+      "sha": "f6d2b07361b7bc56b91d27e6ab77df0bb8ce5f64",
+      "subject": "gateflow: close lifecycle-single-source-of-truth"
+    },
+    {
+      "sha": "0ef5eece39da2e46c32feb4d476b980779b84129",
+      "subject": "Merge pull request #132 from liuxie066/fix/lifecycle-single-source-of-truth"
+    },
+    {
+      "sha": "f87fb4708b2a991770922814ee7e52dcfdaef4dc",
+      "subject": "docs: refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Simplified the position-fact review section by removing redundant explanatory copy while keeping the section hidden when there are no review items.",
+      "commits": [
+        "ed2531e956f7ff818b3198a6dc3d918bb5328b3f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made lifecycle discovery create-only and centralized existing-case deadline and state transitions in the canonical account-scoped reconciler, preventing history backfill from overwriting broker timing policy or invalidating prepared per-account notifications.",
+      "commits": [
+        "07934baa18fa45a3474758bdc154b49f8c80f74e",
+        "35b5c3ba272307c7d7ad6f49bb2ba9d0df70f34c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ac366c5acc5feea512280304a02254ecfe0148ca",
+      "reason": "Planning and review evidence only; no runtime or user-facing behavior changed."
+    },
+    {
+      "commit": "c9cd7ce275d84dfecd13d174abde84019df262d1",
+      "reason": "Aggregate validation and review evidence only; implementation impact is covered by the lifecycle release note."
+    },
+    {
+      "commit": "0acf5fd1f7b8e5a8e49e6815fd8378dc69e9ac59",
+      "reason": "PR review evidence only; no runtime or user-facing behavior changed."
+    },
+    {
+      "commit": "f6d2b07361b7bc56b91d27e6ab77df0bb8ce5f64",
+      "reason": "Gateflow closeout evidence only; no runtime or user-facing behavior changed."
+    },
+    {
+      "commit": "0ef5eece39da2e46c32feb4d476b980779b84129",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation release note."
+    },
+    {
+      "commit": "f87fb4708b2a991770922814ee7e52dcfdaef4dc",
+      "reason": "Regenerated dependency graph documentation only; no runtime or user-facing behavior changed."
+    }
+  ]
+}
