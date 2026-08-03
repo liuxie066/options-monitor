@@ -100,12 +100,24 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
     ]
 
 
-def test_run_history_backfill_skips_state_duplicate_before_pipeline(tmp_path: Path) -> None:
+def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pipeline(
+    tmp_path: Path,
+) -> None:
     state_path = tmp_path / "state.json"
     write_trade_intake_state(
         state_path,
         {
-            "processed_deal_ids": {"deal-1": {"status": "applied", "reason": "applied_open"}},
+            "processed_deal_ids": {
+                "deal-1": {
+                    "status": "applied",
+                    "reason": "applied_open",
+                    "receipt": {
+                        "status": "outbox_managed",
+                        "reason": "transactional_outbox",
+                        "delivery_confirmed": False,
+                    },
+                }
+            },
             "failed_deal_ids": {},
             "unresolved_deal_ids": {},
         },
@@ -119,6 +131,9 @@ def test_run_history_backfill_skips_state_duplicate_before_pipeline(tmp_path: Pa
 
     kwargs = _backfill_kwargs(tmp_path)
     kwargs["state_path"] = state_path
+    kwargs["on_result_fn"] = lambda _context: (_ for _ in ()).throw(
+        AssertionError("duplicate backfill must not invoke receipt callback")
+    )
     out = run_history_backfill(
         **kwargs,
         history_deals_fn=_history_deals_fn,

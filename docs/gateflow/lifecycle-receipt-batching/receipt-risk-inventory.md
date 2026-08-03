@@ -5,6 +5,11 @@
 - Evidence scope: current `src/application`, `src/interfaces`, `scripts`, tests and accepted Gateflow implementation
 - Safety: 本清单为代码与测试审计；未发送真实通知，未读取或写入生产 ledger
 
+> 2026-08-03 后续状态：本快照中“ordinary trade-intake sender 无调用者”
+> 的结论已被有边界的修复取代。普通开仓恢复 intake 回执；lifecycle
+> 通知仍由 durable outbox 拥有，且 `outbox_managed` 需要 ID 读回证据。
+> 当前契约见 `docs/FUTU_TRADE_HOLDINGS_SYNC.md`。
+
 ## 结论
 
 本次发现的高风险活动路径只有 lifecycle 数据核对回执：原实现按 source/account 每五秒逐行领取，一次核对产生 24 行时可以形成 24 次外部发送。该路径已改为同路由持久化批次，并删除可直接逐行发送的 legacy dispatcher。
