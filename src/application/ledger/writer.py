@@ -27,7 +27,6 @@ from domain.domain.lifecycle_allocation import (
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.option_lifecycle import (
     build_lifecycle_case,
-    derive_lifecycle_read_model,
     expiration_observation_start_ms,
 )
 from domain.domain.performance.models import canonical_decimal_text, quantize_money, to_decimal
@@ -1907,7 +1906,6 @@ def discover_expired_lifecycle_cases_atomically(
             raise TypeError("lifecycle discovery requires SQLite transaction authority")
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         position_lots = list(sqlite_repo.list_position_lots(conn=conn))
-        void_event_ids = _effective_void_target_ids(sqlite_repo, conn=conn)
         existing_cases = list(
             sqlite_repo.list_trade_lifecycle_cases(
                 account=account_value or None,
@@ -2016,81 +2014,11 @@ def discover_expired_lifecycle_cases_atomically(
                 )
                 if created:
                     created_case_ids.append(case_id)
-                    existing_cases.append(lifecycle_case)
             else:
                 would_create_case_ids.append(case_id)
 
         refreshed_case_ids: list[str] = []
         would_refresh_case_ids: list[str] = []
-        for lifecycle_case in existing_cases:
-            case_id = str(lifecycle_case.get("case_id") or "").strip()
-            if (
-                not case_id
-                or str(lifecycle_case.get("schema_version") or "").strip()
-                != "lifecycle_case.v2"
-            ):
-                continue
-            persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
-            if persisted_status == "conflict":
-                continue
-            allocations = list(
-                sqlite_repo.list_trade_lifecycle_allocations(
-                    case_id=case_id,
-                    conn=conn,
-                )
-            )
-            read_model = derive_lifecycle_read_model(
-                expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
-                market=str(
-                    lifecycle_case.get("market")
-                    or symbol_market(lifecycle_case.get("symbol"))
-                    or ""
-                ),
-                target_contracts_by_lot=dict(
-                    lifecycle_case.get("target_contracts_by_lot") or {}
-                ),
-                allocations=allocations,
-                void_event_ids=void_event_ids,
-                now_ms=current_ms,
-            )
-            next_status = {
-                "settlement_pending": "waiting_settlement_evidence",
-                "partially_resolved": "partially_resolved",
-                "needs_review": "needs_review",
-                "assigned": "ledger_written",
-                "exercised": "ledger_written",
-                "expired_unassigned": "ledger_written",
-                "closed": "ledger_written",
-                "resolved_mixed": "ledger_written",
-                "conflict": "conflict",
-            }.get(read_model.lifecycle_state, persisted_status)
-            if next_status != persisted_status:
-                if apply_changes:
-                    sqlite_repo.update_trade_lifecycle_case_derived_status(
-                        case_id=case_id,
-                        status=next_status,
-                        derived_summary={
-                            "target_contracts_by_lot": dict(
-                                lifecycle_case.get("target_contracts_by_lot") or {}
-                            ),
-                            "resolved_contracts_by_lot": (
-                                read_model.resolved_contracts_by_lot
-                            ),
-                            "remaining_contracts_by_lot": (
-                                read_model.remaining_contracts_by_lot
-                            ),
-                            "resolved_contracts_by_terminal_type": (
-                                read_model.resolved_contracts_by_terminal_type
-                            ),
-                            "lifecycle_reason_codes": list(
-                                read_model.lifecycle_reason_codes
-                            ),
-                        },
-                        conn=conn,
-                    )
-                    refreshed_case_ids.append(case_id)
-                else:
-                    would_refresh_case_ids.append(case_id)
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "schema_version": "lifecycle_discovery_result.v2",
