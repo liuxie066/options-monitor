@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import src.application.trades.backfill as backfill_module
 from src.application.trades.backfill import run_history_backfill
 from src.application.trades.inbox import (
     list_retryable_trade_payloads,
@@ -19,6 +22,29 @@ class _FakeRepo:
 
     def list_trade_events(self) -> list[dict[str, Any]]:
         return list(self.events)
+
+
+@pytest.fixture(autouse=True)
+def _healthy_lifecycle_discovery(monkeypatch) -> None:
+    def _discover(_repo, *, account, observed_at_ms, apply_changes):
+        return {
+            "schema_version": "lifecycle_discovery_result.v2",
+            "observed_at_ms": observed_at_ms,
+            "account": account,
+            "apply_changes": apply_changes,
+            "created_case_ids": [],
+            "would_create_case_ids": [],
+            "discovered_case_ids": [],
+            "refreshed_case_ids": [],
+            "would_refresh_case_ids": [],
+            "skipped_targeted_lot_ids": [],
+        }
+
+    monkeypatch.setattr(
+        backfill_module,
+        "discover_lifecycle_cases",
+        _discover,
+    )
 
 
 def _backfill_kwargs(tmp_path: Path) -> dict[str, Any]:
@@ -98,6 +124,188 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
         "backfill_lifecycle_reconciliation_after",
         "backfill_check_finished",
     ]
+
+
+def test_backfill_lifecycle_discovery_is_scoped_to_single_mapped_account(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str | None] = []
+
+    def _discover(_repo, *, account, observed_at_ms, apply_changes):
+        calls.append(account)
+        return {
+            "schema_version": "lifecycle_discovery_result.v2",
+            "observed_at_ms": observed_at_ms,
+            "account": account,
+            "apply_changes": apply_changes,
+            "created_case_ids": [],
+            "would_create_case_ids": [],
+            "discovered_case_ids": [],
+            "refreshed_case_ids": [],
+            "would_refresh_case_ids": [],
+            "skipped_targeted_lot_ids": [],
+        }
+
+    monkeypatch.setattr(
+        backfill_module,
+        "discover_lifecycle_cases",
+        _discover,
+    )
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        history_deals_fn=lambda **_kwargs: ([], {}),
+        process_payload_fn=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == ["lx", "lx"]
+    lifecycle = out["diagnostics"]["lifecycle_reconciliation"]
+    assert lifecycle["before"]["accounts"] == ["lx"]
+    assert lifecycle["after"]["accounts"] == ["lx"]
+    assert lifecycle["before"]["schema_version"] == (
+        "lifecycle_discovery_result.v2"
+    )
+    assert lifecycle["after"]["schema_version"] == (
+        "lifecycle_discovery_result.v2"
+    )
+    assert lifecycle["before"]["account_results"][0]["account"] == "lx"
+    assert lifecycle["after"]["account_results"][0]["account"] == "lx"
+    audits = _audit_events(tmp_path / "audit.jsonl")
+    lifecycle_audits = [
+        event
+        for event in audits
+        if event["phase"]
+        in {
+            "backfill_lifecycle_discovery_before",
+            "backfill_lifecycle_reconciliation_after",
+        }
+    ]
+    assert all(event["ok"] is True for event in lifecycle_audits)
+    assert all(event["result"]["accounts"] == ["lx"] for event in lifecycle_audits)
+    assert all(
+        event["result"]["schema_version"]
+        == "lifecycle_discovery_result.v2"
+        for event in lifecycle_audits
+    )
+    assert all("accounts" not in event for event in lifecycle_audits)
+
+
+def test_backfill_lifecycle_discovery_scopes_legacy_source_per_account(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str | None] = []
+
+    def _discover(_repo, *, account, observed_at_ms, apply_changes):
+        calls.append(account)
+        return {
+            "schema_version": "lifecycle_discovery_result.v2",
+            "observed_at_ms": observed_at_ms,
+            "account": account,
+            "apply_changes": apply_changes,
+            "created_case_ids": [f"created-{account}"],
+            "would_create_case_ids": [],
+            "discovered_case_ids": [f"discovered-{account}"],
+            "refreshed_case_ids": [],
+            "would_refresh_case_ids": [],
+            "skipped_targeted_lot_ids": [f"lot-{account}"],
+        }
+
+    monkeypatch.setattr(
+        backfill_module,
+        "discover_lifecycle_cases",
+        _discover,
+    )
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["account_mapping"] = {
+        "REAL_2": "sy",
+        "REAL_1": "LX",
+    }
+    kwargs["futu_account_ids"] = ["REAL_2", "REAL_1"]
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=lambda **_kwargs: ([], {}),
+        process_payload_fn=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == ["lx", "sy", "lx", "sy"]
+    before = out["diagnostics"]["lifecycle_reconciliation"]["before"]
+    assert before["ok"] is True
+    assert before["accounts"] == ["lx", "sy"]
+    assert [item["account"] for item in before["account_results"]] == [
+        "lx",
+        "sy",
+    ]
+    assert before["created_case_ids"] == ["created-lx", "created-sy"]
+    assert before["discovered_case_ids"] == [
+        "discovered-lx",
+        "discovered-sy",
+    ]
+    assert before["skipped_targeted_lot_ids"] == ["lot-lx", "lot-sy"]
+
+
+def test_backfill_lifecycle_discovery_rejects_incomplete_account_scope_without_partial_scan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        backfill_module,
+        "discover_lifecycle_cases",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("incomplete account scope must not scan any account")
+        ),
+    )
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["account_mapping"] = {"REAL_1": "lx"}
+    kwargs["futu_account_ids"] = ["REAL_1", "REAL_2"]
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=lambda **_kwargs: (
+            [
+                {
+                    "deal_id": "deal-unmapped",
+                    "futu_account_id": "REAL_2",
+                }
+            ],
+            {},
+        ),
+        process_payload_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unmapped payload must remain unresolved")
+        ),
+    )
+
+    assert out["ok"] is False
+    assert out["error"] == "lifecycle_discovery_incomplete"
+    assert out["deal_count"] == 1
+    assert out["unresolved_count"] == 1
+    assert out["diagnostics"]["lifecycle_discovery_complete"] is False
+    lifecycle = out["diagnostics"]["lifecycle_reconciliation"]
+    for phase in ("before", "after"):
+        assert lifecycle[phase]["ok"] is False
+        assert lifecycle[phase]["reason"] == (
+            "lifecycle_account_scope_incomplete"
+        )
+        assert lifecycle[phase]["accounts"] == []
+        assert lifecycle[phase]["account_results"] == []
+        assert "REAL_2" in lifecycle[phase]["error"]
+    lifecycle_audits = [
+        event
+        for event in _audit_events(tmp_path / "audit.jsonl")
+        if event["phase"]
+        in {
+            "backfill_lifecycle_discovery_before",
+            "backfill_lifecycle_reconciliation_after",
+        }
+    ]
+    assert all(event["ok"] is False for event in lifecycle_audits)
+    assert all("REAL_2" in event["error"] for event in lifecycle_audits)
+    assert all(event["result"]["accounts"] == [] for event in lifecycle_audits)
+    phases = [
+        event["phase"]
+        for event in _audit_events(tmp_path / "audit.jsonl")
+    ]
+    assert "backfill_received" in phases
+    assert "backfill_identity_needs_review" in phases
 
 
 def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pipeline(
