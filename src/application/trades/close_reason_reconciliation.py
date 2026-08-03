@@ -525,6 +525,94 @@ def reconcile_lifecycle_close_reason(
     }
 
 
+def _reconcile_deadline_without_effective_pairing(
+    repo: Any,
+    *,
+    lifecycle_case: dict[str, Any],
+    read_model: dict[str, Any],
+    now_ms: int,
+    apply_changes: bool,
+) -> dict[str, Any] | None:
+    case_id = str(lifecycle_case.get("case_id") or "").strip()
+    evidence_status = str(
+        read_model.get("lifecycle_evidence_status") or ""
+    ).strip().lower()
+    if evidence_status != "missing":
+        return reconcile_lifecycle_close_reason(
+            repo,
+            case_id=case_id,
+            now_ms=int(now_ms),
+            apply_changes=apply_changes,
+        )
+    if str(read_model.get("reason_state") or "").strip().lower() != "needs_review":
+        return None
+
+    reason_codes = sorted(
+        {
+            str(item).strip()
+            for item in read_model.get("lifecycle_reason_codes") or []
+            if str(item or "").strip()
+        }
+    )
+    close_reason = str(read_model.get("close_reason") or "").strip() or None
+    preview = {
+        "schema_version": "close_reason_reconciliation_result.v1",
+        "case_id": case_id,
+        "apply_changes": bool(apply_changes),
+        "decision": {
+            "status": "needs_review",
+            "close_reason": close_reason,
+            "contracts_resolved": sum(
+                int(value or 0)
+                for value in dict(
+                    read_model.get("resolved_contracts_by_lot") or {}
+                ).values()
+            ),
+            "evidence_ids": [],
+            "reason_codes": reason_codes,
+            "public_transition": None,
+        },
+        "timing": None,
+        "timing_error": read_model.get("timing_error"),
+        "observation_id": None,
+        "lifecycle_generation_token": str(
+            read_model.get("lifecycle_generation_token") or ""
+        ),
+        "poll_settlement_results": [],
+        "lifecycle_read_model": dict(read_model),
+    }
+    if not apply_changes:
+        return preview
+
+    write_result = advance_lifecycle_case_state(
+        repo,
+        case_id=case_id,
+        status="needs_review",
+        derived_summary={
+            "reason_state": "needs_review",
+            "close_reason": close_reason,
+            "lifecycle_reason_codes": reason_codes,
+            "pairing_until_ms": read_model.get("pairing_until_ms"),
+            "settlement_deadline_ms": read_model.get("pending_until_ms"),
+            "timing_policy_hash": read_model.get("timing_policy_hash"),
+            "observation_hash": None,
+        },
+        public_transition=None,
+        expected_lifecycle_generation_token=str(
+            read_model.get("lifecycle_generation_token") or ""
+        ),
+    )
+    return {
+        **preview,
+        "write_result": write_result,
+        "lifecycle_read_model": lifecycle_case_read_model(
+            repo,
+            case_id=case_id,
+            now_ms=now_ms,
+        ),
+    }
+
+
 def reconcile_due_lifecycle_cases(
     repo: Any,
     *,
@@ -592,10 +680,47 @@ def reconcile_due_lifecycle_cases(
                 )
             )
             continue
+        reason_state = str(
+            read_model.get("reason_state") or ""
+        ).strip().lower()
+        if pairing_until_value is None:
+            if (
+                settlement_deadline_value is None
+                or int(now_ms) < settlement_deadline_value
+                or reason_state
+                not in {
+                    "cause_pending",
+                    "partially_resolved",
+                    "needs_review",
+                }
+            ):
+                continue
+            try:
+                result = _reconcile_deadline_without_effective_pairing(
+                    repo,
+                    lifecycle_case=dict(lifecycle_case),
+                    read_model=dict(read_model),
+                    now_ms=int(now_ms),
+                    apply_changes=apply_changes,
+                )
+            except LifecycleCaseDataError as exc:
+                results.append(
+                    _case_data_failure(
+                        case_id=case_id,
+                        reason_code="lifecycle_close_reason_data_invalid",
+                        stage="close_reason",
+                        field=None,
+                        apply_changes=apply_changes,
+                        error=exc,
+                    )
+                )
+                continue
+            if result is not None:
+                results.append(result)
+            continue
         if (
-            pairing_until_value is None
-            or int(now_ms) < pairing_until_value
-            or read_model.get("reason_state")
+            int(now_ms) < pairing_until_value
+            or reason_state
             not in {"cause_pending", "partially_resolved"}
         ):
             continue
