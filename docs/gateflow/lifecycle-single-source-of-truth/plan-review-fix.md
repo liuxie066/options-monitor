@@ -53,4 +53,3 @@ No additional public documentation beyond the already planned lifecycle ownershi
 ## Completion status
 
 Plan fixes complete; next entry point is adversarial plan re-review.
-
