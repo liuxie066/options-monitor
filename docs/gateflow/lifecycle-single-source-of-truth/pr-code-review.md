@@ -17,7 +17,7 @@ The PR-level DeepReview found no actionable findings. GitHub reports the exact b
 - Aggregate matrix: `86 passed` with four classified pre-existing Legacy Tick renderer warnings.
 - Compileall, changed-file Ruff, full-branch diff check, and explicit unscoped-call search passed.
 - PlanReview, S1, S2, and Aggregate DeepReview findings are all fixed and re-reviewed.
-- GitHub checks were still running at review time and are not represented as successful.
+- GitHub checks were still running at review time; after the accepted PR-review evidence push, Agent Plugin, Guardrails, CodeQL actions, CodeQL Python, and the CodeQL summary all completed successfully.
 
 ## Docs decision
 
@@ -27,8 +27,8 @@ The ownership/account-boundary operator update plus goal, plan, slice, validatio
 
 - Existing production data and runtime convergence remain outside this PR's source-delivery authority.
 - Discovery transactions remain per account and idempotently retryable.
-- Hosted checks require a post-push recheck.
+- Hosted checks passed at accepted PR-review head `0acf5fd1`.
 
 ## Next gate
 
-Commit and push the accepted PR-review evidence, recheck the remote Draft PR head and hosted checks, then record final closeout. Merge, Ready transition, reviewer request, release, deployment, and upgrade remain prohibited by this Gateflow run.
+Record and push final closeout evidence. Merge, Ready transition, reviewer request, release, deployment, and upgrade remain prohibited by this Gateflow run.
