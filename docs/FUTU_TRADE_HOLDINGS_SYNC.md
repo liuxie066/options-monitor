@@ -103,6 +103,18 @@ audit 另外记录 `stock_holdings_sync_intent`，用于证明成交是否成功
 成交。`resolution_revision` 只随业务结论变化，通知重发只增加
 `delivery_revision`。
 
+Lifecycle discovery 只冻结到期 lot 并创建 immutable case，不刷新已有 case 的
+`status` 或 `derived_summary`。既有 case 的派生状态由 canonical lifecycle read model
+计算，并只由 account-scoped `reconcile-due` 通过 ledger 原子 transition writer 推进。
+无 option-close anchor 的 case 在 canonical deadline 后仍 fail closed 为人工复核，但不因
+legacy discovery 重放而改写 broker timing policy 口径。
+
+History backfill 只从本次查询的 Futu account IDs 与 canonical account mapping 导出
+显式账户范围，并对每个账户分别执行 discovery；不向 discovery 传
+`account=None`。任一 configured Futu account ID 缺少 mapping 时，该轮 lifecycle discovery
+整体 fail closed，不部分扫描其他账户。Legacy multi-account source 仍可用，但也必须逐账户
+隔离执行。
+
 ## 平仓原因判定
 
 按冻结的合约截止时间先分流：
