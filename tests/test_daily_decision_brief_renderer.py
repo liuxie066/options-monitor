@@ -1359,7 +1359,7 @@ def test_human_fact_review_is_separate_from_close_advice_metrics() -> None:
     for message in (plain, card):
         assert "## 持仓事实核查（非交易建议）" in message
         assert "PDD｜08-28 $85 Put｜持仓事实待核查" in message
-        assert "不是平仓、滚仓或开仓建议" in message
+        assert "以下事项仅用于核对持仓或组合身份" not in message
         assert (
             "核查原因｜组合身份尚未核验；"
             "Position Advice v2 当前不是正式交易建议来源"
@@ -1370,6 +1370,19 @@ def test_human_fact_review_is_separate_from_close_advice_metrics() -> None:
     assert "| 持仓 | 建议 | 参考平仓价 |" not in card
     assert "预计锁定损益" not in card
     assert "剩余年化" not in card
+
+    no_review_brief = _brief()
+    for message in (
+        render_fixed_report(
+            no_review_brief,
+            context=_scheduled_context(),
+        ),
+        render_fixed_report_card_markdown(
+            no_review_brief,
+            context=_scheduled_context(),
+        ),
+    ):
+        assert "持仓事实核查（非交易建议）" not in message
 
 
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:

@@ -498,7 +498,6 @@ def _render_user_view(
                 [
                     _VISIBLE_BLANK_LINE,
                     f"{section_mark} 持仓事实核查（非交易建议）",
-                    "说明｜以下事项仅用于核对持仓或组合身份，不是平仓、滚仓或开仓建议。",
                 ]
             )
             for item in fact_reviews:
@@ -617,7 +616,6 @@ def _render_user_view_card(
                 [
                     "",
                     "## 持仓事实核查（非交易建议）",
-                    "说明｜以下事项仅用于核对持仓或组合身份，不是平仓、滚仓或开仓建议。",
                 ]
             )
             for item in fact_reviews:
