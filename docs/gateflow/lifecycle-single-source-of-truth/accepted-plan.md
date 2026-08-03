@@ -42,4 +42,3 @@ Update `docs/FUTU_TRADE_HOLDINGS_SYNC.md` in S2 to record create-only discovery 
 ## Completion status
 
 Plan gate passed with all findings fixed and classified residual risks.
-
