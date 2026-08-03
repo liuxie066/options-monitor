@@ -140,9 +140,19 @@ def run_history_backfill(
     unresolved_count = 0
     last_result: dict[str, Any] | None = None
     durable_queue_complete = True
+    try:
+        lifecycle_accounts = _lifecycle_discovery_accounts(
+            futu_account_ids=futu_account_ids,
+            account_mapping=account_mapping,
+        )
+        lifecycle_scope_error = None
+    except ValueError as exc:
+        lifecycle_accounts = ()
+        lifecycle_scope_error = f"{type(exc).__name__}: {exc}"
     lifecycle_discovery_before = _lifecycle_discovery_after_backfill_phase(
         repo=repo,
-        account=None,
+        accounts=lifecycle_accounts,
+        scope_error=lifecycle_scope_error,
         observed_at_ms=int(now.astimezone(timezone.utc).timestamp() * 1000),
         apply_changes=apply_changes,
         audit_path=audit_path,
@@ -381,7 +391,8 @@ def run_history_backfill(
     diagnostics["checkpoint_advanced"] = checkpoint_advanced
     lifecycle_discovery_after = _lifecycle_discovery_after_backfill_phase(
         repo=repo,
-        account=None,
+        accounts=lifecycle_accounts,
+        scope_error=lifecycle_scope_error,
         observed_at_ms=int(now.astimezone(timezone.utc).timestamp() * 1000),
         apply_changes=apply_changes,
         audit_path=audit_path,
@@ -391,10 +402,19 @@ def run_history_backfill(
         "before": lifecycle_discovery_before,
         "after": lifecycle_discovery_after,
     }
+    lifecycle_discovery_complete = bool(
+        lifecycle_discovery_before.get("ok")
+        and lifecycle_discovery_after.get("ok")
+    )
+    diagnostics["lifecycle_discovery_complete"] = lifecycle_discovery_complete
 
     finished_at = utc_now()
     out = {
-        "ok": bool(history_query_complete and durable_queue_complete),
+        "ok": bool(
+            history_query_complete
+            and durable_queue_complete
+            and lifecycle_discovery_complete
+        ),
         "started_at_utc": started_at,
         "finished_at_utc": finished_at,
         "deal_count": len(payloads),
@@ -409,6 +429,8 @@ def run_history_backfill(
         out["error"] = "history_query_incomplete"
     elif not durable_queue_complete:
         out["error"] = "durable_inbox_incomplete"
+    elif not lifecycle_discovery_complete:
+        out["error"] = "lifecycle_discovery_incomplete"
     append_trade_intake_audit(
         audit_path,
         {
@@ -423,45 +445,142 @@ def run_history_backfill(
 def _lifecycle_discovery_after_backfill_phase(
     *,
     repo: Any,
-    account: str | None,
+    accounts: tuple[str, ...],
+    scope_error: str | None,
     observed_at_ms: int,
     apply_changes: bool,
     audit_path: Path,
     phase: str,
 ) -> dict[str, Any]:
-    try:
-        result = discover_lifecycle_cases(
-            repo,
-            account=account,
-            observed_at_ms=observed_at_ms,
-            apply_changes=apply_changes,
-        )
-        append_trade_intake_audit(
-            audit_path,
+    aggregate: dict[str, Any] = {
+        "schema_version": "lifecycle_discovery_result.v2",
+        "observed_at_ms": int(observed_at_ms),
+        "account": accounts[0] if len(accounts) == 1 else None,
+        "accounts": list(accounts),
+        "account_results": [],
+        "apply_changes": bool(apply_changes),
+        "created_case_ids": [],
+        "would_create_case_ids": [],
+        "discovered_case_ids": [],
+        "refreshed_case_ids": [],
+        "would_refresh_case_ids": [],
+        "skipped_targeted_lot_ids": [],
+    }
+    if scope_error:
+        aggregate.update(
             {
-                "phase": phase,
-                "source": "backfill",
-                "ok": True,
-                "result": result,
-            },
+                "ok": False,
+                "reason": "lifecycle_account_scope_incomplete",
+                "error": str(scope_error),
+            }
         )
-        return {"ok": True, **result}
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
         append_trade_intake_audit(
             audit_path,
             {
                 "phase": phase,
                 "source": "backfill",
                 "ok": False,
-                "error": error,
+                "error": str(scope_error),
+                "result": aggregate,
             },
         )
-        return {
-            "ok": False,
-            "apply_changes": bool(apply_changes),
-            "error": error,
+        return aggregate
+
+    account_results: list[dict[str, Any]] = []
+    aggregate_fields = (
+        "created_case_ids",
+        "would_create_case_ids",
+        "discovered_case_ids",
+        "refreshed_case_ids",
+        "would_refresh_case_ids",
+        "skipped_targeted_lot_ids",
+    )
+    for account in accounts:
+        try:
+            result = discover_lifecycle_cases(
+                repo,
+                account=account,
+                observed_at_ms=observed_at_ms,
+                apply_changes=apply_changes,
+            )
+            account_result = {"ok": True, **result}
+        except Exception as exc:
+            account_result = {
+                "ok": False,
+                "account": account,
+                "apply_changes": bool(apply_changes),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        account_results.append(account_result)
+
+    for field in aggregate_fields:
+        aggregate[field] = sorted(
+            {
+                str(item).strip()
+                for result in account_results
+                for item in result.get(field) or []
+                if str(item or "").strip()
+            }
+        )
+    aggregate["account_results"] = account_results
+    aggregate["ok"] = all(
+        bool(result.get("ok")) for result in account_results
+    )
+    if not aggregate["ok"]:
+        aggregate["reason"] = "lifecycle_account_discovery_failed"
+        aggregate["error"] = "one or more account discoveries failed"
+    append_trade_intake_audit(
+        audit_path,
+        {
+            "phase": phase,
+            "source": "backfill",
+            "ok": bool(aggregate["ok"]),
+            "result": aggregate,
+            **(
+                {"error": str(aggregate["error"])}
+                if aggregate.get("error")
+                else {}
+            ),
+        },
+    )
+    return aggregate
+
+
+def _lifecycle_discovery_accounts(
+    *,
+    futu_account_ids: list[str],
+    account_mapping: dict[str, str],
+) -> tuple[str, ...]:
+    configured_ids = sorted(
+        {
+            str(item or "").strip()
+            for item in futu_account_ids
+            if str(item or "").strip()
         }
+    )
+    if not configured_ids:
+        raise ValueError("backfill lifecycle account scope is empty")
+    missing_ids = [
+        futu_account_id
+        for futu_account_id in configured_ids
+        if not str(
+            account_mapping.get(futu_account_id) or ""
+        ).strip()
+    ]
+    if missing_ids:
+        raise ValueError(
+            "backfill lifecycle account scope is incomplete: "
+            + ",".join(missing_ids)
+        )
+    accounts = sorted(
+        {
+            str(account_mapping[futu_account_id]).strip().lower()
+            for futu_account_id in configured_ids
+        }
+    )
+    if not accounts:
+        raise ValueError("backfill lifecycle account scope is empty")
+    return tuple(accounts)
 
 
 def _effective_lookback_hours(
