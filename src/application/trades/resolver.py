@@ -106,7 +106,10 @@ def _from_lifecycle_resolution(deal: NormalizedTradeDeal, result: LifecycleTrade
         deal_id=deal.deal_id,
         account=deal.internal_account,
         operations=list(result.operations),
-        diagnostics=dict(result.diagnostics),
+        diagnostics={
+            **dict(result.diagnostics),
+            "notification_authority": "lifecycle_outbox",
+        },
     )
 
 

@@ -395,6 +395,15 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     }
     assert {item["raw_payload"]["source_deal_id"] for item in close_events} == {"deal-close-1"}
     assert all(str(item["event_id"]).startswith("futu:lx:REAL_1:deal-close-1:close:") for item in close_events)
+    outbox_ids = {
+        str(operation.result.to_dict().get("notification_outbox_id") or "")
+        for operation in result.operations
+        if operation.result is not None
+    }
+    assert len(outbox_ids) == 1
+    outbox_id = next(iter(outbox_ids))
+    assert outbox_id
+    assert repo.get_trade_lifecycle_notification(outbox_id)["outbox_id"] == outbox_id
     lots = repo.list_position_lots()
     assert all(item["fields"]["status"] == "close" for item in lots)
     assert all(item["fields"]["contracts_open"] == 0 for item in lots)
