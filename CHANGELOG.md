@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.9.2 - 2026-08-04
+
+### Improvements
+- Simplified the position-fact review section by removing redundant explanatory copy while keeping the section hidden when there are no review items.
+
+### Bug Fixes
+- Made lifecycle discovery create-only and centralized existing-case deadline and state transitions in the canonical account-scoped reconciler, preventing history backfill from overwriting broker timing policy or invalidating prepared per-account notifications.
+
 ## 1.9.1 - 2026-08-03
 
 ### Bug Fixes
