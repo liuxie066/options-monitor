@@ -413,7 +413,7 @@ def test_receipt_decision_skips_confirmed_duplicate_by_default() -> None:
     assert out == {"should_send": False, "reason": "skipped_duplicate"}
 
 
-def test_receipt_decision_retries_unconfirmed_duplicate() -> None:
+def test_receipt_decision_retries_explicit_failed_duplicate() -> None:
     out = decide_trade_intake_receipt(
         receipt_config={},
         apply_changes=True,
@@ -430,6 +430,96 @@ def test_receipt_decision_retries_unconfirmed_duplicate() -> None:
     )
 
     assert out == {"should_send": True, "reason": "duplicate_retry_unconfirmed_receipt"}
+
+
+def test_trade_receipt_does_not_resend_provider_unconfirmed_duplicate(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    deal = SimpleNamespace(
+        deal_id="deal-1",
+        internal_account="lx",
+        futu_account_id="REAL_1",
+        position_effect="open",
+        side="sell",
+        symbol="NVDA",
+        option_type="put",
+        expiration_ymd="2026-06-19",
+        strike=120,
+        contracts=1,
+        price=1.23,
+        multiplier=100,
+        currency="USD",
+        trade_time_ms=1779167311000,
+    )
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "command_ok": True,
+            "delivery_confirmed": False,
+            "message_id": None,
+            "returncode": 0,
+        }
+
+    first = send_trade_intake_receipt(
+        base=tmp_path,
+        config={
+            "notifications": {
+                "provider": "wechat_clawbot",
+                "target": "wechat:ops",
+            }
+        },
+        receipt_config={},
+        apply_changes=True,
+        state={},
+        deal=deal,
+        result={
+            "status": "applied",
+            "reason": "applied_open",
+            "deal_id": "deal-1",
+            "account": "lx",
+            "action": "open",
+        },
+        payload={},
+        send_fn=_send,
+        normalize_fn=lambda send_result: send_result,
+    )
+    assert first["status"] == "unconfirmed"
+
+    duplicate = send_trade_intake_receipt(
+        base=tmp_path,
+        config={
+            "notifications": {
+                "provider": "wechat_clawbot",
+                "target": "wechat:ops",
+            }
+        },
+        receipt_config={},
+        apply_changes=True,
+        state={
+            "processed_deal_ids": {
+                "futu:lx:REAL_1:deal-1": {
+                    "status": "applied",
+                    "receipt": first,
+                }
+            }
+        },
+        deal=deal,
+        result={
+            "status": "skipped",
+            "reason": "duplicate_deal_id",
+            "deal_id": "deal-1",
+            "account": "lx",
+        },
+        payload={},
+        send_fn=_send,
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert duplicate["status"] == "skipped"
+    assert duplicate["reason"] == "skipped_duplicate_delivery_unknown"
+    assert len(calls) == 1
 
 
 def test_receipt_decision_skips_non_option_deal() -> None:
