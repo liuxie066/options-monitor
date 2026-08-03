@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.9.1",
+  "base": {
+    "tag": "v1.9.0",
+    "commit": "8d968612860534dbca8f6650dd563728dbad9386"
+  },
+  "reviewed_head": "237393e3ffb115e779747f0124f5e57965ff0ff8",
+  "commits": [
+    {
+      "sha": "d147975461861f3c15fc399db3dd495312a68a14",
+      "subject": "fix: restore trade intake receipt routing"
+    },
+    {
+      "sha": "237393e3ffb115e779747f0124f5e57965ff0ff8",
+      "subject": "Merge pull request #131 from liuxie066/agent/restore-trade-intake-receipts"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored trade-intake receipts for ordinary open fills while keeping lifecycle notifications on the durable outbox, requiring persisted outbox evidence before suppressing direct delivery, and preventing blind retries or duplicate backfill receipts.",
+      "commits": [
+        "d147975461861f3c15fc399db3dd495312a68a14"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "237393e3ffb115e779747f0124f5e57965ff0ff8",
+      "reason": "Merge-only PR commit; all user-visible changes are covered by the implementation release note."
+    }
+  ]
+}

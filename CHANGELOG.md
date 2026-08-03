@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.9.1 - 2026-08-03
+
+### Bug Fixes
+- Restored trade-intake receipts for ordinary open fills while keeping lifecycle notifications on the durable outbox, requiring persisted outbox evidence before suppressing direct delivery, and preventing blind retries or duplicate backfill receipts.
+
 ## 1.9.0 - 2026-08-02
 
 ### New Features
