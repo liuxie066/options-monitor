@@ -9,8 +9,9 @@ Centralizes:
 - Explicit fail-fast error classification (2FA/auth expired/rate limit)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
+from numbers import Integral
 import random
 import time
 from typing import Any, Iterable
@@ -36,15 +37,36 @@ class _FutuAPIBackend:
         self._quote_client = None
         self._trade_client = None
 
-    def _ensure_clients(self) -> tuple[Any, Any]:
-        if self._quote_client is None or self._trade_client is None:
+    def _ensure_quote_client(self) -> Any:
+        if self._quote_client is None:
             _ensure_futu_api_importable()
             import futu
 
-            if self._quote_client is None:
-                self._quote_client = futu.OpenQuoteContext(host=self.host, port=self.port)
-            if self._trade_client is None:
-                self._trade_client = futu.OpenSecTradeContext(host=self.host, port=self.port)
+            self._quote_client = futu.OpenQuoteContext(host=self.host, port=self.port)
+            LOG.info(
+                "futu_sdk_client_created event=client_created capability=quote host=%s port=%s",
+                self.host,
+                self.port,
+            )
+        return self._quote_client
+
+    def _ensure_trade_client(self) -> Any:
+        if self._trade_client is None:
+            _ensure_futu_api_importable()
+            import futu
+
+            self._trade_client = futu.OpenSecTradeContext(host=self.host, port=self.port)
+            LOG.info(
+                "futu_sdk_client_created event=client_created capability=broker host=%s port=%s",
+                self.host,
+                self.port,
+            )
+        return self._trade_client
+
+    def _ensure_clients(self) -> tuple[Any, Any]:
+        """Backward-compatible combined access; capability paths do not use it."""
+        self._ensure_quote_client()
+        self._ensure_trade_client()
         return self._quote_client, self._trade_client
 
 
@@ -54,10 +76,16 @@ class _FutuAPIClient:
         self.is_option_chain_cache_enabled = bool(is_option_chain_cache_enabled)
 
     def _quote(self) -> Any:
+        ensure = getattr(self.backend, "_ensure_quote_client", None)
+        if callable(ensure):
+            return ensure()
         quote, _trade = self.backend._ensure_clients()
         return quote
 
     def _trade(self) -> Any:
+        ensure = getattr(self.backend, "_ensure_trade_client", None)
+        if callable(ensure):
+            return ensure()
         _quote, trade = self.backend._ensure_clients()
         return trade
 
@@ -308,6 +336,7 @@ class FutuGateway:
     backend: Any
     host: str
     port: int
+    _closed_client_ids: set[int] = field(default_factory=set, init=False, repr=False)
 
     def _raise_mapped(self, exc: Exception, *, action: str) -> None:
         mapped = _map_error(exc, action=action)
@@ -316,18 +345,35 @@ class FutuGateway:
 
     def close(self) -> None:
         for c in (getattr(self.backend, "_quote_client", None), getattr(self.backend, "_trade_client", None)):
+            client_id = id(c)
+            if c is None or client_id in self._closed_client_ids:
+                continue
+            self._closed_client_ids.add(client_id)
             try:
-                if c is not None:
-                    c.close()
+                c.close()
             except Exception:
                 pass
 
     def _quote_client(self) -> Any:
         try:
+            ensure = getattr(self.backend, "_ensure_quote_client", None)
+            if callable(ensure):
+                return ensure()
             quote, _ = self.backend._ensure_clients()
             return quote
         except Exception as exc:
-            self._raise_mapped(exc, action="ensure_clients")
+            self._raise_mapped(exc, action="ensure_quote_client")
+        raise AssertionError("unreachable")
+
+    def _trade_client(self) -> Any:
+        try:
+            ensure = getattr(self.backend, "_ensure_trade_client", None)
+            if callable(ensure):
+                return ensure()
+            _, trade = self.backend._ensure_clients()
+            return trade
+        except Exception as exc:
+            self._raise_mapped(exc, action="ensure_trade_client")
         raise AssertionError("unreachable")
 
     def ensure_quote_ready(self) -> dict[str, Any]:
@@ -338,13 +384,69 @@ class FutuGateway:
                 raise RuntimeError(f"OpenD get_global_state ret={ret}: {state}")
             if not isinstance(state, dict):
                 raise RuntimeError(f"OpenD invalid global_state: {state}")
-            if state.get("program_status_type") not in (None, "", "READY"):
+            if state.get("program_status_type") != "READY":
                 raise RuntimeError(f"OpenD not READY: {state}")
-            if not state.get("qot_logined", True):
+            if state.get("qot_logined") is not True:
                 raise RuntimeError(f"OpenD quote not logged in: {state}")
             return state
         except Exception as exc:
             self._raise_mapped(exc, action="ensure_quote_ready")
+        raise AssertionError("unreachable")
+
+    def ensure_broker_ready(
+        self,
+        *,
+        expected_account_ids: Iterable[str],
+        trd_env: str,
+    ) -> dict[str, Any]:
+        trade = self._trade_client()
+        required = _normalize_required_account_ids(expected_account_ids)
+        environment = _normalize_trade_environment(trd_env)
+        if not required:
+            raise FutuGatewayError("ensure_broker_ready failed: expected_account_ids is empty")
+        if not environment:
+            raise FutuGatewayError("ensure_broker_ready failed: trd_env is empty")
+        try:
+            ret, state = trade.get_global_state()
+            if ret != 0:
+                raise RuntimeError(f"OpenD get_global_state ret={ret}: {state}")
+            if not isinstance(state, dict):
+                raise RuntimeError(f"OpenD invalid global_state: {state}")
+            if state.get("program_status_type") != "READY":
+                raise RuntimeError(f"OpenD not READY: {state}")
+            if state.get("trd_logined") is not True:
+                raise RuntimeError("OpenD trade not logged in")
+
+            result = trade.get_acc_list()
+            rows = self.client._rows(self.client._unwrap(result))
+            observed: set[str] = set()
+            for row in rows:
+                row_env = _normalize_trade_environment(
+                    row.get("trd_env") or row.get("env")
+                )
+                if row_env != environment:
+                    continue
+                account_id = _normalize_observed_account_id(row.get("acc_id"))
+                if account_id:
+                    observed.add(account_id)
+            missing = sorted(required - observed)
+            if missing:
+                raise RuntimeError(
+                    "OpenD required broker identities are unavailable "
+                    f"for trd_env={environment}: missing={[_mask_account_id(value) for value in missing]}"
+                )
+            return {
+                "program_status_type": state.get("program_status_type"),
+                "trd_logined": True,
+                "trd_env": environment,
+                "required_account_id_count": len(required),
+                "matched_account_id_count": len(required),
+                "masked_required_account_ids": [
+                    _mask_account_id(value) for value in sorted(required)
+                ],
+            }
+        except Exception as exc:
+            self._raise_mapped(exc, action="ensure_broker_ready")
         raise AssertionError("unreachable")
 
     def get_option_expiration_dates(self, code: str) -> Any:
@@ -584,6 +686,98 @@ def build_ready_futu_gateway(
     except Exception:
         gateway.close()
         raise
+
+
+def build_ready_futu_quote_gateway(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    is_option_chain_cache_enabled: bool = True,
+    backend_cls: Any | None = None,
+    client_cls: Any | None = None,
+) -> FutuGateway:
+    """Build a gateway and preflight only the quote capability."""
+
+    return build_ready_futu_gateway(
+        host=host,
+        port=port,
+        is_option_chain_cache_enabled=is_option_chain_cache_enabled,
+        backend_cls=backend_cls,
+        client_cls=client_cls,
+    )
+
+
+def build_ready_futu_broker_gateway(
+    *,
+    expected_account_ids: Iterable[str],
+    trd_env: str,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    is_option_chain_cache_enabled: bool = False,
+    backend_cls: Any | None = None,
+    client_cls: Any | None = None,
+) -> FutuGateway:
+    """Build a gateway and verify only broker identity/readiness."""
+
+    gateway = build_futu_gateway(
+        host=host,
+        port=port,
+        is_option_chain_cache_enabled=is_option_chain_cache_enabled,
+        backend_cls=backend_cls,
+        client_cls=client_cls,
+    )
+    try:
+        gateway.ensure_broker_ready(
+            expected_account_ids=expected_account_ids,
+            trd_env=trd_env,
+        )
+        return gateway
+    except Exception:
+        gateway.close()
+        raise
+
+
+def _normalize_required_account_ids(values: Iterable[str]) -> set[str]:
+    normalized: set[str] = set()
+    for raw in values:
+        value = _normalize_observed_account_id(raw)
+        if value is None:
+            raise FutuGatewayError(
+                "ensure_broker_ready failed: account id is not losslessly comparable"
+            )
+        normalized.add(value)
+    return normalized
+
+
+def _normalize_observed_account_id(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Integral):
+        return str(value)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = int(stripped)
+    except (TypeError, ValueError):
+        return None
+    return stripped if str(parsed) == stripped else None
+
+
+def _normalize_trade_environment(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if "." in raw:
+        raw = raw.rsplit(".", 1)[-1]
+    return raw
+
+
+def _mask_account_id(value: str) -> str:
+    raw = str(value or "")
+    if len(raw) <= 4:
+        return "*" * len(raw)
+    return f"{'*' * (len(raw) - 4)}{raw[-4:]}"
 
 
 def retry_futu_gateway_call(

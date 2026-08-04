@@ -17,6 +17,30 @@ def test_enrich_trade_push_payload_normalizes_existing_nonstandard_account_id() 
     assert out.payload["futu_account_id"] == "123"
 
 
+def test_enrichment_readiness_failure_returns_fallback_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+    payload = {
+        "futu_account_id": "123",
+        "order_id": "order-1",
+        "deal_id": "deal-1",
+        "code": "US.NVDA260821P100000",
+    }
+
+    out = enrich_trade_push_payload_with_account_id(
+        payload,
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123"],
+    )
+
+    assert out.payload == payload
+    assert out.diagnostics["matched_via"] == "broker_readiness_unavailable"
+    assert out.diagnostics["query_errors"][0]["method"] == "broker_readiness"
+
+
 def test_enrich_trade_push_payload_uses_existing_account_id_for_symbol_lookup(monkeypatch) -> None:
     class FakeGateway:
         def get_order_list(self, **kwargs):
@@ -30,7 +54,7 @@ def test_enrich_trade_push_payload_uses_existing_account_id_for_symbol_lookup(mo
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {
             "futu_account_id": "777",
@@ -62,7 +86,7 @@ def test_enrich_trade_push_payload_resolves_account_id_via_order_lookup(monkeypa
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-1", "deal_id": "deal-1"},
         host="127.0.0.1",
@@ -85,7 +109,7 @@ def test_enrich_trade_push_payload_resolves_account_id_via_deal_lookup(monkeypat
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"deal_id": "deal-2"},
         host="127.0.0.1",
@@ -112,7 +136,7 @@ def test_enrich_trade_push_payload_filters_deals_locally_for_sdk_without_deal_id
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"deal_id": "deal-2"},
         host="127.0.0.1",
@@ -139,7 +163,7 @@ def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypat
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-3", "deal_id": "deal-3"},
         host="127.0.0.1",
@@ -166,7 +190,7 @@ def test_enrich_trade_push_payload_unifies_symbol_from_futu_underlying_code(monk
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-5", "deal_id": "deal-5", "code": "HK.POP260528P150000"},
         host="127.0.0.1",
@@ -192,7 +216,7 @@ def test_enrich_trade_push_payload_prefers_futu_underlying_over_option_code_root
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-8", "deal_id": "deal-8", "code": "HK.XYZ260528P150000"},
         host="127.0.0.1",
@@ -218,7 +242,7 @@ def test_enrich_trade_push_payload_canonicalizes_alias_symbol_from_lookup_row(mo
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-6", "deal_id": "deal-6"},
         host="127.0.0.1",
@@ -242,7 +266,7 @@ def test_enrich_trade_push_payload_records_lookup_errors(monkeypatch) -> None:
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-4", "deal_id": "deal-4"},
         host="127.0.0.1",
@@ -268,7 +292,7 @@ def test_enrich_trade_push_payload_canonicalizes_us_prefixed_symbol_from_lookup_
         def close(self):
             return None
 
-    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
     out = enrich_trade_push_payload_with_account_id(
         {"order_id": "order-7", "deal_id": "deal-7"},
         host="127.0.0.1",

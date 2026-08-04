@@ -175,18 +175,29 @@ def run_futu_doctor_checks(
     symbols: list[str] | None = None,
     ensure: bool = False,
     timeout_sec: int | None = None,
+    required_capability: str = "both",
+    expected_account_ids: list[str] | tuple[str, ...] | None = None,
+    trd_env: str = "REAL",
 ) -> dict[str, Any]:
     del timeout_sec
     symbol_list = [str(s).strip() for s in (symbols or []) if str(s).strip()]
     sdk = sdk_status()
 
-    watchdog = run_watchdog_check(host=str(host), port=int(port), ensure=bool(ensure)).to_payload()
+    capability = str(required_capability or "").strip().lower()
+    watchdog = run_watchdog_check(
+        host=str(host),
+        port=int(port),
+        ensure=bool(ensure),
+        required_capability=capability,
+        expected_account_ids=expected_account_ids,
+        trd_env=trd_env,
+    ).to_payload()
     watchdog_ok = bool(watchdog.get("ok"))
     telnet = telnet_status(host=str(telnet_host), port=int(telnet_port))
 
     required_fields = None
     required_fields_raw = ""
-    if bool(sdk.get("ok")) and watchdog_ok and symbol_list:
+    if bool(sdk.get("ok")) and watchdog_ok and symbol_list and capability in {"quote", "both"}:
         try:
             required_fields = check_required_option_fields(
                 symbols=symbol_list,
@@ -208,7 +219,11 @@ def run_futu_doctor_checks(
                     for symbol in symbol_list
                 ],
             }
-    fields_ok = required_fields_ok(required_fields, symbols=symbol_list)
+    fields_ok = (
+        True
+        if capability == "broker"
+        else required_fields_ok(required_fields, symbols=symbol_list)
+    )
     ok = bool(sdk.get("ok")) and watchdog_ok and fields_ok
 
     return {
@@ -218,6 +233,7 @@ def run_futu_doctor_checks(
         "telnet_host": str(telnet_host),
         "telnet_port": int(telnet_port),
         "source": "futu",
+        "required_capability": capability,
         "sdk": sdk,
         "telnet": telnet,
         "watchdog_ok": watchdog_ok,

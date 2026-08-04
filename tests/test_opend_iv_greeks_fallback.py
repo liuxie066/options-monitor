@@ -46,7 +46,7 @@ def _chain_rows(count: int) -> list[dict[str, object]]:
 def _setup_common(monkeypatch, tmp_path: Path, *, gateway) -> Callable[..., dict[str, object]]:
     import src.application.opend_symbol_fetching as mod
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: gateway)
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
     monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())

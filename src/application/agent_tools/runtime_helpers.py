@@ -86,6 +86,9 @@ def run_futu_doctor(
     timeout_sec: int,
     telnet_host: str = "127.0.0.1",
     telnet_port: int = 22222,
+    required_capability: str = "both",
+    expected_account_ids: list[str] | tuple[str, ...] | None = None,
+    trd_env: str = "REAL",
 ) -> dict[str, Any]:
     try:
         return run_futu_doctor_checks(
@@ -95,6 +98,9 @@ def run_futu_doctor(
             telnet_port=int(telnet_port),
             symbols=[str(s) for s in symbols],
             timeout_sec=int(timeout_sec),
+            required_capability=required_capability,
+            expected_account_ids=expected_account_ids,
+            trd_env=trd_env,
         )
     except Exception as exc:
         return {"ok": False, "error_code": "DOCTOR_FAILED", "message": f"{type(exc).__name__}: {exc}"}

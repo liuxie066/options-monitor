@@ -231,7 +231,13 @@ def run_watchdog_check(
     retry_interval_sec: float = 3.0,
     retry_timeout_sec: float = 25.0,
     success_threshold: int = 2,
+    required_capability: str = "both",
+    expected_account_ids: list[str] | tuple[str, ...] | None = None,
+    trd_env: str = "REAL",
 ) -> Health:
+    capability = str(required_capability or "").strip().lower()
+    if capability not in {"quote", "broker", "both"}:
+        raise ValueError("required_capability must be quote, broker, or both")
     h = Health(ok=False, ports_open=False)
 
     if not port_open(host, port):
@@ -267,6 +273,35 @@ def run_watchdog_check(
 
     h.ports_open = True
 
+    if capability == "broker":
+        gateway = None
+        try:
+            from src.infrastructure.futu_gateway import (
+                build_ready_futu_broker_gateway,
+            )
+
+            gateway = build_ready_futu_broker_gateway(
+                host=str(host),
+                port=int(port),
+                expected_account_ids=list(expected_account_ids or []),
+                trd_env=str(trd_env),
+                is_option_chain_cache_enabled=False,
+            )
+            h.ok = True
+            h.state = {
+                "program_status_type": "READY",
+                "trd_logined": True,
+                "required_capability": "broker",
+            }
+            h.message = "OpenD broker capability healthy"
+        except Exception as exc:
+            h.error = f"broker readiness failed: {type(exc).__name__}: {exc}"
+            h.error_code, h.message = classify_watchdog_result(None, h.error)
+        finally:
+            if gateway is not None:
+                gateway.close()
+        return h
+
     try:
         st, err, action = get_global_state(host, port, retry_once=True, ensure=bool(ensure))
         h.action_taken = action
@@ -274,19 +309,26 @@ def run_watchdog_check(
             h.error = err
         if st:
             h.state = st
-            ready = st.get("program_status_type") in (None, "", "READY")
-            qot = bool(st.get("qot_logined", True))
-            trd = bool(st.get("trd_logined", True))
-            if ready and qot and trd:
+            ready = st.get("program_status_type") == "READY"
+            qot = st.get("qot_logined") is True
+            trd = st.get("trd_logined") is True
+            capability_ready = ready and qot and (
+                trd if capability == "both" else True
+            )
+            if capability_ready:
                 h.ok = True
                 h.error_code = None
-                h.message = "OpenD 健康"
+                h.message = (
+                    "OpenD quote capability healthy"
+                    if capability == "quote"
+                    else "OpenD 健康"
+                )
             else:
                 if not ready:
                     h.error = f"OpenD not READY: {st}"
                 elif not qot:
                     h.error = f"OpenD quote not logged in: {st}"
-                elif not trd:
+                elif capability == "both" and not trd:
                     h.error = f"OpenD trade not logged in: {st}"
                 h.error_code, h.message = classify_watchdog_result(st, h.error)
         else:

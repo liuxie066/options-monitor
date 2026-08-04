@@ -29,11 +29,27 @@ def collect_broker_settlement_observation(
     *,
     lifecycle_case: dict[str, Any],
     read_model: dict[str, Any],
-    gateway: Any,
+    gateway: Any | None = None,
+    broker_gateway: Any | None = None,
+    quote_gateway: Any | None = None,
+    quote_dependency_error: str | None = None,
     futu_account_id: str,
+    trd_env: str = "REAL",
     now_ms: int,
 ) -> dict[str, Any]:
     """Collect one frozen, fail-closed settlement observation."""
+
+    broker_gateway = broker_gateway or gateway
+    quote_gateway = quote_gateway or gateway
+    if broker_gateway is None:
+        raise SettlementObservationDataError(
+            "settlement observation requires a broker gateway"
+        )
+    environment = str(trd_env or "").strip().upper()
+    if environment not in {"REAL", "SIMULATE"}:
+        raise SettlementObservationDataError(
+            "settlement observation trade environment is invalid"
+        )
 
     case_id = str(lifecycle_case.get("case_id") or "").strip()
     account = str(lifecycle_case.get("account") or "").strip().lower()
@@ -137,7 +153,7 @@ def collect_broker_settlement_observation(
     query_base = {
         "start": start_ymd,
         "end": end_ymd,
-        "trd_env": "REAL",
+        "trd_env": environment,
         "acc_id": account_id,
     }
     anchor_reason_codes: set[str] = set()
@@ -178,7 +194,7 @@ def collect_broker_settlement_observation(
         source="history_deals",
         query_input=query_base,
         observed_at_ms=now_ms,
-        query=lambda: gateway.get_history_deals(
+        query=lambda: broker_gateway.get_history_deals(
             **query_base,
         ),
     )
@@ -187,7 +203,7 @@ def collect_broker_settlement_observation(
         source="history_orders",
         query_input=query_base,
         observed_at_ms=now_ms,
-        query=lambda: gateway.get_history_orders(
+        query=lambda: broker_gateway.get_history_orders(
             **query_base,
         ),
     )
@@ -195,13 +211,13 @@ def collect_broker_settlement_observation(
     positions = _query_receipt(
         source="fresh_positions",
         query_input={
-            "trd_env": "REAL",
+            "trd_env": environment,
             "acc_id": account_id,
             "refresh_cache": True,
         },
         observed_at_ms=now_ms,
-        query=lambda: gateway.get_positions_with_receipt(
-            trd_env="REAL",
+        query=lambda: broker_gateway.get_positions_with_receipt(
+            trd_env=environment,
             acc_id=account_id,
             refresh_cache=True,
         ),
@@ -229,14 +245,14 @@ def collect_broker_settlement_observation(
                     source="account_cash_flows",
                     query_input={
                         "clearing_date": day_text,
-                        "trd_env": "REAL",
+                        "trd_env": environment,
                         "acc_id": account_id,
                     },
                     observed_at_ms=now_ms,
                     query=lambda day=day_text: (
-                        gateway.get_account_cash_flows(
+                        broker_gateway.get_account_cash_flows(
                             clearing_date=day,
-                            trd_env="REAL",
+                            trd_env=environment,
                             acc_id=account_id,
                         )
                     ),
@@ -269,20 +285,36 @@ def collect_broker_settlement_observation(
         if frozen_calendar_days
         else end_ymd
     )
-    calendar = _query_receipt(
-        source="trading_calendar",
-        query_input={
-            "market": market,
-            "start": calendar_start,
-            "end": calendar_end,
-        },
-        observed_at_ms=now_ms,
-        query=lambda: gateway.get_trading_days_with_receipt(
-            market=market,
-            start=calendar_start,
-            end=calendar_end,
-        ),
-    )
+    calendar_input = {
+        "market": market,
+        "start": calendar_start,
+        "end": calendar_end,
+    }
+    if quote_gateway is None:
+        calendar = build_settlement_source_receipt(
+            source="trading_calendar",
+            query_input=calendar_input,
+            rows=[],
+            observed_at_ms=now_ms,
+            retcode="dependency_unavailable",
+            coverage_complete=False,
+            pagination_complete=False,
+            error=(
+                str(quote_dependency_error or "").strip()
+                or "Futu quote dependency is unavailable"
+            ),
+        )
+    else:
+        calendar = _query_receipt(
+            source="trading_calendar",
+            query_input=calendar_input,
+            observed_at_ms=now_ms,
+            query=lambda: quote_gateway.get_trading_days_with_receipt(
+                market=market,
+                start=calendar_start,
+                end=calendar_end,
+            ),
+        )
     receipts["trading_calendar"] = calendar
     receipts["contract_metadata"] = (
         build_settlement_source_receipt(
@@ -525,20 +557,42 @@ def collect_broker_settlement_observation(
 def build_settlement_observation_collector(
     *,
     repo: Any,
-    gateway: Any,
-    futu_account_id: str,
+    gateway: Any | None = None,
+    broker_gateway: Any | None = None,
+    quote_gateway: Any | None = None,
+    quote_dependency_error: str | None = None,
+    futu_account_id: str | None = None,
+    futu_account_ids: Iterable[str] | None = None,
+    trd_env: str = "REAL",
     now_ms_fn: Callable[[], int],
 ) -> Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]:
-    return lambda lifecycle_case, read_model: (
-        collect_broker_settlement_observation(
+    broker = broker_gateway or gateway
+    quote = quote_gateway or gateway
+    allowed = {
+        str(value or "").strip()
+        for value in ([futu_account_id] if futu_account_id else list(futu_account_ids or []))
+        if str(value or "").strip()
+    }
+
+    def collect(lifecycle_case: dict[str, Any], read_model: dict[str, Any]) -> dict[str, Any]:
+        case_account_id = str(lifecycle_case.get("futu_account_id") or "").strip()
+        if case_account_id not in allowed:
+            raise SettlementObservationDataError(
+                "lifecycle case Futu account binding is outside the source binding set"
+            )
+        return collect_broker_settlement_observation(
             repo,
             lifecycle_case=lifecycle_case,
             read_model=read_model,
-            gateway=gateway,
-            futu_account_id=futu_account_id,
+            broker_gateway=broker,
+            quote_gateway=quote,
+            quote_dependency_error=quote_dependency_error,
+            futu_account_id=case_account_id,
+            trd_env=trd_env,
             now_ms=int(now_ms_fn()),
         )
-    )
+
+    return collect
 
 
 def _query_receipt(

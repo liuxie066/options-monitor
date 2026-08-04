@@ -27,7 +27,7 @@ def test_refresh_assigned_stock_quote_snapshots_reuses_gateway(monkeypatch, tmp_
         calls.append({"gateway_kwargs": dict(kwargs)})
         return gateway
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", _build_gateway)
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", _build_gateway)
 
     result = mod.refresh_assigned_stock_quote_snapshots(
         [{"symbol": "NVDA", "shares_remaining": 100}],
@@ -85,13 +85,13 @@ def test_refresh_assigned_stock_quote_snapshots_separates_alias_and_state_base_d
         calls.append({"stage": "snapshot", "code": code, "base_dir": kwargs.get("base_dir")})
         return 101.0
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
     monkeypatch.setattr(mod, "normalize_underlier", _normalize_underlier)
     monkeypatch.setattr(mod, "get_spot_opend", _get_spot_opend)
 
     result = mod.refresh_assigned_stock_quote_snapshots(
         [{"symbol": "NVDA", "shares_remaining": 100}],
-        cfg={},
+        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
         base_dir=alias_base_dir,
         state_base_dir=state_base_dir,
     )
@@ -113,11 +113,11 @@ def test_refresh_assigned_stock_quote_snapshots_degrades_when_price_missing(monk
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
 
     result = mod.refresh_assigned_stock_quote_snapshots(
         [{"symbol": "NVDA", "shares_remaining": 100}],
-        cfg={},
+        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
         base_dir=tmp_path,
     )
 
@@ -126,3 +126,64 @@ def test_refresh_assigned_stock_quote_snapshots_degrades_when_price_missing(monk
     assert result.diagnostics["missing_symbols"] == ["NVDA"]
     assert result.diagnostics["errors"][0]["error_code"] == "MISSING_PRICE"
     assert result.warnings == ["assigned stock quote refresh missing: NVDA"]
+
+
+def test_assigned_stock_complete_explicit_override_does_not_require_canonical_route(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import src.application.positions.assigned_stock_quotes as mod
+
+    calls: list[dict[str, Any]] = []
+
+    class _Gateway:
+        def get_snapshot(self, codes):
+            return [{"code": list(codes)[0], "last_price": 10}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        mod,
+        "build_ready_futu_quote_gateway",
+        lambda **kwargs: calls.append(kwargs) or _Gateway(),
+    )
+    result = mod.refresh_assigned_stock_quote_snapshots(
+        [{"symbol": "NVDA", "shares_remaining": 1}],
+        cfg={},
+        host="diagnostic",
+        port=22222,
+        base_dir=tmp_path,
+    )
+
+    assert calls[0]["host"] == "diagnostic"
+    assert calls[0]["port"] == 22222
+    assert result.diagnostics["route_source"] == "explicit_diagnostic_override"
+
+
+def test_assigned_stock_partial_override_overlays_canonical_route(monkeypatch, tmp_path: Path) -> None:
+    import src.application.positions.assigned_stock_quotes as mod
+
+    calls: list[dict[str, Any]] = []
+
+    class _Gateway:
+        def get_snapshot(self, codes):
+            return [{"code": list(codes)[0], "last_price": 10}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        mod,
+        "build_ready_futu_quote_gateway",
+        lambda **kwargs: calls.append(kwargs) or _Gateway(),
+    )
+    result = mod.refresh_assigned_stock_quote_snapshots(
+        [{"symbol": "NVDA", "shares_remaining": 1}],
+        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu", "host": "canonical", "port": 11111}}]},
+        port=33333,
+        base_dir=tmp_path,
+    )
+
+    assert calls[0]["host"] == "canonical"
+    assert calls[0]["port"] == 33333
+    assert result.diagnostics["route_source"] == "explicit_diagnostic_override"

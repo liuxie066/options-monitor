@@ -6,7 +6,7 @@ from typing import Any
 from src.application.events.prefetch import normalize_event_source_provider
 from src.application.events.source_futu import fetch_symbol_events_futu
 from src.application.events.source_yfinance import EventSourceError, classify_event_source_error, fetch_symbol_events_yfinance
-from src.infrastructure.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 
 def probe_event_source(
@@ -78,7 +78,7 @@ def _probe_futu(*, symbols: list[str], host: str, port: int) -> dict[str, Any]:
     rows: dict[str, dict[str, Any]] = {}
     gateway = None
     try:
-        gateway = build_ready_futu_gateway(host=str(host), port=int(port), is_option_chain_cache_enabled=False)
+        gateway = build_ready_futu_quote_gateway(host=str(host), port=int(port), is_option_chain_cache_enabled=False)
     except Exception as exc:
         error = _error_payload(exc, provider="futu")
         return {

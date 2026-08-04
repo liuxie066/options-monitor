@@ -45,6 +45,12 @@ def add_config_commands(subparsers: Any) -> None:
     validate.add_argument("--config-yaml", default=None)
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
+    validate.add_argument(
+        "--related-config-path",
+        action="append",
+        default=None,
+        help="additional generated runtime JSON to include in Futu routing audit; repeatable",
+    )
     validate.add_argument("--market", default=None, choices=("us", "hk"))
     build = config_sub.add_parser("build", help="build canonical runtime config from config.yaml")
     build.add_argument("--source", default="yaml", metavar="{yaml}", help="authoring source; defaults to yaml")
@@ -128,6 +134,8 @@ def _reject_runtime_validate_flags_for_yaml_source(args: argparse.Namespace) -> 
         runtime_flags.append("--config-key")
     if str(getattr(args, "config_path", "") or "").strip():
         runtime_flags.append("--config-path")
+    if list(getattr(args, "related_config_path", None) or []):
+        runtime_flags.append("--related-config-path")
     if runtime_flags:
         raise AgentToolError(
             code="INPUT_ERROR",
@@ -208,11 +216,44 @@ def handle_config_command(
                 config_path=args.config_yaml,
             )
         _reject_yaml_validate_flags_for_runtime_source(args)
-        return validate_runtime_config_fn(
+        result = validate_runtime_config_fn(
             config_key=args.config_key,
             config_path=args.config_path,
             market=args.market,
         )
+        related_paths = list(getattr(args, "related_config_path", None) or [])
+        if not related_paths:
+            return result
+        primary_path, primary_cfg = load_runtime_config(
+            config_key=args.config_key,
+            config_path=args.config_path,
+            expected_market=args.market,
+        )
+        resolved_paths = [primary_path.resolve()]
+        loaded: list[tuple[str | None, Path, dict[str, Any]]] = [
+            (str(args.config_key or "").strip().lower() or None, primary_path, primary_cfg)
+        ]
+        markets = {str(result.get("market") or "").strip().upper()}
+        for raw_path in related_paths:
+            path, cfg = load_runtime_config(config_path=raw_path)
+            resolved = path.resolve()
+            if resolved in resolved_paths:
+                raise AgentToolError(code="INPUT_ERROR", message="runtime config paths must be unique")
+            readiness = require_runtime_config_readiness(
+                dict(cfg), repo_root=repo_base_fn(), runtime_config_path=path
+            )
+            related_market = str(readiness.get("market") or "").strip().upper()
+            if related_market in markets:
+                raise AgentToolError(code="INPUT_ERROR", message="runtime config markets must be unique")
+            markets.add(related_market)
+            resolved_paths.append(resolved)
+            loaded.append((related_market.lower() or None, path, cfg))
+        from src.application.futu_routing_audit import build_futu_routing_audit
+
+        audit = build_futu_routing_audit(loaded)
+        result["futu_routing_audit"] = audit
+        result["ok"] = bool(result.get("ok", True) and audit["ok"])
+        return result
 
     if args.config_command == "build":
         _normalize_config_source(args, allowed=("yaml",))

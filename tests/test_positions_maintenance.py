@@ -231,7 +231,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
             }
         ],
     )
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
     monkeypatch.setattr(mod, "normalize_underlier", lambda symbol, *, base_dir: _Underlier())
 
     def _get_spot(_gateway: Any, code: str, **_kwargs: Any) -> float:
@@ -246,6 +246,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
             "_generated": {"market": "hk"},
             "portfolio": {"data_config": str(data_config), "broker": "富途"},
             "option_positions": {"auto_close": {"grace_days": 1}},
+            "symbols": [{"symbol": "0700.HK", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}}],
         },
         account="sy",
         broker="富途",
@@ -304,7 +305,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
     )
     monkeypatch.setattr(
         mod,
-        "build_ready_futu_gateway",
+        "build_ready_futu_quote_gateway",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend unavailable")),
     )
 
@@ -314,6 +315,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
             "_generated": {"market": "us"},
             "portfolio": {"data_config": str(data_config), "broker": "富途"},
             "option_positions": {"auto_close": {"grace_days": 1}},
+            "symbols": [{"symbol": "PDD", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}}],
         },
         account="sy",
         broker="富途",

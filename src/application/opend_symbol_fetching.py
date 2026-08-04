@@ -33,7 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.infrastructure.futu_gateway import (
-    build_ready_futu_gateway,
+    build_ready_futu_quote_gateway,
     retry_futu_gateway_call,
 )
 from src.application.opend_utils import normalize_underlier, get_trading_date
@@ -356,7 +356,7 @@ def fetch_symbol_request(
     if external_gateway:
         gateway = request.gateway
     else:
-        gateway = build_ready_futu_gateway(
+        gateway = build_ready_futu_quote_gateway(
             host=host,
             port=int(port),
             is_option_chain_cache_enabled=bool(chain_cache),

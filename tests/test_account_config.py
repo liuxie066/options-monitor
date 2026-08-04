@@ -216,6 +216,69 @@ def test_resolve_futu_account_ids_falls_back_to_legacy_trade_mapping() -> None:
     assert resolve_futu_account_ids(cfg, account="lx") == ["legacy-id"]
 
 
+def test_broker_binding_set_unions_ids_across_markets() -> None:
+    from src.application.account_config import resolve_account_broker_binding_sets
+
+    def config(market: str, account_id: str) -> dict:
+        return {
+            "_generated": {"market": market},
+            "accounts": ["lx"],
+            "account_settings": {
+                "lx": {"type": "futu", "futu": {"host": "broker.local", "port": 11112, "account_id": account_id, "trd_env": "REAL"}}
+            },
+            "symbols": [{"symbol": "S", "fetch": {"source": "futu", "host": "quote", "port": 11111}}],
+        }
+
+    binding = resolve_account_broker_binding_sets(
+        [("us", config("us", "1001")), ("hk", config("hk", "1002"))]
+    )["lx"]
+
+    assert binding.ok is True
+    assert binding.required_account_ids == ("1001", "1002")
+    assert (binding.host, binding.port, binding.trd_env) == ("broker.local", 11112, "REAL")
+
+
+def test_broker_binding_set_rejects_shared_multi_account_endpoint() -> None:
+    from src.application.account_config import resolve_account_broker_binding_sets
+
+    cfg = {
+        "_generated": {"market": "us"},
+        "accounts": ["lx", "sy"],
+        "account_settings": {
+            account: {"type": "futu", "futu": {"host": "broker", "port": 11111, "account_id": account_id, "trd_env": "REAL"}}
+            for account, account_id in (("lx", "1001"), ("sy", "1002"))
+        },
+        "symbols": [{"symbol": "S", "fetch": {"source": "futu"}}],
+    }
+
+    bindings = resolve_account_broker_binding_sets([("us", cfg)])
+
+    assert bindings["lx"].status == "conflict"
+    assert bindings["sy"].status == "conflict"
+
+
+def test_sole_futu_account_can_use_legacy_projection_with_warning() -> None:
+    from src.application.account_config import resolve_account_broker_binding_sets
+
+    cfg = {
+        "_generated": {"market": "us"},
+        "accounts": ["lx", "sy"],
+        "account_settings": {
+            "lx": {"type": "futu", "futu": {"account_id": "1001"}},
+            "sy": {"type": "external_holdings"},
+        },
+        "portfolio": {"futu": {"host": "broker", "port": 11112}},
+        "symbols": [{"symbol": "S", "fetch": {"source": "futu", "host": "quote", "port": 11111}}],
+    }
+
+    binding = resolve_account_broker_binding_sets([("us", cfg)])["lx"]
+
+    assert binding.ok is True
+    assert binding.trd_env == "REAL"
+    assert binding.members[0].authority_source == "legacy_single_futu_projection"
+    assert binding.compatibility_warnings
+
+
 def test_parse_option_message_accepts_configured_account_labels() -> None:
     from src.application.parse_option_message import parse_account
 
