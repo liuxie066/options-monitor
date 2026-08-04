@@ -61,6 +61,23 @@ For live quality or runtime questions, start with existing state:
 
 Do not run tick, send notifications, mutate positions, sync Feishu, or deploy unless the user explicitly asks for that side effect.
 
+### Futu quote and broker capability routing
+
+Generic market facts use the effective Futu bindings from `symbols[].fetch`; account facts use the selected account's broker binding. These are separate authorities even when both resolve to the same OpenD process. Quote-only code must not construct a trade context, and broker-only code must not construct a quote context.
+
+Before applying a multi-market or multi-account runtime configuration, validate all rendered configs together:
+
+```bash
+./om config validate \
+  --config-path /path/to/config.us.json \
+  --market us \
+  --related-config-path /path/to/config.hk.json
+```
+
+The additive `futu_routing_audit.v1` result is read-only and contains masked account identities. It fails when quote bindings do not converge, one account drifts across runtime configs, multiple Futu accounts share a broker endpoint, required account IDs are incomplete, or an enabled direct trade-intake source differs from its broker binding. This validates configured endpoints only; production rollout must still prove that distinct broker endpoints map to distinct OpenD PIDs.
+
+`healthcheck` reports typed `opend_quote_readiness_<endpoint>` and `opend_broker_readiness_<account>_<endpoint>` facts while preserving the legacy readiness summary projection. An account's primary Futu path depends on broker readiness, not quote readiness.
+
 For explicit Control operation diagnosis, read the durable operation timeline:
 
 ```bash

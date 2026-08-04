@@ -1500,6 +1500,28 @@ def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None
     assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us"}]
 
 
+def test_config_validate_rejects_related_runtime_paths_for_yaml_source(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main([
+        "config",
+        "validate",
+        "--source",
+        "yaml",
+        "--market",
+        "us",
+        "--config-yaml",
+        "config.yaml",
+        "--related-config-path",
+        "config.hk.json",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["flags"] == ["--related-config-path"]
+
+
 @pytest.mark.parametrize("argv", [["config", "build", "--help"], ["config", "explain", "--help"]])
 def test_config_authoring_help_hides_legacy_flags(argv: list[str], capsys) -> None:
     import src.interfaces.cli.main as cli

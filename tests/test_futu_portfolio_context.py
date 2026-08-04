@@ -259,10 +259,10 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
         def close(self):
             return None
 
-    old_build_gateway = fc.build_ready_futu_gateway
+    old_build_gateway = fc.build_ready_futu_broker_gateway
     fake_gateway = _FakeGateway()
     try:
-        fc.build_ready_futu_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
             cfg={
                 "portfolio": {
@@ -286,7 +286,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
             base_currency="CNY",
         )
     finally:
-        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = old_build_gateway  # type: ignore[assignment]
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
@@ -311,9 +311,9 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
         def close(self):
             return None
 
-    old_build_gateway = fc.build_ready_futu_gateway
+    old_build_gateway = fc.build_ready_futu_broker_gateway
     try:
-        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
             cfg={
                 "accounts": ["lx"],
@@ -332,7 +332,7 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
             account="lx",
         )
     finally:
-        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = old_build_gateway  # type: ignore[assignment]
 
     assert captured["balance"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
     assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
@@ -355,9 +355,9 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
         def close(self):
             return None
 
-    old_build_gateway = fc.build_ready_futu_gateway
+    old_build_gateway = fc.build_ready_futu_broker_gateway
     try:
-        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
         with pytest.raises(ValueError, match="mapped account_id=not-a-number"):
             fc.fetch_futu_portfolio_context(
                 cfg={
@@ -381,7 +381,7 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
                 base_currency="CNY",
             )
     finally:
-        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = old_build_gateway  # type: ignore[assignment]
 
 
 def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> None:
@@ -530,9 +530,9 @@ def test_fetch_futu_portfolio_context_passes_trd_env_and_filters_simulate_rows()
         def close(self):
             return None
 
-    old_build_gateway = fc.build_ready_futu_gateway
+    old_build_gateway = fc.build_ready_futu_broker_gateway
     try:
-        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
             cfg={
                 "account_settings": {
@@ -545,7 +545,7 @@ def test_fetch_futu_portfolio_context_passes_trd_env_and_filters_simulate_rows()
             account="lx",
         )
     finally:
-        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_broker_gateway = old_build_gateway  # type: ignore[assignment]
 
     assert captured["balance_kwargs"][0].get("trd_env") == "REAL"
     assert captured["position_kwargs"][0].get("trd_env") == "REAL"

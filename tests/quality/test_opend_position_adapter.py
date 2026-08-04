@@ -20,6 +20,9 @@ def _config() -> dict:
                 },
             }
         },
+        "symbols": [
+            {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111}}
+        ],
     }
 
 
@@ -87,7 +90,12 @@ def test_adapter_enriches_missing_multipliers_from_batched_market_snapshot(
     )
     monkeypatch.setattr(
         adapter_module,
-        "build_ready_futu_gateway",
+        "build_ready_futu_broker_gateway",
+        lambda **_kwargs: gateway,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
     )
     monkeypatch.setattr(
@@ -132,7 +140,12 @@ def test_adapter_fails_closed_when_nonzero_position_multiplier_is_missing(
     )
     monkeypatch.setattr(
         adapter_module,
-        "build_ready_futu_gateway",
+        "build_ready_futu_broker_gateway",
+        lambda **_kwargs: gateway,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "build_ready_futu_quote_gateway",
         lambda **_kwargs: gateway,
     )
     monkeypatch.setattr(

@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.application.events.source_yfinance import EventSourceError, to_date_str
 from src.application.opend_utils import normalize_underlier
-from src.infrastructure.futu_gateway import FutuGateway, build_ready_futu_gateway
+from src.infrastructure.futu_gateway import FutuGateway, build_ready_futu_quote_gateway
 
 
 MIN_FUTU_EVENT_API_VERSION = "10.6.6608"
@@ -53,7 +53,7 @@ def fetch_symbol_event_evidence_futu(
     underlier = normalize_underlier(symbol)
     code = underlier.code
     owned_gateway = gateway is None
-    gw = gateway or build_ready_futu_gateway(host=str(host), port=int(port), is_option_chain_cache_enabled=False)
+    gw = gateway or build_ready_futu_quote_gateway(host=str(host), port=int(port), is_option_chain_cache_enabled=False)
     should_close = bool(owned_gateway if close_gateway is None else close_gateway)
     events: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()

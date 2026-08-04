@@ -21,7 +21,7 @@ from src.application.option_chain_fetching import (
     fetch_option_chains,
     prune_option_chain_cache,
 )
-from src.infrastructure.futu_gateway import build_ready_futu_gateway, retry_futu_gateway_call
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -117,7 +117,7 @@ def list_option_expirations(
         ),
         field_name="option expiration as-of date",
     )
-    gateway = build_ready_futu_gateway(
+    gateway = build_ready_futu_quote_gateway(
         host=host,
         port=int(port),
         is_option_chain_cache_enabled=False,

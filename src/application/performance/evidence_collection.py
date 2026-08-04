@@ -255,14 +255,14 @@ def _default_option_snapshot_rows(
     from src.application.opend_market_snapshot_fetching import fetch_option_snapshots
     from src.application.opend_utils import get_trading_date, normalize_underlier
     from src.application.option_chain_fetching import OptionChainFetchRequest, fetch_option_chains
-    from src.infrastructure.futu_gateway import build_ready_futu_gateway, retry_futu_gateway_call
+    from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
 
     root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
     host = str(cfg.get("opend_host") or cfg.get("host") or "127.0.0.1")
     port = int(cfg.get("opend_port") or cfg.get("port") or 11111)
     limits = resolve_opend_fetch_limits(dict(cfg))
     batch = resolve_opend_batch_config(dict(cfg))
-    gateway = build_ready_futu_gateway(host=host, port=port, is_option_chain_cache_enabled=False)
+    gateway = build_ready_futu_quote_gateway(host=host, port=port, is_option_chain_cache_enabled=False)
     try:
         code_by_key: dict[str, str] = {}
         chain_row_by_key: dict[str, dict[str, Any]] = {}

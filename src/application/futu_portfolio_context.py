@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from src.infrastructure.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import (
@@ -505,9 +505,11 @@ def fetch_futu_portfolio_context(
     if not account_ids:
         raise ValueError(f"no futu account_id for account={account}")
 
-    gateway = build_ready_futu_gateway(
+    gateway = build_ready_futu_broker_gateway(
         host=str(host),
         port=int(port),
+        expected_account_ids=account_ids,
+        trd_env=trd_env,
         is_option_chain_cache_enabled=False,
     )
     try:

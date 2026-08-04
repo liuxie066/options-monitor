@@ -125,7 +125,7 @@ class ThreadLocalFutuGatewayPool:
 
         from src.infrastructure import futu_gateway
 
-        gateway = futu_gateway.build_ready_futu_gateway(
+        gateway = futu_gateway.build_ready_futu_quote_gateway(
             host=str(host),
             port=int(port),
             is_option_chain_cache_enabled=bool(chain_cache),

@@ -22,10 +22,13 @@ def ensure_lifecycle_timing_after_intake(
     *,
     payload: dict[str, Any],
     result: dict[str, Any],
-    gateway: Any,
+    gateway: Any | None = None,
+    quote_gateway: Any | None = None,
+    quote_dependency_error: str | None = None,
     now_ms: int,
     apply_changes: bool,
 ) -> dict[str, Any] | None:
+    quote_gateway = quote_gateway or gateway
     adoption = _lifecycle_adoption(result)
     lifecycle_case = (
         dict(adoption.get("lifecycle_case") or {})
@@ -47,6 +50,11 @@ def ensure_lifecycle_timing_after_intake(
         }
     else:
         try:
+            if quote_gateway is None:
+                raise RuntimeError(
+                    str(quote_dependency_error or "").strip()
+                    or "Futu quote dependency is unavailable"
+                )
             contract_metadata = _registry_contract_metadata(
                 payload,
                 lifecycle_case=lifecycle_case,
@@ -66,7 +74,7 @@ def ensure_lifecycle_timing_after_intake(
                 or ""
             ).strip().upper()
             calendar_result = (
-                gateway.get_trading_days_with_receipt(
+                quote_gateway.get_trading_days_with_receipt(
                     market=market,
                     start=calendar_start,
                     end=calendar_end,
@@ -86,7 +94,7 @@ def ensure_lifecycle_timing_after_intake(
                 )
             ):
                 raise ValueError(
-                    "broker trading calendar coverage is incomplete"
+                    "Futu quote trading calendar coverage is incomplete"
                 )
             binding = bind_lifecycle_timing_policy(
                 repo,
@@ -156,7 +164,11 @@ def reconcile_due_lifecycle_cases_for_source(
     repo: Any,
     *,
     source: dict[str, Any],
-    gateway: Any,
+    gateway: Any | None = None,
+    broker_gateway: Any | None = None,
+    quote_gateway: Any | None = None,
+    quote_dependency_error: str | None = None,
+    trd_env: str = "REAL",
     now_ms: int,
     apply_changes: bool,
 ) -> dict[str, Any]:
@@ -166,14 +178,18 @@ def reconcile_due_lifecycle_cases_for_source(
         for item in list(source.get("futu_account_ids") or [])
         if str(item or "").strip()
     ]
-    if not account or len(account_ids) != 1:
+    if not account or not account_ids:
         raise ValueError(
-            "due lifecycle source requires one account and Futu account id"
+            "due lifecycle source requires one account and at least one Futu account id"
         )
     collector = build_settlement_observation_collector(
         repo=repo,
         gateway=gateway,
-        futu_account_id=account_ids[0],
+        broker_gateway=broker_gateway,
+        quote_gateway=quote_gateway,
+        quote_dependency_error=quote_dependency_error,
+        futu_account_ids=account_ids,
+        trd_env=trd_env,
         now_ms_fn=lambda: int(now_ms),
     )
     return reconcile_due_lifecycle_cases(

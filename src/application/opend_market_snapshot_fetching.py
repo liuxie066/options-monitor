@@ -13,7 +13,7 @@ from src.application.opend_fetch_config import (
 )
 from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
-from src.infrastructure.futu_gateway import build_ready_futu_gateway, retry_futu_gateway_call
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -160,7 +160,7 @@ def get_underlier_spot(
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
 ) -> float | None:
-    gateway = build_ready_futu_gateway(
+    gateway = build_ready_futu_quote_gateway(
         host=host,
         port=int(port),
         is_option_chain_cache_enabled=False,

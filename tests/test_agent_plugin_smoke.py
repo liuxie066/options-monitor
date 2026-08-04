@@ -190,6 +190,7 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
 
     targets = {
         "run_futu_doctor": (diagnostics_tools,),
+        "build_ready_futu_broker_gateway": (diagnostics_tools,),
         "load_option_positions_repo": (diagnostics_tools,),
         "load_portfolio_context": (materialization_tools,),
         "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
@@ -210,7 +211,14 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
 
 
 def _patch_healthcheck_dependencies(monkeypatch, **overrides: Any) -> None:
-    deps = {"run_futu_doctor": _futu_doctor_ok}
+    class _ReadyGateway:
+        def close(self) -> None:
+            pass
+
+    deps = {
+        "run_futu_doctor": _futu_doctor_ok,
+        "build_ready_futu_broker_gateway": lambda **_kwargs: _ReadyGateway(),
+    }
     deps.update(overrides)
     _patch_agent_tool_dependencies(monkeypatch, **deps)
 
@@ -252,6 +260,198 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert primary["value"]["user1"]["source"] == "futu"
     assert any(item["name"] == "starter_symbols" and item["status"] == "warn" for item in out["data"]["checks"])
     assert any("starter account label 'user1'" in item for item in out["warnings"])
+
+
+def test_healthcheck_quote_failure_keeps_broker_primary_but_fails_legacy_summary(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    _patch_healthcheck_dependencies(
+        monkeypatch,
+        run_futu_doctor=lambda **_kwargs: {
+            "ok": False,
+            "message": "quote unavailable",
+            "watchdog": {"ok": False, "error": "quote unavailable"},
+            "telnet": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    quote_check = next(
+        item for item in out["data"]["checks"]
+        if item["name"].startswith("opend_quote_readiness_")
+    )
+    assert quote_check["status"] == "error"
+    assert quote_check["summary_excluded"] is True
+    assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
+    aggregate = next(
+        item for item in out["data"]["checks"]
+        if item["name"] == "opend_readiness"
+    )
+    assert aggregate["status"] == "error"
+    assert out["data"]["summary"]["ok"] is False
+    assert out["data"]["summary"]["critical_count"] >= 1
+
+
+def test_healthcheck_quote_doctor_preserves_field_failure_and_telnet_evidence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    def _quote_doctor(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "ok": False,
+            "sdk": {"ok": True},
+            "watchdog_ok": True,
+            "watchdog": {
+                "ok": True,
+                "message": "OpenD quote capability healthy",
+                "state": {
+                    "program_status_type": "READY",
+                    "qot_logined": True,
+                    "trd_logined": False,
+                },
+            },
+            "telnet": {"ok": False, "host": "127.0.0.1", "port": 22222},
+            "required_fields": {
+                "results": [{"symbol": "NVDA", "ok": False}],
+            },
+            "required_fields_ok": False,
+        }
+
+    _patch_healthcheck_dependencies(monkeypatch, run_futu_doctor=_quote_doctor)
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert len(calls) == 1
+    assert calls[0]["required_capability"] == "quote"
+    assert calls[0]["symbols"] == ["NVDA"]
+    quote_check = next(
+        item for item in out["data"]["checks"]
+        if item["name"].startswith("opend_quote_readiness_")
+    )
+    endpoint_check = next(
+        item for item in out["data"]["checks"]
+        if item["name"].startswith("opend_readiness_127_0_0_1_")
+    )
+    aggregate = next(
+        item for item in out["data"]["checks"]
+        if item["name"] == "opend_readiness"
+    )
+    assert quote_check["status"] == "error"
+    assert quote_check["value"]["global_state"]["qot_logined"] is True
+    assert quote_check["value"]["telnet"]["ok"] is False
+    assert endpoint_check["status"] == "error"
+    assert endpoint_check["value"]["telnet"]["ok"] is False
+    assert aggregate["status"] == "error"
+    assert "required option fields" in quote_check["message"]
+    assert "healthy" not in quote_check["message"]
+    assert "required option fields" in endpoint_check["message"]
+    assert out["data"]["summary"]["ok"] is False
+    assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
+    assert any("Telnet is not listening" in warning for warning in out["warnings"])
+
+
+def test_healthcheck_quote_doctor_uses_profile_resolved_route_member(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    non_futu = dict(cfg["symbols"][0])
+    non_futu["symbol"] = "AAPL"
+    non_futu.pop("fetch", None)
+    non_futu["use"] = ["non_futu"]
+    futu = dict(cfg["symbols"][0])
+    futu.pop("fetch", None)
+    futu["use"] = ["futu_alias"]
+    cfg["templates"].update(
+        {
+            "non_futu": {"fetch": {"source": "yfinance"}},
+            "futu_alias": {
+                "fetch": {
+                    "source": "futu_api",
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                }
+            },
+        }
+    )
+    cfg["symbols"] = [non_futu, futu]
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    def _quote_doctor(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog_ok": True,
+            "watchdog": {"ok": True, "message": "OpenD quote capability healthy"},
+            "required_fields_ok": True,
+            "telnet": {"ok": True},
+        }
+
+    _patch_healthcheck_dependencies(monkeypatch, run_futu_doctor=_quote_doctor)
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert len(calls) == 1
+    assert calls[0]["symbols"] == ["NVDA"]
+
+
+def test_healthcheck_normalizes_shared_endpoint_and_preserves_telnet_binding(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["account_settings"]["user1"]["futu"].update(
+        {"host": "LOCALHOST", "telnet_port": 33333}
+    )
+    cfg["symbols"][0]["fetch"]["host"] = "localhost"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    def _quote_doctor(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog_ok": True,
+            "watchdog": {"ok": True, "message": "OpenD quote capability healthy"},
+            "required_fields_ok": True,
+            "telnet": {"ok": True, "port": kwargs["telnet_port"]},
+        }
+
+    _patch_healthcheck_dependencies(monkeypatch, run_futu_doctor=_quote_doctor)
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert len(calls) == 1
+    assert calls[0]["host"] == "localhost"
+    assert calls[0]["telnet_port"] == 33333
+    endpoint_checks = [
+        item for item in out["data"]["checks"]
+        if item["name"].startswith("opend_readiness_")
+        and item["name"] != "opend_readiness_global"
+    ]
+    assert [item["name"] for item in endpoint_checks] == [
+        "opend_readiness_localhost_11111"
+    ]
+    assert endpoint_checks[0]["value"]["accounts"] == ["user1"]
+    assert endpoint_checks[0]["value"]["telnet"]["port"] == 33333
 
 
 def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_symbol(

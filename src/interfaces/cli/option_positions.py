@@ -66,6 +66,8 @@ from src.application.trades.account_mapping import (
     combo_reconciliation_mode_for_account,
     resolve_trade_intake_config,
 )
+from src.application.account_config import resolve_account_broker_binding_sets
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.trades.lifecycle_runtime import (
     reconcile_due_lifecycle_cases_for_source,
 )
@@ -83,7 +85,10 @@ from src.application.trades.receipt import (
     send_trade_lifecycle_outbox_payload,
 )
 from src.application.cash_conversion import utc_now_ms
-from src.infrastructure.futu_gateway import build_futu_gateway
+from src.infrastructure.futu_gateway import (
+    build_ready_futu_broker_gateway,
+    build_ready_futu_quote_gateway,
+)
 from src.application.trades.review import replay_trade_events
 from src.application.write_contract import attach_write_contract
 from src.interfaces.cli.ledger_write_safety import add_write_flags as _add_local_write_flags
@@ -1621,23 +1626,43 @@ def main(argv: list[str] | None = None) -> int:
             source = sources[0]
             if not str(source.get("account") or "").strip():
                 source["account"] = account_value
-            gateway = build_futu_gateway(
-                host=str(source.get("host") or "127.0.0.1"),
-                port=int(source.get("port") or 11111),
+            binding = resolve_account_broker_binding_sets(
+                [(None, cfg)]
+            ).get(account_value)
+            quote_route = resolve_futu_quote_route(cfg)
+            if binding is None or not binding.ok or not quote_route.ok:
+                raise SystemExit(
+                    "lifecycle reconcile-due requires valid broker and canonical quote routes"
+                )
+            broker_gateway = build_ready_futu_broker_gateway(
+                host=str(binding.host),
+                port=int(binding.port or 0),
+                expected_account_ids=binding.required_account_ids,
+                trd_env=str(binding.trd_env),
                 is_option_chain_cache_enabled=False,
             )
+            quote_gateway = None
             try:
+                quote_gateway = build_ready_futu_quote_gateway(
+                    host=str(quote_route.host),
+                    port=int(quote_route.port or 0),
+                    is_option_chain_cache_enabled=False,
+                )
                 result = (
                     reconcile_due_lifecycle_cases_for_source(
                         repo,
                         source=source,
-                        gateway=gateway,
+                        broker_gateway=broker_gateway,
+                        quote_gateway=quote_gateway,
+                        trd_env=str(binding.trd_env),
                         now_ms=observed_at_ms,
                         apply_changes=not dry_run,
                     )
                 )
             finally:
-                gateway.close()
+                broker_gateway.close()
+                if quote_gateway is not None:
+                    quote_gateway.close()
             payload = attach_write_contract(
                 {
                     "operation": "lifecycle_reconcile_due",

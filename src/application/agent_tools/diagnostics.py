@@ -4,7 +4,6 @@ from typing import Any
 
 from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.account_config import accounts_from_config
-from src.application.agent_tools.runtime_helpers import healthcheck_symbols_for_futu
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.account_config import list_account_config_views
 from src.application.ledger.api import open_position_ledger as load_option_positions_repo
@@ -12,6 +11,8 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tools.runtime_helpers import mask_account_id
 from src.application.agent_tool_contracts import mask_path
 from src.application.account_config import normalize_accounts
+from src.application.account_config import resolve_account_broker_binding_sets
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.agent_tools.runtime_helpers import read_json_object_or_empty
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tools.runtime_helpers import resolve_data_config_ref
@@ -19,6 +20,9 @@ from src.application.agent_tools.runtime_helpers import resolve_public_data_conf
 from src.application.agent_tools.runtime_helpers import run_futu_doctor
 from src.application.agent_tools.runtime_helpers import validate_runtime_config
 from src.application.agent_tool_config import write_tools_enabled
+from src.infrastructure.futu_gateway import (
+    build_ready_futu_broker_gateway,
+)
 
 
 _OPERATION_TIMELINE_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -53,6 +57,12 @@ _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
         "checks[].name",
         "checks[].status",
         "checks[].message",
+        "checks[].summary_excluded",
+        "checks[].value.capability",
+        "checks[].value.capabilities",
+        "checks[].value.required_account_id_count",
+        "checks[].value.matched_account_id_count",
+        "checks[].value.masked_required_account_ids",
     ],
 }
 
@@ -130,8 +140,10 @@ def _healthcheck_tool(
         infer_futu_portfolio_settings=infer_futu_portfolio_settings,
         load_option_positions_repo=load_option_positions_repo,
         run_futu_doctor=run_futu_doctor,
-        healthcheck_symbols_for_futu=healthcheck_symbols_for_futu,
         write_tools_enabled=write_tools_enabled,
+        resolve_account_broker_binding_sets=resolve_account_broker_binding_sets,
+        resolve_futu_quote_route=resolve_futu_quote_route,
+        build_ready_futu_broker_gateway=build_ready_futu_broker_gateway,
     )
 
 

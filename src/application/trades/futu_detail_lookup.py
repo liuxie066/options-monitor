@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from src.infrastructure.futu_gateway import build_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.symbol_identity import resolve_symbol_identity
 
@@ -223,7 +223,30 @@ def enrich_trade_push_payload_with_account_id(
         diagnostics["matched_via"] = "payload" if existing_account_id else "missing_identifiers"
         return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
 
-    gateway = build_futu_gateway(host=host, port=port, is_option_chain_cache_enabled=False)
+    numeric_candidates = [value for value in candidate_ids if _numeric_account_id(value) is not None]
+    if not numeric_candidates:
+        diagnostics["matched_via"] = "missing_comparable_account_id"
+        return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
+    try:
+        gateway = build_ready_futu_broker_gateway(
+            host=host,
+            port=port,
+            expected_account_ids=numeric_candidates,
+            trd_env="REAL",
+            is_option_chain_cache_enabled=False,
+        )
+    except Exception as exc:
+        diagnostics["matched_via"] = "broker_readiness_unavailable"
+        diagnostics["query_errors"].append(
+            {
+                "method": "broker_readiness",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return TradePushAccountLookupResult(
+            payload=fallback_payload,
+            diagnostics=diagnostics,
+        )
     try:
         candidate_ids = diagnostics["candidate_account_ids"]
         for acc_id in candidate_ids:

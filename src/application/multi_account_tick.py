@@ -72,6 +72,7 @@ from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
     build_tick_scheduler_context,
 )
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
@@ -109,7 +110,15 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
 
     None means guard check failed and caller should continue without blocking.
     """
-    return trading_day_via_futu(cfg, market)
+    market_used = str(market or "").strip().upper() or "US"
+    route = resolve_futu_quote_route(cfg, market=market_used)
+    if not route.ok or route.host is None or route.port is None:
+        return None, market_used
+    return trading_day_via_futu(
+        host=str(route.host),
+        port=int(route.port),
+        market=market_used,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

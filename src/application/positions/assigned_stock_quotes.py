@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from domain.domain.ledger.position_fields import norm_symbol
-from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_fetch_config import resolve_opend_fetch_limits
 from src.application.opend_market_snapshot_fetching import get_spot_opend
 from src.application.opend_utils import normalize_underlier
-from src.infrastructure.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 
 @dataclass(frozen=True)
@@ -48,11 +48,6 @@ def _open_symbols(rows: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def _settings_value(settings: Mapping[str, Any], key: str, fallback: Any) -> Any:
-    value = settings.get(key)
-    return fallback if value in (None, "") else value
-
-
 def refresh_assigned_stock_quote_snapshots(
     lifecycle_rows: list[dict[str, Any]],
     *,
@@ -83,12 +78,43 @@ def refresh_assigned_stock_quote_snapshots(
         diagnostics["status"] = "skipped_no_open_assigned_stock"
         return AssignedStockQuoteRefreshResult([], diagnostics, [])
 
-    settings = infer_futu_portfolio_settings(cfg, account=account)
-    effective_host = str(host or _settings_value(settings, "host", "127.0.0.1"))
-    try:
-        effective_port = int(port if port is not None else _settings_value(settings, "port", 11111))
-    except Exception:
-        effective_port = 11111
+    quote_route = resolve_futu_quote_route(
+        dict(cfg) if isinstance(cfg, Mapping) else {}
+    )
+    explicit_override = host is not None or port is not None
+    if host is not None and port is not None:
+        effective_host = str(host).strip()
+        try:
+            effective_port = int(port)
+        except Exception:
+            effective_port = 0
+    elif explicit_override:
+        effective_host = str(host if host is not None else quote_route.host or "").strip()
+        try:
+            effective_port = int(port if port is not None else quote_route.port or 0)
+        except Exception:
+            effective_port = 0
+    else:
+        effective_host = str(quote_route.host or "").strip()
+        effective_port = int(quote_route.port or 0)
+    diagnostics["route_source"] = (
+        "explicit_diagnostic_override" if explicit_override else "canonical_fetch_binding"
+    )
+    if not effective_host or effective_port <= 0 or (
+        explicit_override and (host is None or port is None) and not quote_route.ok
+    ) or (not explicit_override and not quote_route.ok):
+        diagnostics["status"] = "source_unavailable"
+        diagnostics["missing_symbols"] = list(symbols)
+        diagnostics["errors"].append(
+            {
+                "stage": "route",
+                "error_code": "FUTU_QUOTE_ROUTE_UNAVAILABLE",
+                "message": "canonical Futu quote route is missing or conflicting",
+            }
+        )
+        return AssignedStockQuoteRefreshResult(
+            [], diagnostics, ["assigned stock quote refresh unavailable: canonical Futu quote route"]
+        )
     effective_base_dir = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
     effective_state_base_dir = Path(state_base_dir) if state_base_dir is not None else effective_base_dir
     limits = resolve_opend_fetch_limits(dict(cfg) if isinstance(cfg, Mapping) else None).market_snapshot
@@ -96,7 +122,7 @@ def refresh_assigned_stock_quote_snapshots(
     diagnostics["port"] = effective_port
 
     try:
-        gateway = build_ready_futu_gateway(
+        gateway = build_ready_futu_quote_gateway(
             host=effective_host,
             port=effective_port,
             is_option_chain_cache_enabled=False,

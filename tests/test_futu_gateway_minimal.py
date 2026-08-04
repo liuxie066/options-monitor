@@ -249,3 +249,187 @@ def test_gateway_event_source_methods_delegate_to_quote_client() -> None:
         "next_key": "-1",
         "split_list": [{"ex_date_str": "2026-06-10"}],
     }
+
+
+def test_broker_ready_builder_never_constructs_quote_context() -> None:
+    from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
+
+    class Trade:
+        def get_global_state(self):
+            return 0, {"program_status_type": "READY", "trd_logined": True}
+
+        def get_acc_list(self):
+            return 0, [{"acc_id": "1001", "trd_env": "REAL"}]
+
+        def close(self):
+            pass
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            self._quote_client = None
+            self._trade_client = None
+
+        def _ensure_quote_client(self):
+            raise AssertionError("quote client must not be constructed")
+
+        def _ensure_trade_client(self):
+            if self._trade_client is None:
+                self._trade_client = Trade()
+            return self._trade_client
+
+    class Client:
+        def __init__(self, backend, **_kwargs):
+            self.backend = backend
+
+        @staticmethod
+        def _unwrap(value):
+            return value[1]
+
+        @staticmethod
+        def _rows(value):
+            return list(value)
+
+    gateway = build_ready_futu_broker_gateway(
+        host="broker",
+        port=11112,
+        expected_account_ids=["1001"],
+        trd_env="REAL",
+        backend_cls=Backend,
+        client_cls=Client,
+    )
+
+    assert gateway.backend._quote_client is None
+
+
+def test_broker_readiness_requires_every_identity_in_requested_environment() -> None:
+    from src.infrastructure.futu_gateway import FutuGatewayError, build_ready_futu_broker_gateway
+
+    class Trade:
+        def get_global_state(self):
+            return 0, {"program_status_type": "READY", "trd_logined": True}
+
+        def get_acc_list(self):
+            return 0, [
+                {"acc_id": "1001", "trd_env": "REAL"},
+                {"acc_id": "1002", "trd_env": "SIMULATE"},
+            ]
+
+        def close(self):
+            pass
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            self._quote_client = None
+            self._trade_client = Trade()
+
+        def _ensure_trade_client(self):
+            return self._trade_client
+
+    class Client:
+        def __init__(self, backend, **_kwargs):
+            self.backend = backend
+
+        @staticmethod
+        def _unwrap(value):
+            return value[1]
+
+        @staticmethod
+        def _rows(value):
+            return list(value)
+
+    try:
+        build_ready_futu_broker_gateway(
+            expected_account_ids=["1001", "1002"],
+            trd_env="REAL",
+            backend_cls=Backend,
+            client_cls=Client,
+        )
+    except FutuGatewayError as exc:
+        assert "1002" not in str(exc)
+        assert "****" in str(exc)
+    else:
+        raise AssertionError("expected broker identity readiness failure")
+
+
+def test_broker_readiness_rejects_missing_explicit_global_state_facts() -> None:
+    from src.infrastructure.futu_gateway import FutuGatewayError, build_ready_futu_broker_gateway
+
+    class Trade:
+        def get_global_state(self):
+            return 0, {}
+
+        def get_acc_list(self):
+            return 0, [{"acc_id": "1001", "trd_env": "REAL"}]
+
+        def close(self):
+            pass
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            self._quote_client = None
+            self._trade_client = Trade()
+
+        def _ensure_trade_client(self):
+            return self._trade_client
+
+    class Client:
+        def __init__(self, backend, **_kwargs):
+            self.backend = backend
+
+        @staticmethod
+        def _unwrap(value):
+            return value[1]
+
+        @staticmethod
+        def _rows(value):
+            return list(value)
+
+    try:
+        build_ready_futu_broker_gateway(
+            expected_account_ids=["1001"],
+            trd_env="REAL",
+            backend_cls=Backend,
+            client_cls=Client,
+        )
+    except FutuGatewayError as exc:
+        assert "not READY" in str(exc)
+    else:
+        raise AssertionError("missing readiness facts must fail closed")
+
+
+def test_default_backend_quote_readiness_does_not_construct_trade_context(monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+
+    calls = {"quote": 0, "trade": 0}
+
+    class Quote:
+        def __init__(self, **_kwargs):
+            calls["quote"] += 1
+
+        def get_global_state(self):
+            return 0, {"program_status_type": "READY", "qot_logined": True}
+
+        def close(self):
+            pass
+
+    class Trade:
+        def __init__(self, **_kwargs):
+            calls["trade"] += 1
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            RET_OK=0,
+            OpenQuoteContext=Quote,
+            OpenSecTradeContext=Trade,
+        ),
+    )
+
+    gateway = build_ready_futu_quote_gateway()
+    gateway.close()
+
+    assert calls == {"quote": 1, "trade": 0}

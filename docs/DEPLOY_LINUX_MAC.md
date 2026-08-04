@@ -363,7 +363,7 @@ launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:
 ./om healthcheck --config-key us --accounts lx sy --opend-telnet-host 127.0.0.1 --opend-telnet-port 22222
 ```
 
-`healthcheck` 的 `opend_readiness*` 检查会展示 OpenD global state 和 Telnet 是否监听。Telnet 未监听不会替代 OpenD API readiness，但会明确提示手机验证码无法通过 Telnet 提交。
+`healthcheck` 会分别输出 `opend_quote_readiness_<endpoint>` 与 `opend_broker_readiness_<account>_<endpoint>`，并把两类 capability 投影回既有 `opend_readiness*` aggregate。账户 primary 只依赖对应 broker readiness；legacy aggregate 则在任一 required capability 失败时 fail closed。Telnet 未监听不会替代 OpenD API readiness，但会明确提示手机验证码无法通过 Telnet 提交。
 
 ## 6. 切换旧数据
 
