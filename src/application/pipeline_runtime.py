@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +21,11 @@ from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.pipeline_symbol import process_symbol
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.tick_run_workspace import (
+    AccountRunConfigAuthority,
+    AccountRunConfigError,
+    load_retained_account_run_config,
+)
 
 from domain.storage.repositories import report_repo
 
@@ -64,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Internal: prepared account portfolio-context manifest.",
     )
+    parser.add_argument(
+        "--prepared-portfolio-context-manifest-sha256",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--report-dir", default=None, help="Directory to write reports (symbols_summary/alerts/notification). Default: output_shared/reports")
     parser.add_argument("--state-dir", default=None, help="Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output_shared/state")
     parser.add_argument("--shared-context-dir", default=None, help="Optional shared context cache directory for cross-account reuse within one tick")
@@ -75,7 +88,67 @@ def build_parser() -> argparse.ArgumentParser:
             "candidate capture"
         ),
     )
+    parser.add_argument("--account-config-base", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--account-config-run-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--account-config-account", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--account-config-compatibility-path",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--account-config-sha256", default=None, help=argparse.SUPPRESS)
     return parser
+
+
+def _load_account_config_authority(
+    *,
+    args: argparse.Namespace,
+    cfg_path: Path,
+) -> tuple[dict | None, str | None]:
+    raw_values = (
+        getattr(args, "account_config_base", None),
+        getattr(args, "account_config_run_id", None),
+        getattr(args, "account_config_account", None),
+        getattr(args, "account_config_compatibility_path", None),
+        getattr(args, "account_config_sha256", None),
+    )
+    if not any(value is not None for value in raw_values):
+        return None, None
+    if not all(value is not None and str(value).strip() for value in raw_values):
+        raise SystemExit("[CONFIG_ERROR] account config authority is incomplete")
+
+    digest = str(args.account_config_sha256).strip().lower()
+    encoded = str(os.environ.get("OM_ACCOUNT_CONFIG_CANONICAL_B64") or "").strip()
+    if not encoded:
+        raise SystemExit(
+            "[CONFIG_ERROR] ACCOUNT_CONFIG_CANONICAL_BYTES_MISSING: "
+            "account config authority requires retained canonical bytes"
+        )
+    try:
+        canonical_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise SystemExit(
+            "[CONFIG_ERROR] ACCOUNT_CONFIG_CANONICAL_BYTES_INVALID: "
+            "retained canonical bytes are not valid base64"
+        ) from exc
+    try:
+        authority = AccountRunConfigAuthority(
+            run_id=str(args.account_config_run_id),
+            account=str(args.account_config_account),
+            state_path=cfg_path,
+            compatibility_path=Path(str(args.account_config_compatibility_path)),
+            account_config_sha256=digest,
+            canonical_bytes=canonical_bytes,
+        )
+        config = load_retained_account_run_config(
+            authority=authority,
+            base=Path(str(args.account_config_base)),
+            run_id=str(args.account_config_run_id),
+            account=str(args.account_config_account),
+        )
+    except AccountRunConfigError as exc:
+        raise SystemExit(f"[CONFIG_ERROR] {exc.code}: {exc}") from exc
+    return config, digest
 
 
 def _want(step: str) -> bool:
@@ -115,6 +188,32 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg_path.is_absolute():
         cfg_path = (repo_root / cfg_path).resolve()
 
+    authority_config, account_config_sha256 = _load_account_config_authority(
+        args=args,
+        cfg_path=cfg_path,
+    )
+    if (
+        getattr(args, "prepared_portfolio_context_manifest", None)
+        and authority_config is None
+    ):
+        raise SystemExit(
+            "[CONFIG_ERROR] prepared portfolio context requires account config authority"
+        )
+    prepared_manifest = getattr(
+        args,
+        "prepared_portfolio_context_manifest",
+        None,
+    )
+    prepared_manifest_sha256 = getattr(
+        args,
+        "prepared_portfolio_context_manifest_sha256",
+        None,
+    )
+    if bool(prepared_manifest) != bool(prepared_manifest_sha256):
+        raise SystemExit(
+            "[CONFIG_ERROR] prepared portfolio context authority is incomplete"
+        )
+
     report_dir, state_dir = report_repo.prepare_dirs(
         base=runtime_root,
         report_dir=getattr(args, "report_dir", None),
@@ -128,7 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             from src.application import multiplier_cache
 
             cache_path = multiplier_cache.default_cache_path(runtime_root)
-            cfg0 = json.loads(cfg_path.read_text(encoding="utf-8"))
+            cfg0 = (
+                dict(authority_config)
+                if authority_config is not None
+                else json.loads(cfg_path.read_text(encoding="utf-8"))
+            )
             opend_kwargs = opend_fetch_kwargs(cfg0)
             syms = [
                 item
@@ -165,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         is_scheduled=is_scheduled,
         log=log,
         state_dir=state_dir,
+        config_payload=authority_config,
     )
     if shared_context_dir is not None:
         runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
@@ -229,6 +333,16 @@ def main(argv: list[str] | None = None) -> int:
                 if getattr(args, "prepared_portfolio_context_manifest", None)
                 else None
             ),
+            prepared_portfolio_context_manifest_sha256=(
+                str(args.prepared_portfolio_context_manifest_sha256).strip().lower()
+                if getattr(
+                    args,
+                    "prepared_portfolio_context_manifest_sha256",
+                    None,
+                )
+                else None
+            ),
+            account_config_sha256=account_config_sha256,
         )
 
         symbols = [str(r.get("symbol")) for r in summary_rows if r.get("symbol")]

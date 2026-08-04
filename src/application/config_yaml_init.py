@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import shlex
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from src.application.account_config import normalize_account_label
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
 from src.application.config_primitives import resolve_config_path as _resolve_path
@@ -34,10 +36,13 @@ def _normalize_markets(raw: list[str] | tuple[str, ...] | None) -> list[str]:
 
 
 def _normalize_account_label(raw: str | None) -> str:
-    account = str(raw or "lx").strip().lower()
-    if not account:
-        raise AgentToolError(code="INPUT_ERROR", message="account label must be non-empty")
-    return account
+    try:
+        return normalize_account_label(raw if raw is not None else "lx")
+    except ValueError as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"account label is invalid: {exc}",
+        ) from exc
 
 
 def _normalize_futu_account_id(raw: str | None) -> str:
@@ -77,7 +82,16 @@ def _starter_yaml_payload(
         }
     }
     us_accounts = [account_label]
-    external_account = str(external_holdings_account or "").strip().lower()
+    external_raw = str(external_holdings_account or "").strip()
+    external_account = ""
+    if external_raw:
+        try:
+            external_account = normalize_account_label(external_raw)
+        except ValueError as exc:
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message=f"external holdings account is invalid: {exc}",
+            ) from exc
     if external_account:
         accounts[external_account] = {
             "type": "external_holdings",
@@ -231,6 +245,33 @@ def init_yaml_config(
     yaml_text = _dump_yaml(yaml_payload)
     validation: dict[str, Any] = {}
     build_results: dict[str, Any] = {}
+
+    # Exercise the same parser, market resolver and generated-config builders
+    # against a disposable candidate before the canonical file can be replaced.
+    with tempfile.TemporaryDirectory(prefix="options-monitor-config-init-") as temp_name:
+        staged_yaml = Path(temp_name) / "config.yaml"
+        atomic_write_text(staged_yaml, yaml_text, encoding="utf-8")
+        for market in selected_markets:
+            validate_yaml_runtime_config(
+                repo_root=repo_root,
+                market=market,
+                config_path=staged_yaml,
+            )
+            if build:
+                build_yaml_runtime_config_file(
+                    repo_root=repo_root,
+                    market=market,
+                    config_path=staged_yaml,
+                    output_config_path=Path(temp_name) / f"config.{market}.json",
+                    dry_run=True,
+                )
+        if build:
+            build_yaml_assistant_config_file(
+                repo_root=repo_root,
+                config_path=staged_yaml,
+                output_config_path=Path(temp_name) / "config.assistant.json",
+                dry_run=True,
+            )
 
     if dry_run:
         validation = {
