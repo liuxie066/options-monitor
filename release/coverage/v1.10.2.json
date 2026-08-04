@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.2",
+  "base": {
+    "tag": "v1.10.1",
+    "commit": "2ac1a1944acd7c8c554041d180515f74db0fdd54"
+  },
+  "reviewed_head": "1bc5cad83addbe581f429381ea8100b95bf7fa17",
+  "commits": [
+    {
+      "sha": "21a535a286660d6a3d6a0c02afeac75874d18399",
+      "subject": "fix: adapt Futu account ids at SDK boundary"
+    },
+    {
+      "sha": "1bc5cad83addbe581f429381ea8100b95bf7fa17",
+      "subject": "docs: refresh dependency graph"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Adapted canonical string Futu account IDs to lossless SDK integer values only at the broker adapter boundary, preventing valid real accounts from being rejected as nonexistent while preserving exact account identity in config and durable state.",
+      "commits": [
+        "21a535a286660d6a3d6a0c02afeac75874d18399"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1bc5cad83addbe581f429381ea8100b95bf7fa17",
+      "reason": "Generated dependency graph refresh only; the broker adapter behavior is mapped to its implementation commit."
+    }
+  ]
+}
