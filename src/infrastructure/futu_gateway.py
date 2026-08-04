@@ -90,6 +90,31 @@ class _FutuAPIClient:
         return trade
 
     @staticmethod
+    def _trade_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Adapt canonical string account ids to the Futu SDK wire type."""
+
+        params = dict(kwargs or {})
+        raw_account_id = params.get("acc_id")
+        if raw_account_id is None:
+            return params
+        if isinstance(raw_account_id, bool):
+            raise ValueError("Futu acc_id must be a lossless integer")
+        if isinstance(raw_account_id, Integral):
+            params["acc_id"] = int(raw_account_id)
+            return params
+        if isinstance(raw_account_id, str):
+            stripped = raw_account_id.strip()
+            try:
+                parsed = int(stripped)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Futu acc_id must be a lossless integer") from exc
+            if str(parsed) != stripped:
+                raise ValueError("Futu acc_id must be a lossless integer")
+            params["acc_id"] = parsed
+            return params
+        raise ValueError("Futu acc_id must be a lossless integer")
+
+    @staticmethod
     def _unwrap(result: Any) -> Any:
         try:
             import futu
@@ -153,7 +178,7 @@ class _FutuAPIClient:
             ret_ok = 0
         query = {
             key: value
-            for key, value in dict(kwargs or {}).items()
+            for key, value in self._trade_kwargs(kwargs).items()
             if value is not None
         }
         rows: list[dict[str, Any]] = []
@@ -196,27 +221,39 @@ class _FutuAPIClient:
         return self._unwrap(self._quote().get_market_snapshot(**kwargs))
 
     def get_positions(self, **kwargs: Any) -> Any:
-        return self._unwrap(self._trade().position_list_query(**kwargs))
+        return self._unwrap(
+            self._trade().position_list_query(**self._trade_kwargs(kwargs))
+        )
 
     def get_account_balance(self, **kwargs: Any) -> Any:
-        return self._unwrap(self._trade().accinfo_query(**kwargs))
+        return self._unwrap(
+            self._trade().accinfo_query(**self._trade_kwargs(kwargs))
+        )
 
     def get_funds(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "acctradinginfo_query"):
-            return self._unwrap(trade.acctradinginfo_query(**kwargs))
-        return self._unwrap(trade.accinfo_query(**kwargs))
+            return self._unwrap(
+                trade.acctradinginfo_query(**self._trade_kwargs(kwargs))
+            )
+        return self._unwrap(
+            trade.accinfo_query(**self._trade_kwargs(kwargs))
+        )
 
     def get_order_list(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "order_list_query"):
-            return self._unwrap(trade.order_list_query(**kwargs))
+            return self._unwrap(
+                trade.order_list_query(**self._trade_kwargs(kwargs))
+            )
         raise AttributeError("order_list_query unavailable")
 
     def get_deal_list(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "deal_list_query"):
-            return self._unwrap(trade.deal_list_query(**kwargs))
+            return self._unwrap(
+                trade.deal_list_query(**self._trade_kwargs(kwargs))
+            )
         raise AttributeError("deal_list_query unavailable")
 
     def get_history_orders(self, **kwargs: Any) -> Any:
