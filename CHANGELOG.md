@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.2 - 2026-08-05
+
+### Bug Fixes
+- Adapted canonical string Futu account IDs to lossless SDK integer values only at the broker adapter boundary, preventing valid real accounts from being rejected as nonexistent while preserving exact account identity in config and durable state.
+
 ## 1.10.1 - 2026-08-05
 
 ### Bug Fixes
