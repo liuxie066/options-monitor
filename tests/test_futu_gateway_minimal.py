@@ -336,9 +336,6 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
         def history_deal_list_query(self, **kwargs):
             return self._record("history_deals", kwargs, paginated=True)
 
-        def cash_flow_query(self, **kwargs):
-            return self._record("cash_flows", kwargs)
-
     class Backend:
         def __init__(self, **_kwargs):
             self.trade = Trade()
@@ -356,7 +353,6 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
     gateway.get_deal_list(**common)
     gateway.get_history_orders(**common)
     gateway.get_history_deals(**common)
-    gateway.get_account_cash_flows(**common)
     gateway.get_positions_with_receipt(**common)
 
     assert [name for name, _kwargs in gateway.backend.trade.calls] == [
@@ -367,7 +363,6 @@ def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_inte
         "deals",
         "history_orders",
         "history_deals",
-        "cash_flows",
         "positions",
     ]
     assert all(

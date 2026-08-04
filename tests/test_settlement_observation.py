@@ -364,11 +364,9 @@ class _Gateway:
     def __init__(
         self,
         *,
-        cash_failure_date: str | None = None,
         calendar_rows: list[dict[str, str]] | None = None,
         history_deals: list[dict] | None = None,
     ) -> None:
-        self.cash_failure_date = cash_failure_date
         self.calendar_rows = (
             list(calendar_rows)
             if calendar_rows is not None
@@ -389,7 +387,6 @@ class _Gateway:
         )
         self.history_deal_queries: list[dict] = []
         self.position_queries: list[dict] = []
-        self.cash_queries: list[dict] = []
         self.calendar_queries: list[dict] = []
 
     def get_history_deals(self, **kwargs: object) -> dict:
@@ -411,23 +408,6 @@ class _Gateway:
         **kwargs: object,
     ) -> dict:
         self.position_queries.append(dict(kwargs))
-        return _complete_receipt([])
-
-    def get_account_cash_flows(
-        self,
-        *,
-        clearing_date: str,
-        **kwargs: object,
-    ) -> dict:
-        self.cash_queries.append({"clearing_date": clearing_date, **kwargs})
-        if clearing_date == self.cash_failure_date:
-            return {
-                "retcode": -1,
-                "coverage_complete": False,
-                "pagination_complete": False,
-                "rows": [],
-                "error": "cash query failed",
-            }
         return _complete_receipt([])
 
     def get_trading_days_with_receipt(
@@ -476,11 +456,7 @@ def test_complete_observation_revalidates_frozen_calendar_window(
             "end": "2026-09-04",
         }
     ]
-    date_receipts = observation["source_receipts"][
-        "account_cash_flows"
-    ]["date_receipts"]
-    assert len(date_receipts) == 5
-    assert all(item["status"] == "complete" for item in date_receipts)
+    assert "account_cash_flows" not in observation["source_receipts"]
 
 
 def test_missing_quote_dependency_preserves_broker_receipts_and_trade_environment(
@@ -509,34 +485,10 @@ def test_missing_quote_dependency_preserves_broker_receipts_and_trade_environmen
     assert broker.history_deal_queries
     assert broker.history_deal_queries[0]["trd_env"] == "SIMULATE"
     assert broker.position_queries[0]["trd_env"] == "SIMULATE"
-    assert all(item["trd_env"] == "SIMULATE" for item in broker.cash_queries)
     calendar = observation["source_receipts"]["trading_calendar"]
     assert calendar["status"] == "incomplete"
     assert calendar["error"] == "canonical route conflict"
     assert observation["complete"] is False
-
-
-def test_cash_date_failure_preserves_each_date_receipt_and_blocks(
-    tmp_path: Path,
-) -> None:
-    gateway = _Gateway(cash_failure_date="2026-08-23")
-    observation = _collect(tmp_path, gateway)
-
-    assert observation["complete"] is False
-    assert (
-        "account_cash_flows_incomplete"
-        in observation["incomplete_reason_codes"]
-    )
-    failed = [
-        item
-        for item in observation["source_receipts"][
-            "account_cash_flows"
-        ]["date_receipts"]
-        if item["query_input"]["clearing_date"] == "2026-08-23"
-    ]
-    assert len(failed) == 1
-    assert failed[0]["status"] == "incomplete"
-    assert failed[0]["error"] == "cash query failed"
 
 
 def test_calendar_or_anchor_history_mismatch_blocks_observation(

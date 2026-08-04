@@ -64,7 +64,6 @@ class CloseReasonEvidenceBundle:
     stock_match_status: str = "none"
     stock_contracts: int = 0
     proposed_allocations: tuple[dict[str, Any], ...] = ()
-    cash_settlement_evidence: bool = False
     mutually_exclusive_terminal_facts: bool = False
     duplicate_source_consumption: bool = False
     over_allocation: bool = False
@@ -73,7 +72,6 @@ class CloseReasonEvidenceBundle:
     broker_option_position_absent: bool = False
     projection_matches_frozen_remaining: bool = False
     no_stock_settlement: bool = False
-    no_cash_settlement: bool = False
     no_normal_order: bool = False
 
 
@@ -344,7 +342,7 @@ def resolve_close_reason(
         if timing is not None
         else ""
     )
-    if evidence.cash_settlement_evidence or settlement_style == "cash":
+    if settlement_style == "cash":
         return _decision(
             status="needs_review",
             evidence=evidence,
@@ -408,7 +406,6 @@ def resolve_close_reason(
         and target.reservation_exclusive
         and not target.competing_effective_consumption
         and evidence.no_stock_settlement
-        and evidence.no_cash_settlement
         and evidence.no_normal_order
     ):
         return _decision(
