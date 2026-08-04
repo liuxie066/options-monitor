@@ -147,11 +147,6 @@ def main(argv: list[str] | None = None) -> int:
     runtime_resolution = resolve_runtime_root(repo_root=repo_root)
     base = runtime_resolution.runtime_root
     vpy = Path(sys.executable)
-    runlog = RunLogger(base)
-    global _CURRENT_RUN_ID
-    _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
-    run_id = runlog.run_id
-
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (repo_root / cfg_path).resolve()
@@ -194,16 +189,23 @@ def main(argv: list[str] | None = None) -> int:
             )
         except RuntimeConfigFreshnessError as exc:
             raise SystemExit(str(exc)) from exc
+    try:
+        if args.accounts is None:
+            args.accounts = accounts_from_config(base_cfg)
+        else:
+            args.accounts = accounts_from_config({'accounts': args.accounts})
+    except ValueError as exc:
+        raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
+    args.default_account = _resolve_default_account(args.default_account, args.accounts)
     trigger_context = build_trigger_context()
     trigger_kind = _resolve_daily_brief_trigger_kind(
         force_mode=force_mode,
         trigger_context=trigger_context,
     )
-    if args.accounts is None:
-        args.accounts = accounts_from_config(base_cfg)
-    else:
-        args.accounts = accounts_from_config({'accounts': args.accounts})
-    args.default_account = _resolve_default_account(args.default_account, args.accounts)
+    runlog = RunLogger(base)
+    global _CURRENT_RUN_ID
+    _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
+    run_id = runlog.run_id
 
     syms0 = resolve_watchlist_config(base_cfg)
     src_counts: dict[str, int] = {}
