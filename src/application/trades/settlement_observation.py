@@ -233,37 +233,6 @@ def collect_broker_settlement_observation(
         and str(item.get("type") or "").upper()
         in {"WHOLE", "TRADING"}
     ][:2]
-    cash_receipts: list[dict[str, Any]] = []
-    if len(business_days) >= 2:
-        for clearing_day in _date_range(
-            anchor_local.date(),
-            date.fromisoformat(business_days[1]),
-        ):
-            day_text = clearing_day.isoformat()
-            cash_receipts.append(
-                _query_receipt(
-                    source="account_cash_flows",
-                    query_input={
-                        "clearing_date": day_text,
-                        "trd_env": environment,
-                        "acc_id": account_id,
-                    },
-                    observed_at_ms=now_ms,
-                    query=lambda day=day_text: (
-                        broker_gateway.get_account_cash_flows(
-                            clearing_date=day,
-                            trd_env=environment,
-                            acc_id=account_id,
-                        )
-                    ),
-                )
-            )
-    receipts["account_cash_flows"] = _merge_receipts(
-        source="account_cash_flows",
-        receipts=cash_receipts,
-        observed_at_ms=now_ms,
-    )
-
     frozen_calendar_days = [
         str(item.get("date") or "").strip()
         for item in list(timing_policy.get("trading_days") or [])
@@ -450,17 +419,6 @@ def collect_broker_settlement_observation(
         ]
         if candidate is not None
     ]
-    cash_rows = [
-        item
-        for item in list(
-            receipts["account_cash_flows"].get("rows") or []
-        )
-        if _looks_like_cash_settlement(
-            item,
-            lifecycle_case=lifecycle_case,
-            contract_code=contract_code,
-        )
-    ]
     option_position_absent = not any(
         _row_matches_option_contract(
             item,
@@ -544,7 +502,6 @@ def collect_broker_settlement_observation(
         competing_effective_consumption=competing_consumption,
         stock_settlement_present=bool(stock_candidates),
         stock_settlement_candidates=stock_candidates,
-        cash_settlement_present=bool(cash_rows),
         normal_order_present=normal_order_present,
         additional_incomplete_reason_codes=extra_incomplete,
     )
@@ -646,82 +603,6 @@ def _query_receipt(
         fallback_cache=bool(result.get("fallback_cache")),
         error=str(result.get("error") or "") or None,
     )
-
-
-def _merge_receipts(
-    *,
-    source: str,
-    receipts: Iterable[dict[str, Any]],
-    observed_at_ms: int,
-) -> dict[str, Any]:
-    rows = [dict(item) for item in receipts]
-    if not rows:
-        return build_settlement_source_receipt(
-            source=source,
-            query_input={"clearing_dates": []},
-            rows=[],
-            observed_at_ms=observed_at_ms,
-            retcode="missing",
-            coverage_complete=False,
-            pagination_complete=False,
-            error="cash-flow clearing-date coverage is unavailable",
-        )
-    combined_rows = [
-        dict(item)
-        for receipt in rows
-        for item in list(receipt.get("rows") or [])
-        if isinstance(item, dict)
-    ]
-    merged = build_settlement_source_receipt(
-        source=source,
-        query_input={
-            "clearing_dates": [
-                dict(item.get("query_input") or {}).get(
-                    "clearing_date"
-                )
-                for item in rows
-            ]
-        },
-        rows=combined_rows,
-        observed_at_ms=observed_at_ms,
-        retcode=(
-            0
-            if all(
-                str(item.get("status") or "") == "complete"
-                for item in rows
-            )
-            else "partial"
-        ),
-        coverage_complete=all(
-            str(item.get("status") or "") == "complete"
-            for item in rows
-        ),
-        pagination_complete=all(
-            bool(item.get("pagination_complete"))
-            for item in rows
-        ),
-        error=(
-            None
-            if all(
-                str(item.get("status") or "") == "complete"
-                for item in rows
-            )
-            else "one or more cash-flow dates are incomplete"
-        ),
-    )
-    return {
-        **merged,
-        "date_receipts": rows,
-    }
-
-
-def _date_range(start: date, end: date) -> list[date]:
-    if end < start:
-        return []
-    return [
-        start + timedelta(days=offset)
-        for offset in range((end - start).days + 1)
-    ]
 
 
 def _extract_option_contract_code(anchor: dict[str, Any]) -> str:
@@ -1169,34 +1050,6 @@ def _row_trade_time_ms(
     if parsed_time.tzinfo is None:
         parsed_time = parsed_time.replace(tzinfo=timezone)
     return int(parsed_time.timestamp() * 1000)
-
-
-def _looks_like_cash_settlement(
-    row: dict[str, Any],
-    *,
-    lifecycle_case: dict[str, Any],
-    contract_code: str,
-) -> bool:
-    text = " ".join(
-        str(row.get(key) or "")
-        for key in (
-            "cashflow_type",
-            "cash_flow_type",
-            "remark",
-            "description",
-            "code",
-        )
-    ).lower()
-    if not any(
-        token in text
-        for token in ("option", "exercise", "assignment", "settlement")
-    ):
-        return False
-    identity_tokens = {
-        str(contract_code or "").strip().lower(),
-        str(lifecycle_case.get("symbol") or "").strip().lower(),
-    }
-    return any(token and token in text for token in identity_tokens)
 
 
 def _row_matches_option_contract(

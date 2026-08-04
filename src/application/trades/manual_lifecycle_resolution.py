@@ -526,7 +526,10 @@ def _complete_observation_for_ref(
             ).strip()
             if (
                 candidate.get("schema_version")
-                == "broker_settlement_observation.v1"
+                in {
+                    "broker_settlement_observation.v1",
+                    "broker_settlement_observation.v2",
+                }
                 and bool(candidate.get("complete"))
                 and broker_ref
                 in {

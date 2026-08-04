@@ -321,9 +321,6 @@ def reconcile_lifecycle_close_reason(
             )
             if isinstance(item, dict)
         ),
-        cash_settlement_evidence=bool(
-            observation_payload.get("cash_settlement_present")
-        ),
         mutually_exclusive_terminal_facts=bool(
             observation_payload.get(
                 "mutually_exclusive_terminal_facts"
@@ -352,9 +349,6 @@ def reconcile_lifecycle_close_reason(
         ),
         no_stock_settlement=not bool(
             observation_payload.get("stock_settlement_present")
-        ),
-        no_cash_settlement=not bool(
-            observation_payload.get("cash_settlement_present")
         ),
         no_normal_order=not bool(
             observation_payload.get("normal_order_present")

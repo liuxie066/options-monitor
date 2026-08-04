@@ -8,14 +8,13 @@ from zoneinfo import ZoneInfo
 
 
 TIMING_POLICY_SCHEMA = "lifecycle_timing_policy.v1"
-SETTLEMENT_OBSERVATION_SCHEMA = "broker_settlement_observation.v1"
+SETTLEMENT_OBSERVATION_SCHEMA = "broker_settlement_observation.v2"
 PAIRING_WINDOW_MS = 15 * 60 * 1000
 REQUIRED_SETTLEMENT_SOURCES = (
     "anchor_option_close",
     "history_deals",
     "history_orders",
     "fresh_positions",
-    "account_cash_flows",
     "trading_calendar",
     "contract_metadata",
 )
@@ -217,7 +216,6 @@ def build_broker_settlement_observation(
     stock_settlement_candidates: Iterable[
         dict[str, Any]
     ] = (),
-    cash_settlement_present: bool,
     normal_order_present: bool,
     additional_incomplete_reason_codes: Iterable[str] = (),
 ) -> dict[str, Any]:
@@ -254,8 +252,6 @@ def build_broker_settlement_observation(
         incomplete.add("competing_effective_consumption")
     if stock_settlement_present:
         incomplete.add("stock_settlement_present")
-    if cash_settlement_present:
-        incomplete.add("cash_settlement_present")
     if normal_order_present:
         incomplete.add("normal_order_present")
     if set(target_contracts_by_lot) != set(
@@ -317,7 +313,6 @@ def build_broker_settlement_observation(
             for item in stock_settlement_candidates
             if isinstance(item, dict)
         ],
-        "cash_settlement_present": bool(cash_settlement_present),
         "normal_order_present": bool(normal_order_present),
         "complete": not incomplete,
         "incomplete_reason_codes": sorted(incomplete),
