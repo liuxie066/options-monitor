@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -460,6 +460,7 @@ def _frozen_workspace(
         save_outputs,
     )
     from src.application.required_data_plan_identity import (
+        build_required_data_expected_fetch_contract,
         required_data_plan_id,
     )
     from src.application.required_data_snapshot import (
@@ -499,22 +500,139 @@ def _frozen_workspace(
         path=plan_path,
         payload=plan,
     )
+    observed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    completed_at = observed_at + timedelta(seconds=1)
+    quote_expiration = "2026-08-28"
+    discovery_trading_date = date(2026, 7, 29)
+    quote_dte = (
+        date.fromisoformat(quote_expiration) - discovery_trading_date
+    ).days
+    quote_spot = 110.0
+    side_plan = {
+        "option_type": "put",
+        "min_dte": quote_dte,
+        "max_dte": quote_dte,
+        "explicit_expirations": [quote_expiration],
+        "strike_window": {
+            "min_strike": quote_strike,
+            "max_strike": quote_strike,
+            "source": "close_advice_fixture",
+            "buffer_applied": False,
+            "buffer_pct": 0.0,
+            "base_min_strike": quote_strike,
+            "base_max_strike": quote_strike,
+        },
+        "planning_reason": "close_advice_fixture",
+        "source_fields": ["open_position"],
+        "spot_reference": quote_spot,
+        "min_strike": quote_strike,
+        "max_strike": quote_strike,
+        "expiration_count": 1,
+        "required_exact_strikes_by_expiration": {
+            quote_expiration: [float(quote_strike)],
+        },
+    }
+    fetch_plan = {
+        "symbol": "NVDA",
+        "spot_reference": quote_spot,
+        "require_realized_volatility": True,
+        "side_plans": [side_plan],
+        "merged_requests": [
+            {
+                "symbol": "NVDA",
+                "limit_expirations": 8,
+                "host": "127.0.0.1",
+                "port": 11111,
+                "option_types": ["put"],
+                "explicit_expirations": [quote_expiration],
+                "trading_date": discovery_trading_date.isoformat(),
+                "min_dte": quote_dte,
+                "max_dte": quote_dte,
+                "side_strike_windows": {
+                    "put": {
+                        "min_strike": quote_strike,
+                        "max_strike": quote_strike,
+                    }
+                },
+                "include_realized_volatility": True,
+                "side_plans": [side_plan],
+                "planning_reason": "close_advice_fixture",
+            }
+        ],
+        "expiration_discovery_complete": True,
+        "expiration_discovery_error": None,
+        "expiration_discovery": {
+            "outcome": "success_rows",
+            "reason_code": None,
+            "expirations": [quote_expiration],
+            "observed_at_utc": observed_at.isoformat(),
+            "completed_at_utc": completed_at.isoformat(),
+            "request_identity": {
+                "symbol": "NVDA",
+                "underlier": "US.NVDA",
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": discovery_trading_date.isoformat(),
+            },
+            "error": None,
+        },
+        "projection_outcome": "success_rows",
+        "projected_expirations": [quote_expiration],
+    }
+    expected_contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=fetch_plan,
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
     quote_payload = {
-        "meta": {"status": "ok"},
+        "symbol": "NVDA",
+        "underlier_code": "US.NVDA",
+        "meta": {
+            "status": "ok",
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "trading_date": discovery_trading_date.isoformat(),
+            "source_outcome": "success_rows",
+            "source_observed_at": observed_at.isoformat(),
+            "completed_at_utc": completed_at.isoformat(),
+            "snapshot_requested_codes": 1,
+            "snapshot_returned_codes": 1,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "snapshot_requested_code_set": ["NVDA-P"],
+            "snapshot_returned_code_set": ["NVDA-P"],
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+            "snapshot_complete": True,
+            "realized_volatility": {
+                "status": "ok",
+                "realized_volatility_20": 0.2,
+                "realized_volatility_60": None,
+                "realized_volatility_120": None,
+                "realized_volatility_estimate": 0.2,
+            },
+        },
         "rows": [
             {
                 "symbol": "NVDA",
                 "option_type": "put",
-                "expiration": "2026-08-28",
-                "dte": 30,
+                "expiration": quote_expiration,
+                "dte": quote_dte,
                 "contract_symbol": "NVDA-P",
                 "strike": quote_strike,
-                "spot": 110,
+                "spot": quote_spot,
                 "bid": 1.9,
                 "ask": 2.1,
                 "mid": 2.0,
                 "last_price": 2.0,
                 "implied_volatility": 0.3,
+                "realized_volatility_20": 0.2,
+                "realized_volatility_60": None,
+                "realized_volatility_120": None,
                 "realized_volatility_estimate": 0.2,
                 "delta": -0.3,
                 "multiplier": 100,
@@ -527,10 +645,6 @@ def _frozen_workspace(
         quote_payload,
         output_root=required_root,
     )
-    fetch_plan = {
-        "symbol": "NVDA",
-        "explicit_expirations": ["2026-08-28"],
-    }
     publish_required_data_quote_snapshot(
         producer_root=required_root,
         producer_run_id=run_id,
@@ -538,14 +652,24 @@ def _frozen_workspace(
         raw_path=raw_path,
         csv_path=csv_path,
         fetch_plan=fetch_plan,
-        fetch_policy={"source": "opend"},
-        source_observed_at=datetime.now(timezone.utc),
+        fetch_policy={
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+        },
+        expected_fetch_contract=expected_contract,
+        source_observed_at=observed_at,
+        completed_at=completed_at,
+        now=completed_at,
     )
     plan_items = [
         {
             "symbol": "NVDA",
             "source": "opend",
             "fetch_plan": fetch_plan,
+            "fetch_binding": expected_contract["fetch_binding"],
+            "expected_fetch_contract": expected_contract,
+            "projection_outcome": "success_rows",
             "discovery_status": "complete",
         }
     ]

@@ -24,6 +24,9 @@ from src.application.position_advice_authority_service import (
 )
 from src.application.position_advice_runner import run_position_advice_v2
 from src.application.position_advice_reader import read_position_advice_v2
+from src.application.required_data_plan_identity import (
+    build_required_data_expected_fetch_contract,
+)
 from src.application.ledger.decision_snapshot import (
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot_fingerprint,
@@ -89,17 +92,72 @@ def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     quotes = tmp_path / "required_data"
     state.mkdir(parents=True)
     quotes.mkdir()
+    completed_at = NOW + timedelta(seconds=1)
+    fetch_plan = {
+        "symbol": "NVDA",
+        "spot_reference": None,
+        "require_realized_volatility": False,
+        "side_plans": [],
+        "merged_requests": [],
+        "expiration_discovery_complete": True,
+        "expiration_discovery_error": None,
+        "expiration_discovery": {
+            "outcome": "success_empty",
+            "reason_code": "no_expirations",
+            "expirations": [],
+            "observed_at_utc": NOW.isoformat(),
+            "completed_at_utc": completed_at.isoformat(),
+            "request_identity": {
+                "symbol": "NVDA",
+                "underlier": "US.NVDA",
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": NOW.date().isoformat(),
+            },
+            "error": None,
+        },
+        "projection_outcome": "success_empty",
+        "projected_expirations": [],
+    }
+    expected_contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=fetch_plan,
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
     raw_path, csv_path = save_outputs(
         quotes,
         "NVDA",
         {
             "symbol": "NVDA",
+            "underlier_code": "US.NVDA",
+            "expirations": [],
+            "expiration_count": 0,
             "rows": [],
             "meta": {
                 "status": "ok",
                 "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": NOW.date().isoformat(),
                 "source_outcome": "success_empty",
                 "reason_code": "no_expirations",
+                "source_observed_at": NOW.isoformat(),
+                "completed_at_utc": completed_at.isoformat(),
+                "snapshot_requested_codes": 0,
+                "snapshot_returned_codes": 0,
+                "snapshot_missing_codes": 0,
+                "snapshot_unexpected_codes": 0,
+                "snapshot_requested_code_set": [],
+                "snapshot_returned_code_set": [],
+                "snapshot_missing_code_set": [],
+                "snapshot_unexpected_code_set": [],
+                "snapshot_complete": True,
+                "realized_volatility": {
+                    "status": "not_applicable_no_contracts",
+                },
             },
         },
         output_root=quotes,
@@ -110,10 +168,16 @@ def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         symbol="NVDA",
         raw_path=raw_path,
         csv_path=csv_path,
-        fetch_plan={"symbol": "NVDA", "sides": ["put", "call"]},
-        fetch_policy={"source": "opend"},
+        fetch_plan=fetch_plan,
+        fetch_policy={
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+        },
+        expected_fetch_contract=expected_contract,
         source_observed_at=NOW,
-        completed_at=NOW + timedelta(seconds=1),
+        completed_at=completed_at,
+        now=completed_at,
     )
     portfolio = {
         "source_observed_at": NOW.isoformat(),
