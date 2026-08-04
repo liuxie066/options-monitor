@@ -1,0 +1,75 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.0",
+  "base": {
+    "tag": "v1.9.3",
+    "commit": "6bc86f81361882b4175eb456a0ae31e36af7bc6c"
+  },
+  "reviewed_head": "0c1baace233da0a4234a9db8fe65f8ccebd80b0b",
+  "commits": [
+    {
+      "sha": "194ce5c5083be25022e122611bf26b73ab26d56a",
+      "subject": "gateflow: accept plan for required-data-multi-account-integrity"
+    },
+    {
+      "sha": "feb79a153814ea381d21080336ec6099455f0872",
+      "subject": "fix: enforce required-data completion authority"
+    },
+    {
+      "sha": "3ba1ffc27c5216baaf4deb096c627c4e7fdacf0f",
+      "subject": "merge: integrate main before required-data delivery"
+    },
+    {
+      "sha": "cc37b8022e9d13f40ecec32c1c5e2aec267f1b86",
+      "subject": "fix: retire scheduler shadow execution"
+    },
+    {
+      "sha": "05398e0d200bd8fb4e5335802c7654295bc0d5ba",
+      "subject": "fix: remove memory compaction from Feishu response path"
+    },
+    {
+      "sha": "0c1baace233da0a4234a9db8fe65f8ccebd80b0b",
+      "subject": "feat: add guarded historical receipt compensation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a guarded historical trade-receipt compensation workflow that validates exact ledger and intake-state evidence, freezes the reviewed payload and route, sends one idempotent combined receipt, and never replays economic events.",
+      "commits": [
+        "0c1baace233da0a4234a9db8fe65f8ccebd80b0b"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced Feishu agent response latency by removing foreground model-based memory compaction while preserving read-only structured-memory context and fail-closed handling of malformed stored memory.",
+      "commits": [
+        "05398e0d200bd8fb4e5335802c7654295bc0d5ba"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made required-data completion authority require exact account-scoped fetch contracts, provider coverage, volatility and expiry evidence, immutable output bytes, and terminal receipts, preventing partial, stale, or cross-account market data from becoming candidate authority.",
+      "commits": [
+        "feb79a153814ea381d21080336ec6099455f0872"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Retired the scheduler's deprecated shadow execution path and reject `--run-if-due` before config, state, or adapter effects, preventing hidden duplicate scan execution.",
+      "commits": [
+        "cc37b8022e9d13f40ecec32c1c5e2aec267f1b86"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "194ce5c5083be25022e122611bf26b73ab26d56a",
+      "reason": "Planning and review evidence only; no runtime, public contract, configuration, or operator behavior changed."
+    },
+    {
+      "commit": "3ba1ffc27c5216baaf4deb096c627c4e7fdacf0f",
+      "reason": "Integration merge only; the required-data change is mapped to its implementation commit and the merged main-side behavior was already released in v1.9.3."
+    }
+  ]
+}

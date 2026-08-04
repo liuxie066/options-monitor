@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, TypeVar
@@ -19,6 +20,7 @@ from src.application.account_run import (
     build_account_runtime_config,
     run_one_account,
 )
+from src.application.account_config import normalize_account_label
 from src.application.config_sections import resolve_watchlist_config
 from src.application.multi_tick.misc import AccountResult
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
@@ -50,7 +52,14 @@ from src.application.required_data_snapshot import (
     seal_required_data_snapshot,
 )
 from src.application.position_advice_source_receipts import sha256_bytes
-from src.infrastructure.io_utils import atomic_write_json
+from src.application.tick_run_workspace import (
+    AccountRunConfigAuthority,
+    AccountRunConfigError,
+    load_account_run_config,
+    publish_account_run_config,
+    write_account_run_state_bytes_once_safely,
+    write_account_run_state_json_safely,
+)
 
 
 T = TypeVar("T")
@@ -227,36 +236,99 @@ def _build_close_advice_barrier_plan(
 
 
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
-    account_count = len(request.account_ids)
+    try:
+        account_ids = [normalize_account_label(item) for item in request.account_ids]
+    except ValueError as exc:
+        raise AccountRunConfigError(
+            "ACCOUNT_CONFIG_IDENTITY_INVALID",
+            "tick account scope contains an invalid account label",
+        ) from exc
+    if len(account_ids) != len(set(account_ids)):
+        raise AccountRunConfigError(
+            "ACCOUNT_CONFIG_IDENTITY_DUPLICATE",
+            "tick account scope contains duplicate canonical account labels",
+        )
+    account_count = len(account_ids)
     shared_event_prefetch_state: dict[str, object] = {}
     shared_event_prefetch_lock = Lock() if account_count > 1 else None
     account_configs: dict[str, dict[str, Any]] = {}
-    account_config_errors: dict[str, Exception] = {}
-    for raw_account in request.account_ids:
-        account = str(raw_account).strip().lower()
+    account_config_authorities: dict[str, AccountRunConfigAuthority] = {}
+    account_config_errors: dict[str, AccountRunConfigError] = {}
+    for account in account_ids:
         try:
-            account_configs[account] = build_account_runtime_config(
+            config = build_account_runtime_config(
                 base_cfg=request.base_cfg,
                 cfg_path=request.cfg_path,
                 account=account,
                 markets_to_run=request.markets_to_run,
                 symbols_arg=request.symbols_arg,
             )
+            authority = publish_account_run_config(
+                base=request.base,
+                run_id=request.run_id,
+                account=account,
+                config=config,
+            )
+            account_configs[account] = load_account_run_config(
+                authority=authority,
+                base=request.base,
+                run_id=request.run_id,
+                account=account,
+            )
+            account_config_authorities[account] = authority
+            try:
+                request.audit_helper.audit(
+                    "write",
+                    "publish_run_account_config",
+                    run_id=request.run_id,
+                    account=account,
+                    status="ok",
+                    extra={
+                        "account_config_sha256": authority.account_config_sha256,
+                        "state_path": str(authority.state_path),
+                        "compatibility_path": str(authority.compatibility_path),
+                    },
+                )
+            except Exception:
+                pass
+        except AccountRunConfigError as exc:
+            account_config_errors[account] = exc
         except Exception as exc:
+            account_config_errors[account] = AccountRunConfigError(
+                "ACCOUNT_CONFIG_BUILD_FAILED",
+                f"failed to build account runtime config: {type(exc).__name__}",
+            )
+    scanning_accounts = [
+        account
+        for account in account_ids
+        if account in account_configs
+        if _account_pipeline_is_required(
+            request=request,
+            account=account,
+            cfg=account_configs[account],
+        )
+    ]
+    # Freeze every published account generation before any account branch can
+    # create its workspace, including accounts whose scan predicate is false.
+    for account in list(account_configs):
+        try:
+            account_configs[account] = load_account_run_config(
+                authority=account_config_authorities[account],
+                base=request.base,
+                run_id=request.run_id,
+                account=account,
+            )
+        except AccountRunConfigError as exc:
             account_config_errors[account] = exc
     scanning_accounts = [
         account
-        for account in request.account_ids
-        if str(account).strip().lower() in account_configs
-        if _account_pipeline_is_required(
-            request=request,
-            account=str(account).strip().lower(),
-            cfg=account_configs[str(account).strip().lower()],
-        )
+        for account in scanning_accounts
+        if account not in account_config_errors
     ]
     scheduled_scan_targets_by_account = _scheduled_targets(request)
     snapshot_manifest_path: Path | None = None
     prepared_manifest_paths: dict[str, Path] = {}
+    prepared_manifest_sha256_by_account: dict[str, str] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -270,6 +342,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         run_state_dir = run_repo.ensure_run_state_dir(request.base, request.run_id)
         scanning_configs = {
             str(account).strip().lower(): account_configs[
+                str(account).strip().lower()
+            ]
+            for account in scanning_accounts
+        }
+        scanning_config_authorities = {
+            str(account).strip().lower(): account_config_authorities[
                 str(account).strip().lower()
             ]
             for account in scanning_accounts
@@ -295,7 +373,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 base=request.base,
                 repo_root=(request.repo_root or request.base),
                 run_id=request.run_id,
-                account_configs=scanning_configs,
+                account_config_authorities=scanning_config_authorities,
                 account_state_dirs=account_state_dirs,
                 shared_state_dir=run_state_dir,
                 timeout_sec=portfolio_timeout_sec,
@@ -305,10 +383,15 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             prepared = _publish_unavailable_prepared_contexts(
                 request=request,
                 accounts=list(scanning_configs),
+                account_config_sha256_by_account={
+                    account: authority.account_config_sha256
+                    for account, authority in scanning_config_authorities.items()
+                },
                 reason="portfolio_context_preparation_failed",
                 error_type=type(exc).__name__,
             )
         prepared_contexts: dict[str, dict[str, Any] | None] = {}
+        invalid_prepared_accounts: set[str] = set()
         for account, manifest in prepared.items():
             prepared_context_metrics.append(
                 {
@@ -323,20 +406,72 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                         "child_finished_at_utc",
                         "promoted_at_utc",
                         "worker_returncode",
+                        "account_config_sha256",
+                        "error_code",
                     )
                     if manifest.get(key) is not None
                 }
             )
             manifest_path = Path(str(manifest["manifest_path"])).resolve()
-            prepared_manifest_paths[account] = manifest_path
+            try:
+                account_configs[account] = load_account_run_config(
+                    authority=scanning_config_authorities[account],
+                    base=request.base,
+                    run_id=request.run_id,
+                    account=account,
+                )
+                scanning_configs[account] = account_configs[account]
+            except AccountRunConfigError as exc:
+                account_config_errors[account] = exc
+                invalid_prepared_accounts.add(account)
+                continue
+            error_code = str(manifest.get("error_code") or "").strip().upper()
+            if error_code.startswith("ACCOUNT_CONFIG_"):
+                account_config_errors[account] = AccountRunConfigError(
+                    error_code,
+                    str(manifest.get("reason") or "prepared account config invalid"),
+                )
+                invalid_prepared_accounts.add(account)
+                continue
             try:
                 prepared_contexts[account] = load_prepared_portfolio_context(
                     manifest_path=manifest_path,
+                    expected_base=request.base,
                     expected_run_id=request.run_id,
                     expected_account=account,
+                    expected_account_config_sha256=(
+                        scanning_config_authorities[
+                            account
+                        ].account_config_sha256
+                    ),
+                    expected_manifest_sha256=str(
+                        manifest.get("manifest_sha256") or ""
+                    ),
+                    expected_runtime_config=scanning_configs[account],
                 )
-            except PreparedPortfolioContextError:
-                prepared_contexts[account] = None
+            except PreparedPortfolioContextError as exc:
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    str(exc),
+                )
+                invalid_prepared_accounts.add(account)
+                continue
+            prepared_manifest_paths[account] = manifest_path
+            prepared_manifest_sha256_by_account[account] = str(
+                manifest.get("manifest_sha256") or ""
+            )
+
+        if invalid_prepared_accounts:
+            scanning_accounts = [
+                account
+                for account in scanning_accounts
+                if account not in invalid_prepared_accounts
+            ]
+            scanning_configs = {
+                account: config
+                for account, config in scanning_configs.items()
+                if account not in invalid_prepared_accounts
+            }
 
         union_cfg = build_cross_account_prefetch_config(
             base_config=request.base_cfg,
@@ -344,16 +479,17 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             prepared_portfolio_contexts=prepared_contexts,
         )
         try:
-            (
-                union_cfg,
-                close_advice_required_data_plan_path,
-            ) = _build_close_advice_barrier_plan(
-                request=request,
-                scanning_configs=scanning_configs,
-                candidate_config=union_cfg,
-                run_state_dir=run_state_dir,
-                run_started_at_utc=run_started_at_utc,
-            )
+            if scanning_configs:
+                (
+                    union_cfg,
+                    close_advice_required_data_plan_path,
+                ) = _build_close_advice_barrier_plan(
+                    request=request,
+                    scanning_configs=scanning_configs,
+                    candidate_config=union_cfg,
+                    run_state_dir=run_state_dir,
+                    run_started_at_utc=run_started_at_utc,
+                )
         except Exception as exc:
             request.audit_helper.audit(
                 "plan",
@@ -375,6 +511,10 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             data={"accounts": sorted(scanning_configs)},
         )
         try:
+            if not scanning_configs:
+                raise PreparedPortfolioContextError(
+                    "no account with valid config authority remains"
+                )
             prefetch_invocation_count += 1
             prefetch_summary = prefetch_required_data(
                 vpy=request.vpy,
@@ -509,14 +649,18 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     / "prepared_portfolio_context.v1.json"
                 ).resolve()
                 if prepared.is_file():
-                    prepared_manifest_paths[str(account).strip().lower()] = prepared
+                    account_key = str(account).strip().lower()
+                    prepared_manifest_paths[account_key] = prepared
+                    prepared_manifest_sha256_by_account[account_key] = sha256_bytes(
+                        prepared.read_bytes()
+                    )
         except (OSError, RequiredDataSnapshotError):
             barrier_reason = "required_data_snapshot_manifest_unavailable"
             snapshot_status = "unavailable"
             prefetch_done = False
 
     def _run_account(acct: str) -> AccountRunOutcome:
-        acct = str(acct).strip()
+        acct = str(acct).strip().lower()
         try:
             config_error = account_config_errors.get(acct)
             if config_error is not None:
@@ -526,8 +670,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     acct=acct,
                     base=request.base,
                     repo_root=request.repo_root,
-                    base_cfg=request.base_cfg,
-                    cfg_path=request.cfg_path,
+                    account_config_authority=account_config_authorities[acct],
                     vpy=request.vpy,
                     markets_to_run=request.markets_to_run,
                     scheduler_ms=request.scheduler_ms,
@@ -553,6 +696,10 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     prepared_portfolio_context_manifest=(
                         prepared_manifest_paths.get(acct)
                     ),
+                    prepared_portfolio_context_manifest_sha256=(
+                        prepared_manifest_sha256_by_account.get(acct)
+                    ),
+                    account_config_generation_frozen=True,
                     required_data_snapshot_status=snapshot_status,
                     required_data_snapshot_sha256=snapshot_manifest_sha256,
                     close_advice_required_data_plan=(
@@ -568,6 +715,13 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     exc=exc,
                     run_id=run_id,
                 ),
+            )
+        except AccountRunConfigError as exc:
+            return _account_config_failure_outcome(
+                request=request,
+                account=acct,
+                error=exc,
+                prefetch_done=prefetch_done,
             )
         except Exception as exc:
             reason = f"account_execution_exception:{type(exc).__name__}"
@@ -624,7 +778,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         )
     else:
         outcomes = run_account_outcomes(
-            account_ids=request.account_ids,
+            account_ids=account_ids,
             max_workers=request.account_workers,
             run_account_fn=_run_account,
         )
@@ -651,6 +805,76 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         snapshot_status=snapshot_status,
         snapshot_manifest_sha256=snapshot_manifest_sha256,
         prepared_context_metrics=tuple(prepared_context_metrics),
+    )
+
+
+def _account_config_failure_outcome(
+    *,
+    request: TickAccountExecutionRequest,
+    account: str,
+    error: AccountRunConfigError,
+    prefetch_done: bool,
+) -> AccountRunOutcome:
+    reason = error.reason
+    metrics = {
+        "run_id": request.run_id,
+        "account": account,
+        "scheduler_ms": request.scheduler_ms,
+        "pipeline_ms": None,
+        "ran_scan": False,
+        "ran_pipeline": False,
+        "should_notify": False,
+        "meaningful": False,
+        "reason": reason,
+        "typed_reason": reason,
+        "error_code": error.code,
+        "error": str(error),
+    }
+    safe_run_path = True
+    try:
+        write_account_run_state_json_safely(
+            base=request.base,
+            run_id=request.run_id,
+            account=account,
+            name="account_metrics.json",
+            payload=metrics,
+        )
+    except Exception:
+        safe_run_path = False
+    if safe_run_path:
+        try:
+            request.audit_helper.audit(
+                "account_run",
+                "account_config_authority_failure",
+                run_id=request.run_id,
+                account=account,
+                status="error",
+                message=str(error),
+                extra={"error_code": error.code, "isolated": True},
+            )
+        except Exception:
+            pass
+    try:
+        request.runlog.safe_event(
+            "account_run",
+            "error",
+            error_code=error.code,
+            message=str(error),
+            data={"account": account, "typed_reason": reason},
+        )
+    except Exception:
+        pass
+    return AccountRunOutcome(
+        result=AccountResult(
+            account=account,
+            ran_scan=False,
+            should_notify=False,
+            decision_reason=reason,
+            notification_text="",
+        ),
+        acct_metrics=metrics,
+        prefetch_done=prefetch_done,
+        ran_pipeline=False,
     )
 
 
@@ -696,17 +920,12 @@ def _publish_unavailable_prepared_contexts(
     *,
     request: TickAccountExecutionRequest,
     accounts: list[str],
+    account_config_sha256_by_account: Mapping[str, str],
     reason: str,
     error_type: str,
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for account in sorted(accounts):
-        state_dir = run_repo.ensure_run_account_state_dir(
-            request.base,
-            request.run_id,
-            account,
-        )
-        manifest_path = (state_dir / "prepared_portfolio_context.v1.json").resolve()
         payload = {
             "schema_version": PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
             "run_id": request.run_id,
@@ -714,10 +933,42 @@ def _publish_unavailable_prepared_contexts(
             "status": "unavailable",
             "reason": reason,
             "error_type": error_type,
+            "account_config_sha256": str(
+                account_config_sha256_by_account.get(account) or ""
+            ).strip().lower(),
         }
-        atomic_write_json(manifest_path, payload)
-        payload["manifest_path"] = str(manifest_path)
-        out[account] = payload
+        manifest_bytes = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            manifest_path = write_account_run_state_bytes_once_safely(
+                base=request.base,
+                run_id=request.run_id,
+                account=account,
+                name="prepared_portfolio_context.v1.json",
+                payload=manifest_bytes,
+            )
+        except AccountRunConfigError:
+            manifest_path = (
+                Path(request.base).resolve()
+                / "output_runs"
+                / request.run_id
+                / "accounts"
+                / account
+                / "state"
+                / "prepared_portfolio_context.v1.json"
+            )
+        promoted = dict(payload)
+        promoted["manifest_path"] = str(manifest_path)
+        promoted["manifest_sha256"] = sha256_bytes(manifest_bytes)
+        out[account] = promoted
     return out
 
 

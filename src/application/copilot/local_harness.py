@@ -6,7 +6,7 @@ from typing import Any
 
 from src.application.copilot.agent import ModelRequest, ModelRunner, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, ExecutionContract
-from src.application.copilot.conversation_memory import prepare_contract_with_memory
+from src.application.copilot.conversation_memory import prepare_contract_with_existing_memory
 from src.application.copilot.eval_fixtures import fixture_observations
 from src.application.copilot.host import run_contract
 from src.application.copilot.host_store import CopilotHostStore
@@ -79,11 +79,10 @@ def run_prepared_contract(
     if model_error:
         return _invalid_model_config_result(prepared, model_error)
     if model_runner is not None and host_store is not None and session_key:
-        prepared = prepare_contract_with_memory(
+        prepared = prepare_contract_with_existing_memory(
             prepared,
             store=host_store,
             session_key=session_key,
-            model_runner=model_runner,
         )
     return run_contract(
         prepared,

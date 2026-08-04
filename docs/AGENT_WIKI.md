@@ -249,7 +249,7 @@ Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, sp
 - Helper modules:
   - `tick_run_context`: idempotency bucket/key and completion records
   - `tick_guard_flow`: project guard, load shedding, market filter, OpenD phone-verify gate, watchdog admission
-  - `tick_run_workspace`: run directory, required-data workspace, shared state pointer
+  - `tick_run_workspace`: run directory, required-data workspace, shared state pointer, immutable per-run account config authority
   - `tick_scheduler_context`: trading-day guard, scheduler state path, scheduler decision
   - `tick_account_execution`: account defaults, worker limits, ordered concurrent execution, account metrics
   - `tick_notification_flow`: notification prep, quiet-hour decision, delivery, metrics, finalization
@@ -262,6 +262,7 @@ Tick flow:
    -> tick_guard_flow
    -> tick_scheduler_context
    -> tick_account_execution
+      -> canonical account config write-once/adopt under `output_runs/<run_id>/accounts/<account>/`
       -> expired position maintenance
       -> required_data prefetch
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
@@ -271,7 +272,29 @@ Tick flow:
    -> run state and audit writes
 ```
 
+For each account, Tick serializes the effective runtime config once before prepared workers or account execution. The
+authoritative input is `output_runs/<run_id>/accounts/<account>/state/config.override.json`; the sibling
+`output_runs/<run_id>/accounts/<account>/config.override.json` is a byte-identical compatibility artifact. Both are
+write-once/adopt and bound to the same SHA-256. Before shared planning or provider I/O, Tick validates both files against
+the parent-retained canonical bytes; a mismatch makes that account terminal for the run. After this final barrier, all
+parent and scan-child consumers use the retained generation instead of reopening mutable paths, so a later path
+replacement cannot split one run across two configs. Account labels are canonical lowercase path components
+(`[a-z0-9][a-z0-9_-]{0,63}`); an explicit empty scope, unsafe label, or symlinked artifact ancestor fails closed before
+run artifacts or config publication.
+
+Prepared portfolio payloads use content-addressed names and a write-once/adopt manifest. The parent retains the manifest
+SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
+anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks
+the account-config SHA-256, and verifies the resolved portfolio source account against `filters.account` and any account
+declared by holding rows. External-holdings contexts bind to the configured `holdings_account`, not implicitly to the OM
+account label. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
+shared planning and required-data prefetch.
+Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
+written as Tick input authority.
+
 Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
+
+The `scheduler` command is decision/mark-only. Its legacy `--run-if-due` flag remains parseable for compatibility but returns `UNSUPPORTED_OPERATION` without reading runtime config/state or starting a child process. Use `./om run tick ...` for explicit scans and `./om run tick-cron ...` for guarded scheduled execution.
 
 Entrypoint signature:
 
@@ -350,6 +373,33 @@ never replaces an already observed `cash_conversion.v1`.
 `portfolio_capital_bridge` have been removed. Do not recreate their ambiguous
 `net_income_cny` or generic return fields. The migration note is historical
 mapping only, not a callable rollback path.
+
+#### Historical Trade Receipt Compensation
+
+Use the guarded compensation mode only when an already-recorded open trade has
+the legacy false `outbox_managed` receipt marker and current evidence proves
+there was no durable outbox ID or confirmed provider message. Preview is the
+default and neither sends nor writes:
+
+```bash
+./om run trade-intake --config /var/lib/options-monitor/config.us.json \
+  --runtime-root /var/lib/options-monitor --compensate-receipts \
+  --account lx \
+  --deal-id futu:lx:<futu_account_id>:<deal_id_1> \
+  --deal-id futu:lx:<futu_account_id>:<deal_id_2> \
+  --dry-run
+```
+
+After reviewing the frozen message, exact member list, route fingerprint,
+delivery key, and `payload_hash`, the high-risk form requires `--apply`,
+`--confirm` (or `--yes`), and the reviewed value as
+`--expected-payload-hash <sha256>`. Any change to the members, message, or route
+fails closed and requires a new preview. Apply sends one combined historical
+receipt, never replays trade events or edits `position_lots`, and writes an
+independent content-addressed record under the source account's
+`receipt_compensations/` directory plus an audit event. A confirmed rerun is
+duplicate-suppressed. A prepared, send-started, accepted, unknown, or otherwise
+unconfirmed record is also frozen and must not be automatically resent.
 
 ### Close Advice
 
