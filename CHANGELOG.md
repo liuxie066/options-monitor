@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.3 - 2026-08-05
+
+### Bug Fixes
+- Removed the unsupported Futu account cash-flow query from lifecycle settlement observations and close-reason resolution, so an unavailable broker data source no longer leaves valid option closures permanently incomplete; cash-settled contracts remain fail-closed from contract metadata.
+
 ## 1.10.2 - 2026-08-05
 
 ### Bug Fixes
