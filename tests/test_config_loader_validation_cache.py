@@ -31,6 +31,31 @@ def test_scheduled_validation_is_cached() -> None:
     assert len(calls) == 1
 
 
+def test_config_payload_is_consumed_without_reopening_mutable_path(
+    tmp_path: Path,
+) -> None:
+    from src.application.config_loader import load_config
+
+    cfg_path = tmp_path / "config.override.json"
+    cfg_path.write_text('{"runtime":{"marker":"mutable-path"}}', encoding="utf-8")
+    validated_payload = {
+        "portfolio": {"account": "lx"},
+        "runtime": {"marker": "validated-payload"},
+        "symbols": [],
+    }
+
+    loaded = load_config(
+        base=tmp_path,
+        config_path=cfg_path,
+        config_payload=validated_payload,
+        is_scheduled=False,
+        log=lambda _message: None,
+        validate_config_fn=lambda _cfg: None,
+    )
+
+    assert loaded["runtime"]["marker"] == "validated-payload"
+
+
 def test_scheduled_validation_failure_is_not_cached() -> None:
     from src.application.config_loader import load_config
 

@@ -1,16 +1,42 @@
 from __future__ import annotations
 
+import pytest
+
 
 def test_accounts_from_config_normalizes_and_dedupes() -> None:
     from src.application.account_config import accounts_from_config
 
-    assert accounts_from_config({"accounts": [" LX ", "sy", "lx", ""]}) == ["lx", "sy"]
+    assert accounts_from_config({"accounts": [" LX ", "sy", "lx"]}) == ["lx", "sy"]
 
 
 def test_accounts_from_config_keeps_legacy_fallback() -> None:
     from src.application.account_config import accounts_from_config
 
     assert accounts_from_config({}) == ["user1"]
+
+
+@pytest.mark.parametrize("accounts", [[], [""], [0], [False], None])
+def test_accounts_from_config_rejects_explicit_empty_or_non_string_scope(accounts) -> None:
+    from src.application.account_config import accounts_from_config
+
+    with pytest.raises(ValueError, match="accounts"):
+        accounts_from_config({"accounts": accounts})
+
+
+@pytest.mark.parametrize("account", ["../lx", "/lx", "lx/sy", "lx.sy", "lx sy"])
+def test_accounts_from_config_rejects_unsafe_labels(account: str) -> None:
+    from src.application.account_config import accounts_from_config
+
+    with pytest.raises(ValueError, match="account label"):
+        accounts_from_config({"accounts": [account]})
+
+
+@pytest.mark.parametrize("accounts", [["../lx"], "../lx"])
+def test_config_validator_rejects_unsafe_account_label(accounts) -> None:
+    from src.application.config_validator import validate_config
+
+    with pytest.raises(SystemExit, match="accounts contains invalid label"):
+        validate_config({"accounts": accounts})
 
 
 def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> None:

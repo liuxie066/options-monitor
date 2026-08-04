@@ -4,6 +4,7 @@ import json
 from numbers import Integral
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 
@@ -11,6 +12,7 @@ DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
 ACCOUNT_TYPE_EXTERNAL_HOLDINGS = "external_holdings"
 ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU, ACCOUNT_TYPE_EXTERNAL_HOLDINGS)
+_ACCOUNT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -74,31 +76,72 @@ class ResolvedAccountBrokerBindingSet:
         return self.status == "ok"
 
 
-def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
+def normalize_account_label(value: Any) -> str:
+    """Return one canonical path-safe account label or raise."""
+
+    if not isinstance(value, str):
+        raise ValueError("account label must be a string")
+    account = value.strip().lower()
+    if not _ACCOUNT_LABEL_RE.fullmatch(account):
+        raise ValueError(
+            "account label must be 1-64 lowercase letters, digits, '_' or '-', "
+            "starting with a letter or digit"
+        )
+    return account
+
+
+def normalize_accounts(
+    raw: Any,
+    *,
+    fallback: tuple[str, ...] = DEFAULT_ACCOUNTS,
+    strict: bool = False,
+) -> list[str]:
+    if raw is None:
+        if strict:
+            raise ValueError("accounts must contain at least one account label")
+        return [normalize_account_label(item) for item in fallback]
     if isinstance(raw, str):
         items = [raw]
     elif isinstance(raw, (list, tuple, set)):
         items = list(raw)
     else:
+        if strict:
+            raise ValueError("accounts must be a string or list of account labels")
         items = []
+
+    if strict and not items:
+        raise ValueError("accounts must contain at least one account label")
 
     out: list[str] = []
     seen: set[str] = set()
     for item in items:
-        acct = str(item or "").strip().lower()
-        if not acct or acct in seen:
+        if not isinstance(item, str):
+            if strict:
+                raise ValueError("accounts must contain only account label strings")
+            continue
+        raw_account = item.strip()
+        if not raw_account:
+            if strict:
+                raise ValueError("accounts must not contain empty account labels")
+            continue
+        acct = normalize_account_label(raw_account)
+        if acct in seen:
             continue
         seen.add(acct)
         out.append(acct)
 
     if out:
         return out
-    return list(fallback)
+    if strict:
+        raise ValueError("accounts must contain at least one account label")
+    return [normalize_account_label(item) for item in fallback]
 
 
 def accounts_from_config(config: dict[str, Any] | None, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
     cfg = config if isinstance(config, dict) else {}
-    return normalize_accounts(cfg.get("accounts"), fallback=fallback)
+    if "accounts" not in cfg:
+        return normalize_accounts(None, fallback=fallback)
+    return normalize_accounts(cfg.get("accounts"), fallback=(), strict=True)
 
 
 def parse_lossless_integer(value: Any) -> int | None:

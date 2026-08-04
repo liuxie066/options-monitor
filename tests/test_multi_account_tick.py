@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 
 def test_run_tick_forwards_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
     from src.application import multi_account_tick as mod
@@ -90,6 +92,52 @@ def test_current_run_id_is_reexported_from_multi_tick_main() -> None:
     from src.application import multi_account_tick as mod
 
     assert callable(mod.current_run_id)
+
+
+def test_explicit_empty_cli_account_fails_before_run_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import multi_account_tick as mod
+
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text('{"symbols": []}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "resolve_runtime_root",
+        lambda **_kwargs: SimpleNamespace(
+            runtime_root=tmp_path,
+            source="test",
+        ),
+    )
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_canonical_config",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_config_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_runtime_schedule_matches_market",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        mod,
+        "RunLogger",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("run logger must not start")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="invalid account scope"):
+        mod.main(["--config", str(config_path), "--accounts", ""])
+
+    assert not (tmp_path / "output_runs").exists()
 
 
 def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> None:

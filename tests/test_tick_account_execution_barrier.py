@@ -84,11 +84,18 @@ def _fake_prepare(**kwargs):
 
     out = {}
     for account, state_dir in kwargs["account_state_dirs"].items():
+        authority = kwargs["account_config_authorities"][account]
+        assert authority.state_path.is_file()
+        assert authority.compatibility_path.is_file()
+        assert authority.state_path.read_bytes() == authority.canonical_bytes
+        assert authority.compatibility_path.read_bytes() == authority.canonical_bytes
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
         context = {
+            "filters": {"account": account},
+            "portfolio_source_name": "futu",
             "stocks_by_symbol": {
-                "NVDA": {"avg_cost": 100, "shares": 100}
+                "NVDA": {"avg_cost": 100, "shares": 100, "account": account}
             }
         }
         context_path = state_dir / "portfolio_context.json"
@@ -99,11 +106,18 @@ def _fake_prepare(**kwargs):
             "run_id": kwargs["run_id"],
             "account": account,
             "status": "ready",
+            "account_config_sha256": authority.account_config_sha256,
             "portfolio_context_relpath": context_path.name,
             "payload_sha256": hashlib.sha256(context_path.read_bytes()).hexdigest(),
+            "portfolio_source_name": "futu",
+            "portfolio_source_account": account,
         }
         atomic_write_json(manifest_path, manifest)
-        out[account] = {**manifest, "manifest_path": str(manifest_path)}
+        out[account] = {
+            **manifest,
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
     return out
 
 
@@ -680,3 +694,251 @@ def test_quote_drift_is_frozen_once_while_account_capacity_can_differ(
     assert observed_by_account["lx"]["capacity"] != observed_by_account["sy"][
         "capacity"
     ]
+
+
+def test_config_archive_conflict_fails_closed_before_any_account_child(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.tick_run_workspace import account_run_config_paths
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    historical = (
+        tmp_path
+        / "output_accounts"
+        / "lx"
+        / "state"
+        / "config.override.json"
+    )
+    historical.parent.mkdir(parents=True)
+    historical.write_text("historical\n", encoding="utf-8")
+    state_path, compatibility_path = account_run_config_paths(
+        base=tmp_path,
+        run_id=request.run_id,
+        account="lx",
+    )
+    compatibility_path.parent.mkdir(parents=True, exist_ok=True)
+    compatibility_path.write_text("conflicting archive\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "prepare_portfolio_contexts",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("prepared worker must not start")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_required_data",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("required-data prefetch must not start")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_one_account",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pipeline and Close Advice must not start")
+        ),
+    )
+
+    outcome = mod.run_tick_account_execution(request)
+
+    assert outcome.ran_pipeline_accounts == []
+    assert [item.decision_reason for item in outcome.results] == [
+        "account_config_compatibility_conflict"
+    ]
+    assert outcome.account_metrics[0]["error_code"] == (
+        "ACCOUNT_CONFIG_COMPATIBILITY_CONFLICT"
+    )
+    assert state_path.is_file()
+    assert compatibility_path.read_text(encoding="utf-8") == (
+        "conflicting archive\n"
+    )
+    assert historical.read_text(encoding="utf-8") == "historical\n"
+
+
+def test_config_hash_drift_returns_typed_failure_before_pipeline_and_close_advice(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import account_run as account_run_mod
+    from src.application import tick_account_execution as mod
+    from src.application.tick_run_workspace import account_run_config_paths
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+
+    def _tamper_after_publication(**_kwargs):
+        state_path, _compatibility_path = account_run_config_paths(
+            base=tmp_path,
+            run_id=request.run_id,
+            account="lx",
+        )
+        state_path.write_text("{}\n", encoding="utf-8")
+        return False
+
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", _tamper_after_publication)
+    monkeypatch.setattr(
+        account_run_mod,
+        "ensure_account_output_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("account workspace must not be touched")
+        ),
+    )
+    monkeypatch.setattr(
+        account_run_mod,
+        "run_pipeline_script",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pipeline must not start")
+        ),
+    )
+    monkeypatch.setattr(
+        account_run_mod,
+        "run_close_advice",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Close Advice must not start")
+        ),
+    )
+
+    outcome = mod.run_tick_account_execution(request)
+
+    assert [item.decision_reason for item in outcome.results] == [
+        "account_config_artifact_mismatch"
+    ]
+    assert outcome.account_metrics[0]["error_code"] == (
+        "ACCOUNT_CONFIG_ARTIFACT_MISMATCH"
+    )
+    assert outcome.ran_pipeline_accounts == []
+
+
+def test_config_failure_projection_does_not_follow_output_runs_symlink(
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.tick_run_workspace import AccountRunConfigError
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    output_runs = tmp_path / "output_runs"
+    preserved = tmp_path / "output_runs-preserved"
+    output_runs.rename(preserved)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_runs.symlink_to(outside, target_is_directory=True)
+
+    outcome = mod._account_config_failure_outcome(
+        request=request,
+        account="lx",
+        error=AccountRunConfigError(
+            "ACCOUNT_CONFIG_PATH_UNSAFE",
+            "unsafe run path",
+        ),
+        prefetch_done=False,
+    )
+
+    assert outcome.result.decision_reason == "account_config_path_unsafe"
+    assert outcome.acct_metrics["error_code"] == "ACCOUNT_CONFIG_PATH_UNSAFE"
+    assert list(outside.iterdir()) == []
+
+
+def test_config_drift_isolated_to_one_account_before_shared_prefetch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.tick_run_workspace import canonical_account_run_config_bytes
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = _request(
+        tmp_path,
+        accounts=["lx", "sy"],
+        workers=2,
+        force=False,
+    )
+    prepared_scopes: list[set[str]] = []
+    prefetch_scopes: list[set[str]] = []
+    account_children: list[str] = []
+
+    def _scan_gate(**_kwargs):
+        return True
+
+    def _prepare(**kwargs):
+        prepared_scopes.append(set(kwargs["account_config_authorities"]))
+        prepared = _fake_prepare(**kwargs)
+        authority = kwargs["account_config_authorities"]["lx"]
+        replacement = json.loads(authority.canonical_bytes.decode("utf-8"))
+        replacement.setdefault("runtime", {})["generation"] = "replacement"
+        replacement_bytes = canonical_account_run_config_bytes(replacement)
+        authority.state_path.write_bytes(replacement_bytes)
+        authority.compatibility_path.write_bytes(replacement_bytes)
+        return prepared
+
+    def _prefetch(**kwargs):
+        accounts = set(kwargs["cfg"].get("accounts") or [])
+        prefetch_scopes.append(accounts)
+        return {
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+            "symbols": [],
+            "results": {},
+        }
+
+    def _seal(**kwargs):
+        payload = {
+            "schema_version": "required_data_snapshot_manifest.v1",
+            "run_id": kwargs["run_id"],
+            "status": "complete",
+            "plan_id": "a" * 64,
+            "symbols": {},
+            "summary": {},
+        }
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    def _run_one_account(*, request, **_kwargs):
+        account_children.append(request.acct)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", _scan_gate)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
+    monkeypatch.setattr(
+        mod,
+        "_build_close_advice_barrier_plan",
+        lambda **kwargs: (kwargs["candidate_config"], None),
+    )
+    monkeypatch.setattr(mod, "prefetch_required_data", _prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    assert prepared_scopes == [{"lx", "sy"}]
+    assert len(prefetch_scopes) == 1
+    assert account_children == ["sy"]
+    assert [item.decision_reason for item in outcome.results] == [
+        "account_config_parent_bytes_mismatch",
+        "ok",
+    ]
+    assert outcome.ran_pipeline_accounts == ["sy"]

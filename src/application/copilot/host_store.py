@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -102,20 +103,34 @@ class CopilotHostStore:
                 "SELECT memory_json FROM copilot_sessions WHERE session_key = ?",
                 (session_key,),
             ).fetchone()
-        default = {"version": 1, "compacted_turn_count": 0, "pinned_state": {}, "episodes": []}
+        default = _default_session_memory()
         if row is None:
             return default
         try:
             payload = json.loads(str(row[0] or "{}"))
         except Exception:
-            payload = {}
+            return default
         if not isinstance(payload, dict):
             return default
+        version = _memory_integer(payload.get("version"), default=1, minimum=1)
+        compacted_turn_count = _memory_integer(
+            payload.get("compacted_turn_count"),
+            default=0,
+            minimum=0,
+        )
+        if version is None or compacted_turn_count is None:
+            return default
+        pinned_state = payload.get("pinned_state")
+        episodes = payload.get("episodes")
+        if pinned_state is not None and not isinstance(pinned_state, dict):
+            return default
+        if episodes is not None and not isinstance(episodes, list):
+            return default
         return {
-            "version": int(payload.get("version") or 1),
-            "compacted_turn_count": max(0, int(payload.get("compacted_turn_count") or 0)),
-            "pinned_state": dict(payload.get("pinned_state") or {}),
-            "episodes": [dict(item) for item in payload.get("episodes") or () if isinstance(item, dict)],
+            "version": version,
+            "compacted_turn_count": compacted_turn_count,
+            "pinned_state": dict(pinned_state or {}),
+            "episodes": [dict(item) for item in episodes or () if isinstance(item, dict)],
         }
 
     def update_session_memory(
@@ -125,6 +140,7 @@ class CopilotHostStore:
         *,
         expected_compacted_turn_count: int | None = None,
     ) -> bool:
+        encoded_memory = json.dumps(memory, ensure_ascii=False, default=str, allow_nan=False)
         self._ensure_schema()
         now = utc_now_iso()
         with self._connect() as conn:
@@ -135,9 +151,17 @@ class CopilotHostStore:
                     (session_key,),
                 ).fetchone()
                 current = _json_object(row)
-                if max(0, int(current.get("compacted_turn_count") or 0)) != max(
-                    0, int(expected_compacted_turn_count)
-                ):
+                current_count = _memory_integer(
+                    current.get("compacted_turn_count"),
+                    default=0,
+                    minimum=0,
+                )
+                expected_count = _memory_integer(
+                    expected_compacted_turn_count,
+                    default=0,
+                    minimum=0,
+                )
+                if current_count is None or expected_count is None or current_count != expected_count:
                     return False
             conn.execute(
                 """
@@ -147,7 +171,7 @@ class CopilotHostStore:
                     memory_json = excluded.memory_json,
                     updated_at = excluded.updated_at
                 """,
-                (session_key, json.dumps(memory, ensure_ascii=False, default=str), now),
+                (session_key, encoded_memory, now),
             )
         return True
 
@@ -697,6 +721,25 @@ def _json_object(row: tuple[Any, ...] | sqlite3.Row | None) -> dict[str, Any]:
     except Exception:
         return {}
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _default_session_memory() -> dict[str, Any]:
+    return {"version": 1, "compacted_turn_count": 0, "pinned_state": {}, "episodes": []}
+
+
+def _memory_integer(value: Any, *, default: int, minimum: int) -> int | None:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not isfinite(value) or not value.is_integer():
+            return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return normalized if normalized >= minimum else default
 
 
 __all__ = ["CopilotHostStore"]

@@ -15,7 +15,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.settings import build_effective_env
@@ -126,6 +126,7 @@ def load_config(
     log: Callable[[str], None],
     validate_config_fn: Callable[[dict], None] | None = None,
     state_dir: Path | None = None,
+    config_payload: Mapping[str, Any] | None = None,
 ) -> dict:
     cfg_path = config_path
     if not cfg_path.is_absolute():
@@ -134,7 +135,11 @@ def load_config(
     if cfg_path.suffix.lower() != '.json':
         raise SystemExit('[CONFIG_ERROR] runtime config must be a .json file')
 
-    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    cfg = (
+        dict(config_payload)
+        if config_payload is not None
+        else json.loads(cfg_path.read_text(encoding='utf-8'))
+    )
 
     if not isinstance(cfg, dict):
         raise SystemExit('[CONFIG_ERROR] config must be a JSON object')

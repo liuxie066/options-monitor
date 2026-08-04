@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.10.0 - 2026-08-04
+
+### New Features
+- Added a guarded historical trade-receipt compensation workflow that validates exact ledger and intake-state evidence, freezes the reviewed payload and route, sends one idempotent combined receipt, and never replays economic events.
+
+### Improvements
+- Reduced Feishu agent response latency by removing foreground model-based memory compaction while preserving read-only structured-memory context and fail-closed handling of malformed stored memory.
+
+### Bug Fixes
+- Made required-data completion authority require exact account-scoped fetch contracts, provider coverage, volatility and expiry evidence, immutable output bytes, and terminal receipts, preventing partial, stale, or cross-account market data from becoming candidate authority.
+- Retired the scheduler's deprecated shadow execution path and reject `--run-if-due` before config, state, or adapter effects, preventing hidden duplicate scan execution.
+
 ## 1.9.3 - 2026-08-04
 
 ### Bug Fixes

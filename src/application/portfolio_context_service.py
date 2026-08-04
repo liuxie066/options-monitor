@@ -37,7 +37,11 @@ def _load_json_payload(load_json_fn: JsonLoader, path: Path) -> dict[str, Any]:
     return _read_json_from_path(path)
 
 
-def _portfolio_context_account_mismatch_reason(ctx: dict[str, Any], *, requested_account: str | None) -> str | None:
+def portfolio_context_account_mismatch_reason(
+    ctx: dict[str, Any],
+    *,
+    requested_account: str | None,
+) -> str | None:
     account_norm = str(requested_account or "").strip()
     if not account_norm or not isinstance(ctx, dict):
         return None
@@ -67,18 +71,26 @@ def _validate_portfolio_context_account(
     log: Logger,
     source: str,
 ) -> bool:
-    mismatch = _portfolio_context_account_mismatch_reason(ctx, requested_account=requested_account)
+    mismatch = portfolio_context_account_mismatch_reason(
+        ctx,
+        requested_account=requested_account,
+    )
     if mismatch is None:
         return True
     log(f"[CTX] portfolio_context cache rejected due to account mismatch source={source} {mismatch}")
     return False
 
 
-def _expected_context_account(*, source_name: str, account: str | None, holdings_account: str | None) -> str | None:
+def expected_portfolio_context_account(
+    *,
+    source_name: str,
+    account: str | None,
+    holdings_account: str | None,
+) -> str | None:
     source_norm = str(source_name or "").strip().lower()
     if source_norm == "futu":
-        return str(account or "").strip() or None
-    return str(holdings_account or account or "").strip() or None
+        return str(account or "").strip().lower() or None
+    return str(holdings_account or account or "").strip().lower() or None
 
 
 def load_account_portfolio_context(
@@ -115,7 +127,7 @@ def load_account_portfolio_context(
     cached_source = str((cached or {}).get("portfolio_source_name") or "").strip().lower() if isinstance(cached, dict) else ""
     if isinstance(cached, dict):
         if cached_source == plan.primary_source:
-            expected_account = _expected_context_account(
+            expected_account = expected_portfolio_context_account(
                 source_name=cached_source,
                 account=account,
                 holdings_account=plan.holdings_account,
@@ -125,7 +137,7 @@ def load_account_portfolio_context(
                 log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
                 return cached
         if plan.primary_source == "external_holdings" and cached_source in {"holdings", "external_holdings"}:
-            expected_account = _expected_context_account(
+            expected_account = expected_portfolio_context_account(
                 source_name=cached_source,
                 account=account,
                 holdings_account=plan.holdings_account,
@@ -147,7 +159,7 @@ def load_account_portfolio_context(
                 )
             ctx = dict(ctx)
             ctx["portfolio_source_name"] = "futu"
-            expected_account = _expected_context_account(
+            expected_account = expected_portfolio_context_account(
                 source_name="futu",
                 account=account,
                 holdings_account=plan.holdings_account,
@@ -177,7 +189,7 @@ def load_account_portfolio_context(
             if isinstance(shared_cached, dict):
                 sliced = slice_shared_context_for_account(shared_cached, holdings_account)
                 if isinstance(sliced, dict):
-                    expected_account = _expected_context_account(
+                    expected_account = expected_portfolio_context_account(
                         source_name=holdings_source_name,
                         account=account,
                         holdings_account=holdings_account,
@@ -214,7 +226,7 @@ def load_account_portfolio_context(
                 )
             if not ctx:
                 ctx = dict(_load_json_payload(load_json_fn, port_path))
-            expected_account = _expected_context_account(
+            expected_account = expected_portfolio_context_account(
                 source_name=holdings_source_name,
                 account=account,
                 holdings_account=holdings_account,
@@ -232,7 +244,7 @@ def load_account_portfolio_context(
             if shared_out is None:
                 if allow_holdings_fallback:
                     cached_fallback = _load_json_payload(load_json_fn, port_path)
-                    expected_account = _expected_context_account(
+                    expected_account = expected_portfolio_context_account(
                         source_name=holdings_source_name,
                         account=account,
                         holdings_account=holdings_account,

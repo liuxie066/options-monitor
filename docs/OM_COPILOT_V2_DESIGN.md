@@ -34,7 +34,7 @@ Agent
 ```
 
 The stable layers are `UI -> Service -> Host -> Agent`. Contract preparation,
-Scene preparation, memory compaction, event storage, and tool projection are
+Scene preparation, structured-memory injection, event storage, and tool projection are
 mechanisms inside those layers, not additional architecture layers.
 
 `./om-agent` is a structured Tool Gateway for external agents. It is a UI entry,
@@ -262,7 +262,7 @@ model preview request
 
 Current pending operations are injected into every channel turn from the
 operation store. This snapshot is newer and more authoritative than conversation
-history or compacted memory.
+history or structured memory.
 
 `取消分析` targets an active Copilot run. `取消执行` targets a pending Control
 operation. These are distinct state machines.
@@ -287,14 +287,17 @@ episodes:
   next_step
 ```
 
-Compaction:
+Online request preparation:
 
-- keeps recent raw turns;
-- summarizes only older uncompacted turns;
-- uses the configured model with tools disabled;
-- rejects malformed summaries without deleting raw turns;
-- uses optimistic compacted-turn checks to reject stale writes;
-- never turns a preview or chat claim into authoritative execution state.
+- reads already persisted structured memory;
+- injects pinned state and recent episodes before the current user message;
+- never calls a model, acquires a memory lease, or writes session memory;
+- leaves raw turns and malformed or missing stored memory unchanged.
+
+Model-driven conversation-memory compaction is disabled on the online request
+path. Reintroducing automatic compaction requires a separate design that proves
+foreground latency isolation and replaces the sliding-array count cursor with a
+stable turn identity before any memory write is enabled.
 
 Memory is contextual and may be stale. Current financial and runtime questions
 must still use canonical tools.
@@ -391,7 +394,6 @@ OM uses lightweight Host leases rather than a general multi-tenant governor:
 
 ```text
 chat_read: 2
-memory_compact: 1
 control: independent
 ```
 
@@ -492,7 +494,7 @@ configured at runtime and must not assume a provider.
 |---|---|---|
 | P0 | Stable rebuild baseline | Focused tests, guards, dependency graph, and diff checks pass. |
 | P1 | Production answer-quality baseline | The configured production model produces sanitized v3 traces and human scores. |
-| P2 | Structured memory | Follow-up scope survives compaction; stale writes and malformed summaries are safe. |
+| P2 | Structured memory | Existing pinned state and episodes remain injectable without request-path model calls or memory writes. |
 | P3 | Durable run control | Interrupted reads resume safely and cancellation stops further work. |
 | P4 | Trace/model protocol | Iteration identity, usage, termination, and failure categories are persisted. |
 | P5 | Progress/outbox | Coarse progress is pollable and final replies are idempotent and retryable. |

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
+
+import pytest
 
 
 def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp_path: Path) -> None:
@@ -84,3 +87,162 @@ def test_pipeline_runtime_has_no_config_driven_legacy_compatibility_bundle() -> 
     assert 'notifications_cfg.get("render_style")' not in source
     assert 'render_style="compact"' in source
     assert "not delivery evidence" in source
+
+
+def _authority_args(authority, *, base: Path) -> list[str]:
+    return [
+        "--config",
+        str(authority.state_path),
+        "--account-config-base",
+        str(base),
+        "--account-config-run-id",
+        authority.run_id,
+        "--account-config-account",
+        authority.account,
+        "--account-config-compatibility-path",
+        str(authority.compatibility_path),
+        "--account-config-sha256",
+        authority.account_config_sha256,
+    ]
+
+
+def _set_authority_env(monkeypatch, authority) -> None:
+    monkeypatch.setenv(
+        "OM_ACCOUNT_CONFIG_CANONICAL_B64",
+        base64.b64encode(authority.canonical_bytes).decode("ascii"),
+    )
+
+
+def test_pipeline_runtime_passes_validated_account_config_payload_to_loader(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_runtime as mod
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-pipeline",
+        account="lx",
+        config={
+            "portfolio": {"account": "lx"},
+            "runtime": {"marker": "validated-authority"},
+            "symbols": [],
+        },
+    )
+    report_dir = tmp_path / "reports"
+    state_dir = tmp_path / "state"
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        mod.report_repo,
+        "prepare_dirs",
+        lambda **_kwargs: (report_dir, state_dir),
+    )
+    _set_authority_env(monkeypatch, authority)
+
+    def _load(**kwargs):
+        observed.update(kwargs)
+        return {"symbols": []}
+
+    monkeypatch.setattr(mod, "load_runtime_pipeline_config", _load)
+    from src.application import pipeline_watchlist
+
+    monkeypatch.setattr(
+        pipeline_watchlist,
+        "run_watchlist_pipeline_default",
+        lambda **_kwargs: [],
+    )
+
+    assert mod.main(
+        _authority_args(authority, base=tmp_path) + ["--stage", "fetch"]
+    ) == 0
+    assert observed["config_payload"]["runtime"]["marker"] == (
+        "validated-authority"
+    )
+    assert observed["config_path"] == authority.state_path
+
+
+def test_pipeline_runtime_uses_retained_generation_after_path_drift(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_runtime as mod
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-pipeline-tamper",
+        account="lx",
+        config={"portfolio": {"account": "lx"}, "symbols": []},
+    )
+    authority.state_path.write_text("{}\n", encoding="utf-8")
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod.report_repo,
+        "prepare_dirs",
+        lambda **_kwargs: (tmp_path / "reports", tmp_path / "state"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_runtime_pipeline_config",
+        lambda **kwargs: observed.setdefault("config", kwargs["config_payload"])
+        or {"symbols": []},
+    )
+    from src.application import pipeline_watchlist
+
+    monkeypatch.setattr(
+        pipeline_watchlist,
+        "run_watchlist_pipeline_default",
+        lambda **_kwargs: [],
+    )
+    _set_authority_env(monkeypatch, authority)
+
+    assert mod.main(_authority_args(authority, base=tmp_path) + ["--stage", "fetch"]) == 0
+    assert observed["config"]["portfolio"]["account"] == "lx"
+
+
+def test_pipeline_subprocess_command_forwards_complete_config_authority(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.infrastructure import external_services as mod
+
+    observed: dict[str, object] = {}
+
+    def _run_command(command, **kwargs):
+        observed["command"] = list(command)
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(mod, "run_command", _run_command)
+    compatibility = tmp_path / "run" / "config.override.json"
+    compatibility.parent.mkdir(parents=True)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text("{}\n", encoding="utf-8")
+    compatibility.symlink_to(replacement)
+    mod.run_pipeline_script(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        config=tmp_path / "run" / "state" / "config.override.json",
+        report_dir=tmp_path / "reports",
+        state_dir=tmp_path / "state",
+        account_config_base=tmp_path,
+        account_config_run_id="run-1",
+        account_config_account="lx",
+        account_config_compatibility_path=compatibility,
+        account_config_sha256="a" * 64,
+        account_config_canonical_bytes=b"{}\n",
+    )
+
+    command = observed["command"]
+    assert command[command.index("--account-config-base") + 1] == str(
+        tmp_path.resolve()
+    )
+    assert command[command.index("--account-config-run-id") + 1] == "run-1"
+    assert command[command.index("--account-config-account") + 1] == "lx"
+    assert command[
+        command.index("--account-config-compatibility-path") + 1
+    ] == str(compatibility)
+    assert command[command.index("--account-config-sha256") + 1] == "a" * 64
+    assert "OM_ACCOUNT_CONFIG_CANONICAL_B64" in observed["env"]

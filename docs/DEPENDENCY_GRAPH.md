@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 919 (`src`: 495, `domain`: 76, `scripts`: 8, `tests`: 340)
-- Internal import edges: 5748 total, 2492 production/script edges excluding tests
+- Python files scanned: 922 (`src`: 496, `domain`: 76, `scripts`: 8, `tests`: 342)
+- Internal import edges: 5835 total, 2509 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -45,11 +45,11 @@ flowchart LR
   scripts -->|12| application
   scripts -->|1| infrastructure
   storage -->|1| domain
-  tests -->|2362| application
+  tests -->|2423| application
   tests -->|482| domain
   tests -->|2| domain_services
-  tests -->|140| infrastructure
-  tests -->|211| interfaces
+  tests -->|143| infrastructure
+  tests -->|217| interfaces
   tests -->|13| scripts
   tests -->|16| storage
 ```
@@ -77,10 +77,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2362 |
+| tests | application | 2423 |
 | tests | domain | 482 |
-| tests | interfaces | 211 |
-| tests | infrastructure | 140 |
+| tests | interfaces | 217 |
+| tests | infrastructure | 143 |
 | tests | storage | 16 |
 | tests | scripts | 13 |
 | tests | domain_services | 2 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 249 |
 | src.interfaces | src.application | 117 |
-| src.application | src.infrastructure | 101 |
+| src.application | src.infrastructure | 100 |
 | src.application.ledger | domain.domain | 49 |
 | src.application | domain.storage | 34 |
 | src.application.ledger | domain.domain.ledger | 32 |
@@ -101,17 +101,17 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain | 25 |
 | src.application.positions | src.application | 23 |
 | src.application | domain.domain.engine | 22 |
+| src.application.trades | src.application | 20 |
 | src.application.multi_tick | src.application | 17 |
 | src.application | src.application.settings | 16 |
 | src.application.inbound | src.application | 16 |
 | src.application.positions | domain.domain | 16 |
 | src.application.research | src.application | 16 |
-| src.application.trades | src.application | 16 |
 | src.application | src.application.multi_tick | 15 |
 | src.application | src.application.positions | 15 |
 | src.application.trades | src.application.ledger | 15 |
+| src.application.trades | src.infrastructure | 12 |
 | domain.domain | domain.domain.ledger | 12 |
-| src.application.trades | src.infrastructure | 11 |
 | scripts | src.application | 11 |
 | src.application | domain.domain.ledger | 10 |
 | src.application | src.application.trades | 9 |
@@ -177,14 +177,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 94 |
+| src.application.agent_tool_contracts | 95 |
 | domain.domain.symbol_identity | 70 |
 | src.application.agent_tool_config | 57 |
 | src.infrastructure.io_utils | 57 |
 | src.application.ledger.api | 54 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.option_position_identity | 41 |
-| src.application.account_config | 36 |
+| src.application.account_config | 40 |
 | domain.domain.decision_state_fingerprint | 28 |
 | domain.domain.trade_contract_identity | 25 |
 | src.application.shadow_replay.common | 25 |
@@ -197,9 +197,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
+| src.application.trades.auto_intake | 29 |
 | src.application.agent_tools.analysis | 28 |
 | src.application.close_advice_runner | 28 |
-| src.application.trades.auto_intake | 28 |
 | src.interfaces.cli.main | 28 |
 | src.interfaces.cli.option_positions | 26 |
 | src.application.agent_tools.materialization | 25 |
@@ -207,11 +207,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.daily_decision_brief_service | 24 |
 | src.application.channels.wechat_clawbot.inbound | 23 |
 | src.application.ledger.queries | 23 |
+| src.application.account_run | 22 |
 | src.application.agent_tools.diagnostics | 22 |
 | src.application.ledger.writer | 22 |
 | src.application.multi_tick.required_data_prefetch | 22 |
 | src.application.tick_notification_flow | 22 |
-| src.application.account_run | 21 |
 
 ## Reading
 

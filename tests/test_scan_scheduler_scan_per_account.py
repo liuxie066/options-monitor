@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
+import pytest
+
 
 def test_scan_scheduler_scan_is_per_account() -> None:
     from src.application.scan_scheduler import decide
@@ -178,3 +180,46 @@ def test_mark_scheduler_accounts_batches_scan_state(tmp_path) -> None:
         'lx': t0.isoformat(),
         'sy': t0.isoformat(),
     }
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {},
+        {"account": "lx", "mark_notified": True},
+        {"account": "sy", "mark_scanned": True},
+        {"account": "lx", "mark_notified": True, "mark_scanned": True, "force": True, "jsonl": True},
+    ],
+)
+def test_run_scheduler_rejects_run_if_due_before_runtime_or_state_access(
+    monkeypatch,
+    tmp_path,
+    extra_args,
+) -> None:
+    from src.application import scan_scheduler
+    from src.application.agent_tool_contracts import AgentToolError
+
+    calls: list[str] = []
+
+    def _unexpected_call(name: str):
+        def _fail(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"unexpected call: {name}")
+
+        return _fail
+
+    for owner in ("_resolve_base", "_resolve_state_path", "read_state", "write_state"):
+        monkeypatch.setattr(scan_scheduler, owner, _unexpected_call(owner))
+
+    with pytest.raises(AgentToolError) as exc_info:
+        scan_scheduler.run_scheduler(
+            config=tmp_path / "missing.json",
+            state=tmp_path / "scheduler_state.json",
+            run_if_due=True,
+            **extra_args,
+        )
+
+    assert exc_info.value.code == "UNSUPPORTED_OPERATION"
+    assert "tick" in str(exc_info.value.hint)
+    assert calls == []
+    assert not (tmp_path / "scheduler_state.json").exists()
