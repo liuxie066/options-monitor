@@ -90,6 +90,11 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="mark sampling source for Strategy Lab recorder timers",
     )
     service_render.add_argument(
+        "--strategy-lab-recorder-account",
+        default=None,
+        help="Futu account whose OpenD endpoint owns Strategy Lab mark sampling",
+    )
+    service_render.add_argument(
         "--strategy-lab-recorder-max-datasets",
         type=int,
         default=5,
@@ -247,6 +252,7 @@ def handle_service_update_command(
             wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
             include_strategy_lab_recorder=bool(args.include_strategy_lab_recorder),
             strategy_lab_recorder_source=args.strategy_lab_recorder_source,
+            strategy_lab_recorder_account=args.strategy_lab_recorder_account,
             strategy_lab_recorder_max_datasets=args.strategy_lab_recorder_max_datasets,
             strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
             include_quality_monitoring=bool(args.include_quality_monitoring),

@@ -195,6 +195,171 @@ def _complete_receipt(rows: list[dict]) -> dict:
     }
 
 
+def test_discovery_replay_does_not_override_canonical_timing_policy(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(
+        tmp_path
+    )
+    case_id = str(lifecycle_case["case_id"])
+    fallback_deadline_ms = int(lifecycle_case["pending_until_ms"])
+    canonical_deadline_ms = int(policy["settlement_deadline_ms"])
+    assert fallback_deadline_ms < canonical_deadline_ms
+
+    before = repo.get_trade_lifecycle_case(case_id)
+    assert before is not None
+    canonical_before = lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=fallback_deadline_ms,
+    )
+    assert canonical_before["pending_until_ms"] == canonical_deadline_ms
+    assert canonical_before["reason_state"] == "cause_pending"
+
+    replay = discover_lifecycle_cases(
+        repo,
+        account="lx",
+        observed_at_ms=fallback_deadline_ms,
+    )
+
+    assert replay["created_case_ids"] == []
+    assert replay["refreshed_case_ids"] == []
+    assert replay["would_refresh_case_ids"] == []
+    assert repo.get_trade_lifecycle_case(case_id) == before
+    canonical_after = lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=fallback_deadline_ms,
+    )
+    assert canonical_after == canonical_before
+
+
+def test_due_reconciliation_routes_anchor_without_effective_pairing_to_close_reason(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    class _DueV2Repo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "anchor-without-timing",
+                    "account": "lx",
+                    "status": "waiting_settlement_evidence",
+                    "target_contracts_by_lot": {"lot-1": 1},
+                }
+            ]
+
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {
+            "pairing_until_ms": None,
+            "pending_until_ms": 200,
+            "reason_state": "needs_review",
+            "lifecycle_evidence_status": "closure_observed_cause_pending",
+        },
+    )
+    calls: list[dict] = []
+
+    def _reconcile(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "case_id": "anchor-without-timing",
+            "decision": {
+                "status": "needs_review",
+                "reason_codes": ["lifecycle_timing_policy_unavailable"],
+            },
+        }
+
+    monkeypatch.setattr(
+        reconciliation,
+        "reconcile_lifecycle_close_reason",
+        _reconcile,
+    )
+
+    result = reconcile_due_lifecycle_cases(
+        _DueV2Repo(),
+        account="lx",
+        now_ms=200,
+        apply_changes=False,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("no effective pairing must not poll provider")
+        ),
+    )
+
+    assert result["results"][0]["decision"]["reason_codes"] == [
+        "lifecycle_timing_policy_unavailable"
+    ]
+    assert calls == [
+        {
+            "case_id": "anchor-without-timing",
+            "now_ms": 200,
+            "apply_changes": False,
+        }
+    ]
+
+
+def test_due_reconciliation_skips_conflict_without_effective_pairing(
+    monkeypatch,
+) -> None:
+    import src.application.trades.close_reason_reconciliation as reconciliation
+
+    class _ConflictRepo:
+        def list_trade_lifecycle_cases(
+            self,
+            *,
+            account: str,
+        ) -> list[dict]:
+            assert account == "lx"
+            return [
+                {
+                    "schema_version": "lifecycle_case.v2",
+                    "case_id": "conflict-without-timing",
+                    "account": "lx",
+                    "status": "conflict",
+                    "target_contracts_by_lot": {"lot-1": 1},
+                }
+            ]
+
+    monkeypatch.setattr(
+        reconciliation,
+        "lifecycle_case_read_model",
+        lambda *_args, **_kwargs: {
+            "pairing_until_ms": None,
+            "pending_until_ms": 200,
+            "reason_state": "conflict",
+            "lifecycle_evidence_status": "conflict",
+        },
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "reconcile_lifecycle_close_reason",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("conflict case is absorbing for due reconciliation")
+        ),
+    )
+
+    result = reconcile_due_lifecycle_cases(
+        _ConflictRepo(),
+        account="lx",
+        now_ms=200,
+        apply_changes=False,
+        observation_collector=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("conflict case must not poll provider")
+        ),
+    )
+
+    assert result["case_count"] == 0
+    assert result["results"] == []
+
+
 class _Gateway:
     def __init__(
         self,

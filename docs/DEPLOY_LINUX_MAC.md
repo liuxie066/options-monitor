@@ -146,6 +146,7 @@ cd "$REPO"
   --config-hk "$RUNTIME/config.hk.json" \
   --include-strategy-lab-recorder \
   --strategy-lab-recorder-source opend \
+  --strategy-lab-recorder-account lx \
   --strategy-lab-recorder-max-datasets 5 \
   --output-dir /tmp/options-monitor-service
 ```
@@ -153,10 +154,10 @@ cd "$REPO"
 这个开关会生成三类独立 timer：
 
 - `options-monitor-strategy-lab-build.timer`：每 6 小时幂等构建 latest scanned run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，已存在就跳过，不覆盖已有 mark path。build 只建立 cohort，不占用 mark/settle 维护批次。
-- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
+- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 会从 canonical config 解析 `--strategy-lab-recorder-account` 的 OpenD host/port，并把端点显式写入采样命令。选择了多个 Futu 账户时必须显式给出 recorder account；只有一个 Futu 账户时可以省略。若同一次 render 也包含 `--include-opend`，systemd unit 只依赖该账户对应的 OpenD service，不依赖其他账户。
 - `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 outcome facts；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
 
-recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in，service drift reconcile 会继续渲染这些 timer；不传该开关则默认不启用。
+如果 OpenD 由外部服务管理，不传 `--include-opend` 即可；渲染出的采样命令仍包含所选账户的显式 host/port，但不会伪造 systemd 依赖。部署前必须单独确认该端点可用。recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in 和账户绑定；service drift 会按绑定账户从 canonical config 重新解析端点，因此配置变化会显示为 drift。不传 recorder 开关则默认不启用。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
@@ -307,10 +308,11 @@ Mac 上同样可以显式开启 Strategy Lab recorder：
   --config-hk "$RUNTIME/config.hk.json" \
   --include-strategy-lab-recorder \
   --strategy-lab-recorder-source opend \
+  --strategy-lab-recorder-account lx \
   --output-dir /tmp/options-monitor-service
 ```
 
-launchd 没有 systemd 的 `After=` / `Wants=` 关系；使用 `opend` source 时，需要先确认 OpenD 已经在同一台机器上稳定运行。
+launchd plist 同样会写入所选账户的显式 OpenD host/port。launchd 没有 systemd 的 `After=` / `Wants=` 关系；使用 `opend` source 时，需要先确认该端点已经稳定可用。
 
 安装：
 
@@ -351,7 +353,7 @@ launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:
 
 - Linux 机器能连接可用 OpenD host/port，或本机已运行 OpenD。
 - Mac 机器的 OpenD 登录状态稳定，launchd 服务能访问同一端口。
-- runtime config 中的 `fetch.host` / `fetch.port` 指向正确地址。
+- canonical runtime config 中所选账户的 `account_settings.<account>.futu.host` / `port` 指向正确地址；跨 US/HK render 时两边必须一致。
 - OpenD Telnet 已启用，`FutuOpenD.xml` 中应包含 `telnet_ip=127.0.0.1`、`telnet_port=22222`。
 - 手机验证码需要通过 Telnet 提交；提交后 `program_status_type=READY`，且 `qot_logined=true`、`trd_logined=true`。
 

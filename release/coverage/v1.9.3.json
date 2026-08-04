@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.9.3",
+  "base": {
+    "tag": "v1.9.2",
+    "commit": "9f0c1dc87d2eae7abc4be0cc8ceffbb2bb5d809c"
+  },
+  "reviewed_head": "4ef2baea0d50cef7a0c13bb2f5edc97ac5166a8d",
+  "commits": [
+    {
+      "sha": "4ef2baea0d50cef7a0c13bb2f5edc97ac5166a8d",
+      "subject": "fix: bind Strategy Lab recorder to one OpenD"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Bound Strategy Lab mark sampling to one canonical Futu account and OpenD endpoint, removing unrelated OpenD service dependencies while making ambiguous legacy bindings and malformed ports fail closed.",
+      "commits": [
+        "4ef2baea0d50cef7a0c13bb2f5edc97ac5166a8d"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
