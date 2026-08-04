@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.9.3 - 2026-08-04
+
+### Bug Fixes
+- Bound Strategy Lab mark sampling to one canonical Futu account and OpenD endpoint, removing unrelated OpenD service dependencies while making ambiguous legacy bindings and malformed ports fail closed.
+
 ## 1.9.2 - 2026-08-04
 
 ### Improvements
