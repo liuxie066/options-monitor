@@ -683,6 +683,8 @@ artifact 命名必须能区分策略域：
   --markets us hk \
   --accounts lx sy \
   --include-strategy-lab-recorder \
+  --strategy-lab-recorder-source opend \
+  --strategy-lab-recorder-account lx \
   --output-dir /tmp/options-monitor-service
 ```
 
@@ -690,7 +692,8 @@ artifact 命名必须能区分策略域：
 sampler、outcome settler。build unit 固定使用
 `--build-dataset --include-close-decisions --write --source local`。这个
 recorder 只是 evidence lifecycle 的服务化入口，不是 experiment runner，也不会应用
-proposal。
+proposal。OpenD recorder 以所选 Futu 账户为绑定身份，host/port 每次从 canonical
+config 解析；多 Futu 账户不允许依赖列表顺序或默认端口推断。
 
 ### `readiness`
 

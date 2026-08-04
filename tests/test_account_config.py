@@ -179,6 +179,26 @@ def test_build_account_config_view_exposes_futu_runtime_plan() -> None:
     assert out.runtime_plan.futu_trd_env == "REAL"
 
 
+def test_build_account_runtime_plan_does_not_truncate_non_integer_futu_ports() -> None:
+    from src.application.account_config import build_account_runtime_plan
+
+    for value in (11111.9, True, "11111.0", " 11111"):
+        cfg = {
+            "accounts": ["lx"],
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {
+                        "host": "127.0.0.1",
+                        "port": value,
+                    },
+                }
+            },
+        }
+
+        assert build_account_runtime_plan(cfg, account="lx").futu_port is None
+
+
 def test_resolve_futu_account_ids_falls_back_to_legacy_trade_mapping() -> None:
     from src.application.account_config import resolve_futu_account_ids
 
