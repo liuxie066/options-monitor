@@ -188,7 +188,10 @@ def test_auto_trade_intake_dry_run_flag_is_reconcile_state_only(tmp_path: Path) 
     )
 
     assert result.returncode == 2
-    assert "--dry-run is only supported with --reconcile-state" in result.stdout
+    assert (
+        "--dry-run is only supported with --reconcile-state or "
+        "--compensate-receipts"
+    ) in result.stdout
 
 
 def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: Path) -> None:

@@ -65,6 +65,12 @@ def add_run_commands(subparsers: Any) -> None:
     trade_intake.add_argument("--deal-json", default=None)
     trade_intake.add_argument("--retry-failed", action="store_true")
     trade_intake.add_argument("--reconcile-state", action="store_true")
+    trade_intake.add_argument("--compensate-receipts", action="store_true")
+    trade_intake.add_argument(
+        "--compensation-reason",
+        default="legacy_false_outbox_marker",
+    )
+    trade_intake.add_argument("--expected-payload-hash", default=None)
     trade_intake.add_argument("--account", default=None)
     trade_intake.add_argument("--deal-id", action="append", default=None)
     trade_intake.add_argument("--apply", action="store_true")
@@ -126,10 +132,19 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
         intake_argv.append("--retry-failed")
     if args.reconcile_state:
         intake_argv.append("--reconcile-state")
+    if args.compensate_receipts:
+        intake_argv.append("--compensate-receipts")
+        intake_argv.extend(
+            ["--compensation-reason", str(args.compensation_reason)]
+        )
     if args.account:
         intake_argv.extend(["--account", str(args.account)])
     for deal_id in args.deal_id or []:
         intake_argv.extend(["--deal-id", str(deal_id)])
+    if args.expected_payload_hash:
+        intake_argv.extend(
+            ["--expected-payload-hash", str(args.expected_payload_hash)]
+        )
     if args.apply:
         intake_argv.append("--apply")
     if args.dry_run:
