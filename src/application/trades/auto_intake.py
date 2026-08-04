@@ -59,6 +59,10 @@ from src.application.trades.receipt import (
     send_trade_lifecycle_outbox_payload,
     send_trade_intake_receipt,
 )
+from src.application.trades.receipt_compensation import (
+    LEGACY_FALSE_OUTBOX_REASON,
+    compensate_trade_intake_receipts,
+)
 from src.application.trades.inbox import (
     enqueue_trade_payload,
     list_retryable_trade_payloads,
@@ -101,10 +105,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
     ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
-    ap.add_argument("--account", default=None, help="Limit --reconcile-state to one configured intake account")
-    ap.add_argument("--deal-id", action="append", default=None, help="Limit --reconcile-state to a specific deal_id; repeatable")
-    ap.add_argument("--apply", action="store_true", help="Apply --reconcile-state local state changes; dry-run by default")
-    ap.add_argument("--dry-run", action="store_true", help="Preview --reconcile-state without writing")
+    ap.add_argument(
+        "--compensate-receipts",
+        action="store_true",
+        help=(
+            "Send one guarded historical receipt for canonical open deal IDs "
+            "that carry the legacy false outbox marker"
+        ),
+    )
+    ap.add_argument(
+        "--compensation-reason",
+        default=LEGACY_FALSE_OUTBOX_REASON,
+        help="Fixed audit reason for --compensate-receipts",
+    )
+    ap.add_argument(
+        "--expected-payload-hash",
+        default=None,
+        help="Exact payload_hash returned by receipt compensation dry-run",
+    )
+    ap.add_argument("--account", default=None, help="Limit state reconciliation or receipt compensation to one configured intake account")
+    ap.add_argument("--deal-id", action="append", default=None, help="Canonical deal ID for state reconciliation or receipt compensation; repeatable")
+    ap.add_argument("--apply", action="store_true", help="Apply state reconciliation or confirmed receipt compensation; dry-run by default")
+    ap.add_argument("--dry-run", action="store_true", help="Preview state reconciliation or receipt compensation without writing or sending")
     return ap.parse_args(argv)
 
 
@@ -402,17 +424,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.retry_failed and not args.deal_json:
         print("--retry-failed requires --deal-json replay")
         return 2
-    if args.deal_id and not args.reconcile_state:
-        print("--deal-id is only supported with --reconcile-state")
+    state_operation = bool(args.reconcile_state or args.compensate_receipts)
+    if args.expected_payload_hash and not args.compensate_receipts:
+        print("--expected-payload-hash is only supported with --compensate-receipts")
         return 2
-    if args.account and not args.reconcile_state:
-        print("--account is only supported with --reconcile-state")
+    if args.deal_id and not state_operation:
+        print("--deal-id is only supported with --reconcile-state or --compensate-receipts")
         return 2
-    if args.apply and not args.reconcile_state:
-        print("--apply is only supported with --reconcile-state; use --mode apply for trade-event writes")
+    if args.account and not state_operation:
+        print("--account is only supported with --reconcile-state or --compensate-receipts")
         return 2
-    if args.dry_run and not args.reconcile_state:
-        print("--dry-run is only supported with --reconcile-state; use --mode dry-run for trade intake")
+    if args.apply and not state_operation:
+        print("--apply is only supported with --reconcile-state or --compensate-receipts; use --mode apply for trade-event writes")
+        return 2
+    if args.dry_run and not state_operation:
+        print("--dry-run is only supported with --reconcile-state or --compensate-receipts; use --mode dry-run for trade intake")
         return 2
     if args.apply and args.dry_run:
         print("--dry-run cannot be combined with --apply")
@@ -420,6 +446,94 @@ def main(argv: list[str] | None = None) -> int:
     if args.reconcile_state and args.mode:
         print("--reconcile-state uses --apply/--dry-run; do not use --mode")
         return 2
+    if args.reconcile_state and args.compensate_receipts:
+        print("--reconcile-state cannot be combined with --compensate-receipts")
+        return 2
+    if args.compensate_receipts:
+        forbidden = [
+            name
+            for name, enabled in (
+                ("--mode", bool(args.mode)),
+                ("--once", bool(args.once)),
+                ("--deal-json", bool(args.deal_json)),
+                ("--retry-failed", bool(args.retry_failed)),
+                ("--state-path", args.state_path is not None),
+                ("--audit-path", args.audit_path is not None),
+                ("--status-path", args.status_path is not None),
+                ("--host", args.host is not None),
+                ("--port", args.port is not None),
+            )
+            if enabled
+        ]
+        if forbidden:
+            print(
+                "--compensate-receipts cannot be combined with "
+                + ", ".join(forbidden)
+            )
+            return 2
+        if not str(args.account or "").strip() or not args.deal_id:
+            print("--compensate-receipts requires --account and at least one canonical --deal-id")
+            return 2
+        if (args.confirm or args.yes) and not args.apply:
+            print("--confirm/--yes requires --apply for --compensate-receipts")
+            return 2
+        if args.apply and not (args.confirm or args.yes):
+            print(
+                "receipt compensation sends one real notification and writes "
+                "durable audit evidence; use --apply with --confirm or --yes"
+            )
+            return 2
+        if args.apply and not str(args.expected_payload_hash or "").strip():
+            print(
+                "receipt compensation apply requires --expected-payload-hash "
+                "from the reviewed dry-run"
+            )
+            return 2
+        try:
+            _data_config, repo = open_position_ledger_from_runtime_config(
+                base=runtime_root,
+                cfg=cfg,
+                data_config=args.data_config,
+            )
+            result = compensate_trade_intake_receipts(
+                base=base,
+                config=cfg,
+                sources=sources,
+                repo=repo,
+                account=str(args.account),
+                deal_ids=list(args.deal_id or []),
+                apply_changes=bool(args.apply),
+                expected_payload_hash=args.expected_payload_hash,
+                reason=str(args.compensation_reason),
+            )
+        except (TypeError, ValueError) as exc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "status": "preflight_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "dry_run": not bool(args.apply),
+                        "write_applied": False,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2
+        result["runtime_root"] = str(runtime_root)
+        result["runtime_root_source"] = runtime_resolution.source
+        result = attach_write_contract(
+            result,
+            dry_run=not bool(args.apply),
+            write_applied=bool(result.get("write_applied")),
+            rollback_hint=(
+                "receipt compensation records suppress duplicate delivery; "
+                "do not delete or replay a non-confirmed record"
+            ),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if bool(result.get("ok")) else 2
     if args.reconcile_state:
         _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
         result = _reconcile_intake_sources(
