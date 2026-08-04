@@ -276,16 +276,6 @@ class _FutuAPIClient:
             )
         raise AttributeError("history_deal_list_query unavailable")
 
-    def get_account_cash_flows(self, **kwargs: Any) -> Any:
-        trade = self._trade()
-        if hasattr(trade, "cash_flow_query"):
-            return self._query_with_coverage(
-                trade.cash_flow_query,
-                paginated=False,
-                kwargs=kwargs,
-            )
-        raise AttributeError("cash_flow_query unavailable")
-
     def get_trading_days(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().request_trading_days(**kwargs))
 
@@ -565,13 +555,6 @@ class FutuGateway:
             return self.client.get_history_deals(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_history_deals")
-        raise AssertionError("unreachable")
-
-    def get_account_cash_flows(self, **kwargs: Any) -> Any:
-        try:
-            return self.client.get_account_cash_flows(**kwargs)
-        except Exception as exc:
-            self._raise_mapped(exc, action="get_account_cash_flows")
         raise AssertionError("unreachable")
 
     def get_trading_days(self, **kwargs: Any) -> Any:

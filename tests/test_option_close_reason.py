@@ -168,8 +168,8 @@ def test_stock_match_status_cannot_self_attest_full_quantity() -> None:
 def test_cash_settlement_is_review_only() -> None:
     decision = resolve_close_reason(
         _target(),
-        _zero_evidence(cash_settlement_evidence=True),
-        _timing(),
+        _zero_evidence(),
+        _timing(settlement_style="cash"),
         100,
     )
 
@@ -194,7 +194,6 @@ def test_complete_no_settlement_observation_resolves_expiration() -> None:
         broker_option_position_absent=True,
         projection_matches_frozen_remaining=True,
         no_stock_settlement=True,
-        no_cash_settlement=True,
         no_normal_order=True,
     )
 
@@ -211,7 +210,6 @@ def test_incomplete_no_settlement_observation_fails_closed() -> None:
         broker_option_position_absent=True,
         projection_matches_frozen_remaining=False,
         no_stock_settlement=True,
-        no_cash_settlement=True,
         no_normal_order=True,
     )
 

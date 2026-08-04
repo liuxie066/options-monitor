@@ -281,7 +281,7 @@ FOREIGN KEY(case_id, owner_evidence_id)
 规则：
 
 - 只 claim 会改变经济解释的 broker event：零价 option anchor 与每一笔 stock settlement deal；
-  history query、position snapshot、calendar、order/cash-flow observation receipt 作为不可消费证据，
+  history query、position snapshot、calendar、order observation receipt 作为不可消费证据，
   由 observation hash 保证完整性，不写 source claim；
 - 首次 evidence acceptance 必须在同一 ledger transaction 中插入全部 source claims；
 - 同 `source_key + case_id + owner_evidence_id + role + hash` 重放为 no-op；
@@ -425,8 +425,13 @@ read model v3；binding 缺失时报告 unavailable，不自行 fallback。
 
 ### 9.1 冻结契约
 
-新增 `broker_settlement_observation.v1`，由 application evidence assembler 构建并作为 lifecycle
+新增 `broker_settlement_observation.v2`，由 application evidence assembler 构建并作为 lifecycle
 evidence 写入 ledger。它至少包含：
+
+v2 不再要求或推断账户现金流：当前 broker SDK 没有可验证的账户现金流数据源，
+因此该条件不得参与 `complete` 或平仓原因判定。历史 v1 observation 只保留读取兼容，
+新观测一律写入 v2。现金结算合约仍仅根据合约元数据 `settlement_style=cash`
+fail closed 为 `needs_review`，不由现金流反推。
 
 ```text
 schema_version
@@ -487,16 +492,10 @@ observed-at 和 allowlisted canonical rows；也可以引用 ledger-local immuta
    - 精确账户；
    - 目标 option contract 已不在 broker open positions；
    - 返回必须是完整账户 snapshot。
-5. **Account cash flows**
-   - 新增 gateway public method `get_account_cash_flows`；
-   - infrastructure adapter 封装实际 Futu SDK 方法，不把 SDK method name 泄漏到 domain；
-   - 逐 clearing date 查询 anchor 当地日期至第二营业日的所有日期；
-   - 每个日期均记录 retcode、row count、coverage 和 payload hash；
-   - endpoint 不可用、任一日期失败或 coverage 不可证明时 observation 不完整。
-6. **Trading calendar**
+5. **Trading calendar**
    - 覆盖 expiration 前一日到第二营业日后一日；
    - 完整保存返回日期、类型、observed-at 和 hash。
-7. **Contract timing/settlement metadata**
+6. **Contract timing/settlement metadata**
    - 明确 `settlement_style=physical`；
    - 明确 `underlying_security_type=equity`；
    - last-trading cutoff 来源符合第 8.2 节。
@@ -514,7 +513,7 @@ observed-at 和 allowlisted canonical rows；也可以引用 ledger-local immuta
 - 没有 truncated、partial、stale、fallback-cache 或 unknown pagination；
 - observed time 达到 settlement deadline；
 - payload hashes 与冻结 rows 一致；
-- 无股票交割、无现金结算、无正常订单、无互斥 evidence；
+- 无股票交割、无正常订单、无互斥 evidence；
 - broker position snapshot 显示目标 option quantity 为零；
 - canonical projection 的每个 target lot remaining 与 observation 冻结的
   `frozen_preterminal_remaining_by_lot` 完全相等；
@@ -636,7 +635,7 @@ if option-close price > 0 and no exact normal order:
     return needs_review(nonzero_close_order_evidence_missing)
 
 # 以下只处理 price == 0
-if cash settlement evidence exists or settlement_style == cash:
+if settlement_style == cash:
     return needs_review(cash_settlement_unsupported_v1)
 
 stock_matches = find_unique_unconsumed_stock_settlement(...)
@@ -671,7 +670,6 @@ if observation.complete
    and target has no competing effective terminal event or consumption
    and this case exclusively reserves the target quantity
    and no stock settlement
-   and no cash settlement
    and no normal order
    and no conflict:
     return resolved(expiration_no_settlement)
@@ -1084,16 +1082,15 @@ Rollback 不删除新表或新 evidence：
 
 工作：
 
-- 增加 history order、account cash flow 的 gateway public methods；
+- 增加 history order 的 gateway public method；
 - 构建 timing policy binding；
-- 构建、冻结并验证 `broker_settlement_observation.v1`；
+- 构建、冻结并验证 `broker_settlement_observation.v2`；
 - 缺 endpoint/coverage/metadata 时返回 typed incomplete，不抛成全局 intake retry。
 - 让 quality 消费 lifecycle effective deadline，删除独立 deadline fallback。
 
 验收：
 
 - Friday/weekend、连续假日、DST、缺 calendar、缺 cutoff；
-- 每个 cash-flow clearing date query；
 - success-empty 与 partial/unknown coverage 分离；
 - snapshot hash 和 account binding 防串户。
 - quality 与 lifecycle read model 对同一 case 给出相同 deadline。
@@ -1299,7 +1296,7 @@ Rollback 不删除新表或新 evidence：
 | Long Call，price = 0，Buy stock | `exercise` |
 | Long Put，price = 0，Sell stock | `exercise` |
 | price = 0，只有部分股票数量 | `partially_resolved` |
-| price = 0，现金结算 evidence | `needs_review` |
+| price = 0，`settlement_style=cash` | `needs_review` |
 | price = 0，完整无交割 observation | `expiration_no_settlement` |
 | price = 0，任一 required source incomplete | `needs_review` |
 | 同股票 deal 可匹配两个 case | `needs_review` 或 `conflict`，零自动 allocation |
@@ -1333,7 +1330,6 @@ Rollback 不删除新表或新 evidence：
 - cutoff metadata missing/conflict；
 - positions cache 未 refresh；
 - history query coverage truncated；
-- cash-flow 某一 clearing date 失败；
 - observation 早于 deadline；
 - payload hash 被篡改。
 
