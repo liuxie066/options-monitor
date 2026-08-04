@@ -1045,6 +1045,37 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
 
 
+@pytest.mark.parametrize(
+    "invalid_scope",
+    [
+        {"account_label": "../escaped"},
+        {"account_label": "lx.sy"},
+        {"external_holdings_account": "sy account"},
+    ],
+)
+def test_config_init_invalid_account_scope_has_dry_run_apply_parity_and_preserves_existing(
+    tmp_path: Path,
+    invalid_scope: dict[str, str],
+) -> None:
+    output_path = tmp_path / "config.yaml"
+    runtime_dir = tmp_path / "runtime"
+    preserved = "accounts:\n  lx:\n    type: futu\n"
+    output_path.write_text(preserved, encoding="utf-8")
+
+    for dry_run in (True, False):
+        with pytest.raises(AgentToolError, match="invalid"):
+            init_yaml_config(
+                repo_root=REPO_ROOT,
+                output_config_yaml_path=output_path,
+                runtime_output_dir=runtime_dir,
+                dry_run=dry_run,
+                force=True,
+                **invalid_scope,
+            )
+        assert output_path.read_text(encoding="utf-8") == preserved
+        assert not runtime_dir.exists()
+
+
 def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 

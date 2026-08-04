@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """基础设施 service 层：统一承接外部进程与第三方 API 调用。"""
 
+import base64
+import os
 import subprocess
 from datetime import date, datetime
 from pathlib import Path
@@ -91,6 +93,13 @@ def run_pipeline_script(
     position_advice_account_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
+    prepared_portfolio_context_manifest_sha256: str | None = None,
+    account_config_base: Path | None = None,
+    account_config_run_id: str | None = None,
+    account_config_account: str | None = None,
+    account_config_compatibility_path: Path | None = None,
+    account_config_sha256: str | None = None,
+    account_config_canonical_bytes: bytes | None = None,
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
@@ -130,18 +139,84 @@ def run_pipeline_script(
             ]
         )
     if prepared_portfolio_context_manifest is not None:
+        digest = str(prepared_portfolio_context_manifest_sha256 or "").strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                "prepared portfolio context manifest requires its retained SHA-256"
+            )
         cmd.extend(
             [
                 "--prepared-portfolio-context-manifest",
                 str(Path(prepared_portfolio_context_manifest).resolve()),
+                "--prepared-portfolio-context-manifest-sha256",
+                digest,
             ]
         )
+    elif prepared_portfolio_context_manifest_sha256 is not None:
+        raise ValueError(
+            "prepared portfolio context manifest SHA-256 requires a manifest"
+        )
+    account_config_authority = (
+        account_config_base,
+        account_config_run_id,
+        account_config_account,
+        account_config_compatibility_path,
+        account_config_sha256,
+        account_config_canonical_bytes,
+    )
+    if any(value is not None for value in account_config_authority):
+        if not all(
+            value is not None and str(value).strip()
+            for value in account_config_authority
+        ):
+            raise ValueError("account config authority arguments must be complete")
+        assert account_config_base is not None
+        assert account_config_run_id is not None
+        assert account_config_account is not None
+        assert account_config_compatibility_path is not None
+        assert account_config_sha256 is not None
+        if not isinstance(account_config_canonical_bytes, bytes) or not account_config_canonical_bytes:
+            raise ValueError(
+                "account config authority requires retained canonical bytes"
+            )
+        compatibility_authority_path = Path(
+            account_config_compatibility_path
+        ).expanduser()
+        if not compatibility_authority_path.is_absolute():
+            raise ValueError(
+                "account config compatibility authority path must be absolute"
+            )
+        compatibility_authority_path = Path(
+            os.path.abspath(str(compatibility_authority_path))
+        )
+        cmd.extend(
+            [
+                "--account-config-base",
+                str(Path(account_config_base).resolve()),
+                "--account-config-run-id",
+                str(account_config_run_id).strip(),
+                "--account-config-account",
+                str(account_config_account).strip(),
+                "--account-config-compatibility-path",
+                str(compatibility_authority_path),
+                "--account-config-sha256",
+                str(account_config_sha256).strip().lower(),
+            ]
+        )
+        child_env = dict(os.environ if env is None else env)
+        child_env["OM_ACCOUNT_CONFIG_CANONICAL_B64"] = base64.b64encode(
+            account_config_canonical_bytes
+        ).decode("ascii")
+    else:
+        child_env = env
     return run_command(
         cmd,
         cwd=base,
         capture_output=capture_output,
         text=text,
-        env=env,
+        env=child_env,
     )
 
 
