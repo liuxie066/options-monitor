@@ -1,0 +1,53 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.1",
+  "base": {
+    "tag": "v1.10.0",
+    "commit": "74075abb2130cabea607fb2ff58cdfb18e58438d"
+  },
+  "reviewed_head": "bcb1bb64d2c871cf56177ab695886c1253954b65",
+  "commits": [
+    {
+      "sha": "30a3b69e5f6f2a017eb116b7cdf7145095d1601e",
+      "subject": "fix: harden run-scoped account authority"
+    },
+    {
+      "sha": "c0463267026911a6bb42cf189d73a33291c080f5",
+      "subject": "merge: harden run-scoped account authority"
+    },
+    {
+      "sha": "51a57677abf5029beb47d1b5a58fdb3d6f1f0e95",
+      "subject": "feat: separate Futu quote and broker capabilities"
+    },
+    {
+      "sha": "bcb1bb64d2c871cf56177ab695886c1253954b65",
+      "subject": "Merge remote-tracking branch 'origin/main' into feat/futu-quote-broker-boundary"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Hardened run-scoped multi-account authority so account selection, runtime paths, prepared portfolio facts, and completion receipts remain bound to one immutable run workspace instead of leaking across accounts or configuration generations.",
+      "commits": [
+        "30a3b69e5f6f2a017eb116b7cdf7145095d1601e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Separated the canonical Futu quote route from per-account broker gateways, validating each broker identity before use and preventing multi-account trade intake, settlement, positions, and health checks from querying an account through the wrong OpenD endpoint.",
+      "commits": [
+        "51a57677abf5029beb47d1b5a58fdb3d6f1f0e95"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c0463267026911a6bb42cf189d73a33291c080f5",
+      "reason": "Integration merge only; the run-scoped authority behavior is mapped to its implementation commit."
+    },
+    {
+      "commit": "bcb1bb64d2c871cf56177ab695886c1253954b65",
+      "reason": "Integration merge only; the Futu capability-boundary behavior is mapped to its implementation commit."
+    }
+  ]
+}
