@@ -492,6 +492,27 @@ def test_validate_config_requires_host_port_for_multiple_futu_accounts() -> None
         assert "account_settings.user1.futu.host must be set when multiple futu accounts are configured" in str(exc)
 
 
+def test_validate_config_rejects_lossy_or_out_of_range_futu_ports() -> None:
+    import src.application.config_validator as mod
+
+    for value, expected in (
+        (11111.9, "must be an integer"),
+        (True, "must be an integer"),
+        ("11111.0", "must be an integer"),
+        (" 11111", "must be an integer"),
+        (0, "must be between 1 and 65535"),
+        (70000, "must be between 1 and 65535"),
+    ):
+        cfg = _base_cfg()
+        cfg["account_settings"]["user1"]["futu"]["port"] = value
+
+        try:
+            mod.validate_config(cfg)
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            assert expected in str(exc)
+
+
 def test_validate_config_rejects_unknown_futu_trade_environments() -> None:
     import src.application.config_validator as mod
 
