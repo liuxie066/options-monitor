@@ -336,6 +336,33 @@ never replaces an already observed `cash_conversion.v1`.
 `net_income_cny` or generic return fields. The migration note is historical
 mapping only, not a callable rollback path.
 
+#### Historical Trade Receipt Compensation
+
+Use the guarded compensation mode only when an already-recorded open trade has
+the legacy false `outbox_managed` receipt marker and current evidence proves
+there was no durable outbox ID or confirmed provider message. Preview is the
+default and neither sends nor writes:
+
+```bash
+./om run trade-intake --config /var/lib/options-monitor/config.us.json \
+  --runtime-root /var/lib/options-monitor --compensate-receipts \
+  --account lx \
+  --deal-id futu:lx:<futu_account_id>:<deal_id_1> \
+  --deal-id futu:lx:<futu_account_id>:<deal_id_2> \
+  --dry-run
+```
+
+After reviewing the frozen message, exact member list, route fingerprint,
+delivery key, and `payload_hash`, the high-risk form requires `--apply`,
+`--confirm` (or `--yes`), and the reviewed value as
+`--expected-payload-hash <sha256>`. Any change to the members, message, or route
+fails closed and requires a new preview. Apply sends one combined historical
+receipt, never replays trade events or edits `position_lots`, and writes an
+independent content-addressed record under the source account's
+`receipt_compensations/` directory plus an audit event. A confirmed rerun is
+duplicate-suppressed. A prepared, send-started, accepted, unknown, or otherwise
+unconfirmed record is also frozen and must not be automatically resent.
+
 ### Close Advice
 
 - Domain policy: `domain/domain/close_advice.py`

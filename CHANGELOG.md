@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- Added a guarded historical trade-receipt compensation workflow that validates exact ledger and intake-state evidence, freezes the reviewed payload and route, sends one idempotent combined receipt, and never replays economic events.
+
 ## 1.9.3 - 2026-08-04
 
 ### Bug Fixes
