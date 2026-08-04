@@ -396,6 +396,8 @@ def build_pipeline_context(
     want_scan: bool,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_run_id: str | None = None,
+    prepared_portfolio_context_account_config_sha256: str | None = None,
+    prepared_portfolio_context_manifest_sha256: str | None = None,
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
     """Load portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate."""
     if (not want_scan) or bool(no_context):
@@ -418,14 +420,22 @@ def build_pipeline_context(
         try:
             portfolio_ctx = load_prepared_portfolio_context(
                 manifest_path=prepared_portfolio_context_manifest,
+                expected_base=base,
                 expected_run_id=str(prepared_portfolio_context_run_id or ""),
                 expected_account=str(account or ""),
+                expected_account_config_sha256=str(
+                    prepared_portfolio_context_account_config_sha256 or ""
+                ),
+                expected_manifest_sha256=str(
+                    prepared_portfolio_context_manifest_sha256 or ""
+                ),
+                expected_runtime_config=cfg,
             )
             source = "prepared" if portfolio_ctx is not None else "prepared_unavailable"
             log(f"[CTX] portfolio_context source={source} account={account or '-'}")
         except PreparedPortfolioContextError as exc:
             log(f"[WARN] prepared portfolio context not available: {exc}")
-            portfolio_ctx = None
+            raise
     else:
         portfolio_ctx = load_portfolio_context(
             base=base,

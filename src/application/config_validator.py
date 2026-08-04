@@ -19,6 +19,8 @@ from src.application.account_config import (
     ACCOUNT_TYPES,
     account_settings_from_config,
     accounts_from_config,
+    normalize_account_label,
+    normalize_accounts,
     parse_lossless_integer,
 )
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
@@ -920,14 +922,20 @@ def validate_config(cfg: dict):
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
 
-    raw_accounts = cfg.get('accounts')
-    if isinstance(raw_accounts, (list, tuple)):
-        normalized_accounts = [
-            str(item or '').strip().lower()
-            for item in raw_accounts
-            if str(item or '').strip()
-        ]
-        if len(normalized_accounts) != len(set(normalized_accounts)):
+    if 'accounts' in cfg:
+        raw_accounts = cfg.get('accounts')
+        try:
+            normalized_accounts = normalize_accounts(
+                raw_accounts,
+                fallback=(),
+                strict=True,
+            )
+        except ValueError as exc:
+            die(f'accounts contains invalid label or scope: {exc}')
+        raw_account_count = (
+            1 if isinstance(raw_accounts, str) else len(raw_accounts)
+        )
+        if len(normalized_accounts) != raw_account_count:
             die('accounts contains duplicate labels after trim + lowercase normalization')
 
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)

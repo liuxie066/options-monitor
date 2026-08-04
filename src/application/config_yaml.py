@@ -12,6 +12,7 @@ import yaml
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.account_config import normalize_account_label
 from src.application.assistant.llm_model_profiles import resolve_authoring_assistant_config
 from src.application.config_primitives import (
     config_key_parts as _key_parts,
@@ -163,10 +164,13 @@ def _reject_unknown_keys(data: dict[str, Any], *, allowed: set[str], path: str) 
 
 
 def _normalize_account_label(raw: Any, *, path: str) -> str:
-    account = str(raw or "").strip().lower()
-    if not account:
-        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be a non-empty account label")
-    return account
+    try:
+        return normalize_account_label(raw)
+    except ValueError as exc:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"{path} is not a valid account label: {exc}",
+        ) from exc
 
 
 def _normalize_symbol(raw: Any, *, path: str) -> str:

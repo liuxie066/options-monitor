@@ -232,7 +232,7 @@ Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, sp
 - Helper modules:
   - `tick_run_context`: idempotency bucket/key and completion records
   - `tick_guard_flow`: project guard, load shedding, market filter, OpenD phone-verify gate, watchdog admission
-  - `tick_run_workspace`: run directory, required-data workspace, shared state pointer
+  - `tick_run_workspace`: run directory, required-data workspace, shared state pointer, immutable per-run account config authority
   - `tick_scheduler_context`: trading-day guard, scheduler state path, scheduler decision
   - `tick_account_execution`: account defaults, worker limits, ordered concurrent execution, account metrics
   - `tick_notification_flow`: notification prep, quiet-hour decision, delivery, metrics, finalization
@@ -245,6 +245,7 @@ Tick flow:
    -> tick_guard_flow
    -> tick_scheduler_context
    -> tick_account_execution
+      -> canonical account config write-once/adopt under `output_runs/<run_id>/accounts/<account>/`
       -> expired position maintenance
       -> required_data prefetch
       -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
@@ -253,6 +254,26 @@ Tick flow:
    -> tick_notification_flow  # scheduled only: Daily Decision Brief ordinary delivery
    -> run state and audit writes
 ```
+
+For each account, Tick serializes the effective runtime config once before prepared workers or account execution. The
+authoritative input is `output_runs/<run_id>/accounts/<account>/state/config.override.json`; the sibling
+`output_runs/<run_id>/accounts/<account>/config.override.json` is a byte-identical compatibility artifact. Both are
+write-once/adopt and bound to the same SHA-256. Before shared planning or provider I/O, Tick validates both files against
+the parent-retained canonical bytes; a mismatch makes that account terminal for the run. After this final barrier, all
+parent and scan-child consumers use the retained generation instead of reopening mutable paths, so a later path
+replacement cannot split one run across two configs. Account labels are canonical lowercase path components
+(`[a-z0-9][a-z0-9_-]{0,63}`); an explicit empty scope, unsafe label, or symlinked artifact ancestor fails closed before
+run artifacts or config publication.
+
+Prepared portfolio payloads use content-addressed names and a write-once/adopt manifest. The parent retains the manifest
+SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
+anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks
+the account-config SHA-256, and verifies the resolved portfolio source account against `filters.account` and any account
+declared by holding rows. External-holdings contexts bind to the configured `holdings_account`, not implicitly to the OM
+account label. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
+shared planning and required-data prefetch.
+Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
+written as Tick input authority.
 
 Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
 
