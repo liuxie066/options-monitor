@@ -10,7 +10,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
-from src.application.account_config import build_account_runtime_plan
+from src.application.account_config import AccountRuntimePlan, build_account_runtime_plan
 from src.application.config_yaml import resolve_yaml_assistant_config, resolve_yaml_runtime_config
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.settings import build_effective_env
@@ -351,6 +351,278 @@ def _opend_profile(target: ServiceTarget, plans: list[OpendServicePlan]) -> dict
     return profile
 
 
+def _runtime_configs_by_market(
+    *,
+    repo_root: Path,
+    config_yaml_path: Path | None,
+    config_by_market: dict[str, Path],
+    market_values: list[str],
+) -> dict[str, dict[str, Any]]:
+    configs: dict[str, dict[str, Any]] = {}
+    for market in market_values:
+        if config_yaml_path is not None:
+            config, _meta = resolve_yaml_runtime_config(
+                repo_root=repo_root,
+                market=market,
+                config_path=config_yaml_path,
+            )
+        else:
+            config_path = config_by_market.get(market)
+            if config_path is None or not config_path.exists():
+                raise ValueError(f"strategy_lab_recorder config is missing for market: {market}")
+            config = _read_json_config(config_path)
+        configs[market] = config
+    return configs
+
+
+def _configured_account_names(config: dict[str, Any]) -> set[str]:
+    raw_accounts = config.get("accounts")
+    if isinstance(raw_accounts, dict):
+        values = raw_accounts
+    elif isinstance(raw_accounts, (list, tuple, set)):
+        values = raw_accounts
+    elif isinstance(raw_accounts, str):
+        values = [raw_accounts]
+    else:
+        values = []
+    return {str(item or "").strip().lower() for item in values if str(item or "").strip()}
+
+
+def _strategy_lab_recorder_account_plans(
+    *,
+    configs: dict[str, dict[str, Any]],
+    market_values: list[str],
+    account_values: list[str],
+) -> tuple[
+    dict[str, set[str]],
+    dict[str, list[AccountRuntimePlan]],
+    list[str],
+]:
+    configured_accounts = {
+        market: _configured_account_names(config)
+        for market, config in configs.items()
+    }
+    plans_by_account: dict[str, list[AccountRuntimePlan]] = {}
+    futu_accounts: list[str] = []
+    for account in account_values:
+        market_plans = [
+            build_account_runtime_plan(configs[market], account=account)
+            for market in market_values
+        ]
+        plans_by_account[account] = market_plans
+        account_types = {plan.account_type for plan in market_plans}
+        configured_in_all_markets = all(
+            account in configured_accounts[market]
+            for market in market_values
+        )
+        if configured_in_all_markets and account_types == {"futu"}:
+            futu_accounts.append(account)
+    return configured_accounts, plans_by_account, futu_accounts
+
+
+def _strategy_lab_recorder_endpoint_for_account(
+    *,
+    selected_account: str,
+    market_values: list[str],
+    configured_accounts: dict[str, set[str]],
+    plans_by_account: dict[str, list[AccountRuntimePlan]],
+) -> tuple[dict[str, Any], list[AccountRuntimePlan]]:
+    selected_plans = plans_by_account.get(selected_account) or []
+    missing_markets = [
+        market
+        for market in market_values
+        if selected_account not in configured_accounts[market]
+    ]
+    if missing_markets:
+        raise ValueError(
+            f"strategy_lab_recorder_account is not configured for markets {','.join(missing_markets)}: "
+            f"{selected_account}"
+        )
+    selected_account_types = {plan.account_type for plan in selected_plans}
+    if len(selected_account_types) != 1:
+        raise ValueError(f"strategy_lab_recorder account type differs across markets: {selected_account}")
+    if not selected_plans or any(plan.account_type != "futu" for plan in selected_plans):
+        raise ValueError(f"strategy_lab_recorder_account must be a selected Futu account: {selected_account}")
+
+    hosts = [str(plan.futu_host or "").strip() for plan in selected_plans]
+    ports: list[int] = []
+    if any(not host for host in hosts):
+        raise ValueError(f"strategy_lab_recorder OpenD host is missing: {selected_account}")
+    for plan in selected_plans:
+        port = plan.futu_port
+        if port is None or port <= 0 or port > 65535:
+            raise ValueError(f"strategy_lab_recorder OpenD port is invalid: {selected_account}")
+        ports.append(port)
+    if len({host.lower() for host in hosts}) != 1 or len(set(ports)) != 1:
+        raise ValueError(f"strategy_lab_recorder OpenD endpoint differs across markets: {selected_account}")
+
+    return {
+        "account": selected_account,
+        "host": hosts[0],
+        "port": ports[0],
+    }, selected_plans
+
+
+def resolve_strategy_lab_recorder_endpoint_matches(
+    *,
+    repo_root: str | Path,
+    runtime_root: str | Path | None,
+    accounts: list[str] | tuple[str, ...] | None,
+    markets: list[str] | tuple[str, ...] | None,
+    config_paths: dict[str, str | Path] | None,
+    config_yaml: str | Path | None,
+    include_auto_upgrade: bool,
+    host: str,
+    port: int,
+) -> list[str]:
+    """Resolve selected Futu endpoint owners without rendering OpenD services."""
+
+    repo = _absolute_path_preserve_symlink(repo_root)
+    runtime = _absolute_path_preserve_symlink(runtime_root, base=repo) if runtime_root is not None else repo
+    account_values = normalize_accounts(accounts)
+    market_values = normalize_markets(markets)
+    config_default_root = runtime if include_auto_upgrade else None
+    config_by_market = {
+        market: _config_path_for_market(
+            market,
+            repo_root=repo,
+            runtime_root=config_default_root,
+            config_paths=config_paths,
+        )
+        for market in market_values
+    }
+    config_yaml_path = (
+        _absolute_path_preserve_symlink(config_yaml, base=repo)
+        if config_yaml is not None and str(config_yaml).strip()
+        else None
+    )
+    configs = _runtime_configs_by_market(
+        repo_root=repo,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+    )
+    configured_accounts, plans_by_account, futu_accounts = _strategy_lab_recorder_account_plans(
+        configs=configs,
+        market_values=market_values,
+        account_values=account_values,
+    )
+    expected_host = str(host or "").strip().lower()
+    matches: list[str] = []
+    for account in futu_accounts:
+        endpoint, _selected_plans = _strategy_lab_recorder_endpoint_for_account(
+            selected_account=account,
+            market_values=market_values,
+            configured_accounts=configured_accounts,
+            plans_by_account=plans_by_account,
+        )
+        if str(endpoint["host"]).strip().lower() == expected_host and endpoint["port"] == port:
+            matches.append(account)
+    return sorted(set(matches))
+
+
+def _resolve_strategy_lab_recorder_binding(
+    *,
+    target: ServiceTarget,
+    include_strategy_lab_recorder: bool,
+    recorder_source: str,
+    recorder_account: str | None,
+    repo_root: Path,
+    config_yaml_path: Path | None,
+    config_by_market: dict[str, Path],
+    market_values: list[str],
+    account_values: list[str],
+    include_opend: bool,
+    explicit_opend_root: bool,
+    opend_service_plans: list[OpendServicePlan],
+) -> dict[str, Any] | None:
+    requested_account = str(recorder_account or "").strip().lower() or None
+    if not include_strategy_lab_recorder:
+        if requested_account is not None:
+            raise ValueError("strategy_lab_recorder_account requires include_strategy_lab_recorder")
+        return None
+    if recorder_source == "local":
+        if requested_account is not None:
+            raise ValueError("strategy_lab_recorder_account is not valid when strategy_lab_recorder_source=local")
+        return None
+
+    selected_accounts: list[str] = []
+    for raw_account in account_values:
+        account = str(raw_account or "").strip().lower()
+        if account and account not in selected_accounts:
+            selected_accounts.append(account)
+    if requested_account is not None and requested_account not in selected_accounts:
+        raise ValueError("strategy_lab_recorder_account must be included in accounts")
+
+    configs = _runtime_configs_by_market(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+    )
+    configured_accounts, plans_by_account, futu_accounts = _strategy_lab_recorder_account_plans(
+        configs=configs,
+        market_values=market_values,
+        account_values=selected_accounts,
+    )
+
+    if requested_account is None:
+        if not futu_accounts:
+            raise ValueError("strategy_lab_recorder_source=opend requires one selected Futu account")
+        if len(futu_accounts) != 1:
+            raise ValueError("strategy_lab_recorder_account is required when multiple Futu accounts are selected")
+        selected_account = futu_accounts[0]
+    else:
+        selected_account = requested_account
+
+    endpoint, selected_plans = _strategy_lab_recorder_endpoint_for_account(
+        selected_account=selected_account,
+        market_values=market_values,
+        configured_accounts=configured_accounts,
+        plans_by_account=plans_by_account,
+    )
+
+    if include_opend and not explicit_opend_root:
+        roots = [
+            _absolute_path_preserve_symlink(str(plan.futu_opend_root), base=repo_root)
+            if plan.futu_opend_root
+            else None
+            for plan in selected_plans
+        ]
+        if any(root is None for root in roots):
+            raise ValueError(f"strategy_lab_recorder OpenD root is missing: {selected_account}")
+        if len({str(root) for root in roots}) != 1:
+            raise ValueError(f"strategy_lab_recorder OpenD root differs across markets: {selected_account}")
+
+    service_name: str | None = None
+    if include_opend:
+        matching_plans = [
+            plan
+            for plan in opend_service_plans
+            if str(plan.account or "").strip().lower() == selected_account
+        ]
+        if len(matching_plans) == 1:
+            selected_service_plan = matching_plans[0]
+        elif (
+            len(opend_service_plans) == 1
+            and opend_service_plans[0].account is None
+            and len(futu_accounts) == 1
+        ):
+            selected_service_plan = opend_service_plans[0]
+        else:
+            raise ValueError(f"strategy_lab_recorder OpenD service is not uniquely mapped: {selected_account}")
+        service_name = (
+            selected_service_plan.systemd_service_name
+            if target == "systemd"
+            else selected_service_plan.launchd_label
+        )
+
+    return {
+        **endpoint,
+        **({"service_name": service_name} if service_name is not None else {}),
+    }
+
+
 def _config_path_for_market(
     market: str,
     *,
@@ -661,6 +933,7 @@ def render_service_bundle(
     wechat_clawbot_allowed_senders: str | None = None,
     include_strategy_lab_recorder: bool = False,
     strategy_lab_recorder_source: str | None = DEFAULT_STRATEGY_LAB_RECORDER_SOURCE,
+    strategy_lab_recorder_account: str | None = None,
     strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
     include_quality_monitoring: bool = False,
@@ -726,6 +999,20 @@ def render_service_bundle(
             default=default_opend_root(deploy_home=systemd_home),
         )
         opend_service_plans = [_legacy_opend_service_plan(root=opend_root_path, executable=opend_executable_value)]
+    recorder_binding = _resolve_strategy_lab_recorder_binding(
+        target=target_key,
+        include_strategy_lab_recorder=include_strategy_lab_recorder,
+        recorder_source=recorder_source,
+        recorder_account=strategy_lab_recorder_account,
+        repo_root=repo,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
+        account_values=account_values,
+        include_opend=include_opend,
+        explicit_opend_root=explicit_opend_root,
+        opend_service_plans=opend_service_plans,
+    )
 
     om = str(repo / "om")
     lock_root = runtime / "locks"
@@ -957,6 +1244,11 @@ def render_service_bundle(
         )
 
         opend_dependency_units = [item.systemd_service_name for item in opend_service_plans]
+        recorder_opend_dependency_units = (
+            [str(recorder_binding["service_name"])]
+            if recorder_binding is not None and recorder_binding.get("service_name")
+            else []
+        )
         for opend_plan in opend_service_plans:
             add(
                 f"systemd/{opend_plan.systemd_service_name}",
@@ -1264,6 +1556,13 @@ def render_service_bundle(
                 "--mark-stale-hours",
                 str(recorder_mark_stale_hours),
             ]
+            if recorder_binding is not None:
+                recorder_sample_args.extend([
+                    "--opend-host",
+                    str(recorder_binding["host"]),
+                    "--opend-port",
+                    str(recorder_binding["port"]),
+                ])
             add(
                 f"systemd/{recorder_sample_service}",
                 _systemd_unit(
@@ -1274,9 +1573,9 @@ def render_service_bundle(
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
                     exec_args=recorder_sample_args,
-                    after=opend_dependency_units if recorder_source == "opend" else None,
+                    after=recorder_opend_dependency_units if recorder_source == "opend" else None,
                     timeout_start_sec=600,
-                    wants=opend_dependency_units if recorder_source == "opend" else None,
+                    wants=recorder_opend_dependency_units if recorder_source == "opend" else None,
                 ),
                 install_path=f"/etc/systemd/system/{recorder_sample_service}",
                 kind="systemd_service",
@@ -1719,6 +2018,13 @@ def render_service_bundle(
                 "--mark-stale-hours",
                 str(recorder_mark_stale_hours),
             ]
+            if recorder_binding is not None:
+                recorder_sample_args.extend([
+                    "--opend-host",
+                    str(recorder_binding["host"]),
+                    "--opend-port",
+                    str(recorder_binding["port"]),
+                ])
             add(
                 f"launchd/{recorder_sample_label}.plist",
                 _launchd_plist(
@@ -1917,6 +2223,7 @@ def render_service_bundle(
             "build_interval": STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_BUILD_INTERVAL_SECONDS,
             "sample_interval": STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
             "settle_schedule_beijing": "07:20",
+            **({"binding": dict(recorder_binding)} if recorder_binding is not None else {}),
         } if include_strategy_lab_recorder else None,
         quality_monitoring={
             "enabled": True,

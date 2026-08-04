@@ -15,6 +15,38 @@ CURRENT_PYTHON = sys.executable
 PYTHON_MINOR = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
+def _futu_service_account(
+    *,
+    host: str = "127.0.0.1",
+    port: object = 11111,
+    opend_root: str | Path | None = None,
+) -> dict[str, object]:
+    futu: dict[str, object] = {"host": host, "port": port}
+    if opend_root is not None:
+        futu["opend_root"] = str(opend_root)
+    return {"type": "futu", "futu": futu}
+
+
+def _write_service_account_config(path: Path, settings: dict[str, dict[str, object]]) -> Path:
+    path.write_text(
+        json.dumps({"accounts": list(settings), "account_settings": settings}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _two_futu_service_accounts(
+    tmp_path: Path,
+    *,
+    lx_port: object = 11111,
+    sy_port: object = 11112,
+) -> dict[str, dict[str, object]]:
+    return {
+        "lx": _futu_service_account(port=lx_port, opend_root=tmp_path / "opend-lx"),
+        "sy": _futu_service_account(port=sy_port, opend_root=tmp_path / "opend-sy"),
+    }
+
+
 def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
@@ -1111,6 +1143,11 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     repo.mkdir()
+    opend_root = tmp_path / "opend-lx"
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        {"lx": _futu_service_account(opend_root=opend_root)},
+    )
 
     default_bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, markets=["us"])
     default_files = {item["relative_path"]: item for item in default_bundle["files"]}
@@ -1120,7 +1157,9 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
         target="systemd",
         repo_root=repo,
         runtime_root=runtime,
+        accounts=["lx"],
         markets=["us"],
+        config_paths={"us": config_path},
         include_opend=True,
         include_strategy_lab_recorder=True,
         strategy_lab_recorder_source="opend",
@@ -1147,6 +1186,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
     assert "OnUnitActiveSec=6h" in build_timer
     assert str(repo / "om") + " research strategy-lab update --profile-path" in sample_service
     assert "--source opend --write --action collect_marks --max-datasets 3" in sample_service
+    assert "--opend-host 127.0.0.1 --opend-port 11111" in sample_service
     assert "--settle-after-collect" not in sample_service
     assert "After=network-online.target options-monitor-opend.service" in sample_service
     assert "OnUnitActiveSec=2h" in sample_timer
@@ -1165,6 +1205,12 @@ def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path
         "build_interval": "6h",
         "sample_interval": "2h",
         "settle_schedule_beijing": "07:20",
+        "binding": {
+            "account": "lx",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "service_name": "options-monitor-opend.service",
+        },
     }
 
 
@@ -1174,12 +1220,19 @@ def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) 
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     repo.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        {"lx": _futu_service_account(opend_root=tmp_path / "opend-lx")},
+    )
 
     bundle = render_service_bundle(
         target="launchd",
         repo_root=repo,
         runtime_root=runtime,
+        accounts=["lx"],
         markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
         include_strategy_lab_recorder=True,
         strategy_lab_recorder_source="opend",
         strategy_lab_recorder_max_datasets=3,
@@ -1195,6 +1248,10 @@ def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) 
     settle_args = args("settle")
     build_plist = files["launchd/com.options-monitor.strategy-lab-build.plist"]["content"]
     build_payload = plistlib.loads(build_plist.encode("utf-8"))
+    sample_payload = plistlib.loads(
+        files["launchd/com.options-monitor.strategy-lab-sample.plist"]["content"].encode("utf-8")
+    )
+    profile = json.loads(files["service.profile.json"]["content"])
 
     assert build_args[build_args.index("--max-datasets") + 1] == "0"
     assert "--include-close-decisions" in build_args
@@ -1202,9 +1259,690 @@ def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) 
     assert build_payload["StartInterval"] == 21600
     assert sample_args[sample_args.index("--action") + 1] == "collect_marks"
     assert sample_args[sample_args.index("--max-datasets") + 1] == "3"
+    assert sample_args[sample_args.index("--opend-host") + 1] == "127.0.0.1"
+    assert sample_args[sample_args.index("--opend-port") + 1] == "11111"
     assert "--settle-after-collect" not in sample_args
+    assert "After" not in sample_payload
+    assert "Wants" not in sample_payload
+    assert profile["strategy_lab_recorder"]["binding"]["service_name"] == "com.options-monitor.opend"
     assert settle_args[settle_args.index("--action") + 1] == "settle"
     assert "--max-datasets" not in settle_args
+
+
+def test_render_strategy_lab_recorder_requires_account_for_multiple_futu_accounts(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="required when multiple Futu accounts"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx", "sy"],
+            markets=["us"],
+            config_paths={"us": config_path},
+            include_opend=True,
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+        )
+
+
+@pytest.mark.parametrize(
+    ("recorder_account", "expected_account", "expected_port", "expected_service", "other_service"),
+    [
+        ("LX", "lx", 11111, "options-monitor-opend-lx.service", "options-monitor-opend-sy.service"),
+        ("sy", "sy", 11112, "options-monitor-opend-sy.service", "options-monitor-opend-lx.service"),
+    ],
+)
+def test_render_strategy_lab_recorder_binds_only_selected_systemd_opend(
+    tmp_path: Path,
+    recorder_account: str,
+    expected_account: str,
+    expected_port: int,
+    expected_service: str,
+    other_service: str,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account=recorder_account,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert f"--opend-host 127.0.0.1 --opend-port {expected_port}" in sample
+    assert f"After=network-online.target {expected_service}" in sample
+    assert f"Wants=network-online.target {expected_service}" in sample
+    assert other_service not in sample
+    assert profile["schema_version"] == 1
+    assert profile["strategy_lab_recorder"]["binding"] == {
+        "account": expected_account,
+        "host": "127.0.0.1",
+        "port": expected_port,
+        "service_name": expected_service,
+    }
+
+
+@pytest.mark.parametrize(
+    ("settings", "accounts", "recorder_account", "error_pattern"),
+    [
+        ({"lx": _futu_service_account()}, ["lx"], "sy", "must be included in accounts"),
+        ({"lx": _futu_service_account()}, ["lx", "sy"], "sy", "not configured for markets us"),
+        ({"lx": {"type": "external_holdings"}}, ["lx"], "lx", "selected Futu account"),
+        ({"lx": _futu_service_account(host="")}, ["lx"], "lx", "host is missing"),
+        ({"lx": _futu_service_account(port=None)}, ["lx"], "lx", "port is invalid"),
+        ({"lx": _futu_service_account(port=11111.9)}, ["lx"], "lx", "port is invalid"),
+        ({"lx": _futu_service_account(port=True)}, ["lx"], "lx", "port is invalid"),
+        ({"lx": _futu_service_account(port="11111.0")}, ["lx"], "lx", "port is invalid"),
+        ({"lx": _futu_service_account(port=70000)}, ["lx"], "lx", "port is invalid"),
+    ],
+)
+def test_render_strategy_lab_recorder_rejects_invalid_account_or_endpoint(
+    tmp_path: Path,
+    settings: dict[str, dict[str, object]],
+    accounts: list[str],
+    recorder_account: str,
+    error_pattern: str,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = _write_service_account_config(tmp_path / "config.us.json", settings)
+
+    with pytest.raises(ValueError, match=error_pattern):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=accounts,
+            markets=["us"],
+            config_paths={"us": config_path},
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+            strategy_lab_recorder_account=recorder_account,
+        )
+
+
+def test_render_strategy_lab_recorder_rejects_non_integer_yaml_port(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu:
+      account_id: "REAL_12345678"
+      host: 127.0.0.1
+      port: 11111.9
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["us"],
+            config_yaml=config_yaml,
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+            strategy_lab_recorder_account="lx",
+        )
+        raise AssertionError("expected AgentToolError")
+    except AgentToolError as exc:
+        assert "account_settings.lx.futu.port must be an integer" in str(exc)
+
+
+@pytest.mark.parametrize(
+    ("hk_settings", "error_pattern"),
+    [
+        ({"lx": _futu_service_account(port=11112)}, "endpoint differs across markets"),
+        ({"lx": {"type": "external_holdings"}}, "account type differs across markets"),
+    ],
+)
+def test_render_strategy_lab_recorder_rejects_cross_market_binding_mismatch(
+    tmp_path: Path,
+    hk_settings: dict[str, dict[str, object]],
+    error_pattern: str,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    us_config = _write_service_account_config(
+        tmp_path / "config.us.json",
+        {"lx": _futu_service_account(port=11111)},
+    )
+    hk_config = _write_service_account_config(
+        tmp_path / "config.hk.json",
+        hk_settings,
+    )
+
+    with pytest.raises(ValueError, match=error_pattern):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["us", "hk"],
+            config_paths={"us": us_config, "hk": hk_config},
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+            strategy_lab_recorder_account="lx",
+        )
+
+
+def test_render_strategy_lab_recorder_rejects_cross_market_opend_root_mismatch(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    us_config = _write_service_account_config(
+        tmp_path / "config.us.json",
+        {"lx": _futu_service_account(opend_root=tmp_path / "opend-us")},
+    )
+    hk_config = _write_service_account_config(
+        tmp_path / "config.hk.json",
+        {"lx": _futu_service_account(opend_root=tmp_path / "opend-hk")},
+    )
+
+    with pytest.raises(ValueError, match="root differs across markets"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["us", "hk"],
+            config_paths={"us": us_config, "hk": hk_config},
+            include_opend=True,
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+        )
+
+
+def test_render_strategy_lab_recorder_external_opend_has_endpoint_without_dependency(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=False,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "--opend-host 127.0.0.1 --opend-port 11111" in sample
+    assert "After=network-online.target\n" in sample
+    assert "options-monitor-opend" not in sample
+    assert profile["strategy_lab_recorder"]["binding"] == {
+        "account": "lx",
+        "host": "127.0.0.1",
+        "port": 11111,
+    }
+
+
+def test_render_strategy_lab_recorder_allows_only_unambiguous_legacy_opend_plan(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sole_config = _write_service_account_config(
+        tmp_path / "config.sole.json",
+        {"lx": _futu_service_account()},
+    )
+    sole = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        accounts=["lx"],
+        markets=["us"],
+        config_paths={"us": sole_config},
+        include_opend=True,
+        opend_root=tmp_path / "legacy-opend",
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+    )
+    sole_profile = json.loads({item["relative_path"]: item for item in sole["files"]}["service.profile.json"]["content"])
+    assert sole_profile["strategy_lab_recorder"]["binding"]["service_name"] == "options-monitor-opend.service"
+
+    multi_config = _write_service_account_config(
+        tmp_path / "config.multi.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    with pytest.raises(ValueError, match="service is not uniquely mapped"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx", "sy"],
+            markets=["us"],
+            config_paths={"us": multi_config},
+            include_opend=True,
+            opend_root=tmp_path / "legacy-opend",
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="opend",
+            strategy_lab_recorder_account="lx",
+        )
+
+
+def test_render_local_strategy_lab_recorder_rejects_account_and_has_no_binding(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(ValueError, match="requires include_strategy_lab_recorder"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["us"],
+            strategy_lab_recorder_account="lx",
+        )
+    with pytest.raises(ValueError, match="not valid.*source=local"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            accounts=["lx"],
+            markets=["us"],
+            include_strategy_lab_recorder=True,
+            strategy_lab_recorder_source="local",
+            strategy_lab_recorder_account="lx",
+        )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        accounts=["lx"],
+        markets=["us"],
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="local",
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+    assert "--opend-host" not in sample
+    assert "--opend-port" not in sample
+    assert "binding" not in profile["strategy_lab_recorder"]
+
+
+def test_strategy_lab_recorder_profile_round_trips_and_reresolves_endpoint(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    clean = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    assert clean["summary"]["status"] == "ok"
+    assert clean["profile_content_changed"] is False
+    assert clean["compatibility_warnings"] == []
+
+    _write_service_account_config(
+        config_path,
+        _two_futu_service_accounts(tmp_path, lx_port=11113),
+    )
+    changed = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    assert changed["summary"]["status"] == "warn"
+    assert changed["profile_content_changed"] is True
+    assert "options-monitor-strategy-lab-sample.service" in changed["mismatched_units"]
+    assert changed["compatibility_warnings"] == []
+
+
+def test_legacy_strategy_lab_recorder_binding_warns_then_confirm_migrates(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["strategy_lab_recorder"].pop("binding")
+    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    sample_path = systemd_root / "options-monitor-strategy-lab-sample.service"
+    sample_path.write_text(
+        sample_path.read_text(encoding="utf-8").replace(" --opend-host 127.0.0.1 --opend-port 11111", ""),
+        encoding="utf-8",
+    )
+
+    warning = {
+        "code": "legacy_strategy_lab_recorder_binding_inferred",
+        "account": "lx",
+        "host": "127.0.0.1",
+        "port": 11111,
+    }
+    before = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    assert before["compatibility_warnings"] == [warning]
+    assert before["summary"]["status"] == "warn"
+    assert before["summary"]["warning_count"] >= 1
+    assert before["profile_content_changed"] is True
+    assert "options-monitor-strategy-lab-sample.service" in before["mismatched_units"]
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[1] == "is-enabled":
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        if command[1] == "is-active":
+            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    migrated = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+    refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+    assert migrated["before"]["compatibility_warnings"] == [warning]
+    assert migrated["compatibility_warnings"] == []
+    assert migrated["summary"]["status"] == "ok"
+    assert refreshed["strategy_lab_recorder"]["binding"] == {
+        "account": "lx",
+        "host": "127.0.0.1",
+        "port": 11111,
+        "service_name": "options-monitor-opend-lx.service",
+    }
+    subsequent = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    assert subsequent["compatibility_warnings"] == []
+    assert subsequent["summary"]["status"] == "ok"
+
+
+@pytest.mark.parametrize(("lx_port", "sy_port"), [(11113, 11112), (11111, 11111)])
+def test_legacy_strategy_lab_recorder_binding_ambiguity_blocks_confirmed_writes(
+    tmp_path: Path,
+    lx_port: int,
+    sy_port: int,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path, lx_port=lx_port, sy_port=sy_port),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["strategy_lab_recorder"].pop("binding")
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    original_profile = profile_path.read_text(encoding="utf-8")
+    original_sample = (systemd_root / "options-monitor-strategy-lab-sample.service").read_text(encoding="utf-8")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+
+    assert out["supported"] is False
+    assert out["reason"] == "strategy_lab_recorder_binding_invalid"
+    assert out["summary"]["status"] == "error"
+    assert out["changed"] is False
+    assert out["operations"] == []
+    assert profile_path.read_text(encoding="utf-8") == original_profile
+    assert (systemd_root / "options-monitor-strategy-lab-sample.service").read_text(encoding="utf-8") == original_sample
+
+
+@pytest.mark.parametrize("root_case", ["missing", "cross_market_mismatch"])
+def test_legacy_strategy_lab_recorder_counts_endpoint_matches_before_opend_root_validation(
+    tmp_path: Path,
+    root_case: str,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    us_settings = _two_futu_service_accounts(tmp_path, lx_port=11111, sy_port=11111)
+    markets = ["us"]
+    config_paths = {
+        "us": _write_service_account_config(tmp_path / "config.us.json", us_settings),
+    }
+    if root_case == "missing":
+        sy_futu = us_settings["sy"]["futu"]
+        assert isinstance(sy_futu, dict)
+        sy_futu.pop("opend_root")
+        _write_service_account_config(config_paths["us"], us_settings)
+    else:
+        markets.append("hk")
+        hk_settings = _two_futu_service_accounts(tmp_path, lx_port=11111, sy_port=11111)
+        sy_hk_futu = hk_settings["sy"]["futu"]
+        assert isinstance(sy_hk_futu, dict)
+        sy_hk_futu["opend_root"] = str(tmp_path / "opend-sy-hk")
+        config_paths["hk"] = _write_service_account_config(tmp_path / "config.hk.json", hk_settings)
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=markets,
+        config_paths=config_paths,
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["strategy_lab_recorder"].pop("binding")
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    original_profile = profile_path.read_bytes()
+    original_units = {
+        path.name: path.read_bytes()
+        for path in systemd_root.iterdir()
+        if path.is_file()
+    }
+
+    dry_run = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+    confirmed = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+
+    for out in (dry_run, confirmed):
+        assert out["supported"] is False
+        assert out["reason"] == "strategy_lab_recorder_binding_invalid"
+        assert "matched lx,sy" in out["error"]
+        assert out["summary"]["status"] == "error"
+        assert out["changed"] is False
+        assert out["operations"] == []
+    assert profile_path.read_bytes() == original_profile
+    assert {
+        path.name: path.read_bytes()
+        for path in systemd_root.iterdir()
+        if path.is_file()
+    } == original_units
+
+
+def test_legacy_strategy_lab_recorder_invalid_runtime_port_blocks_confirmed_writes(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path = _write_service_account_config(
+        tmp_path / "config.us.json",
+        _two_futu_service_accounts(tmp_path),
+    )
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_account="lx",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["strategy_lab_recorder"].pop("binding")
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    _write_service_account_config(
+        config_path,
+        _two_futu_service_accounts(tmp_path, lx_port=11111.9),
+    )
+    original_profile = profile_path.read_bytes()
+    original_units = {
+        path.name: path.read_bytes()
+        for path in systemd_root.iterdir()
+        if path.is_file()
+    }
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+    )
+
+    assert out["supported"] is False
+    assert out["reason"] == "strategy_lab_recorder_binding_invalid"
+    assert "OpenD port is invalid: lx" in out["error"]
+    assert out["changed"] is False
+    assert out["operations"] == []
+    assert profile_path.read_bytes() == original_profile
+    assert {
+        path.name: path.read_bytes()
+        for path in systemd_root.iterdir()
+        if path.is_file()
+    } == original_units
+
+
+def test_service_render_cli_exposes_strategy_lab_recorder_account(capsys: pytest.CaptureFixture[str]) -> None:
+    from src.interfaces.cli.main import parse_args
+
+    args = parse_args([
+        "service",
+        "render",
+        "--target",
+        "systemd",
+        "--config-yaml",
+        "/tmp/config.yaml",
+        "--include-strategy-lab-recorder",
+        "--strategy-lab-recorder-account",
+        "sy",
+    ])
+    assert args.strategy_lab_recorder_account == "sy"
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args(["service", "render", "--help"])
+    assert exc_info.value.code == 0
+    assert "--strategy-lab-recorder-account" in capsys.readouterr().out
 
 
 def test_service_drift_preserves_strategy_lab_recorder_opt_in(tmp_path: Path) -> None:

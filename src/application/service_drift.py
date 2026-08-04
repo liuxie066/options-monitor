@@ -11,6 +11,7 @@ from src.application.service_deploy import (
     DEFAULT_MARKETS,
     load_service_profile,
     render_service_bundle,
+    resolve_strategy_lab_recorder_endpoint_matches,
 )
 
 
@@ -22,6 +23,8 @@ LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
     "com.options-monitor.position-advice-promotion",
     "com.options-monitor.projection-verify",
 )
+LEGACY_STRATEGY_LAB_RECORDER_HOST = "127.0.0.1"
+LEGACY_STRATEGY_LAB_RECORDER_PORT = 11111
 
 
 def service_drift(
@@ -194,11 +197,41 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "manual_actions": [],
             "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
         }
-    bundle = _expected_bundle_from_profile(
-        profile,
-        provider=provider,
-        repo_root=ctx["repo_root"],
-        runtime_root=ctx["runtime_root"],
+    try:
+        bundle = _expected_bundle_from_profile(
+            profile,
+            provider=provider,
+            repo_root=ctx["repo_root"],
+            runtime_root=ctx["runtime_root"],
+        )
+    except ValueError as exc:
+        error = str(exc)
+        if not error.startswith("strategy_lab_recorder_binding_"):
+            raise
+        return {
+            "checked": True,
+            "supported": False,
+            "reason": "strategy_lab_recorder_binding_invalid",
+            "error": error,
+            "provider": provider,
+            "profile_path": str(ctx["profile_path"]),
+            "repo_root": str(ctx["repo_root"]),
+            "runtime_root": str(ctx["runtime_root"]),
+            "systemd_unit_root": str(ctx["systemd_unit_root"]) if provider == "systemd" else None,
+            "compatibility_warnings": [],
+            "summary": {
+                "ok": False,
+                "status": "error",
+                "error_count": 1,
+                "warning_count": 0,
+                "missing_required_units": [],
+            },
+        }
+    compatibility_warnings_raw = bundle.get("compatibility_warnings")
+    compatibility_warnings = (
+        [dict(item) for item in compatibility_warnings_raw if isinstance(item, dict)]
+        if isinstance(compatibility_warnings_raw, list)
+        else []
     )
     expected_files = _expected_install_files(bundle, provider=provider)
     expected_services = _service_names_from_profile(_bundle_profile(bundle))
@@ -252,6 +285,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
         profile_content_changed=profile_content_changed,
+        compatibility_warning_count=len(compatibility_warnings),
     )
     return {
         "checked": True,
@@ -275,6 +309,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "required_units": required_units,
         "missing_required_units": missing_required_units,
         "profile_content_changed": profile_content_changed,
+        "compatibility_warnings": compatibility_warnings,
         "manual_actions": manual_actions,
         "summary": summary,
     }
@@ -349,35 +384,113 @@ def _expected_bundle_from_profile(
         include_wechat_clawbot = False
     if include_wechat_clawbot and not wechat_clawbot_allowed_senders_configured:
         include_wechat_clawbot = False
-    return render_service_bundle(
-        target=provider,
-        repo_root=repo_root,
-        runtime_root=runtime_root,
-        accounts=_profile_accounts(profile),
-        markets=market_values,
-        config_paths={str(key): str(value) for key, value in config_paths.items() if str(value or "").strip()},
-        config_yaml=_profile_config_yaml(profile),
-        env_file=profile.get("env_file"),
-        deploy_user=profile.get("deploy_user"),
-        deploy_home=profile.get("deploy_home"),
-        use_default_deploy_user=False,
-        include_auto_upgrade=include_auto_upgrade,
-        include_opend=include_opend,
-        opend_root=opend.get("root"),
-        opend_executable=opend.get("executable"),
-        include_feishu_ws=include_feishu_ws,
-        feishu_ws_config_key=feishu_ws_config_key,
-        include_wechat_clawbot=include_wechat_clawbot,
-        wechat_clawbot_config_key=wechat_clawbot_config_key,
-        wechat_clawbot_label=str(wechat_clawbot.get("label") or "default"),
-        wechat_clawbot_allowed_senders=wechat_clawbot_allowed_senders,
-        include_strategy_lab_recorder=include_strategy_lab_recorder,
-        strategy_lab_recorder_source=str(strategy_lab_recorder.get("source") or "opend"),
-        strategy_lab_recorder_max_datasets=int(strategy_lab_recorder.get("max_datasets") or 5),
-        strategy_lab_recorder_mark_stale_hours=int(strategy_lab_recorder.get("mark_stale_hours") or 2),
-        include_quality_monitoring=include_quality_monitoring,
-        include_content=True,
-    )
+    accounts = _profile_accounts(profile)
+    recorder_source = str(strategy_lab_recorder.get("source") or "opend").strip().lower() or "opend"
+    binding_raw = strategy_lab_recorder.get("binding")
+    binding = binding_raw if isinstance(binding_raw, dict) else {}
+    recorder_account = str(binding.get("account") or "").strip().lower() or None
+    opend_root, opend_executable = _profile_opend_render_values(opend)
+    render_kwargs: dict[str, Any] = {
+        "target": provider,
+        "repo_root": repo_root,
+        "runtime_root": runtime_root,
+        "accounts": accounts,
+        "markets": market_values,
+        "config_paths": {str(key): str(value) for key, value in config_paths.items() if str(value or "").strip()},
+        "config_yaml": _profile_config_yaml(profile),
+        "env_file": profile.get("env_file"),
+        "deploy_user": profile.get("deploy_user"),
+        "deploy_home": profile.get("deploy_home"),
+        "use_default_deploy_user": False,
+        "include_auto_upgrade": include_auto_upgrade,
+        "include_opend": include_opend,
+        "opend_root": opend_root,
+        "opend_executable": opend_executable,
+        "include_feishu_ws": include_feishu_ws,
+        "feishu_ws_config_key": feishu_ws_config_key,
+        "include_wechat_clawbot": include_wechat_clawbot,
+        "wechat_clawbot_config_key": wechat_clawbot_config_key,
+        "wechat_clawbot_label": str(wechat_clawbot.get("label") or "default"),
+        "wechat_clawbot_allowed_senders": wechat_clawbot_allowed_senders,
+        "include_strategy_lab_recorder": include_strategy_lab_recorder,
+        "strategy_lab_recorder_source": recorder_source,
+        "strategy_lab_recorder_max_datasets": int(strategy_lab_recorder.get("max_datasets") or 5),
+        "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
+        "include_quality_monitoring": include_quality_monitoring,
+        "include_content": True,
+    }
+    compatibility_warnings: list[dict[str, Any]] = []
+    if include_strategy_lab_recorder and recorder_source == "opend" and recorder_account is None:
+        try:
+            matching_accounts = resolve_strategy_lab_recorder_endpoint_matches(
+                repo_root=repo_root,
+                runtime_root=runtime_root,
+                accounts=accounts,
+                markets=market_values,
+                config_paths=render_kwargs["config_paths"],
+                config_yaml=render_kwargs["config_yaml"],
+                include_auto_upgrade=include_auto_upgrade,
+                host=LEGACY_STRATEGY_LAB_RECORDER_HOST,
+                port=LEGACY_STRATEGY_LAB_RECORDER_PORT,
+            )
+        except ValueError as exc:
+            raise ValueError(f"strategy_lab_recorder_binding_invalid: {exc}") from exc
+        if len(matching_accounts) != 1:
+            matches = ",".join(matching_accounts) if matching_accounts else "none"
+            raise ValueError(
+                "strategy_lab_recorder_binding_unresolved: legacy endpoint "
+                f"{LEGACY_STRATEGY_LAB_RECORDER_HOST}:{LEGACY_STRATEGY_LAB_RECORDER_PORT} "
+                f"matched {matches}; expected exactly one selected Futu account"
+            )
+        recorder_account = matching_accounts[0]
+        compatibility_warnings.append({
+            "code": "legacy_strategy_lab_recorder_binding_inferred",
+            "account": recorder_account,
+            "host": LEGACY_STRATEGY_LAB_RECORDER_HOST,
+            "port": LEGACY_STRATEGY_LAB_RECORDER_PORT,
+        })
+
+    try:
+        bundle = render_service_bundle(
+            **render_kwargs,
+            strategy_lab_recorder_account=recorder_account,
+        )
+    except ValueError as exc:
+        if include_strategy_lab_recorder and recorder_source == "opend":
+            raise ValueError(f"strategy_lab_recorder_binding_invalid: {exc}") from exc
+        raise
+    if compatibility_warnings:
+        bundle["compatibility_warnings"] = compatibility_warnings
+    return bundle
+
+
+def _profile_opend_render_values(opend: dict[str, Any]) -> tuple[str | None, str | None]:
+    services_raw = opend.get("services")
+    services = [item for item in services_raw if isinstance(item, dict)] if isinstance(services_raw, list) else []
+    if not services or not any(str(item.get("account") or "").strip() for item in services):
+        root = str(opend.get("root") or "").strip() or None
+        executable = str(opend.get("executable") or "").strip() or None
+        return root, executable
+
+    relative_executables: list[str] = []
+    absolute_executables: list[str] = []
+    for item in services:
+        root_raw = str(item.get("root") or "").strip()
+        executable_raw = str(item.get("executable") or "").strip()
+        if not root_raw or not executable_raw:
+            continue
+        root_path = Path(root_raw)
+        executable_path = Path(executable_raw)
+        absolute_executables.append(executable_raw)
+        try:
+            relative_executables.append(str(executable_path.relative_to(root_path)))
+        except ValueError:
+            relative_executables.append("")
+    if relative_executables and all(relative_executables) and len(set(relative_executables)) == 1:
+        return None, relative_executables[0]
+    if absolute_executables and len(absolute_executables) == len(services) and len(set(absolute_executables)) == 1:
+        return None, absolute_executables[0]
+    return None, None
 
 
 def _bundle_profile(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -612,6 +725,7 @@ def _drift_summary(
     mismatched_units: list[str],
     activation_drift_units: list[str],
     profile_content_changed: bool,
+    compatibility_warning_count: int = 0,
 ) -> dict[str, Any]:
     warning_count = sum(
         1
@@ -627,6 +741,7 @@ def _drift_summary(
     )
     if profile_content_changed:
         warning_count += 1
+    warning_count += max(0, int(compatibility_warning_count))
     error_count = int(bool(missing_required_units)) + int(bool(activation_drift_units))
     status = "error" if error_count else ("warn" if warning_count else "ok")
     return {
