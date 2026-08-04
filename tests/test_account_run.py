@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 class _FakeRunlog:
@@ -24,8 +27,13 @@ def _make_request(
     force_mode: bool = False,
     allow_mutations: bool = True,
     allow_notifications: bool = True,
+    close_advice_enabled: bool = False,
 ) -> Any:
-    from src.application.account_run import AccountRunRequest
+    from src.application.account_run import (
+        AccountRunRequest,
+        build_account_runtime_config,
+    )
+    from src.application.tick_run_workspace import publish_account_run_config
 
     base = tmp_path / "repo"
     base.mkdir()
@@ -37,15 +45,26 @@ def _make_request(
     shared_required.mkdir(parents=True)
     accounts_root = run_dir / "accounts"
     accounts_root.mkdir(parents=True)
+    base_cfg = {
+        "symbols": [{"symbol": "NVDA", "market": "US"}],
+        "portfolio": {},
+        "close_advice": {"enabled": close_advice_enabled},
+    }
+    account_config_authority = publish_account_run_config(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        config=build_account_runtime_config(
+            base_cfg=base_cfg,
+            cfg_path=cfg_path,
+            account="lx",
+            markets_to_run=["US"],
+        ),
+    )
     return AccountRunRequest(
         acct="lx",
         base=base,
-        base_cfg={
-            "symbols": [{"symbol": "NVDA", "market": "US"}],
-            "portfolio": {},
-            "close_advice": {"enabled": False},
-        },
-        cfg_path=cfg_path,
+        account_config_authority=account_config_authority,
         vpy=base / ".venv/bin/python",
         markets_to_run=["US"],
         scheduler_ms=12,
@@ -61,6 +80,27 @@ def _make_request(
         force_mode=force_mode,
         allow_mutations=allow_mutations,
         allow_notifications=allow_notifications,
+    )
+
+
+def _request_for_account(request: Any, account: str, **changes: Any) -> Any:
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    config = json.loads(
+        request.account_config_authority.canonical_bytes.decode("utf-8")
+    )
+    config["portfolio"]["account"] = account
+    authority = publish_account_run_config(
+        base=request.base,
+        run_id=request.run_id,
+        account=account,
+        config=config,
+    )
+    return replace(
+        request,
+        acct=account,
+        account_config_authority=authority,
+        **changes,
     )
 
 
@@ -91,16 +131,6 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     monkeypatch.setattr(mod.run_repo, "ensure_run_account_state_dir", lambda *args: acct_state_dir.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(mod.run_repo, "get_run_state_dir", lambda *args: shared_state_dir)
     monkeypatch.setattr(mod.run_repo, "write_run_account_text", lambda *args: None)
-    monkeypatch.setattr(mod.run_repo, "copy_to_run_account", lambda *args: None)
-
-    def _write_account_state_json_text(base, acct, name, payload):
-        acct_dir = request.base / "output_accounts" / acct / "state"
-        acct_dir.mkdir(parents=True, exist_ok=True)
-        target = acct_dir / name
-        target.write_text("{}", encoding="utf-8")
-        return target
-
-    monkeypatch.setattr(mod.state_repo, "write_account_state_json_text", _write_account_state_json_text)
     monkeypatch.setattr(mod.state_repo, "write_account_run_state", lambda base, run_id, acct, name, payload: state_writes.append((name, dict(payload))))
     monkeypatch.setattr(mod.state_repo, "write_shared_state", lambda base, name, payload: state_writes.append((name, dict(payload))))
     monkeypatch.setattr(mod.state_repo, "append_run_audit_jsonl", lambda *args, **kwargs: None)
@@ -156,6 +186,56 @@ def test_build_account_runtime_config_is_pure_and_applies_shared_filters(
     assert cfg["config_source_path"] == str(
         (tmp_path / "config.us.json").resolve()
     )
+
+
+def test_run_one_account_rejects_tampered_prepublished_config_before_children(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import account_run as mod
+    from src.application.account_run import run_one_account
+    from src.application.tick_run_workspace import AccountRunConfigError
+
+    request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        close_advice_enabled=True,
+    )
+    request.account_config_authority.state_path.write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "ensure_account_output_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("account child workspace must not be touched")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_pipeline_script",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pipeline must not start")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_close_advice",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Close Advice must not start")
+        ),
+    )
+
+    with pytest.raises(AccountRunConfigError) as raised:
+        run_one_account(
+            request=request,
+            runlog=_FakeRunlog(),
+            audit_fn=lambda *_args, **_kwargs: None,
+            fail_schema_validation=lambda **_kwargs: None,
+        )
+
+    assert raised.value.code == "ACCOUNT_CONFIG_ARTIFACT_MISMATCH"
 
 
 def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
@@ -244,6 +324,155 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
 
+def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import run_one_account
+    from src.application.tick_run_workspace import canonical_account_run_config_bytes
+
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True),
+        account_config_generation_frozen=True,
+    )
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _drift_during_event_prefetch(**_kwargs):
+        replacement = json.loads(
+            request.account_config_authority.canonical_bytes.decode("utf-8")
+        )
+        replacement.setdefault("runtime", {})["generation"] = "late-replacement"
+        replacement_bytes = canonical_account_run_config_bytes(replacement)
+        request.account_config_authority.state_path.write_bytes(replacement_bytes)
+        request.account_config_authority.compatibility_path.write_bytes(
+            replacement_bytes
+        )
+        return {
+            "summary": {"errors": 0, "unique_symbols_total": 1},
+            "symbols": {},
+        }
+
+    observed_pipeline: dict[str, Any] = {}
+
+    def _run_pipeline_script(**kwargs):
+        observed_pipeline.update(kwargs)
+        kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
+        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
+            "retained generation\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "prefetch_event_data", _drift_during_event_prefetch)
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"},
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "ok",
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **_kwargs: None,
+    )
+
+    assert outcome.ran_pipeline is True
+    assert outcome.result.ran_scan is True
+    assert observed_pipeline["account_config_canonical_bytes"] == (
+        request.account_config_authority.canonical_bytes
+    )
+    assert observed_pipeline["account_config_sha256"] == (
+        request.account_config_authority.account_config_sha256
+    )
+
+
+def test_pipeline_child_account_config_failure_preserves_typed_reason(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import run_one_account
+
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True),
+        account_config_generation_frozen=True,
+    )
+    env = _install_common_patches(monkeypatch, request)
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "run_pipeline_script",
+        lambda **_kwargs: SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr=(
+                "[CONFIG_ERROR] ACCOUNT_CONFIG_HASH_MISMATCH: "
+                "retained account config hash mismatch"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"},
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": False,
+            "ran_scan": True,
+            "meaningful": False,
+            "reason": "pipeline failed",
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=_FakeRunlog(),
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **_kwargs: None,
+    )
+
+    assert outcome.ran_pipeline is False
+    assert outcome.result.ran_scan is False
+    assert outcome.result.should_notify is False
+    assert outcome.result.decision_reason == "account_config_hash_mismatch"
+    assert outcome.acct_metrics["error_code"] == "ACCOUNT_CONFIG_HASH_MISMATCH"
+    assert outcome.acct_metrics["ran_scan"] is False
+
+
 def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
@@ -289,6 +518,24 @@ def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(m
     assert outcome.ran_pipeline is True
     assert seen_pipeline["base"] == repo_root
     assert seen_pipeline["env"]["PYTHONPATH"] == str(repo_root)
+    assert seen_pipeline["config"] == request.account_config_authority.state_path
+    assert seen_pipeline["account_config_base"] == request.base
+    assert seen_pipeline["account_config_run_id"] == request.run_id
+    assert seen_pipeline["account_config_account"] == "lx"
+    assert seen_pipeline["account_config_compatibility_path"] == (
+        request.account_config_authority.compatibility_path
+    )
+    assert seen_pipeline["account_config_sha256"] == (
+        request.account_config_authority.account_config_sha256
+    )
+    assert (
+        request.account_config_authority.state_path.read_bytes()
+        == request.account_config_authority.compatibility_path.read_bytes()
+        == request.account_config_authority.canonical_bytes
+    )
+    assert outcome.acct_metrics["account_config_sha256"] == (
+        request.account_config_authority.account_config_sha256
+    )
     assert seen_pipeline["shared_context_dir"] == request.base / "output_runs" / "run-1" / "state"
 
 
@@ -474,9 +721,9 @@ def test_run_one_account_force_event_prefetch_uses_shared_state_once(
     prefetch_calls: list[str] = []
 
     def _run(acct: str):
-        request = replace(
+        request = _request_for_account(
             base_request,
-            acct=acct,
+            acct,
             prefetch_state=shared_prefetch_state,
         )
         env = _install_common_patches(monkeypatch, request)
@@ -558,9 +805,9 @@ def test_run_one_account_force_event_prefetch_failure_does_not_mark_shared_done(
     prefetch_calls: list[str] = []
 
     def _run(acct: str):
-        request = replace(
+        request = _request_for_account(
             base_request,
-            acct=acct,
+            acct,
             prefetch_state=shared_prefetch_state,
         )
         env = _install_common_patches(monkeypatch, request)
@@ -712,8 +959,11 @@ def test_run_one_account_emits_degraded_event_when_artifact_write_fails(monkeypa
 def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(tmp_path, prefetch_done=True)
-    request.base_cfg["close_advice"] = {"enabled": True}
+    request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        close_advice_enabled=True,
+    )
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
@@ -790,8 +1040,11 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
 ) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(tmp_path, prefetch_done=True)
-    request.base_cfg["close_advice"] = {"enabled": True}
+    request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        close_advice_enabled=True,
+    )
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
@@ -885,8 +1138,11 @@ def test_run_one_account_projects_frozen_close_advice_integrity_failure(
 def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
-    request = _make_request(tmp_path, prefetch_done=True)
-    request.base_cfg["close_advice"] = {"enabled": True}
+    request = _make_request(
+        tmp_path,
+        prefetch_done=True,
+        close_advice_enabled=True,
+    )
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
