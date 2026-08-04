@@ -60,11 +60,14 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
   --target systemd \
   --runtime-root /var/lib/options-monitor \
   --config-yaml /var/lib/options-monitor/config.yaml \
+  --markets us hk \
+  --accounts lx sy \
   --include-strategy-lab-recorder \
-  --strategy-lab-recorder-source opend
+  --strategy-lab-recorder-source opend \
+  --strategy-lab-recorder-account lx
 ```
 
-生成的 build timer 每 6 小时分别按 latest scanned candidate run 和 latest non-empty Close Advice run 幂等构建 dataset；同 run 时只生成一个 close-aware dataset。Close 正式 evidence 不完整会 fail closed，但 candidate build 仍独立执行。sample timer 每 2 小时采样 candidate / close mark path；settle timer 每天维护 `outcome_facts.jsonl` 与 close outcomes。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。6 小时 cadence 是采样覆盖，不是每个 tick 的完整事件日志。
+生成的 build timer 每 6 小时分别按 latest scanned candidate run 和 latest non-empty Close Advice run 幂等构建 dataset；同 run 时只生成一个 close-aware dataset。Close 正式 evidence 不完整会 fail closed，但 candidate build 仍独立执行。sample timer 每 2 小时采样 candidate / close mark path；`--strategy-lab-recorder-account` 只确定其 OpenD endpoint 和可选 service 依赖，不改变两小时 cadence，也不会在失败时切换到另一个账户。选择多个 Futu 账户时必须显式指定，只有一个时可省略。settle timer 每天维护 `outcome_facts.jsonl` 与 close outcomes。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。6 小时 cadence 是采样覆盖，不是每个 tick 的完整事件日志。
 
 ## 候选影响对比
 

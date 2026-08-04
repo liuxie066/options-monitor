@@ -75,13 +75,24 @@ def accounts_from_config(config: dict[str, Any] | None, *, fallback: tuple[str, 
     return normalize_accounts(cfg.get("accounts"), fallback=fallback)
 
 
-def _int_or_none(value: Any) -> int | None:
-    if value in (None, ""):
+def parse_lossless_integer(value: Any) -> int | None:
+    """Return an integer only when the configured value has exact integer semantics."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not value:
         return None
     try:
-        return int(value)
-    except Exception:
+        parsed = int(value)
+    except (TypeError, ValueError):
         return None
+    return parsed if str(parsed) == value else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    return parse_lossless_integer(value)
 
 
 def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -121,10 +132,9 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
                 port = futu_cfg.get(key)
                 if port in (None, ""):
                     continue
-                try:
-                    futu_out[key] = int(port)
-                except Exception:
-                    pass
+                parsed_port = parse_lossless_integer(port)
+                if parsed_port is not None:
+                    futu_out[key] = parsed_port
             account_id = str(futu_cfg.get("account_id") or "").strip()
             if account_id:
                 futu_out["account_id"] = account_id
