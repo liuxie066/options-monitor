@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -41,6 +42,11 @@ from src.application.multi_tick.misc import (
     ensure_account_output_dir,
 )
 from src.application.events.prefetch import prefetch_event_data
+from src.application.tick_run_workspace import (
+    AccountRunConfigAuthority,
+    load_account_run_config,
+    load_retained_account_run_config,
+)
 
 from domain.storage.repositories import run_repo, state_repo
 
@@ -49,8 +55,7 @@ from domain.storage.repositories import run_repo, state_repo
 class AccountRunRequest:
     acct: str
     base: Path
-    base_cfg: dict[str, Any]
-    cfg_path: Path
+    account_config_authority: AccountRunConfigAuthority
     vpy: Path
     markets_to_run: list[str]
     scheduler_ms: int
@@ -73,9 +78,11 @@ class AccountRunRequest:
     symbols_arg: str | None = None
     required_data_snapshot_manifest: Path | None = None
     prepared_portfolio_context_manifest: Path | None = None
+    prepared_portfolio_context_manifest_sha256: str | None = None
     required_data_snapshot_status: str | None = None
     required_data_snapshot_sha256: str | None = None
     close_advice_required_data_plan: Path | None = None
+    account_config_generation_frozen: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,6 +91,14 @@ class AccountRunOutcome:
     acct_metrics: dict[str, Any]
     prefetch_done: bool
     ran_pipeline: bool
+
+
+def _pipeline_account_config_error_code(output: str) -> str | None:
+    match = re.search(
+        r"\[CONFIG_ERROR\][^\r\n]*\b(ACCOUNT_CONFIG_[A-Z0-9_]+)\b",
+        str(output or ""),
+    )
+    return match.group(1) if match is not None else None
 
 
 def _close_advice_issue_breakdown(flag_counts: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
@@ -248,11 +263,24 @@ def run_one_account(
     audit_fn: Callable[..., Any],
     fail_schema_validation: Callable[..., Any],
 ) -> AccountRunOutcome:
-    acct = str(request.acct).strip()
+    acct = str(request.acct).strip().lower()
     repo_root = (request.repo_root or request.base).resolve()
+    config_loader = (
+        load_retained_account_run_config
+        if request.account_config_generation_frozen
+        else load_account_run_config
+    )
+    cfg = config_loader(
+        authority=request.account_config_authority,
+        base=request.base,
+        run_id=request.run_id,
+        account=acct,
+    )
+    cfg_override = request.account_config_authority.state_path
     acct_out = request.accounts_root / acct
     acct_metrics = {
         "account": acct,
+        "account_config_sha256": request.account_config_authority.account_config_sha256,
         "scheduler_ms": request.scheduler_ms,
         "pipeline_ms": None,
         "ran_scan": False,
@@ -263,24 +291,20 @@ def run_one_account(
     }
     ensure_account_output_dir(acct_out)
 
-    cfg = build_account_runtime_config(
-        base_cfg=request.base_cfg,
-        cfg_path=request.cfg_path,
-        account=acct,
-        markets_to_run=request.markets_to_run,
-        symbols_arg=request.symbols_arg,
-    )
-
     acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
     acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
-
-    cfg_override = state_repo.write_account_state_json_text(
-        request.base,
-        acct,
-        "config.override.json",
-        cfg,
+    audit_fn(
+        "read",
+        "validate_run_account_config",
+        run_id=request.run_id,
+        account=acct,
+        status="ok",
+        extra={
+            "account_config_sha256": request.account_config_authority.account_config_sha256,
+            "state_path": str(cfg_override),
+            "compatibility_path": str(request.account_config_authority.compatibility_path),
+        },
     )
-    audit_fn("write", "write_account_state_json_text:config.override.json", run_id=request.run_id, account=acct)
 
     try:
         run_repo.ensure_run_account_state_dir(request.base, request.run_id, acct)
@@ -328,6 +352,7 @@ def run_one_account(
             "run_dir": str(request.run_dir),
             "snapshot_status": request.required_data_snapshot_status,
             "snapshot_manifest_sha256": request.required_data_snapshot_sha256,
+            "account_config_sha256": request.account_config_authority.account_config_sha256,
         }
         _write_acct_run_state("account_metrics.json", payload)
 
@@ -505,6 +530,21 @@ def run_one_account(
         prepared_portfolio_context_manifest=(
             request.prepared_portfolio_context_manifest
         ),
+        prepared_portfolio_context_manifest_sha256=(
+            request.prepared_portfolio_context_manifest_sha256
+        ),
+        account_config_base=request.base,
+        account_config_run_id=request.run_id,
+        account_config_account=acct,
+        account_config_compatibility_path=(
+            request.account_config_authority.compatibility_path
+        ),
+        account_config_sha256=(
+            request.account_config_authority.account_config_sha256
+        ),
+        account_config_canonical_bytes=(
+            request.account_config_authority.canonical_bytes
+        ),
         capture_output=True,
         text=True,
         env=dict(os.environ, PYTHONPATH=str(repo_root)),
@@ -528,6 +568,8 @@ def run_one_account(
         returncode=int(pipeline_tool_dto.get("returncode") or 0)
     )
     if not bool(pipeline_result.get("ok")):
+        output_text = ((pipe.stdout or "") + "\n" + (pipe.stderr or "")).strip()
+        typed_config_code = _pipeline_account_config_error_code(output_text)
         audit_fn(
             "tool_call",
             "run_pipeline_result",
@@ -545,26 +587,37 @@ def run_one_account(
             "snapshot_batches",
             "error",
             duration_ms=acct_metrics["pipeline_ms"],
-            error_code="PIPELINE_FAILED",
+            error_code=typed_config_code or "PIPELINE_FAILED",
             message=f"pipeline failed for {acct}",
             data=_safe_runlog_data({"account": acct, "returncode": pipe.returncode}),
         )
-        out = ((pipe.stdout or "") + "\n" + (pipe.stderr or "")).strip()
-        if out:
-            tail = "\n".join(out.splitlines()[-60:])
+        if output_text:
+            tail = "\n".join(output_text.splitlines()[-60:])
             print(f"[ERR] pipeline failed ({acct})\n{tail}")
-        result_should_notify = bool(should_notify)
-        acct_metrics["ran_scan"] = bool(pipeline_result.get("ran_scan"))
+        result_should_notify = False if typed_config_code else bool(should_notify)
+        acct_metrics["ran_scan"] = (
+            False if typed_config_code else bool(pipeline_result.get("ran_scan"))
+        )
         acct_metrics["should_notify"] = result_should_notify
-        acct_metrics["meaningful"] = bool(pipeline_result.get("meaningful"))
-        acct_metrics["reason"] = str(pipeline_result.get("reason") or "pipeline failed")
+        acct_metrics["meaningful"] = (
+            False if typed_config_code else bool(pipeline_result.get("meaningful"))
+        )
+        result_reason = (
+            typed_config_code.lower()
+            if typed_config_code
+            else str(pipeline_result.get("reason") or "pipeline failed")
+        )
+        acct_metrics["reason"] = result_reason
+        if typed_config_code:
+            acct_metrics["typed_reason"] = result_reason
+            acct_metrics["error_code"] = typed_config_code
         _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(
                 acct,
-                bool(pipeline_result.get("ran_scan")),
+                False if typed_config_code else bool(pipeline_result.get("ran_scan")),
                 result_should_notify,
-                str(pipeline_result.get("reason") or "pipeline failed"),
+                result_reason,
                 "",
             ),
             acct_metrics=acct_metrics,
@@ -977,15 +1030,6 @@ def run_one_account(
             text + "\n",
         )
         audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
-        if cfg_override.exists() and cfg_override.stat().st_size > 0:
-            run_repo.copy_to_run_account(
-                request.base,
-                request.run_id,
-                acct,
-                cfg_override,
-                "config.override.json",
-            )
-            audit_fn("write", "copy_to_run_account:config.override.json", run_id=request.run_id, account=acct)
     except Exception as exc:
         _record_account_run_degraded(
             runlog=runlog,
