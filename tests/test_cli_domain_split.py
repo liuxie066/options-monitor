@@ -109,6 +109,9 @@ def test_step4_domain_files_no_argparse_or_main() -> None:
         if path.name in ('scan_scheduler.py', 'cash_headroom_query.py'):
             assert 'import argparse' not in text
             assert '__main__' not in text
+        if path.name == 'scan_scheduler.py':
+            assert 'import subprocess' not in text
+            assert 'scan-pipeline' not in text
 
 
 def test_scan_scheduler_domain_and_cli() -> None:

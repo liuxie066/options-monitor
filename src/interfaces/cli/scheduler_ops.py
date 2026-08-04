@@ -8,7 +8,7 @@ from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.scan_scheduler import run_scheduler
+from src.application.scan_scheduler import reject_scheduler_run_if_due, run_scheduler
 
 
 def add_scheduler_commands(subparsers: Any) -> None:
@@ -42,6 +42,9 @@ def handle_scheduler_command(
     run_scheduler_fn: Callable[..., object] = run_scheduler,
     query_sell_put_cash_fn: Callable[..., object] = query_sell_put_cash,
 ) -> int:
+    if args.command == "scheduler":
+        reject_scheduler_run_if_due(bool(args.run_if_due))
+
     runtime_root = resolve_runtime_root(repo_root=repo_base_fn()).runtime_root
 
     if args.command == "scheduler":
