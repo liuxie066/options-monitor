@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.3",
+  "base": {
+    "tag": "v1.10.2",
+    "commit": "c0f1c544288acfcc100afe38c38143a56766a024"
+  },
+  "reviewed_head": "5f6a5b35ee6f3f0fe591c06318874be96a82b3f8",
+  "commits": [
+    {
+      "sha": "5f6a5b35ee6f3f0fe591c06318874be96a82b3f8",
+      "subject": "fix: remove unsupported settlement cash-flow checks"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Removed the unsupported Futu account cash-flow query from lifecycle settlement observations and close-reason resolution, so an unavailable broker data source no longer leaves valid option closures permanently incomplete; cash-settled contracts remain fail-closed from contract metadata.",
+      "commits": [
+        "5f6a5b35ee6f3f0fe591c06318874be96a82b3f8"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
