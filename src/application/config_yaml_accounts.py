@@ -8,6 +8,7 @@ from src.application.account_config import (
     ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     ACCOUNT_TYPE_FUTU,
     ACCOUNT_TYPES,
+    normalize_account_label,
     normalize_accounts,
 )
 from src.application.agent_tool_contracts import AgentToolError
@@ -392,10 +393,13 @@ def _market_accounts(config_doc: dict[str, Any], *, market: str) -> list[str]:
 
 
 def _normalize_account_label(value: str | None) -> str:
-    accounts = normalize_accounts([value or ""], fallback=())
-    if not accounts:
-        raise AgentToolError(code="INPUT_ERROR", message="account_label must be a non-empty label")
-    return accounts[0]
+    try:
+        return normalize_account_label(value)
+    except ValueError as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"account_label is invalid: {exc}",
+        ) from exc
 
 
 def _normalize_account_type(value: Any) -> str:
