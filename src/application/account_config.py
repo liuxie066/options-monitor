@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from numbers import Integral
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -48,6 +49,31 @@ class AccountRuntimePlan:
     futu_trd_env: str | None = None
 
 
+@dataclass(frozen=True)
+class ResolvedAccountBrokerBindingMember:
+    config_key: str | None
+    market: str
+    authority_source: str
+    account_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedAccountBrokerBindingSet:
+    account: str
+    status: str
+    host: str | None
+    port: int | None
+    trd_env: str | None
+    required_account_ids: tuple[str, ...]
+    members: tuple[ResolvedAccountBrokerBindingMember, ...]
+    compatibility_warnings: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
 def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
     if isinstance(raw, str):
         items = [raw]
@@ -80,8 +106,8 @@ def parse_lossless_integer(value: Any) -> int | None:
 
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value
+    if isinstance(value, Integral):
+        return int(value)
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -229,9 +255,147 @@ def resolve_account_futu_settings(config: Mapping[str, Any] | Any, *, account: s
 def resolve_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
     futu_cfg = resolve_account_futu_settings(config, account=account)
     account_id = str(futu_cfg.get("account_id") or "").strip()
+    mapped_ids = _resolve_trade_intake_mapping_futu_account_ids(config, account=account)
     if account_id:
         return [account_id]
-    return _resolve_trade_intake_mapping_futu_account_ids(config, account=account)
+    cfg = dict(config) if isinstance(config, Mapping) else {}
+    futu_accounts = [
+        value
+        for value in accounts_from_config(cfg)
+        if resolve_account_type(cfg, account=value) == ACCOUNT_TYPE_FUTU
+    ]
+    if len(futu_accounts) != 1:
+        return []
+    return mapped_ids
+
+
+def resolve_account_broker_binding_sets(
+    configs: list[tuple[str | None, Mapping[str, Any]]],
+) -> dict[str, ResolvedAccountBrokerBindingSet]:
+    """Resolve fail-closed broker authority across selected runtime configs."""
+
+    from src.application.futu_quote_routing import resolve_futu_quote_route, runtime_config_market
+
+    contributions: dict[str, list[dict[str, Any]]] = {}
+    for config_key, raw_config in configs:
+        cfg = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+        futu_accounts = [
+            account
+            for account in accounts_from_config(cfg)
+            if resolve_account_type(cfg, account=account) == ACCOUNT_TYPE_FUTU
+        ]
+        quote_route = resolve_futu_quote_route(cfg, config_key=config_key)
+        market = runtime_config_market(cfg)
+        for account in futu_accounts:
+            explicit = resolve_account_futu_settings(cfg, account=account)
+            complete_explicit = all(
+                explicit.get(key) not in (None, "")
+                for key in ("host", "port", "account_id", "trd_env")
+            )
+            warnings: list[str] = []
+            errors: list[str] = []
+            settings = dict(explicit)
+            authority = "account_settings"
+            if not complete_explicit:
+                if len(futu_accounts) != 1:
+                    errors.append("multi-Futu runtime requires a complete account_settings broker binding")
+                else:
+                    authority = "legacy_single_futu_projection"
+                    portfolio = cfg.get("portfolio")
+                    legacy = portfolio.get("futu") if isinstance(portfolio, Mapping) else None
+                    if isinstance(legacy, Mapping):
+                        for key, value in legacy.items():
+                            if settings.get(key) in (None, "") and value not in (None, ""):
+                                settings[str(key)] = value
+                    if settings.get("host") in (None, "") and quote_route.ok:
+                        settings["host"] = quote_route.host
+                    if settings.get("port") in (None, "") and quote_route.ok:
+                        settings["port"] = quote_route.port
+                    if settings.get("trd_env") in (None, ""):
+                        settings["trd_env"] = "REAL"
+                    warnings.append(
+                        f"{account} uses legacy sole-Futu broker projection; configure account_settings.{account}.futu explicitly"
+                    )
+            ids = resolve_futu_account_ids(cfg, account=account)
+            if settings.get("account_id") not in (None, ""):
+                explicit_id = str(settings["account_id"]).strip()
+                if explicit_id and explicit_id not in ids:
+                    ids.insert(0, explicit_id)
+            normalized_ids: list[str] = []
+            for raw_id in ids:
+                parsed = parse_lossless_integer(raw_id)
+                if parsed is None:
+                    errors.append("broker account id is not losslessly comparable")
+                    continue
+                normalized_ids.append(str(parsed))
+            host = str(settings.get("host") or "").strip().lower()
+            port = parse_lossless_integer(settings.get("port"))
+            trd_env = str(settings.get("trd_env") or "").strip().upper()
+            if not host or port is None or not 1 <= port <= 65535 or not trd_env or not normalized_ids:
+                errors.append("broker binding is incomplete")
+            contributions.setdefault(account, []).append(
+                {
+                    "config_key": str(config_key or "").strip().lower() or None,
+                    "market": market,
+                    "authority": authority,
+                    "host": host or None,
+                    "port": port,
+                    "trd_env": trd_env or None,
+                    "ids": tuple(dict.fromkeys(normalized_ids)),
+                    "warnings": tuple(warnings),
+                    "errors": tuple(errors),
+                }
+            )
+
+    result: dict[str, ResolvedAccountBrokerBindingSet] = {}
+    for account, rows in contributions.items():
+        endpoints = {(row["host"], row["port"], row["trd_env"]) for row in rows if not row["errors"]}
+        errors = [error for row in rows for error in row["errors"]]
+        if len(endpoints) > 1:
+            errors.append("broker endpoint or trd_env differs across runtime configs")
+        endpoint = next(iter(endpoints)) if len(endpoints) == 1 else (None, None, None)
+        members = tuple(
+            ResolvedAccountBrokerBindingMember(
+                config_key=row["config_key"],
+                market=row["market"],
+                authority_source=row["authority"],
+                account_ids=row["ids"],
+            )
+            for row in rows
+        )
+        result[account] = ResolvedAccountBrokerBindingSet(
+            account=account,
+            status="ok" if not errors and len(endpoints) == 1 else "conflict",
+            host=endpoint[0],
+            port=endpoint[1],
+            trd_env=endpoint[2],
+            required_account_ids=tuple(sorted({value for row in rows for value in row["ids"]}, key=int)),
+            members=members,
+            compatibility_warnings=tuple(dict.fromkeys(warning for row in rows for warning in row["warnings"])),
+            errors=tuple(dict.fromkeys(errors)),
+        )
+
+    ready_endpoints: dict[tuple[str, int], list[str]] = {}
+    for account, binding in result.items():
+        if binding.ok and binding.host is not None and binding.port is not None:
+            ready_endpoints.setdefault((binding.host, binding.port), []).append(account)
+    for endpoint, accounts in ready_endpoints.items():
+        if len(accounts) < 2:
+            continue
+        for account in accounts:
+            current = result[account]
+            result[account] = ResolvedAccountBrokerBindingSet(
+                account=current.account,
+                status="conflict",
+                host=None,
+                port=None,
+                trd_env=current.trd_env,
+                required_account_ids=current.required_account_ids,
+                members=current.members,
+                compatibility_warnings=current.compatibility_warnings,
+                errors=current.errors + ("multiple logical Futu accounts share one broker endpoint",),
+            )
+    return result
 
 
 def resolve_account_trade_intake_enabled(config: Mapping[str, Any] | Any, *, account: str | None) -> bool:

@@ -24,6 +24,28 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _quote_probe_message(probe: dict[str, Any], *, ready: bool) -> str:
+    watchdog = _dict(probe.get("watchdog"))
+    explicit = str(probe.get("message") or "").strip()
+    if ready:
+        return explicit or str(watchdog.get("message") or "OpenD quote readiness passed")
+    if explicit:
+        return explicit
+    sdk = _dict(probe.get("sdk"))
+    if sdk and not bool(sdk.get("ok")):
+        return "Futu SDK is unavailable"
+    if probe.get("watchdog_ok") is False or watchdog.get("ok") is False:
+        return str(
+            watchdog.get("error")
+            or watchdog.get("message")
+            or probe.get("error_code")
+            or "OpenD quote readiness failed"
+        )
+    if probe.get("required_fields_ok") is False:
+        return "OpenD quote required option fields are unavailable"
+    return str(probe.get("error_code") or "OpenD quote readiness failed")
+
+
 def _list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -223,8 +245,10 @@ def run_healthcheck_tool(
     infer_futu_portfolio_settings: Callable[..., dict[str, Any]],
     load_option_positions_repo: Callable[[Any], Any],
     run_futu_doctor: Callable[..., dict[str, Any]],
-    healthcheck_symbols_for_futu: Callable[[dict[str, Any]], list[str]],
     write_tools_enabled: Callable[[], bool],
+    resolve_account_broker_binding_sets: Callable[..., dict[str, Any]],
+    resolve_futu_quote_route: Callable[..., Any],
+    build_ready_futu_broker_gateway: Callable[..., Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     del load_option_positions_repo
     config_path, cfg = load_runtime_config(
@@ -560,24 +584,145 @@ def run_healthcheck_tool(
             except Exception:
                 port_value = 0
             if host and port_value > 0:
-                key = f"{host}:{port_value}"
+                normalized_host = host.lower()
+                key = f"{normalized_host}:{port_value}"
                 if key not in opend_endpoints:
-                    opend_endpoints[key] = {"host": host, "port": port_value, "telnet_port": telnet_port, "accounts": []}
-                opend_endpoints[key]["accounts"].append(account)
+                    opend_endpoints[key] = {
+                        "host": normalized_host,
+                        "port": port_value,
+                        "telnet_port": telnet_port,
+                        "accounts": [],
+                    }
+                elif opend_endpoints[key].get("telnet_port") in (None, "") and telnet_port not in (None, ""):
+                    opend_endpoints[key]["telnet_port"] = telnet_port
+                if account not in opend_endpoints[key]["accounts"]:
+                    opend_endpoints[key]["accounts"].append(account)
 
+    broker_bindings = resolve_account_broker_binding_sets([(None, cfg)])
+    quote_route = resolve_futu_quote_route(cfg)
+    quote_ready = False
+    quote_message = "canonical Futu quote route is missing or conflicting"
+    quote_global_state: dict[str, Any] = {}
+    quote_telnet: dict[str, Any] = {}
+    if quote_route.ok:
+        quote_symbols = list(
+            dict.fromkeys(
+                str(member.symbol or "").strip().upper()
+                for member in quote_route.members
+                if str(member.symbol or "").strip()
+            )
+        )[:1]
+        quote_key = f"{quote_route.host}:{quote_route.port}"
+        quote_endpoint = opend_endpoints.get(quote_key) or {}
+        quote_probe = (
+            run_futu_doctor(
+                host=str(quote_route.host),
+                port=int(quote_route.port or 0),
+                symbols=quote_symbols,
+                timeout_sec=int(payload.get("timeout_sec") or 20),
+                telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
+                telnet_port=int(
+                    payload.get("opend_telnet_port")
+                    or quote_endpoint.get("telnet_port")
+                    or 22222
+                ),
+                required_capability="quote",
+            )
+            if quote_symbols
+            else {
+                "ok": False,
+                "message": "canonical Futu quote route has no representative symbol",
+            }
+        )
+        quote_ready = bool(quote_probe.get("ok"))
+        quote_watchdog = _dict(quote_probe.get("watchdog"))
+        quote_global_state = _dict(quote_watchdog.get("state"))
+        quote_telnet = _dict(quote_probe.get("telnet"))
+        quote_message = _quote_probe_message(quote_probe, ready=quote_ready)
+    if quote_route.ok and quote_route.host is not None and quote_route.port is not None:
+        quote_key = f"{quote_route.host}:{quote_route.port}"
+        if quote_key not in opend_endpoints:
+            opend_endpoints[quote_key] = {
+                "host": quote_route.host,
+                "port": quote_route.port,
+                "telnet_port": None,
+                "accounts": [],
+            }
+
+    broker_typed_evidence: dict[str, dict[str, Any]] = {}
     readiness_results: dict[str, dict[str, Any]] = {}
     opend_ready_by_account: dict[str, bool] = {}
     for key, ep in opend_endpoints.items():
         ep_host = ep["host"]
         ep_port = ep["port"]
-        readiness = run_futu_doctor(
-            host=ep_host,
-            port=ep_port,
-            symbols=healthcheck_symbols_for_futu(cfg),
-            timeout_sec=int(payload.get("timeout_sec") or 20),
-            telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
-            telnet_port=int(payload.get("opend_telnet_port") or ep.get("telnet_port") or 22222),
+        endpoint_is_quote = bool(
+            quote_route.ok
+            and str(quote_route.host) == str(ep_host).strip().lower()
+            and int(quote_route.port or 0) == int(ep_port)
         )
+        endpoint_ok = quote_ready if endpoint_is_quote else True
+        endpoint_messages: list[str] = []
+        if endpoint_is_quote:
+            endpoint_messages.append(f"quote: {quote_message}")
+        for account in ep["accounts"]:
+            binding = broker_bindings.get(account)
+            ready = False
+            message = "broker binding is unavailable"
+            if binding is not None and binding.ok:
+                gateway = None
+                try:
+                    gateway = build_ready_futu_broker_gateway(
+                        host=str(binding.host),
+                        port=int(binding.port or 0),
+                        expected_account_ids=binding.required_account_ids,
+                        trd_env=str(binding.trd_env),
+                        is_option_chain_cache_enabled=False,
+                    )
+                    ready = True
+                    message = "OpenD broker readiness passed"
+                except Exception as exc:
+                    message = f"OpenD broker readiness failed: {type(exc).__name__}: {exc}"
+                finally:
+                    if gateway is not None:
+                        gateway.close()
+            elif binding is not None:
+                message = "; ".join(binding.errors) or message
+            broker_typed_evidence[account] = {
+                "ready": ready,
+                "message": message,
+                "global_state": {
+                    "program_status_type": "READY" if ready else "UNKNOWN",
+                    "trd_logined": ready,
+                },
+            }
+            opend_ready_by_account[account] = ready
+            endpoint_ok = endpoint_ok and ready
+            endpoint_messages.append(f"{account}: {message}")
+        capability_status: dict[str, str] = {}
+        if ep["accounts"]:
+            capability_status["broker"] = (
+                "ok"
+                if all(
+                    broker_typed_evidence[account]["ready"]
+                    for account in ep["accounts"]
+                )
+                else "error"
+            )
+        if endpoint_is_quote:
+            capability_status["quote"] = "ok" if quote_ready else "error"
+        readiness = {
+            "ok": endpoint_ok,
+            "message": "; ".join(endpoint_messages),
+            "watchdog": {
+                "state": (
+                    quote_global_state
+                    if endpoint_is_quote and quote_global_state
+                    else {"program_status_type": "READY" if endpoint_ok else "UNKNOWN"}
+                )
+            },
+            "telnet": quote_telnet if endpoint_is_quote else {},
+            "capabilities": capability_status,
+        }
         readiness_results[key] = readiness
 
     # Global path if no specific account needs Futu but global settings exist.
@@ -589,8 +734,12 @@ def run_healthcheck_tool(
         futu_port = 0
 
     if opend_endpoints:
-        aggregate_readiness_status = "ok"
-        aggregate_readiness_message = "all OpenD readiness checks passed"
+        aggregate_readiness_status = "ok" if quote_ready else "error"
+        aggregate_readiness_message = (
+            "all OpenD readiness checks passed"
+            if quote_ready
+            else quote_message
+        )
         for key, ep in opend_endpoints.items():
             ep_host = ep["host"]
             ep_port = ep["port"]
@@ -601,7 +750,11 @@ def run_healthcheck_tool(
                 opend_ready_by_account[account] = readiness_ok
 
             if readiness_ok:
-                readiness_message = f"OpenD readiness passed for {', '.join(ep_accounts)}"
+                readiness_message = (
+                    f"OpenD readiness passed for {', '.join(ep_accounts)}"
+                    if ep_accounts
+                    else str(readiness.get("message") or "OpenD quote readiness passed")
+                )
             else:
                 watchdog = _dict(readiness.get("watchdog"))
                 readiness_message = f"{', '.join(ep_accounts)}: " + str(
@@ -623,13 +776,18 @@ def run_healthcheck_tool(
                         "accounts": ep_accounts,
                         "global_state": _dict(readiness.get("watchdog")).get("state"),
                         "telnet": _dict(readiness.get("telnet")),
+                        "capabilities": dict(readiness.get("capabilities") or {}),
                     },
                 }
             )
             if not readiness_ok:
                 aggregate_readiness_status = "error"
                 aggregate_readiness_message = readiness_message
-                warnings.append(f"OpenD endpoint {key} for {', '.join(ep_accounts)} is not ready.")
+                warnings.append(
+                    f"OpenD endpoint {key}"
+                    + (f" for {', '.join(ep_accounts)}" if ep_accounts else "")
+                    + " is not ready."
+                )
             telnet = _dict(readiness.get("telnet"))
             if telnet and not bool(telnet.get("ok")):
                 warnings.append("OpenD Telnet is not listening; phone verification cannot be submitted through telnet.")
@@ -640,16 +798,14 @@ def run_healthcheck_tool(
                 "message": aggregate_readiness_message,
             }
         )
+        if not quote_ready:
+            warnings.append("Canonical Futu quote capability is not ready.")
     elif futu_host and futu_port > 0:
-        readiness = run_futu_doctor(
-            host=futu_host,
-            port=futu_port,
-            symbols=healthcheck_symbols_for_futu(cfg),
-            timeout_sec=int(payload.get("timeout_sec") or 20),
-            telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
-            telnet_port=int(payload.get("opend_telnet_port") or 22222),
+        readiness_ok = bool(
+            quote_ready
+            and str(quote_route.host) == futu_host.strip().lower()
+            and int(quote_route.port or 0) == futu_port
         )
-        readiness_ok = bool(readiness.get("ok"))
         for account in accounts:
             if account_views[account].account_type == "futu":
                 opend_ready_by_account[account] = readiness_ok
@@ -657,18 +813,22 @@ def run_healthcheck_tool(
             {
                 "name": "opend_readiness_global",
                 "status": ("ok" if readiness_ok else "error"),
-                "message": (readiness.get("message") or "Global OpenD readiness passed"),
+                "message": (
+                    "Global OpenD quote readiness passed"
+                    if readiness_ok
+                    else quote_message
+                ),
                 "value": {
                     "host": futu_host,
                     "port": futu_port,
-                    "global_state": _dict(readiness.get("watchdog")).get("state"),
-                    "telnet": _dict(readiness.get("telnet")),
+                    "global_state": quote_global_state,
+                    "telnet": quote_telnet,
+                    "capabilities": {
+                        "quote": "ok" if readiness_ok else "error"
+                    },
                 },
             }
         )
-        telnet = _dict(readiness.get("telnet"))
-        if telnet and not bool(telnet.get("ok")):
-            warnings.append("OpenD Telnet is not listening; phone verification cannot be submitted through telnet.")
     else:
         checks.append(
             {
@@ -678,6 +838,84 @@ def run_healthcheck_tool(
             }
         )
         warnings.append("Set account_settings.<account>.futu.host/port or symbols[].fetch.source=futu for the public install flow.")
+
+    # Add typed capability facts without changing legacy readiness projections,
+    # counts, or warning semantics.
+    for account in accounts:
+        if account_views[account].account_type != "futu":
+            continue
+        binding = broker_bindings.get(account)
+        broker_ready = False
+        value: dict[str, Any] = {"account": account}
+        message = "broker binding is unavailable"
+        if binding is not None:
+            value.update(
+                {
+                    "host": binding.host,
+                    "port": binding.port,
+                    "trd_env": binding.trd_env,
+                    "required_account_id_count": len(binding.required_account_ids),
+                    "masked_required_account_ids": [mask_account_id(item) for item in binding.required_account_ids],
+                }
+            )
+        if account in broker_typed_evidence:
+            broker_ready = bool(broker_typed_evidence[account]["ready"])
+            message = str(broker_typed_evidence[account]["message"])
+        elif binding is not None and binding.ok:
+            message = "broker endpoint is not available to the account health projection"
+        elif binding is not None:
+            message = "; ".join(binding.errors) or message
+        checks.append(
+            {
+                "name": (
+                    f"opend_broker_readiness_{account}_"
+                    f"{str(getattr(binding, 'host', None) or 'unknown').replace('.', '_').replace(':', '_')}_"
+                    f"{int(getattr(binding, 'port', None) or 0)}"
+                ),
+                "status": "ok" if broker_ready else "error",
+                "message": message,
+                "value": {
+                    **value,
+                    "capability": "broker",
+                    "accounts": [account],
+                    "ready": broker_ready,
+                    "global_state": dict(
+                        broker_typed_evidence.get(account, {}).get("global_state") or {}
+                    ),
+                    "telnet": {},
+                    "matched_account_id_count": (
+                        len(binding.required_account_ids)
+                        if broker_ready and binding is not None
+                        else 0
+                    ),
+                },
+                "summary_excluded": True,
+            }
+        )
+        opend_ready_by_account[account] = broker_ready
+
+    checks.append(
+        {
+            "name": (
+                "opend_quote_readiness_"
+                f"{str(quote_route.host or 'unknown').replace('.', '_').replace(':', '_')}_"
+                f"{int(quote_route.port or 0)}"
+            ),
+            "status": "ok" if quote_ready else "error",
+            "message": quote_message,
+            "value": {
+                "capability": "quote",
+                "host": quote_route.host,
+                "port": quote_route.port,
+                "accounts": [],
+                "ready": quote_ready,
+                "global_state": quote_global_state,
+                "telnet": quote_telnet,
+                "member_count": len(quote_route.members),
+            },
+            "summary_excluded": True,
+        }
+    )
 
     account_paths: dict[str, dict[str, Any]] = {}
     for account in accounts:
@@ -700,7 +938,10 @@ def run_healthcheck_tool(
         }
 
     tools = _agent_tool_availability(write_enabled=write_tools_enabled())
-    critical = [item for item in checks if item["status"] == "error"]
+    critical = [
+        item for item in checks
+        if item["status"] == "error" and not bool(item.get("summary_excluded"))
+    ]
     return (
         {
             "config": {
@@ -724,7 +965,9 @@ def run_healthcheck_tool(
             "summary": {
                 "ok": not critical,
                 "critical_count": len(critical),
-                "warning_count": len(warnings) + len([item for item in checks if item["status"] == "warn"]),
+                "warning_count": len(warnings) + len(
+                    [item for item in checks if item["status"] == "warn" and not bool(item.get("summary_excluded"))]
+                ),
             },
         },
         warnings,

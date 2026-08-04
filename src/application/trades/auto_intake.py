@@ -67,6 +67,7 @@ from src.application.trades.inbox import (
     trade_inbox_summary,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import (
@@ -1252,11 +1253,32 @@ def _run_listener_source_loop(
         dispatcher_status_fn=lifecycle_dispatcher_status_fn,
     )
     stop = stop_event or threading.Event()
-    settlement_gateway = build_futu_gateway(
+    settlement_broker_gateway = build_futu_gateway(
         host=host,
         port=port,
         is_option_chain_cache_enabled=False,
     )
+    quote_route = resolve_futu_quote_route(cfg)
+    quote_dependency_error = (
+        None
+        if quote_route.ok
+        else "; ".join(quote_route.errors)
+        or f"canonical Futu quote route is {quote_route.status}"
+    )
+    settlement_quote_gateway = (
+        build_futu_gateway(
+            host=str(quote_route.host),
+            port=int(quote_route.port or 0),
+            is_option_chain_cache_enabled=False,
+        )
+        if quote_route.ok
+        else None
+    )
+
+    def _close_settlement_gateways() -> None:
+        settlement_broker_gateway.close()
+        if settlement_quote_gateway is not None:
+            settlement_quote_gateway.close()
 
     def _run_combo_reconciliation() -> dict[str, Any]:
         return reconcile_account_post_trade_combos(
@@ -1286,7 +1308,8 @@ def _run_listener_source_loop(
                 repo,
                 payload=payload,
                 result=result,
-                gateway=settlement_gateway,
+                quote_gateway=settlement_quote_gateway,
+                quote_dependency_error=quote_dependency_error,
                 now_ms=int(time.time() * 1000),
                 apply_changes=True,
             )
@@ -1484,8 +1507,18 @@ def _run_listener_source_loop(
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
 
-    listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
-    history_client = OpenDHistoryDealClient(host=host, port=port)
+    listener = None
+    history_client = None
+    try:
+        listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
+        history_client = OpenDHistoryDealClient(host=host, port=port)
+    except Exception:
+        if listener is not None:
+            listener.close()
+        if history_client is not None:
+            history_client.close()
+        _close_settlement_gateways()
+        raise
     restart_count = 0
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
@@ -1557,7 +1590,10 @@ def _run_listener_source_loop(
                                 reconcile_due_lifecycle_cases_for_source(
                                     repo,
                                     source=source,
-                                    gateway=settlement_gateway,
+                                    broker_gateway=settlement_broker_gateway,
+                                    quote_gateway=settlement_quote_gateway,
+                                    quote_dependency_error=quote_dependency_error,
+                                    trd_env="REAL",
                                     now_ms=int(time.time() * 1000),
                                     apply_changes=True,
                                 )
@@ -1685,13 +1721,13 @@ def _run_listener_source_loop(
             stop.set()
             listener.close()
             history_client.close()
-            settlement_gateway.close()
+            _close_settlement_gateways()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
         except TradeIntakeStartCancelled:
             listener.close()
             history_client.close()
-            settlement_gateway.close()
+            _close_settlement_gateways()
             _write_listener_status(
                 status_path,
                 status_state,
@@ -1703,7 +1739,7 @@ def _run_listener_source_loop(
         except TradeIntakeAuthRequired as exc:
             listener.close()
             history_client.close()
-            settlement_gateway.close()
+            _close_settlement_gateways()
             stop.set()
             status_state["last_error"] = str(exc)
             status_state["last_error_at"] = utc_now()
@@ -1739,7 +1775,7 @@ def _run_listener_source_loop(
             reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()
     history_client.close()
-    settlement_gateway.close()
+    _close_settlement_gateways()
     _write_listener_status(status_path, status_state, status="stopped", stage="stop_event", restart_count=restart_count)
     return 0
 

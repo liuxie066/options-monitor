@@ -125,6 +125,7 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].quote_status",
         "quote_refresh.status",
         "quote_refresh.quote_source",
+        "quote_refresh.route_source",
     ],
     "missing_data_fields": [
         "quote_refresh.missing_symbols",
@@ -167,6 +168,7 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].spot_time",
         "rows[].quote_source",
         "assigned_stock_review_rows[].status",
+        "quote_refresh.route_source",
     ],
     "model_preview_fields": ["scope", "coverage", "freshness", "rows", "quote_refresh", "warnings"],
 }
@@ -410,8 +412,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "stock_lot_id": "assigned-stock selector",
         "quote_snapshots": "assigned-stock optional quote snapshot list/dict; supplying it disables implicit realtime refresh",
         "refresh_quotes": "assigned-stock optional bool; current queries refresh realtime OpenD spot by default, false disables it, true with historical as_of_ms is skipped",
-        "opend_host": "assigned-stock refresh_quotes optional OpenD host override",
-        "opend_port": "assigned-stock refresh_quotes optional OpenD port override",
+        "opend_host": "assigned-stock refresh_quotes optional read-only diagnostic OpenD host override",
+        "opend_port": "assigned-stock refresh_quotes optional read-only diagnostic OpenD port override",
         "as_of_ms": "assigned-stock optional as-of timestamp for quote snapshot selection",
     },
     handler=_option_positions_read_tool,

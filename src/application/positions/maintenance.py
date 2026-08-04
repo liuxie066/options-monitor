@@ -12,7 +12,7 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
 )
 from src.application.config_loader import resolve_data_config_path
-from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import (
     ledger_store_payload,
     list_expiry_close_position_lots,
@@ -30,7 +30,7 @@ from src.application.positions.maintenance_receipt import (
 )
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_config_paths import resolve_data_config_ref
-from src.infrastructure.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -168,11 +168,6 @@ def _mark_manual_expiry_review_required(
     return out
 
 
-def _settings_value(settings: dict[str, Any], key: str, fallback: Any) -> Any:
-    value = settings.get(key)
-    return fallback if value in (None, "") else value
-
-
 def _requires_expiry_assignment_quote(
     fields: dict[str, Any],
     *,
@@ -258,19 +253,32 @@ def _refresh_expiry_assignment_quote_evidence(
         diagnostics["status"] = "skipped_no_assignment_quote_required"
         return [dict(item) for item in positions], diagnostics
 
-    settings = infer_futu_portfolio_settings(cfg, account=account)
-    effective_host = str(_settings_value(settings, "host", "127.0.0.1"))
-    try:
-        effective_port = int(_settings_value(settings, "port", 11111))
-    except Exception:
-        effective_port = 11111
+    quote_route = resolve_futu_quote_route(cfg)
+    if not quote_route.ok:
+        diagnostics["status"] = "source_unavailable"
+        diagnostics["missing_symbols"] = list(symbols)
+        diagnostics["errors"].append(
+            {
+                "stage": "route",
+                "error_code": "FUTU_QUOTE_ROUTE_UNAVAILABLE",
+                "message": "canonical Futu quote route is missing or conflicting",
+            }
+        )
+        return _enrich_positions_with_assignment_quotes(
+            positions,
+            {},
+            set(symbols),
+            eligible_record_ids=eligible_record_ids,
+        ), diagnostics
+    effective_host = str(quote_route.host)
+    effective_port = int(quote_route.port or 0)
     repo_root = Path(__file__).resolve().parents[3]
     limits = resolve_opend_fetch_limits(cfg).market_snapshot
     diagnostics["host"] = effective_host
     diagnostics["port"] = effective_port
 
     try:
-        gateway = build_ready_futu_gateway(
+        gateway = build_ready_futu_quote_gateway(
             host=effective_host,
             port=effective_port,
             is_option_chain_cache_enabled=False,

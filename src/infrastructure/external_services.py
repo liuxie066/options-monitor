@@ -8,12 +8,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.domain.fetch_source import is_futu_fetch_source
 from src.infrastructure.opend_watchdog import run_watchdog_check
-
-
-DEFAULT_OPEND_HOST = '127.0.0.1'
-DEFAULT_OPEND_PORT = 11111
 
 
 def run_command(
@@ -157,6 +152,7 @@ def run_opend_watchdog(
     retry_interval_sec: float = 3.0,
     retry_timeout_sec: float = 25.0,
     success_threshold: int = 2,
+    required_capability: str = "both",
 ) -> dict[str, Any]:
     del vpy, base, timeout_sec
     health = run_watchdog_check(
@@ -167,52 +163,17 @@ def run_opend_watchdog(
         retry_interval_sec=float(retry_interval_sec),
         retry_timeout_sec=float(retry_timeout_sec),
         success_threshold=int(success_threshold),
+        required_capability=required_capability,
     )
     return health.to_payload()
 
 
-def _resolve_watchlist_config(cfg: dict[str, Any] | None) -> list[dict[str, Any]]:
-    data = cfg if isinstance(cfg, dict) else {}
-    symbols = data.get("symbols")
-    if not isinstance(symbols, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in symbols:
-        if not isinstance(item, dict):
-            continue
-        normalized = dict(item)
-        broker = str(item.get("broker") or "").strip() or str(item.get("market") or "").strip()
-        if broker:
-            normalized["broker"] = broker
-        normalized.pop("market", None)
-        out.append(normalized)
-    return out
-
-
-def _resolve_opend_endpoint_for_market(cfg_obj: dict[str, Any], market: str) -> tuple[str, int]:
-    host = DEFAULT_OPEND_HOST
-    port = DEFAULT_OPEND_PORT
-    mkt = str(market or '').upper().strip()
-
-    try:
-        for sym in _resolve_watchlist_config(cfg_obj):
-            if not isinstance(sym, dict):
-                continue
-            if str(sym.get('broker') or '').upper() != mkt:
-                continue
-            fetch = (sym.get('fetch') or {})
-            if not is_futu_fetch_source(fetch.get('source')):
-                continue
-            host = str(fetch.get('host') or host)
-            port = int(fetch.get('port') or port)
-            break
-    except Exception:
-        pass
-
-    return host, port
-
-
-def trading_day_via_futu(cfg_obj: dict[str, Any], market: str) -> tuple[bool | None, str]:
+def trading_day_via_futu(
+    *,
+    host: str,
+    port: int,
+    market: str,
+) -> tuple[bool | None, str]:
     """读取交易日状态。
 
     返回值：
@@ -226,10 +187,8 @@ def trading_day_via_futu(cfg_obj: dict[str, Any], market: str) -> tuple[bool | N
     except Exception:
         return (None, market_used)
 
-    host, port = _resolve_opend_endpoint_for_market(cfg_obj, market_used)
-
     try:
-        ctx = OpenQuoteContext(host=host, port=port)
+        ctx = OpenQuoteContext(host=str(host), port=int(port))
     except Exception:
         return (None, market_used)
 

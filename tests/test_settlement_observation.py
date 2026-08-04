@@ -388,6 +388,8 @@ class _Gateway:
             ]
         )
         self.history_deal_queries: list[dict] = []
+        self.position_queries: list[dict] = []
+        self.cash_queries: list[dict] = []
         self.calendar_queries: list[dict] = []
 
     def get_history_deals(self, **kwargs: object) -> dict:
@@ -408,6 +410,7 @@ class _Gateway:
         self,
         **kwargs: object,
     ) -> dict:
+        self.position_queries.append(dict(kwargs))
         return _complete_receipt([])
 
     def get_account_cash_flows(
@@ -416,6 +419,7 @@ class _Gateway:
         clearing_date: str,
         **kwargs: object,
     ) -> dict:
+        self.cash_queries.append({"clearing_date": clearing_date, **kwargs})
         if clearing_date == self.cash_failure_date:
             return {
                 "retcode": -1,
@@ -477,6 +481,39 @@ def test_complete_observation_revalidates_frozen_calendar_window(
     ]["date_receipts"]
     assert len(date_receipts) == 5
     assert all(item["status"] == "complete" for item in date_receipts)
+
+
+def test_missing_quote_dependency_preserves_broker_receipts_and_trade_environment(
+    tmp_path: Path,
+) -> None:
+    repo, lifecycle_case, policy, _anchor_ms = _repo_with_pending_case(tmp_path)
+    now_ms = int(policy["settlement_deadline_ms"]) + 1
+    broker = _Gateway()
+
+    observation = collect_broker_settlement_observation(
+        repo,
+        lifecycle_case=lifecycle_case,
+        read_model=lifecycle_case_read_model(
+            repo,
+            case_id=str(lifecycle_case["case_id"]),
+            now_ms=now_ms,
+        ),
+        broker_gateway=broker,
+        quote_gateway=None,
+        quote_dependency_error="canonical route conflict",
+        futu_account_id="1001",
+        trd_env="SIMULATE",
+        now_ms=now_ms,
+    )
+
+    assert broker.history_deal_queries
+    assert broker.history_deal_queries[0]["trd_env"] == "SIMULATE"
+    assert broker.position_queries[0]["trd_env"] == "SIMULATE"
+    assert all(item["trd_env"] == "SIMULATE" for item in broker.cash_queries)
+    calendar = observation["source_receipts"]["trading_calendar"]
+    assert calendar["status"] == "incomplete"
+    assert calendar["error"] == "canonical route conflict"
+    assert observation["complete"] is False
 
 
 def test_cash_date_failure_preserves_each_date_receipt_and_blocks(

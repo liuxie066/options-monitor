@@ -59,7 +59,7 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
                 ]
             )
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
     monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
@@ -118,7 +118,7 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
                 ]
             )
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
     monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
@@ -272,7 +272,7 @@ def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_p
         )
         return kwargs["call"]()
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "rate_limited_opend_call", _fake_rate_limited_call)
 
@@ -390,7 +390,7 @@ def test_fetch_symbol_uses_shared_snapshot_limiter(monkeypatch, tmp_path: Path) 
         )
         return kwargs["call"]()
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "rate_limited_opend_call", _fake_rate_limited_call)
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
@@ -449,7 +449,7 @@ def test_fetch_symbol_reports_underlier_snapshot_errors(monkeypatch, tmp_path: P
         def close(self):  # noqa: ANN201
             return None
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
 
@@ -485,7 +485,7 @@ def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path
         calls.append(dict(kwargs))
         raise TypeError("legacy spot signature is not supported")
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "get_spot_opend", _get_spot)
 
     payload = mod.fetch_symbol(
@@ -546,7 +546,7 @@ def test_fetch_symbol_reports_snapshot_rate_limit_errors(monkeypatch, tmp_path: 
         kwargs["rate_limited_call"] = lambda **call_kwargs: call_kwargs["call"]()
         return fetch_option_snapshots(**kwargs)
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **kwargs: _Gateway())
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "fetch_option_snapshots", _fetch_option_snapshots)
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))

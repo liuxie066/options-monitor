@@ -65,6 +65,30 @@ def test_opend_watchdog_requires_trade_login() -> None:
     assert "交易未登录" in message
 
 
+def test_quote_watchdog_ignores_unrequested_trade_login(monkeypatch) -> None:
+    import src.infrastructure.opend_watchdog as watchdog
+
+    monkeypatch.setattr(watchdog, "port_open", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        watchdog,
+        "get_global_state",
+        lambda *_args, **_kwargs: (
+            {
+                "program_status_type": "READY",
+                "qot_logined": True,
+                "trd_logined": False,
+            },
+            None,
+            None,
+        ),
+    )
+
+    health = watchdog.run_watchdog_check(required_capability="quote")
+
+    assert health.ok is True
+    assert health.error is None
+
+
 def test_multi_tick_watchdog_accepts_structured_watchdog_payload(fake_runlog_factory, tmp_path: Path) -> None:
     from src.application.multi_tick_watchdog import run_multi_tick_watchdog
 
@@ -100,3 +124,4 @@ def test_multi_tick_watchdog_accepts_structured_watchdog_payload(fake_runlog_fac
 
     assert outcome.should_continue is True
     assert len(calls) == 1
+    assert calls[0]["required_capability"] == "quote"

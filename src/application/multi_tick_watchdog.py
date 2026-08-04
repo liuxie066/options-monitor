@@ -78,6 +78,7 @@ def run_multi_tick_watchdog(
                         retry_interval_sec=retry_interval_sec,
                         retry_timeout_sec=retry_timeout_sec,
                         success_threshold=success_threshold,
+                        required_capability="quote",
                     )
                     if isinstance(wd0, dict):
                         payload0 = wd0

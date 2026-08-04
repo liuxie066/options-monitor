@@ -49,7 +49,7 @@ def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> Non
         def close():
             return None
 
-    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
     monkeypatch.setattr(
         mod,
         "normalize_underlier",

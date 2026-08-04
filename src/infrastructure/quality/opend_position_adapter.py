@@ -10,8 +10,12 @@ from typing import Any, Mapping
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.application.account_config import resolve_futu_account_ids
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_utils import market_to_futu_trade_date_market
-from src.infrastructure.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import (
+    build_ready_futu_broker_gateway,
+    build_ready_futu_quote_gateway,
+)
 
 
 _MARKET_SNAPSHOT_BATCH_SIZE = 200
@@ -132,14 +136,38 @@ class OpenDOptionPositionAdapter:
                 error_code="OPEND_SETTINGS_INVALID",
                 error_message="OpenD host/port and REAL environment are required.",
             )
-        gateway = None
+        quote_route = resolve_futu_quote_route(cfg, market=market)
+        if not quote_route.ok:
+            return OpenDOptionSnapshot(
+                account=account,
+                market=market,
+                environment=environment,
+                account_fingerprint=_account_fingerprint(account_id),
+                observed_at_utc=observed_at_utc,
+                snapshot_id=f"opend-unavailable-{account}",
+                complete=False,
+                refresh_cache=True,
+                rows=[],
+                trading_days=[],
+                error_code="OPEND_QUOTE_ROUTE_UNAVAILABLE",
+                error_message="canonical Futu quote route is missing or conflicting",
+            )
+        broker_gateway = None
+        quote_gateway = None
         try:
-            gateway = build_ready_futu_gateway(
+            broker_gateway = build_ready_futu_broker_gateway(
                 host=host,
                 port=port,
+                expected_account_ids=[account_id],
+                trd_env=environment,
                 is_option_chain_cache_enabled=False,
             )
-            raw_positions = gateway.get_positions(
+            quote_gateway = build_ready_futu_quote_gateway(
+                host=str(quote_route.host),
+                port=int(quote_route.port or 0),
+                is_option_chain_cache_enabled=False,
+            )
+            raw_positions = broker_gateway.get_positions(
                 acc_id=int(account_id),
                 trd_env=environment,
                 refresh_cache=True,
@@ -150,7 +178,7 @@ class OpenDOptionPositionAdapter:
             trade_market = market_to_futu_trade_date_market(market)
             if trade_market is None:
                 raise ValueError(f"unsupported market calendar: {market}")
-            raw_days = gateway.get_trading_days(
+            raw_days = quote_gateway.get_trading_days(
                 market=trade_market,
                 start=start.isoformat(),
                 end=end.isoformat(),
@@ -163,7 +191,7 @@ class OpenDOptionPositionAdapter:
             ]
             option_rows = [row for row in position_rows if _looks_like_option(row)]
             option_rows = _enrich_option_multipliers(
-                gateway,
+                quote_gateway,
                 option_rows,
             )
             return OpenDOptionSnapshot(
@@ -198,8 +226,10 @@ class OpenDOptionPositionAdapter:
                 error_message=str(exc),
             )
         finally:
-            if gateway is not None:
-                gateway.close()
+            if broker_gateway is not None:
+                broker_gateway.close()
+            if quote_gateway is not None and quote_gateway is not broker_gateway:
+                quote_gateway.close()
 
 
 def _looks_like_option(row: dict[str, Any]) -> bool:
