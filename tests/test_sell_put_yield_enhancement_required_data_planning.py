@@ -60,9 +60,11 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
 
 def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
     monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 5, 15))
 
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,
@@ -95,9 +97,11 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
 
 def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
+    import src.application.opend_utils as opend_utils
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
     monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 5, 15))
 
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,

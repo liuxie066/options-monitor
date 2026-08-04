@@ -442,6 +442,11 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     account_requests = []
     monkeypatch.setattr(
         mod,
+        "load_required_data_snapshot_manifest",
+        lambda **_kwargs: (manifest, request.shared_required.resolve()),
+    )
+    monkeypatch.setattr(
+        mod,
         "prepare_portfolio_contexts",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("re-entry must not prepare contexts")

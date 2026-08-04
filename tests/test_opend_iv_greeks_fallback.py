@@ -88,8 +88,12 @@ def test_fallback_fills_missing_iv_when_batch_fails(monkeypatch, tmp_path: Path)
     assert len(payload["rows"]) == 2
     assert all(row["implied_volatility"] == 0.25 for row in payload["rows"])
     assert all(row["delta"] == -0.2 for row in payload["rows"])
+    assert payload["meta"]["status"] == "ok"
+    assert payload["meta"]["snapshot_complete"] is True
+    assert payload["meta"]["snapshot_missing_code_set"] == []
     assert payload["meta"]["snapshot_fallback_filled"] == 2
     assert payload["meta"]["snapshot_fallback_failed"] == 0
+    assert payload["meta"]["snapshot_errors"]
 
 
 def test_fallback_respects_max_codes_budget(monkeypatch, tmp_path: Path) -> None:
@@ -118,6 +122,9 @@ def test_fallback_respects_max_codes_budget(monkeypatch, tmp_path: Path) -> None
     assert len(filled) == 50
     errors = payload["meta"]["snapshot_errors"]
     assert any(item["error_code"] == "FALLBACK_BUDGET_EXCEEDED" for item in errors)
+    assert payload["meta"]["status"] == "error"
+    assert payload["meta"]["error_code"] == "SNAPSHOT_COVERAGE_INCOMPLETE"
+    assert len(payload["meta"]["snapshot_missing_code_set"]) == 150
     assert payload["meta"]["snapshot_fallback_filled"] == 50
     assert payload["meta"]["snapshot_fallback_failed"] == 150
 

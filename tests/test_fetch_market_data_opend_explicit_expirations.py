@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 
 def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_symbol_fetching as mod
@@ -133,6 +135,115 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
     expirations = sorted({str(row.get("expiration")) for row in (payload.get("rows") or [])})
     assert requested_chain_dates == ["2026-04-29", "2026-06-18"]
     assert expirations == ["2026-04-29", "2026-06-18"]
+
+
+@pytest.mark.parametrize("clock_behavior", ["flipped", "raises"])
+def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    clock_behavior: str,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+    from src.application.short_vol_metrics import RealizedVolatilitySnapshot
+
+    requested_chain_dates: list[tuple[str, str]] = []
+    rv_calls: list[tuple[str, date]] = []
+
+    class _Gateway:
+        def get_snapshot(self, codes):  # noqa: ANN001
+            import pandas as pd
+
+            return pd.DataFrame(
+                [
+                    {
+                        "code": code,
+                        "last_price": 1.0,
+                        "bid_price": 0.9,
+                        "ask_price": 1.1,
+                        "option_contract_multiplier": 100,
+                    }
+                    for code in codes
+                ]
+            )
+
+        def get_option_chain(
+            self,
+            *,
+            code,
+            start=None,
+            end=None,
+            is_force_refresh=False,
+        ):  # noqa: ANN001
+            import pandas as pd
+
+            requested_chain_dates.append((str(start), str(end)))
+            return pd.DataFrame(
+                [
+                    {
+                        "code": f"{code}.{start}.P100",
+                        "strike_time": str(start),
+                        "strike_price": 100.0,
+                        "option_type": "PUT",
+                        "lot_size": 100,
+                    }
+                ]
+            )
+
+    def current_clock(_market: str) -> date:
+        if clock_behavior == "raises":
+            raise AssertionError("ambient clock must not be read")
+        return date(2026, 7, 28)
+
+    def fetch_rv(
+        _gateway: object,
+        *,
+        underlier_code: str,
+        trading_day: date,
+    ) -> RealizedVolatilitySnapshot:
+        rv_calls.append((underlier_code, trading_day))
+        return RealizedVolatilitySnapshot(
+            rv_20=0.20,
+            rv_60=0.24,
+            rv_120=0.28,
+            rv_estimate=0.25,
+            sample_count=120,
+            status="ok",
+        )
+
+    monkeypatch.setattr(mod, "get_trading_date", current_clock)
+    monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
+    monkeypatch.setattr(
+        mod,
+        "get_spot_opend",
+        lambda gateway, code, **kwargs: 100.0,
+    )
+    monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", fetch_rv)
+
+    payload = mod.fetch_symbol_request(
+        mod.FetchSymbolRequest(
+            symbol="NVDA",
+            limit_expirations=0,
+            base_dir=tmp_path,
+            explicit_expirations=["2026-08-07"],
+            trading_date="2026-07-27",
+            option_types="put",
+            include_realized_volatility=True,
+            gateway=_Gateway(),
+        )
+    )
+
+    rows = payload.get("rows") or []
+    meta = payload.get("meta") or {}
+    assert requested_chain_dates == [("2026-08-07", "2026-08-07")]
+    assert rv_calls == [("US.NVDA", date(2026, 7, 27))]
+    assert len(rows) == 1
+    assert rows[0]["expiration"] == "2026-08-07"
+    assert rows[0]["dte"] == 11
+    assert rows[0]["realized_volatility_estimate"] == 0.25
+    assert meta["status"] == "ok"
+    assert meta["source_outcome"] == "success_rows"
+    assert meta["trading_date"] == "2026-07-27"
+    assert meta["realized_volatility"]["status"] == "ok"
 
 
 def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_path: Path) -> None:
@@ -452,5 +563,7 @@ def test_fetch_symbol_reports_snapshot_rate_limit_errors(monkeypatch, tmp_path: 
     meta = payload.get("meta") or {}
     assert len(payload.get("rows") or []) == 1
     assert meta["status"] == "error"
-    assert meta["error_code"] == "RATE_LIMIT"
+    assert meta["error_code"] == "SNAPSHOT_COVERAGE_INCOMPLETE"
+    assert meta["snapshot_complete"] is False
+    assert any(item["error_code"] == "RATE_LIMIT" for item in meta["snapshot_errors"])
     assert meta["snapshot_errors"][0]["stage"] == "market_snapshot"

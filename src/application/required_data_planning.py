@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+import math
 from pathlib import Path
 from typing import Any, Literal, MutableMapping
 
@@ -12,13 +13,13 @@ from domain.domain.candidate_defaults import (
     CandidateWindowDefaults,
     resolve_candidate_window,
 )
+from src.application import opend_utils
 from src.application.opend_market_snapshot_fetching import get_underlier_spot
 from src.application.opend_symbol_chain_fetching import (
     OptionExpirationDiscoveryResult,
     discover_option_expirations,
     list_option_expirations,
 )
-from src.application.opend_utils import get_trading_date, normalize_underlier
 from src.application.yield_enhancement_config import (
     derive_yield_enhancement_policy,
     resolve_staggered_expiry_gap_days,
@@ -45,6 +46,27 @@ DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
 DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT = 0.40
+
+
+class RequiredDataPlanningError(RuntimeError):
+    """Raised when required-data demand cannot be projected without loss."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        requirement_index: int,
+        field_name: str,
+        reason_code: str = "invalid_ready_position_requirement",
+    ) -> None:
+        self.symbol = str(symbol or "").strip().upper()
+        self.reason_code = str(reason_code or "").strip()
+        self.requirement_index = int(requirement_index)
+        self.field_name = str(field_name or "").strip()
+        super().__init__(
+            f"{self.symbol or 'UNKNOWN'}: {self.reason_code}: "
+            f"position_requirements[{self.requirement_index}].{self.field_name}"
+        )
 
 
 @dataclass(frozen=True)
@@ -74,6 +96,9 @@ class OptionSideFetchPlan:
     explicit_expirations: list[str]
     strike_window: StrikeWindowPlan
     planning_reason: str
+    required_exact_strikes_by_expiration: dict[str, list[float]] = field(
+        default_factory=dict
+    )
     source_fields: list[str] = field(default_factory=list)
     spot_reference: float | None = None
 
@@ -99,6 +124,7 @@ class RequiredDataFetchSpec:
     include_realized_volatility: bool = False
     side_plans: list[OptionSideFetchPlan] = field(default_factory=list)
     planning_reason: str = ""
+    trading_date: str | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -111,9 +137,10 @@ class RequiredDataFetchSpec:
             "min_dte": self.min_dte,
             "max_dte": self.max_dte,
             "side_strike_windows": {k: dict(v) for k, v in self.side_strike_windows.items()},
-            "include_realized_volatility": bool(self.include_realized_volatility),
+            "include_realized_volatility": self.include_realized_volatility,
             "side_plans": [plan.to_debug_dict() for plan in self.side_plans],
             "planning_reason": self.planning_reason,
+            "trading_date": self.trading_date,
         }
 
 
@@ -128,6 +155,7 @@ class RequiredDataFetchPlanBundle:
     expiration_discovery: OptionExpirationDiscoveryResult | None = None
     projection_outcome: FetchPlanOutcome | None = None
     projected_expirations: list[str] = field(default_factory=list)
+    require_realized_volatility: bool = False
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +172,7 @@ class RequiredDataFetchPlanBundle:
             ),
             "projection_outcome": self.projection_outcome,
             "projected_expirations": list(self.projected_expirations),
+            "require_realized_volatility": self.require_realized_volatility,
         }
 
 
@@ -212,21 +241,24 @@ def _resolve_spot_reference(
     return None
 
 
-def _filter_expirations_by_dte(*, symbol: str, available_expirations: list[str], min_dte: int | None, max_dte: int | None) -> list[str]:
+def _filter_expirations_by_dte(
+    *,
+    symbol: str,
+    available_expirations: list[str],
+    trading_date: date | None,
+    min_dte: int | None,
+    max_dte: int | None,
+) -> list[str]:
     if not available_expirations:
         return []
-    try:
-        from src.application.opend_utils import get_trading_date, normalize_underlier
-
-        today = get_trading_date(normalize_underlier(symbol).market)
-    except Exception as exc:
-        raise RuntimeError(f"failed to resolve trading date for {symbol}") from exc
+    if trading_date is None:
+        raise RuntimeError(f"failed to resolve trading date for {symbol}")
 
     out: list[str] = []
     for exp in available_expirations:
         try:
             d0 = datetime.fromisoformat(str(exp)[:10]).date()
-            dte0 = int((d0 - today).days)
+            dte0 = int((d0 - trading_date).days)
         except Exception:
             continue
         if min_dte is not None and dte0 < int(min_dte):
@@ -242,6 +274,28 @@ def _expiration_date(value: Any) -> date | None:
         return datetime.fromisoformat(str(value)[:10]).date()
     except Exception:
         return None
+
+
+def _strict_iso_expiration(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.isoformat() == value else None
+
+
+def _strict_positive_finite_strike(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
 
 
 def _filter_staggered_call_expirations(
@@ -277,6 +331,7 @@ def _resolve_put_side_plan(
     sell_put_cfg: dict,
     limit_expirations: int,
     available_expirations: list[str],
+    trading_date: date | None,
     spot_reference: float | None,
     defaults: CandidateWindowDefaults = DEFAULT_SELL_PUT_WINDOW,
     source_prefix: str = "sell_put",
@@ -285,6 +340,7 @@ def _resolve_put_side_plan(
     filtered = _filter_expirations_by_dte(
         symbol=symbol,
         available_expirations=available_expirations,
+        trading_date=trading_date,
         min_dte=window.min_dte,
         max_dte=window.max_dte,
     )
@@ -387,6 +443,7 @@ def _resolve_call_side_plan(
     sell_call_cfg: dict,
     limit_expirations: int,
     available_expirations: list[str],
+    trading_date: date | None,
     spot_reference: float | None,
     defaults: CandidateWindowDefaults = DEFAULT_SELL_CALL_WINDOW,
     source_prefix: str = "sell_call",
@@ -398,6 +455,7 @@ def _resolve_call_side_plan(
     filtered = _filter_expirations_by_dte(
         symbol=symbol,
         available_expirations=available_expirations,
+        trading_date=trading_date,
         min_dte=window.min_dte,
         max_dte=window.max_dte,
     )
@@ -431,6 +489,7 @@ def _resolve_combo_yield_call_plan(
     yield_enhancement_cfg: dict,
     limit_expirations: int,
     available_expirations: list[str],
+    trading_date: date | None = None,
     spot_reference: float | None,
 ) -> OptionSideFetchPlan:
     cfg = dict(yield_enhancement_cfg or {})
@@ -464,6 +523,7 @@ def _resolve_combo_yield_call_plan(
         sell_call_cfg=call_cfg,
         limit_expirations=limit_expirations,
         available_expirations=available_expirations,
+        trading_date=trading_date,
         spot_reference=spot_reference,
         defaults=call_window,
         source_prefix="combo_yield.call",
@@ -477,6 +537,7 @@ def _resolve_combo_yield_call_plan(
     put_expirations = _filter_expirations_by_dte(
         symbol=symbol,
         available_expirations=available_expirations,
+        trading_date=trading_date,
         min_dte=put_window.min_dte,
         max_dte=put_window.max_dte,
     )
@@ -520,14 +581,12 @@ def _unique_preserve_order(values: list[str]) -> list[str]:
 
 def _expiration_discovery_cache_key(
     *,
-    base: Path,
     symbol: str,
     source: str,
     host: str,
     port: int,
+    trading_date: str,
 ) -> ExpirationDiscoveryCacheKey:
-    underlier = normalize_underlier(symbol, base_dir=base)
-    trading_date = get_trading_date(underlier.market).isoformat()
     return (
         str(symbol or "").strip().upper(),
         str(source or "").strip().lower(),
@@ -535,6 +594,104 @@ def _expiration_discovery_cache_key(
         int(port),
         trading_date,
     )
+
+
+def _expiration_discovery_cache_entries(
+    cache: MutableMapping[
+        ExpirationDiscoveryCacheKey,
+        OptionExpirationDiscoveryResult,
+    ],
+    *,
+    symbol: str,
+    source: str,
+    host: str,
+    port: int,
+) -> list[tuple[ExpirationDiscoveryCacheKey, Any]]:
+    prefix = (
+        str(symbol or "").strip().upper(),
+        str(source or "").strip().lower(),
+        str(host),
+        int(port),
+    )
+    return [
+        (key, value)
+        for key, value in cache.items()
+        if isinstance(key, tuple)
+        and len(key) == 5
+        and key[:4] == prefix
+    ]
+
+
+def _expiration_discovery_cache_identity_matches(
+    *,
+    cache_key: ExpirationDiscoveryCacheKey,
+    result: Any,
+) -> bool:
+    if not isinstance(result, OptionExpirationDiscoveryResult):
+        return False
+    identity = result.request_identity
+    if not isinstance(identity, dict):
+        return False
+    expected_symbol, expected_source, expected_host, expected_port, expected_date = (
+        cache_key
+    )
+    return (
+        identity.get("symbol") == expected_symbol
+        and identity.get("source") == expected_source
+        and identity.get("host") == expected_host
+        and identity.get("port") == expected_port
+        and identity.get("trading_date") == expected_date
+        and _strict_iso_expiration(expected_date) == expected_date
+    )
+
+
+def _expiration_discovery_cache_failure(
+    *,
+    symbol: str,
+    source: str,
+    host: str,
+    port: int,
+    trading_date: str | None,
+    reason_code: str,
+    error: str,
+) -> OptionExpirationDiscoveryResult:
+    return OptionExpirationDiscoveryResult(
+        outcome="parse_error",
+        reason_code=reason_code,
+        expirations=[],
+        observed_at_utc=None,
+        completed_at_utc=(
+            datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        request_identity={
+            "symbol": str(symbol or "").strip().upper(),
+            "underlier": None,
+            "source": str(source or "").strip().lower(),
+            "host": str(host),
+            "port": int(port),
+            "trading_date": trading_date,
+        },
+        error=error,
+    )
+
+
+def _freeze_expiration_discovery_trading_date(
+    *,
+    base: Path,
+    symbol: str,
+) -> str:
+    underlier = opend_utils.normalize_underlier(symbol, base_dir=base)
+    raw_trading_date = opend_utils.get_trading_date(
+        underlier.market
+    ).isoformat()
+    trading_date = _strict_iso_expiration(raw_trading_date)
+    if trading_date is None:
+        raise ValueError(
+            f"invalid expiration-discovery trading date for {symbol}"
+        )
+    return trading_date
 
 
 def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[OptionSideFetchPlan]:
@@ -552,20 +709,66 @@ def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[Option
             continue
 
         expirations = _unique_preserve_order([exp for plan in plans for exp in plan.explicit_expirations])
-        min_values = [plan.strike_window.min_strike for plan in plans if plan.strike_window.min_strike is not None]
-        max_values = [plan.strike_window.max_strike for plan in plans if plan.strike_window.max_strike is not None]
+        min_dte_values = [
+            plan.min_dte for plan in plans if plan.min_dte is not None
+        ]
+        max_dte_values = [
+            plan.max_dte for plan in plans if plan.max_dte is not None
+        ]
+        merged_min_dte = (
+            None
+            if any(plan.min_dte is None for plan in plans)
+            else min(min_dte_values)
+        )
+        merged_max_dte = (
+            None
+            if any(plan.max_dte is None for plan in plans)
+            else max(max_dte_values)
+        )
+        min_values = [
+            plan.strike_window.min_strike
+            for plan in plans
+            if plan.strike_window.min_strike is not None
+        ]
+        max_values = [
+            plan.strike_window.max_strike
+            for plan in plans
+            if plan.strike_window.max_strike is not None
+        ]
+        merged_min_strike = (
+            None
+            if any(
+                plan.strike_window.min_strike is None for plan in plans
+            )
+            else min(min_values)
+        )
+        merged_max_strike = (
+            None
+            if any(
+                plan.strike_window.max_strike is None for plan in plans
+            )
+            else max(max_values)
+        )
         base_min_values = [plan.strike_window.base_min_strike for plan in plans if plan.strike_window.base_min_strike is not None]
         base_max_values = [plan.strike_window.base_max_strike for plan in plans if plan.strike_window.base_max_strike is not None]
         source_fields = _unique_preserve_order([field for plan in plans for field in plan.source_fields])
+        exact_strikes_by_expiration: dict[str, set[float]] = {}
+        for plan in plans:
+            for expiration, strikes in (
+                plan.required_exact_strikes_by_expiration.items()
+            ):
+                exact_strikes_by_expiration.setdefault(expiration, set()).update(
+                    float(strike) for strike in strikes
+                )
         merged.append(
             OptionSideFetchPlan(
                 option_type=option_type,
-                min_dte=min((plan.min_dte for plan in plans if plan.min_dte is not None), default=None),
-                max_dte=max((plan.max_dte for plan in plans if plan.max_dte is not None), default=None),
+                min_dte=merged_min_dte,
+                max_dte=merged_max_dte,
                 explicit_expirations=expirations,
                 strike_window=StrikeWindowPlan(
-                    min_strike=(min(min_values) if min_values else None),
-                    max_strike=(max(max_values) if max_values else None),
+                    min_strike=merged_min_strike,
+                    max_strike=merged_max_strike,
                     source="+".join(_unique_preserve_order([plan.strike_window.source for plan in plans])),
                     buffer_applied=any(plan.strike_window.buffer_applied for plan in plans),
                     buffer_pct=max((plan.strike_window.buffer_pct for plan in plans), default=0.0),
@@ -573,6 +776,12 @@ def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[Option
                     base_max_strike=(max(base_max_values) if base_max_values else None),
                 ),
                 planning_reason=f"merged {option_type} requirements across enabled strategies",
+                required_exact_strikes_by_expiration={
+                    expiration: sorted(strikes)
+                    for expiration, strikes in sorted(
+                        exact_strikes_by_expiration.items()
+                    )
+                },
                 source_fields=source_fields,
                 spot_reference=next((plan.spot_reference for plan in plans if plan.spot_reference is not None), None),
             )
@@ -580,21 +789,65 @@ def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[Option
     return merged
 
 
-def _position_requirement_side_plans(
+def _validate_ready_position_requirements(
     requirements: list[dict[str, Any]] | None,
+    *,
+    symbol: str,
+) -> list[dict[str, Any]]:
+    ready: list[dict[str, Any]] = []
+    for index, requirement in enumerate(requirements or []):
+        if not isinstance(requirement, dict):
+            raise RequiredDataPlanningError(
+                symbol=symbol,
+                requirement_index=index,
+                field_name="requirement",
+            )
+        if str(requirement.get("planning_status") or "ready") != "ready":
+            continue
+        option_type = requirement.get("option_type")
+        if not isinstance(option_type, str) or option_type not in {"put", "call"}:
+            raise RequiredDataPlanningError(
+                symbol=symbol,
+                requirement_index=index,
+                field_name="option_type",
+            )
+        expiration = _strict_iso_expiration(requirement.get("expiration"))
+        if expiration is None:
+            raise RequiredDataPlanningError(
+                symbol=symbol,
+                requirement_index=index,
+                field_name="expiration",
+            )
+        strike = _strict_positive_finite_strike(requirement.get("strike"))
+        if strike is None:
+            raise RequiredDataPlanningError(
+                symbol=symbol,
+                requirement_index=index,
+                field_name="strike",
+            )
+        ready.append(
+            {
+                **requirement,
+                "option_type": option_type,
+                "expiration": expiration,
+                "strike": strike,
+            }
+        )
+    return ready
+
+
+def _position_requirement_side_plans(
+    requirements: list[dict[str, Any]],
+    *,
+    trading_date: date | None,
+    symbol: str,
 ) -> list[OptionSideFetchPlan]:
     grouped: dict[OptionSide, list[dict[str, Any]]] = {
         "put": [],
         "call": [],
     }
-    for requirement in requirements or []:
-        if not isinstance(requirement, dict):
-            continue
-        option_type = str(requirement.get("option_type") or "").strip().lower()
-        if option_type not in {"put", "call"}:
-            continue
-        if str(requirement.get("planning_status") or "ready") != "ready":
-            continue
+    for requirement in requirements:
+        option_type = requirement["option_type"]
         grouped[option_type].append(requirement)
 
     plans: list[OptionSideFetchPlan] = []
@@ -609,16 +862,37 @@ def _position_requirement_side_plans(
                 if str(item.get("expiration") or "").strip()
             }
         )
-        strikes = [
-            value
-            for item in items
-            if (value := _safe_float(item.get("strike"))) is not None
-        ]
+        strikes = [float(item["strike"]) for item in items]
+        dtes: list[int] = []
+        if trading_date is not None:
+            for requirement_index, item in enumerate(items):
+                expiration_date = date.fromisoformat(item["expiration"])
+                dte = (expiration_date - trading_date).days
+                if dte < 0:
+                    raise RequiredDataPlanningError(
+                        symbol=symbol,
+                        requirement_index=requirement_index,
+                        field_name="expiration",
+                        reason_code=(
+                            "position_expiration_before_trading_date"
+                        ),
+                    )
+                dtes.append(dte)
+        exact_strikes_by_expiration = {
+            expiration: sorted(
+                {
+                    float(item["strike"])
+                    for item in items
+                    if item["expiration"] == expiration
+                }
+            )
+            for expiration in expirations
+        }
         plans.append(
             OptionSideFetchPlan(
                 option_type=option_type,
-                min_dte=None,
-                max_dte=None,
+                min_dte=(min(dtes) if dtes else None),
+                max_dte=(max(dtes) if dtes else None),
                 explicit_expirations=expirations,
                 strike_window=StrikeWindowPlan(
                     min_strike=(min(strikes) if strikes else None),
@@ -626,10 +900,50 @@ def _position_requirement_side_plans(
                     source="close_advice.position_requirements",
                 ),
                 planning_reason="cover active Close Advice position contracts",
+                required_exact_strikes_by_expiration=(
+                    exact_strikes_by_expiration
+                ),
                 source_fields=["close_advice.position_requirements"],
             )
         )
     return plans
+
+
+def _expiration_discovery_trading_date(
+    *,
+    expiration_discovery: OptionExpirationDiscoveryResult,
+    symbol: str,
+    has_ready_requirements: bool,
+    expected_trading_date: str | None,
+) -> date | None:
+    raw_trading_date = expiration_discovery.request_identity.get(
+        "trading_date"
+    )
+    normalized = _strict_iso_expiration(raw_trading_date)
+    if normalized is not None:
+        if (
+            expected_trading_date is not None
+            and normalized != expected_trading_date
+        ):
+            raise RequiredDataPlanningError(
+                symbol=symbol,
+                requirement_index=0,
+                field_name="expiration_discovery.trading_date",
+                reason_code="expiration_discovery_trading_date_mismatch",
+            )
+        return date.fromisoformat(normalized)
+    if expiration_discovery.complete:
+        raise RequiredDataPlanningError(
+            symbol=symbol,
+            requirement_index=0,
+            field_name="expiration_discovery.trading_date",
+            reason_code=(
+                "position_dte_unavailable"
+                if has_ready_requirements
+                else "strategy_dte_unavailable"
+            ),
+        )
+    return None
 
 
 def _merge_side_plans(
@@ -639,10 +953,15 @@ def _merge_side_plans(
     host: str,
     port: int,
     side_plans: list[OptionSideFetchPlan],
+    trading_date: date | None = None,
     include_realized_volatility: bool = False,
 ) -> list[RequiredDataFetchSpec]:
+    if not isinstance(include_realized_volatility, bool):
+        raise TypeError("required-data RV authority must be a bool")
     groups: dict[tuple[str, ...], list[OptionSideFetchPlan]] = {}
     for plan in side_plans:
+        if not plan.explicit_expirations:
+            continue
         key = tuple(plan.explicit_expirations)
         groups.setdefault(key, []).append(plan)
     merged: list[RequiredDataFetchSpec] = []
@@ -666,9 +985,14 @@ def _merge_side_plans(
                 min_dte=min((plan.min_dte for plan in plans if plan.min_dte is not None), default=None),
                 max_dte=max((plan.max_dte for plan in plans if plan.max_dte is not None), default=None),
                 side_strike_windows=side_strike_windows,
-                include_realized_volatility=bool(include_realized_volatility),
+                include_realized_volatility=include_realized_volatility,
                 side_plans=list(plans),
                 planning_reason=("shared expirations -> merged request" if len(plans) > 1 else "single-side request"),
+                trading_date=(
+                    trading_date.isoformat()
+                    if trading_date is not None
+                    else None
+                ),
             )
         )
     return merged
@@ -705,37 +1029,110 @@ def build_required_data_fetch_plan(
     expiration_max_calls: int = 60,
 ) -> RequiredDataFetchPlanBundle:
     assert_strategy_config_resolved(symbol_cfg)
+    ready_position_requirements = _validate_ready_position_requirements(
+        position_requirements,
+        symbol=symbol,
+    )
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
     resolved_yield_enhancement_cfg = dict(yield_enhancement_cfg or {})
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sell_put_cfg)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=sell_call_cfg)
-    spot_reference = _resolve_spot_reference(
-        symbol=symbol,
-        host=fetch_host,
-        port=fetch_port,
-        base_dir=base,
-        required_data_dir=required_data_dir,
-        snapshot_max_wait_sec=snapshot_max_wait_sec,
-        snapshot_window_sec=snapshot_window_sec,
-        snapshot_max_calls=snapshot_max_calls,
-    )
-    try:
-        discovery_cache_key = _expiration_discovery_cache_key(
-            base=base,
+    expiration_discovery: OptionExpirationDiscoveryResult | None = None
+    discovery_cache_key: ExpirationDiscoveryCacheKey | None = None
+    frozen_trading_date: str | None = None
+    trading_date_resolution_error: Exception | None = None
+    cache_entries = (
+        _expiration_discovery_cache_entries(
+            expiration_discovery_cache,
             symbol=symbol,
             source=fetch_source,
             host=fetch_host,
             port=fetch_port,
         )
-    except Exception:
-        discovery_cache_key = None
-    expiration_discovery = (
-        expiration_discovery_cache.get(discovery_cache_key)
         if expiration_discovery_cache is not None
-        and discovery_cache_key is not None
+        else []
+    )
+    if len(cache_entries) > 1:
+        expiration_discovery = _expiration_discovery_cache_failure(
+            symbol=symbol,
+            source=fetch_source,
+            host=fetch_host,
+            port=fetch_port,
+            trading_date=None,
+            reason_code="expiration_discovery_cache_ambiguous",
+            error=(
+                "multiple expiration-discovery cache dates exist for one "
+                "physical binding"
+            ),
+        )
+    elif cache_entries:
+        candidate_key, candidate_result = cache_entries[0]
+        candidate_date = _strict_iso_expiration(candidate_key[4])
+        if (
+            candidate_date is None
+            or not _expiration_discovery_cache_identity_matches(
+                cache_key=candidate_key,
+                result=candidate_result,
+            )
+        ):
+            expiration_discovery = _expiration_discovery_cache_failure(
+                symbol=symbol,
+                source=fetch_source,
+                host=fetch_host,
+                port=fetch_port,
+                trading_date=None,
+                reason_code=(
+                    "expiration_discovery_cache_identity_invalid"
+                ),
+                error=(
+                    "expiration-discovery cache identity does not match "
+                    "its physical binding and trading-date key"
+                ),
+            )
+        else:
+            frozen_trading_date = candidate_date
+            discovery_cache_key = candidate_key
+            expiration_discovery = candidate_result
+    else:
+        try:
+            frozen_trading_date = (
+                _freeze_expiration_discovery_trading_date(
+                    base=base,
+                    symbol=symbol,
+                )
+            )
+        except Exception as exc:
+            trading_date_resolution_error = exc
+    spot_reference = (
+        _resolve_spot_reference(
+            symbol=symbol,
+            host=fetch_host,
+            port=fetch_port,
+            base_dir=base,
+            required_data_dir=required_data_dir,
+            snapshot_max_wait_sec=snapshot_max_wait_sec,
+            snapshot_window_sec=snapshot_window_sec,
+            snapshot_max_calls=snapshot_max_calls,
+        )
+        if frozen_trading_date is not None
         else None
     )
+    if (
+        discovery_cache_key is None
+        and frozen_trading_date is not None
+        and expiration_discovery is None
+    ):
+        try:
+            discovery_cache_key = _expiration_discovery_cache_key(
+                symbol=symbol,
+                source=fetch_source,
+                host=fetch_host,
+                port=fetch_port,
+                trading_date=frozen_trading_date,
+            )
+        except Exception:
+            discovery_cache_key = None
     if expiration_discovery is None:
         expiration_discovery = discover_option_expirations(
             symbol,
@@ -747,14 +1144,42 @@ def build_required_data_fetch_plan(
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
             list_expirations_fn=list_option_expirations,
+            trading_date=(frozen_trading_date or ""),
         )
+        if (
+            trading_date_resolution_error is not None
+            and expiration_discovery.reason_code
+            == "request_identity_invalid"
+        ):
+            expiration_discovery = replace(
+                expiration_discovery,
+                error=(
+                    f"{type(trading_date_resolution_error).__name__}: "
+                    f"{trading_date_resolution_error}"
+                ),
+            )
         if (
             expiration_discovery_cache is not None
             and discovery_cache_key is not None
+            and _expiration_discovery_cache_identity_matches(
+                cache_key=discovery_cache_key,
+                result=expiration_discovery,
+            )
         ):
             expiration_discovery_cache[discovery_cache_key] = (
                 expiration_discovery
             )
+    trading_date = _expiration_discovery_trading_date(
+        expiration_discovery=expiration_discovery,
+        symbol=symbol,
+        has_ready_requirements=bool(ready_position_requirements),
+        expected_trading_date=frozen_trading_date,
+    )
+    position_side_plans = _position_requirement_side_plans(
+        ready_position_requirements,
+        trading_date=trading_date,
+        symbol=symbol,
+    )
     available_expirations = list(expiration_discovery.expirations)
 
     side_plans: list[OptionSideFetchPlan] = []
@@ -767,6 +1192,7 @@ def build_required_data_fetch_plan(
                 sell_put_cfg=sell_put_cfg,
                 limit_expirations=limit_expirations,
                 available_expirations=available_expirations,
+                trading_date=trading_date,
                 spot_reference=spot_reference,
             )
         )
@@ -777,6 +1203,7 @@ def build_required_data_fetch_plan(
                 sell_call_cfg=sell_call_cfg,
                 limit_expirations=limit_expirations,
                 available_expirations=available_expirations,
+                trading_date=trading_date,
                 spot_reference=spot_reference,
             )
         )
@@ -788,12 +1215,11 @@ def build_required_data_fetch_plan(
                 yield_enhancement_cfg=resolved_yield_enhancement_cfg,
                 limit_expirations=limit_expirations,
                 available_expirations=available_expirations,
+                trading_date=trading_date,
                 spot_reference=spot_reference,
             )
         )
-    side_plans.extend(
-        _position_requirement_side_plans(position_requirements)
-    )
+    side_plans.extend(position_side_plans)
     side_plans = _merge_same_side_plans(side_plans)
     projected_expirations = _unique_preserve_order(
         [
@@ -812,6 +1238,18 @@ def build_required_data_fetch_plan(
         projection_outcome = "projection_empty"
     else:
         projection_outcome = "success_rows"
+    require_realized_volatility = bool(
+        (want_put and sell_put_semantics.scan_requires_rv)
+        or (want_call and sell_call_semantics.scan_requires_rv)
+        or (
+            combo_yield_enabled
+            and yield_enhancement_policy.requires_realized_volatility
+        )
+        or any(
+            bool(item.get("requires_realized_volatility"))
+            for item in ready_position_requirements
+        )
+    )
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
         spot_reference=spot_reference,
@@ -821,22 +1259,16 @@ def build_required_data_fetch_plan(
             limit_expirations=limit_expirations,
             host=fetch_host,
             port=fetch_port,
-            side_plans=side_plans,
-            include_realized_volatility=bool(
-                (want_put and sell_put_semantics.scan_requires_rv)
-                or (want_call and sell_call_semantics.scan_requires_rv)
-                or (combo_yield_enabled and yield_enhancement_policy.requires_realized_volatility)
-                or any(
-                    bool(item.get("requires_realized_volatility"))
-                    for item in (position_requirements or [])
-                    if isinstance(item, dict)
-                    and str(item.get("planning_status") or "ready") == "ready"
-                )
+            side_plans=(
+                side_plans if projection_outcome == "success_rows" else []
             ),
+            trading_date=trading_date,
+            include_realized_volatility=require_realized_volatility,
         ),
         expiration_discovery_complete=expiration_discovery.complete,
         expiration_discovery_error=expiration_discovery.error,
         expiration_discovery=expiration_discovery,
         projection_outcome=projection_outcome,
         projected_expirations=projected_expirations,
+        require_realized_volatility=require_realized_volatility,
     )

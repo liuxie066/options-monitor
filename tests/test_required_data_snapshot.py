@@ -16,13 +16,20 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
     _validate_complete_required_data_bundle,
+    _validate_physical_binding,
     resolve_frozen_required_data,
     seal_required_data_snapshot,
 )
-from src.application.required_data_plan_identity import required_data_plan_id
+from src.application.required_data_plan_identity import (
+    build_required_data_expected_fetch_contract,
+    required_data_plan_id,
+)
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
 )
+
+
+_OBSERVED_AT = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
@@ -35,15 +42,182 @@ def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
     return root, state / "required_data_snapshot_manifest.json"
 
 
+def _underlier_code(symbol: str) -> str:
+    symbol_norm = str(symbol).strip().upper()
+    if symbol_norm.endswith(".HK"):
+        return f"HK.{int(symbol_norm[:-3]):05d}"
+    return f"US.{symbol_norm}"
+
+
+def _fetch_plan(
+    symbol: str,
+    *,
+    outcome: str = "success_rows",
+    observed_at: str = _OBSERVED_AT,
+) -> dict:
+    success_rows = outcome == "success_rows"
+    expirations = ["2026-08-28"] if success_rows else []
+    side_plan = {
+        "option_type": "put",
+        "min_dte": 20,
+        "max_dte": 40,
+        "explicit_expirations": expirations,
+        "strike_window": {
+            "min_strike": 100,
+            "max_strike": 100,
+            "source": "position_exact",
+            "buffer_applied": False,
+            "buffer_pct": 0.0,
+            "base_min_strike": 100,
+            "base_max_strike": 100,
+        },
+        "planning_reason": "fixture exact position contract",
+        "source_fields": ["position.strike"],
+        "spot_reference": None,
+        "min_strike": 100,
+        "max_strike": 100,
+        "expiration_count": len(expirations),
+        "required_exact_strikes_by_expiration": (
+            {expiration: [100.0] for expiration in expirations}
+        ),
+    }
+    request = {
+        "symbol": symbol,
+        "limit_expirations": 0,
+        "host": "127.0.0.1",
+        "port": 11111,
+        "option_types": ["put"],
+        "explicit_expirations": expirations,
+        "min_dte": 20,
+        "max_dte": 40,
+        "side_strike_windows": {
+            "put": {
+                "min_strike": 100,
+                "max_strike": 100,
+            }
+        },
+        "include_realized_volatility": True,
+        "side_plans": [side_plan],
+        "planning_reason": "fixture exact position request",
+        "trading_date": "2026-08-04",
+    }
+    return {
+        "symbol": symbol,
+        "spot_reference": None,
+        "side_plans": [side_plan],
+        "merged_requests": ([request] if success_rows else []),
+        "expiration_discovery_complete": True,
+        "expiration_discovery_error": None,
+        "expiration_discovery": {
+            "outcome": outcome,
+            "reason_code": (None if success_rows else "no_expirations"),
+            "expirations": expirations,
+            "observed_at_utc": observed_at,
+            "completed_at_utc": observed_at,
+            "request_identity": {
+                "symbol": symbol,
+                "underlier": _underlier_code(symbol),
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": "2026-08-04",
+            },
+            "error": None,
+        },
+        "projection_outcome": outcome,
+        "projected_expirations": expirations,
+        "require_realized_volatility": True,
+    }
+
+
+def _expected_contract(
+    symbol: str,
+    *,
+    outcome: str = "success_rows",
+    fetch_plan: dict | None = None,
+) -> dict:
+    return build_required_data_expected_fetch_contract(
+        symbol=symbol,
+        fetch_plan=fetch_plan or _fetch_plan(symbol, outcome=outcome),
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
+
+
+@pytest.mark.parametrize(
+    ("observed_port", "expected_port"),
+    [
+        (True, 11111),
+        (11111.0, 11111),
+        (11111, True),
+        (11111, 11111.0),
+    ],
+)
+def test_snapshot_physical_binding_rejects_non_integer_ports(
+    observed_port: object,
+    expected_port: object,
+) -> None:
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match="required-data manifest physical binding is invalid",
+    ):
+        _validate_physical_binding(
+            observed={
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": observed_port,
+            },
+            expected={
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": expected_port,
+            },
+            subject="manifest",
+        )
+
+
 def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
+    fetch_plan = _fetch_plan(symbol)
+    contract = _expected_contract(symbol, fetch_plan=fetch_plan)
+    observed_at = _OBSERVED_AT
     payload = {
-        "meta": {"status": "ok"},
+        "symbol": symbol,
+        "underlier_code": _underlier_code(symbol),
+        "expiration_count": 1,
+        "expirations": ["2026-08-28"],
+        "meta": {
+            "status": "ok",
+            "source_outcome": "success_rows",
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "trading_date": "2026-08-04",
+            "snapshot_complete": True,
+            "snapshot_requested_code_set": [f"{symbol}-P"],
+            "snapshot_returned_code_set": [f"{symbol}-P"],
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+            "snapshot_requested_codes": 1,
+            "snapshot_returned_codes": 1,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "realized_volatility": {
+                "status": "ok",
+                "realized_volatility_20": 0.2,
+                "realized_volatility_60": None,
+                "realized_volatility_120": None,
+                "realized_volatility_estimate": 0.2,
+            },
+            "source_observed_at": observed_at,
+            "completed_at_utc": observed_at,
+        },
         "rows": [
             {
                 "symbol": symbol,
                 "option_type": "put",
                 "expiration": "2026-08-28",
-                "dte": 31,
+                "dte": 24,
                 "contract_symbol": f"{symbol}-P",
                 "strike": 100,
                 "spot": 110,
@@ -51,6 +225,9 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
                 "ask": 2.2,
                 "implied_volatility": 0.3,
                 "realized_volatility_20": 0.2,
+                "realized_volatility_60": None,
+                "realized_volatility_120": None,
+                "realized_volatility_estimate": 0.2,
                 "multiplier": 100,
             }
         ],
@@ -62,9 +239,15 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
         symbol=symbol,
         raw_path=raw_path,
         csv_path=csv_path,
-        fetch_plan={"symbol": symbol, "min_dte": 20, "max_dte": 40},
-        fetch_policy={"source": "futu"},
-        source_observed_at=datetime.now(timezone.utc),
+        fetch_plan=fetch_plan,
+        fetch_policy={
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+        },
+        expected_fetch_contract=contract,
+        source_observed_at=observed_at,
+        completed_at=observed_at,
     )
 
 
@@ -74,17 +257,44 @@ def _publish_empty_quote(
     run_id: str,
     symbol: str = "3690.HK",
 ) -> str:
-    source_observed_at = (
-        datetime.now(timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z")
+    source_observed_at = _OBSERVED_AT
+    fetch_plan = _fetch_plan(
+        symbol,
+        outcome="success_empty",
+        observed_at=source_observed_at,
+    )
+    contract = _expected_contract(
+        symbol,
+        outcome="success_empty",
+        fetch_plan=fetch_plan,
     )
     payload = {
+        "symbol": symbol,
+        "underlier_code": _underlier_code(symbol),
+        "expiration_count": 0,
+        "expirations": [],
         "meta": {
             "status": "ok",
             "source_outcome": "success_empty",
             "reason_code": "no_expirations",
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "trading_date": "2026-08-04",
+            "snapshot_complete": True,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "realized_volatility": {
+                "status": "not_applicable_no_contracts"
+            },
             "source_observed_at": source_observed_at,
+            "completed_at_utc": source_observed_at,
         },
         "rows": [],
     }
@@ -100,23 +310,47 @@ def _publish_empty_quote(
         symbol=symbol,
         raw_path=raw_path,
         csv_path=csv_path,
-        fetch_plan={"symbol": symbol},
-        fetch_policy={"source": "futu"},
+        fetch_plan=fetch_plan,
+        fetch_policy={
+            "source": "opend",
+            "host": "127.0.0.1",
+            "port": 11111,
+        },
+        expected_fetch_contract=contract,
         source_observed_at=source_observed_at,
+        completed_at=source_observed_at,
     )
     return source_observed_at
 
 
-def _summary(*symbols: str) -> dict:
-    plan_items = [
-        {
-            "symbol": symbol,
-            "source": "futu",
-            "fetch_plan": {"symbol": symbol},
-            "discovery_status": "complete",
-        }
-        for symbol in symbols
-    ]
+def _summary(
+    *symbols: str,
+    outcomes: dict[str, str] | None = None,
+    fetch_plans: dict[str, dict] | None = None,
+) -> dict:
+    plan_items = []
+    for symbol in symbols:
+        outcome = (outcomes or {}).get(symbol, "success_rows")
+        fetch_plan = (fetch_plans or {}).get(symbol) or _fetch_plan(
+            symbol,
+            outcome=outcome,
+        )
+        contract = _expected_contract(
+            symbol,
+            outcome=outcome,
+            fetch_plan=fetch_plan,
+        )
+        plan_items.append(
+            {
+                "symbol": symbol,
+                "source": "opend",
+                "fetch_binding": dict(contract["fetch_binding"]),
+                "fetch_plan": fetch_plan,
+                "expected_fetch_contract": contract,
+                "projection_outcome": outcome,
+                "discovery_status": "complete",
+            }
+        )
     plan_id = required_data_plan_id(plan_items)
     return {
         "schema_version": "1.0",
@@ -184,7 +418,10 @@ def test_sealed_snapshot_accepts_positive_success_empty_evidence(
         manifest_path=manifest_path,
         required_data_root=root,
         run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
+        prefetch_summary=_summary(
+            "3690.HK",
+            outcomes={"3690.HK": "success_empty"},
+        ),
     )
 
     assert manifest["status"] == "complete"
@@ -298,6 +535,62 @@ def test_partial_snapshot_keeps_ready_symbol_and_types_failed_symbol(tmp_path: P
     assert failed.value.reason == "empty_chain"
 
 
+def test_contract_mismatch_fails_one_symbol_without_losing_ready_peer(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", symbol="3690.HK")
+    _publish_quote(root, run_id="run-1", symbol="9898.HK")
+    mismatched_plan = _fetch_plan("9898.HK")
+    mismatched_plan["side_plans"][0]["planning_reason"] = (
+        "fixture mismatched exact position contract"
+    )
+    summary = _summary(
+        "3690.HK",
+        "9898.HK",
+        fetch_plans={"9898.HK": mismatched_plan},
+    )
+
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=summary,
+    )
+
+    assert manifest["status"] == "partial"
+    assert manifest["symbols"]["3690.HK"]["status"] == "ready"
+    assert manifest["symbols"]["9898.HK"] == {
+        "status": "failed",
+        "reason": "quote_receipt_unavailable",
+        "error_type": "RequiredDataFetchError",
+    }
+
+
+def test_snapshot_seal_rejects_self_inconsistent_plan_authority(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    summary = _summary("3690.HK")
+    plan = summary["global_required_data_plan"]
+    plan["symbols"][0]["fetch_plan"]["projection_outcome"] = (
+        "success_empty"
+    )
+    plan["plan_id"] = required_data_plan_id(plan["symbols"])
+
+    with pytest.raises(
+        RequiredDataSnapshotError,
+        match="global plan fetch plan contradicts its contract",
+    ):
+        seal_required_data_snapshot(
+            manifest_path=manifest_path,
+            required_data_root=root,
+            run_id="run-1",
+            prefetch_summary=summary,
+        )
+    assert not manifest_path.exists()
+
+
 def test_frozen_snapshot_rejects_manifest_content_tampering(tmp_path: Path) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
@@ -353,6 +646,51 @@ def test_frozen_snapshot_cross_checks_manifest_plan_against_receipt(
     )
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["symbols"]["3690.HK"]["fetch_plan"]["min_dte"] = 999
+    payload["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "content_sha256"
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(FrozenRequiredDataUnavailable) as mismatched:
+        resolve_frozen_required_data(
+            manifest_path=manifest_path,
+            expected_run_id="run-1",
+            symbol="3690.HK",
+            required_data_root=root,
+        )
+    assert mismatched.value.reason == "receipt_or_payload_mismatch"
+
+
+def test_frozen_snapshot_rejects_forged_manifest_contract(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1")
+    seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    forged_plan = _fetch_plan("3690.HK")
+    forged_plan["side_plans"][0]["planning_reason"] = (
+        "fixture forged exact position contract"
+    )
+    forged_contract = _expected_contract(
+        "3690.HK",
+        fetch_plan=forged_plan,
+    )
+    entry = payload["symbols"]["3690.HK"]
+    entry["fetch_plan"] = forged_plan
+    entry["expected_fetch_contract"] = forged_contract
+    entry["expected_fetch_contract_sha256"] = forged_contract[
+        "contract_sha256"
+    ]
     payload["content_sha256"] = canonical_sha256(
         {
             key: value

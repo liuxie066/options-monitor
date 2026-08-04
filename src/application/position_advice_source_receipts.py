@@ -5,6 +5,7 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
@@ -94,8 +95,15 @@ def publish_source_receipt(
     producer_policy_hash: str,
     dependencies: Iterable[Mapping[str, Any]] = (),
     capacity_pool_authority_id: str | None = None,
+    before_receipt_commit: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Publish payload first and its immutable completion receipt last."""
+    """Publish payload first and its immutable completion receipt last.
+
+    A commit validator runs after the receipt has been fully validated and
+    serialized but immediately before its write-once commit. If it rejects,
+    the immutable payload may remain orphaned, while no completion receipt is
+    published.
+    """
 
     root = _validated_root_for_write(producer_root)
     payload_path = _safe_new_relative_path(root, payload_relpath)
@@ -154,6 +162,8 @@ def publish_source_receipt(
     receipt_bytes = (
         json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
+    if before_receipt_commit is not None:
+        before_receipt_commit(dict(receipt))
     _write_once_or_verify(receipt_path, receipt_bytes)
     return receipt
 

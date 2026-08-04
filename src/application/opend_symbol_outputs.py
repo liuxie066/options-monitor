@@ -2,18 +2,30 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 import io
 import json
+import math
+from numbers import Number
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.fetch_source import normalize_fetch_source
 from domain.domain.symbol_identity import symbol_market
+from src.application.required_data_coverage import (
+    required_data_frame_covers_fetch_plan_debug,
+)
+from src.application.required_data_plan_identity import (
+    required_data_request_sha256,
+    validate_required_data_expected_fetch_contract,
+)
 from src.application.position_advice_source_receipts import (
     PositionAdviceSourceError,
+    SOURCE_MAX_AGE_SECONDS,
     publish_source_receipt,
     safe_existing_relative_path,
     sha256_bytes,
@@ -21,7 +33,11 @@ from src.application.position_advice_source_receipts import (
     validate_source_receipt,
 )
 from src.infrastructure.io_utils import atomic_write_text
-from src.application.close_advice_quote_cache import publish_quote_cache_metadata
+from src.application.close_advice_quote_cache import (
+    QUOTE_CACHE_METADATA_SCHEMA,
+    publish_quote_cache_metadata,
+    quote_cache_metadata_path,
+)
 
 
 REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v1"
@@ -81,6 +97,1153 @@ def validate_required_data_source_outcome(
     return outcome, reason
 
 
+def _validate_required_data_payload_candidate(
+    *,
+    raw_payload: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[Any], str, dict[str, Any]]:
+    if not isinstance(raw_payload, dict):
+        raise PositionAdviceSourceError("required-data JSON must be an object")
+    meta = raw_payload.get("meta")
+    meta = dict(meta) if isinstance(meta, Mapping) else {}
+    if str(meta.get("status") or "").strip().lower() != "ok":
+        raise PositionAdviceSourceError(
+            "incomplete required-data payload cannot produce a quote receipt"
+        )
+    rows = raw_payload.get("rows")
+    if not isinstance(rows, list):
+        raise PositionAdviceSourceError("required-data rows are invalid")
+    _validate_rows_persist_without_loss(rows)
+    source_outcome, _reason = validate_required_data_source_outcome(
+        rows=rows,
+        source_outcome=meta.get("source_outcome"),
+        reason_code=meta.get("reason_code"),
+        subject="payload",
+    )
+    if rows and str(meta.get("source_outcome") or "").strip().lower() != "success_rows":
+        raise PositionAdviceSourceError(
+            "required-data payload lacks explicit success-rows evidence"
+        )
+    contract = validate_required_data_expected_fetch_contract(
+        expected_fetch_contract,
+        expected_symbol=str(expected_fetch_contract.get("symbol") or ""),
+    )
+    expected_symbol = str(contract["symbol"])
+    raw_symbol = str(raw_payload.get("symbol") or "").strip().upper()
+    if raw_symbol != expected_symbol:
+        raise PositionAdviceSourceError("required-data payload symbol mismatch")
+    _validate_raw_binding(
+        meta=meta,
+        expected_fetch_contract=contract,
+        strict=True,
+    )
+    _validate_trading_date_binding(
+        meta=meta,
+        expected_fetch_contract=contract,
+    )
+    _validate_raw_underlier_binding(
+        raw_payload=raw_payload,
+        contract=contract,
+    )
+    _validate_timestamp_evidence(meta)
+    projection_outcome = str(
+        (contract.get("coverage_policy") or {}).get("projection_outcome")
+        or ""
+    ).strip()
+    if source_outcome == "success_empty":
+        if projection_outcome != "success_empty":
+            raise PositionAdviceSourceError(
+                "success-empty payload contradicts expected fetch contract"
+            )
+        rv_meta = meta.get("realized_volatility")
+        if (
+            not isinstance(rv_meta, Mapping)
+            or str(rv_meta.get("status") or "").strip().lower()
+            != "not_applicable_no_contracts"
+        ):
+            raise PositionAdviceSourceError(
+                "success-empty required-data lacks no-contract RV evidence"
+            )
+        _validate_snapshot_completeness(meta=meta, rows=rows)
+        discovery = contract.get("fetch_plan", {}).get("expiration_discovery")
+        if not isinstance(discovery, Mapping):
+            raise PositionAdviceSourceError(
+                "success-empty required-data lacks expected discovery evidence"
+            )
+        if (
+            str(discovery.get("outcome") or "").strip().lower()
+            != "success_empty"
+            or str(discovery.get("reason_code") or "").strip().lower()
+            != str(meta.get("reason_code") or "").strip().lower()
+            or list(discovery.get("expirations") or [])
+            or list(raw_payload.get("expirations") or [])
+            or int(raw_payload.get("expiration_count") or 0) != 0
+            or not _same_datetime(
+                discovery.get("observed_at_utc"),
+                meta.get("source_observed_at"),
+            )
+            or not _same_datetime(
+                discovery.get("completed_at_utc"),
+                meta.get("completed_at_utc"),
+            )
+        ):
+            raise PositionAdviceSourceError(
+                "success-empty required-data discovery evidence mismatch"
+            )
+    else:
+        if projection_outcome != "success_rows":
+            raise PositionAdviceSourceError(
+                "row payload contradicts expected fetch contract"
+            )
+        identities = _row_identity_counter(rows)
+        if any(identity[0] != expected_symbol for identity in identities):
+            raise PositionAdviceSourceError("required-data row symbol mismatch")
+        _validate_snapshot_completeness(meta=meta, rows=rows)
+        require_realized_volatility = bool(
+            (contract.get("coverage_policy") or {}).get(
+                "require_realized_volatility"
+            )
+        )
+        canonical_realized_volatility = (
+            _validate_required_realized_volatility(meta=meta, rows=rows)
+            if require_realized_volatility
+            else None
+        )
+        _validate_expected_child_request_evidence(
+            meta=meta,
+            contract=contract,
+            rows=rows,
+            canonical_realized_volatility=canonical_realized_volatility,
+        )
+    return meta, rows, source_outcome, contract
+
+
+def validate_required_data_payload_candidate(
+    *,
+    payload: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+    now: datetime | str | None = None,
+    require_fresh: bool = False,
+) -> None:
+    """Validate one provider payload before gateway health or cache mutation."""
+
+    meta, _rows, _outcome, _contract = _validate_required_data_payload_candidate(
+        raw_payload=payload,
+        expected_fetch_contract=expected_fetch_contract,
+    )
+    if require_fresh:
+        _validate_payload_freshness(meta=meta, now=now)
+
+
+def _validate_required_data_quote_candidate(
+    *,
+    raw: Path,
+    csv: Path,
+    expected_fetch_contract: Mapping[str, Any],
+) -> None:
+    try:
+        raw_payload = json.loads(raw.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PositionAdviceSourceError("required-data JSON is unreadable") from exc
+    meta, rows, source_outcome, contract = (
+        _validate_required_data_payload_candidate(
+            raw_payload=raw_payload,
+            expected_fetch_contract=expected_fetch_contract,
+        )
+    )
+    try:
+        frame = pd.read_csv(csv)
+    except Exception as exc:
+        raise PositionAdviceSourceError(
+            "required-data CSV is unreadable"
+        ) from exc
+    if source_outcome == "success_empty":
+        if not frame.empty or list(frame.columns) != REQUIRED_DATA_COLUMNS:
+            raise PositionAdviceSourceError(
+                "success-empty required-data CSV is not header-only"
+            )
+        return
+    _validate_consumer_csv_projection(
+        rows=rows,
+        frame=frame,
+        csv=csv,
+        symbol=str(contract["symbol"]),
+        raw_meta=meta,
+    )
+    if not required_data_frame_covers_fetch_plan_debug(
+        df=frame,
+        fetch_plan=dict(contract.get("fetch_plan") or {}),
+    ):
+        raise PositionAdviceSourceError(
+            "required-data CSV does not cover expected fetch contract"
+        )
+
+
+def validate_required_data_quote_candidate(
+    *,
+    producer_root: Path,
+    raw_path: Path,
+    csv_path: Path,
+    expected_fetch_contract: Mapping[str, Any],
+    now: datetime | str | None = None,
+    require_fresh: bool = False,
+) -> None:
+    """Validate cached/fresh bytes without publishing a receipt."""
+
+    root_input = Path(producer_root)
+    if (
+        not root_input.exists()
+        or not root_input.is_dir()
+        or root_input.is_symlink()
+    ):
+        raise PositionAdviceSourceError("quote producer root is invalid")
+    root = root_input.resolve()
+    try:
+        raw_relpath = Path(raw_path).absolute().relative_to(root).as_posix()
+        csv_relpath = Path(csv_path).absolute().relative_to(root).as_posix()
+    except ValueError as exc:
+        raise PositionAdviceSourceError(
+            "required-data quote files escape producer root"
+        ) from exc
+    _validate_required_data_quote_candidate(
+        raw=safe_existing_relative_path(root, raw_relpath),
+        csv=safe_existing_relative_path(root, csv_relpath),
+        expected_fetch_contract=expected_fetch_contract,
+    )
+    if require_fresh:
+        try:
+            raw_payload = json.loads(
+                safe_existing_relative_path(root, raw_relpath).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PositionAdviceSourceError(
+                "required-data JSON is unreadable"
+            ) from exc
+        meta = raw_payload.get("meta") if isinstance(raw_payload, Mapping) else None
+        if not isinstance(meta, Mapping):
+            raise PositionAdviceSourceError(
+                "required-data payload metadata is invalid"
+            )
+        _validate_payload_freshness(
+            meta=meta,
+            now=now,
+        )
+
+
+def _snapshot_complete(meta: Mapping[str, Any]) -> bool:
+    if meta.get("snapshot_complete") is True:
+        return True
+    coverage = meta.get("snapshot_coverage")
+    if isinstance(coverage, Mapping) and coverage.get("complete") is True:
+        return True
+    return False
+
+
+def _validate_snapshot_completeness(
+    *,
+    meta: Mapping[str, Any],
+    rows: list[Any],
+) -> None:
+    requested = _code_set(meta.get("snapshot_requested_code_set"))
+    returned = _code_set(meta.get("snapshot_returned_code_set"))
+    missing = _code_set(meta.get("snapshot_missing_code_set"))
+    unexpected = _code_set(meta.get("snapshot_unexpected_code_set"))
+    declared_counts = {
+        "requested": meta.get("snapshot_requested_codes"),
+        "returned": meta.get("snapshot_returned_codes"),
+        "missing": meta.get("snapshot_missing_codes"),
+        "unexpected": meta.get("snapshot_unexpected_codes"),
+    }
+    actual_counts = {
+        "requested": len(requested),
+        "returned": len(returned),
+        "missing": len(missing),
+        "unexpected": len(unexpected),
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in declared_counts.values()
+    ):
+        raise PositionAdviceSourceError(
+            "required-data snapshot coverage counts are invalid"
+        )
+    if declared_counts != actual_counts:
+        raise PositionAdviceSourceError(
+            "required-data snapshot coverage counts mismatch"
+        )
+    if missing != requested.difference(returned):
+        raise PositionAdviceSourceError(
+            "required-data snapshot missing-code evidence mismatch"
+        )
+    if unexpected != returned.difference(requested):
+        raise PositionAdviceSourceError(
+            "required-data snapshot unexpected-code evidence mismatch"
+        )
+    if missing or unexpected or requested != returned or not _snapshot_complete(meta):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks complete snapshot evidence"
+        )
+    row_code_items = [
+        str(row.get("contract_symbol") or "").strip()
+        for row in rows
+        if isinstance(row, Mapping)
+    ]
+    row_codes = set(row_code_items)
+    row_codes.discard("")
+    if len(row_code_items) != len(rows) or any(not code for code in row_code_items):
+        raise PositionAdviceSourceError(
+            "required-data rows contain invalid snapshot codes"
+        )
+    if len(row_code_items) != len(row_codes):
+        raise PositionAdviceSourceError(
+            "required-data rows contain duplicate snapshot codes"
+        )
+    if rows and (row_codes != requested or len(rows) != len(requested)):
+        raise PositionAdviceSourceError(
+            "required-data rows do not match requested snapshot codes"
+        )
+    if not rows and requested:
+        raise PositionAdviceSourceError(
+            "success-empty required-data requested option snapshots"
+        )
+
+
+def _validate_required_realized_volatility(
+    *,
+    meta: Mapping[str, Any],
+    rows: list[Any],
+) -> dict[str, float | None]:
+    meta_values = _required_realized_volatility_values(meta)
+    rv_fields = tuple(meta_values)
+    for row in rows:
+        if not isinstance(row, Mapping) or any(
+            field not in row for field in rv_fields
+        ):
+            raise PositionAdviceSourceError(
+                "required-data rows lack canonical realized volatility"
+            )
+        row_values = {
+            field: _normalize_realized_volatility_value(
+                row.get(field),
+                allow_none=(field != "realized_volatility_estimate"),
+            )
+            for field in rv_fields
+        }
+        if row_values != meta_values:
+            raise PositionAdviceSourceError(
+                "required-data rows contradict canonical realized volatility"
+            )
+    return meta_values
+
+
+def _required_realized_volatility_values(
+    meta: Mapping[str, Any],
+) -> dict[str, float | None]:
+    rv_meta = meta.get("realized_volatility")
+    if not isinstance(rv_meta, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks required realized volatility"
+        )
+    rv_fields = (
+        "realized_volatility_20",
+        "realized_volatility_60",
+        "realized_volatility_120",
+        "realized_volatility_estimate",
+    )
+    if any(field not in rv_meta for field in rv_fields):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks required realized volatility"
+        )
+    meta_values = {
+        field: _normalize_realized_volatility_value(
+            rv_meta.get(field),
+            allow_none=(field != "realized_volatility_estimate"),
+        )
+        for field in rv_fields
+    }
+    estimate = meta_values["realized_volatility_estimate"]
+    if (
+        str(rv_meta.get("status") or "").strip().lower() != "ok"
+        or estimate is None
+        or estimate <= 0
+    ):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks required realized volatility"
+        )
+    return meta_values
+
+
+def _normalize_realized_volatility_value(
+    value: Any,
+    *,
+    allow_none: bool,
+) -> float | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks required realized volatility"
+        )
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise PositionAdviceSourceError(
+            "required-data payload lacks required realized volatility"
+        )
+    return normalized
+
+
+def _validate_timestamp_evidence(meta: Mapping[str, Any]) -> None:
+    observed_at = meta.get("source_observed_at")
+    completed_at = meta.get("completed_at_utc")
+    try:
+        observed = _parse_datetime(observed_at)
+        completed = _parse_datetime(completed_at)
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data payload lacks stable observation timestamps"
+        ) from exc
+    if completed < observed:
+        raise PositionAdviceSourceError(
+            "required-data completion precedes source observation"
+        )
+    requests = meta.get("requests")
+    if requests is None:
+        return
+    if (
+        not isinstance(requests, list)
+        or not requests
+        or any(not isinstance(item, Mapping) for item in requests)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data child timestamp evidence is invalid"
+        )
+    child_observed: list[datetime] = []
+    child_completed: list[datetime] = []
+    for item in requests:
+        _validate_timestamp_evidence(item)
+        child_observed.append(_parse_datetime(item.get("source_observed_at")))
+        child_completed.append(_parse_datetime(item.get("completed_at_utc")))
+    if observed != min(child_observed) or completed != max(child_completed):
+        raise PositionAdviceSourceError(
+            "required-data aggregate timestamp evidence mismatch"
+        )
+
+
+def _validate_expected_child_request_evidence(
+    *,
+    meta: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    rows: list[Any],
+    canonical_realized_volatility: Mapping[str, float | None] | None,
+) -> None:
+    merged_requests = (contract.get("fetch_plan") or {}).get("merged_requests")
+    if not isinstance(merged_requests, list) or not merged_requests:
+        return
+    row_by_code = _required_data_rows_by_code(rows)
+    aggregate_requested = _code_set(meta.get("snapshot_requested_code_set"))
+    if len(merged_requests) == 1:
+        planned_request = merged_requests[0]
+        if not isinstance(planned_request, Mapping):
+            raise PositionAdviceSourceError(
+                "required-data planned child request is invalid"
+            )
+        aggregate_requested = _validate_child_snapshot_code_evidence(meta)
+        _validate_child_rows_against_planned_request(
+            planned_request=planned_request,
+            requested_codes=aggregate_requested,
+            row_by_code=row_by_code,
+            contract=contract,
+        )
+        return
+    requests = meta.get("requests")
+    if (
+        not isinstance(requests, list)
+        or len(requests) != len(merged_requests)
+        or any(not isinstance(item, Mapping) for item in requests)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data child request evidence count mismatch"
+        )
+    request_count = meta.get("request_count")
+    if (
+        isinstance(request_count, bool)
+        or not isinstance(request_count, int)
+        or request_count != len(merged_requests)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data child request evidence count mismatch"
+        )
+    discovery = (contract.get("fetch_plan") or {}).get(
+        "expiration_discovery"
+    )
+    discovery_identity = (
+        discovery.get("request_identity")
+        if isinstance(discovery, Mapping)
+        else None
+    )
+    expected_underlier = (
+        str(discovery_identity.get("underlier") or "").strip()
+        if isinstance(discovery_identity, Mapping)
+        else ""
+    )
+    expected_symbol = str(contract.get("symbol") or "").strip().upper()
+    seen_hashes: set[str] = set()
+    child_requested_union: set[str] = set()
+    for index, (planned_request, child) in enumerate(
+        zip(merged_requests, requests, strict=True)
+    ):
+        if not isinstance(planned_request, Mapping):
+            raise PositionAdviceSourceError(
+                "required-data planned child request is invalid"
+            )
+        expected_hash = required_data_request_sha256(planned_request)
+        child_hash = str(child.get("planned_request_sha256") or "").strip()
+        child_index = child.get("request_index")
+        if (
+            isinstance(child_index, bool)
+            or not isinstance(child_index, int)
+            or child_index != index
+            or child_hash != expected_hash
+            or child_hash in seen_hashes
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request identity mismatch"
+            )
+        seen_hashes.add(child_hash)
+        if (
+            str(child.get("request_symbol") or "").strip().upper()
+            != expected_symbol
+            or str(child.get("request_underlier_code") or "").strip()
+            != expected_underlier
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request symbol identity mismatch"
+            )
+        try:
+            _validate_raw_binding(
+                meta=child,
+                expected_fetch_contract=contract,
+                strict=True,
+            )
+        except PositionAdviceSourceError as exc:
+            raise PositionAdviceSourceError(
+                "required-data child request binding mismatch"
+            ) from exc
+        _validate_trading_date_binding(
+            meta=child,
+            expected_fetch_contract=contract,
+            planned_request=planned_request,
+        )
+        if str(child.get("status") or "").strip().lower() != "ok":
+            raise PositionAdviceSourceError(
+                "required-data child request outcome is not successful"
+            )
+        if (
+            str(child.get("source_outcome") or "").strip().lower()
+            != "success_rows"
+            or str(child.get("reason_code") or "").strip()
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request outcome evidence is invalid"
+            )
+        if canonical_realized_volatility is not None:
+            child_realized_volatility = _required_realized_volatility_values(
+                child
+            )
+            if child_realized_volatility != dict(
+                canonical_realized_volatility
+            ):
+                raise PositionAdviceSourceError(
+                    "required-data child request realized volatility mismatch"
+                )
+        requested_codes = _validate_child_snapshot_code_evidence(child)
+        child_requested_union.update(requested_codes)
+        _validate_child_rows_against_planned_request(
+            planned_request=planned_request,
+            requested_codes=requested_codes,
+            row_by_code=row_by_code,
+            contract=contract,
+        )
+    if child_requested_union != set(aggregate_requested):
+        raise PositionAdviceSourceError(
+            "required-data child request code sets do not match aggregate rows"
+        )
+
+
+def _required_data_rows_by_code(
+    rows: list[Any],
+) -> dict[str, Mapping[str, Any]]:
+    row_by_code: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise PositionAdviceSourceError(
+                "required-data child request rows are invalid"
+            )
+        code = str(row.get("contract_symbol") or "").strip()
+        if not code or code in row_by_code:
+            raise PositionAdviceSourceError(
+                "required-data child request rows are invalid"
+            )
+        row_by_code[code] = row
+    return row_by_code
+
+
+def _validate_child_snapshot_code_evidence(
+    child: Mapping[str, Any],
+) -> frozenset[str]:
+    requested = _code_set(child.get("snapshot_requested_code_set"))
+    returned = _code_set(child.get("snapshot_returned_code_set"))
+    missing = _code_set(child.get("snapshot_missing_code_set"))
+    unexpected = _code_set(child.get("snapshot_unexpected_code_set"))
+    declared = {
+        "requested": child.get("snapshot_requested_codes"),
+        "returned": child.get("snapshot_returned_codes"),
+        "missing": child.get("snapshot_missing_codes"),
+        "unexpected": child.get("snapshot_unexpected_codes"),
+    }
+    expected = {
+        "requested": len(requested),
+        "returned": len(returned),
+        "missing": len(missing),
+        "unexpected": len(unexpected),
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in declared.values()
+    ) or declared != expected:
+        raise PositionAdviceSourceError(
+            "required-data child request snapshot counts mismatch"
+        )
+    if (
+        not requested
+        or requested != returned
+        or missing
+        or unexpected
+        or child.get("snapshot_complete") is not True
+    ):
+        raise PositionAdviceSourceError(
+            "required-data child request snapshot evidence is incomplete"
+        )
+    return requested
+
+
+def _validate_child_rows_against_planned_request(
+    *,
+    planned_request: Mapping[str, Any],
+    requested_codes: frozenset[str],
+    row_by_code: Mapping[str, Mapping[str, Any]],
+    contract: Mapping[str, Any],
+) -> None:
+    if not requested_codes or any(code not in row_by_code for code in requested_codes):
+        raise PositionAdviceSourceError(
+            "required-data child request rows do not match requested codes"
+        )
+    option_types = planned_request.get("option_types")
+    expirations = planned_request.get("explicit_expirations")
+    windows = planned_request.get("side_strike_windows")
+    if (
+        not isinstance(option_types, list)
+        or not option_types
+        or not isinstance(expirations, list)
+        or not expirations
+        or not isinstance(windows, Mapping)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data planned child request is invalid"
+        )
+    discovery = (contract.get("fetch_plan") or {}).get(
+        "expiration_discovery"
+    )
+    identity = (
+        discovery.get("request_identity")
+        if isinstance(discovery, Mapping)
+        else None
+    )
+    try:
+        trading_date = date.fromisoformat(
+            str(
+                identity.get("trading_date")
+                if isinstance(identity, Mapping)
+                else ""
+            )
+        )
+    except ValueError as exc:
+        raise PositionAdviceSourceError(
+            "required-data child request trading date is invalid"
+        ) from exc
+    allowed_option_types = set(option_types)
+    allowed_expirations = set(expirations)
+    for code in requested_codes:
+        row = row_by_code[code]
+        option_type = str(row.get("option_type") or "").strip().lower()
+        expiration = str(row.get("expiration") or "").strip()
+        window = windows.get(option_type)
+        try:
+            strike = float(row.get("strike"))
+            row_dte = float(row.get("dte"))
+            expected_dte = (
+                date.fromisoformat(expiration) - trading_date
+            ).days
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise PositionAdviceSourceError(
+                "required-data child request row identity is invalid"
+            ) from exc
+        if (
+            option_type not in allowed_option_types
+            or expiration not in allowed_expirations
+            or not isinstance(window, Mapping)
+            or not math.isfinite(strike)
+            or strike <= 0
+            or not math.isfinite(row_dte)
+            or not row_dte.is_integer()
+            or int(row_dte) != expected_dte
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request rows contradict planned request"
+            )
+        min_strike = window.get("min_strike")
+        max_strike = window.get("max_strike")
+        try:
+            parsed_min = (
+                float(min_strike) if min_strike is not None else None
+            )
+            parsed_max = (
+                float(max_strike) if max_strike is not None else None
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise PositionAdviceSourceError(
+                "required-data child request strike window is invalid"
+            ) from exc
+        if (
+            parsed_min is not None
+            and (not math.isfinite(parsed_min) or parsed_min <= 0)
+        ) or (
+            parsed_max is not None
+            and (not math.isfinite(parsed_max) or parsed_max <= 0)
+        ) or (
+            parsed_min is not None
+            and parsed_max is not None
+            and parsed_min > parsed_max
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request strike window is invalid"
+            )
+        if (
+            parsed_min is not None and strike < parsed_min
+        ) or (
+            parsed_max is not None and strike > parsed_max
+        ):
+            raise PositionAdviceSourceError(
+                "required-data child request rows contradict strike window"
+            )
+
+
+def _validate_raw_underlier_binding(
+    *,
+    raw_payload: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> str:
+    discovery = (contract.get("fetch_plan") or {}).get(
+        "expiration_discovery"
+    )
+    identity = (
+        discovery.get("request_identity")
+        if isinstance(discovery, Mapping)
+        else None
+    )
+    expected_underlier = (
+        str(identity.get("underlier") or "").strip()
+        if isinstance(identity, Mapping)
+        else ""
+    )
+    if (
+        not expected_underlier
+        or str(raw_payload.get("underlier_code") or "").strip()
+        != expected_underlier
+    ):
+        raise PositionAdviceSourceError(
+            "required-data payload underlier identity mismatch"
+        )
+    return expected_underlier
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("timestamp is missing")
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp timezone is missing")
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_quote_freshness(
+    *,
+    source_observed_at: Any,
+    now: datetime | str | None,
+) -> datetime:
+    try:
+        observed = _parse_datetime(source_observed_at)
+        now_value = _parse_datetime(now or datetime.now(timezone.utc))
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data quote freshness evidence is invalid"
+        ) from exc
+    if observed > now_value:
+        raise PositionAdviceSourceError(
+            "required-data quote observation is in the future"
+        )
+    expires_at = observed + timedelta(
+        seconds=int(SOURCE_MAX_AGE_SECONDS["quotes"])
+    )
+    if now_value >= expires_at:
+        raise PositionAdviceSourceError("required-data quote observation is stale")
+    return now_value
+
+
+def _validate_payload_freshness(
+    *,
+    meta: Mapping[str, Any],
+    now: datetime | str | None,
+) -> datetime:
+    now_value = _validate_quote_freshness(
+        source_observed_at=meta.get("source_observed_at"),
+        now=now,
+    )
+    requests = meta.get("requests")
+    if requests is not None:
+        if not isinstance(requests, list):
+            raise PositionAdviceSourceError(
+                "required-data child freshness evidence is invalid"
+            )
+        for item in requests:
+            if not isinstance(item, Mapping):
+                raise PositionAdviceSourceError(
+                    "required-data child freshness evidence is invalid"
+                )
+            _validate_payload_freshness(
+                meta=item,
+                now=now_value,
+            )
+    try:
+        completed_at = _parse_datetime(meta.get("completed_at_utc"))
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data completion timestamp is invalid"
+        ) from exc
+    if completed_at > now_value:
+        raise PositionAdviceSourceError(
+            "required-data completion is in the future"
+        )
+    return now_value
+
+
+def _validate_rows_persist_without_loss(rows: list[Any]) -> None:
+    from src.application.required_data_validation import validate_required_rows
+
+    validated, stats = validate_required_rows(rows)
+    if stats.dropped_rows or len(validated) != len(rows):
+        raise PositionAdviceSourceError(
+            "required-data rows would be dropped during persistence"
+        )
+
+
+def _code_set(value: Any) -> frozenset[str]:
+    if not isinstance(value, list):
+        raise PositionAdviceSourceError(
+            "required-data snapshot code-set evidence is invalid"
+        )
+    normalized = [str(item or "").strip() for item in value]
+    if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
+        raise PositionAdviceSourceError(
+            "required-data snapshot code-set evidence is invalid"
+        )
+    return frozenset(normalized)
+
+
+def _row_identity_counter(rows: list[Any]) -> Counter[tuple[Any, ...]]:
+    identities: Counter[tuple[Any, ...]] = Counter()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise PositionAdviceSourceError("required-data JSON rows are invalid")
+        identities[_row_identity(row)] += 1
+    return identities
+
+
+def _validate_consumer_csv_projection(
+    *,
+    rows: list[Any],
+    frame: pd.DataFrame,
+    csv: Path,
+    symbol: str,
+    raw_meta: Mapping[str, Any],
+) -> None:
+    if list(frame.columns) != REQUIRED_DATA_COLUMNS:
+        raise PositionAdviceSourceError(
+            "required-data CSV columns differ from canonical projection"
+        )
+    expected = _csv_roundtrip_frame(rows)
+    if len(frame.index) != len(expected.index):
+        raise PositionAdviceSourceError(
+            "required-data JSON and CSV row counts differ"
+        )
+    multiplier_enriched = False
+    for row_index in range(len(expected.index)):
+        for column in REQUIRED_DATA_COLUMNS:
+            expected_value = _canonical_csv_value(expected.iloc[row_index][column])
+            actual_value = _canonical_csv_value(frame.iloc[row_index][column])
+            if expected_value == actual_value:
+                continue
+            if column == "multiplier" and _is_valid_multiplier_enrichment(
+                raw_value=expected.iloc[row_index][column],
+                csv_value=frame.iloc[row_index][column],
+            ):
+                multiplier_enriched = True
+                continue
+            raise PositionAdviceSourceError(
+                "required-data JSON and CSV canonical projections differ"
+            )
+    if multiplier_enriched:
+        _validate_quote_cache_metadata_binding(
+            csv=csv,
+            symbol=symbol,
+            raw_meta=raw_meta,
+        )
+
+
+def _csv_roundtrip_frame(rows: list[Any]) -> pd.DataFrame:
+    projected = pd.DataFrame(rows)
+    for column in REQUIRED_DATA_COLUMNS:
+        if column not in projected.columns:
+            projected[column] = pd.NA
+    projected = projected[REQUIRED_DATA_COLUMNS]
+    buffer = io.StringIO()
+    projected.to_csv(buffer, index=False)
+    return pd.read_csv(io.StringIO(buffer.getvalue()))
+
+
+def _canonical_csv_value(value: Any) -> tuple[str, Any]:
+    try:
+        if pd.isna(value):
+            return "null", None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool) or type(value).__name__ == "bool_":
+        return "bool", bool(value)
+    if isinstance(value, Number):
+        return "number", float(value)
+    return "string", str(value)
+
+
+def _is_valid_multiplier_enrichment(*, raw_value: Any, csv_value: Any) -> bool:
+    try:
+        raw_number = float(raw_value)
+    except (TypeError, ValueError):
+        raw_number = math.nan
+    try:
+        csv_number = float(csv_value)
+    except (TypeError, ValueError):
+        return False
+    return (
+        (not math.isfinite(raw_number) or raw_number <= 0)
+        and math.isfinite(csv_number)
+        and csv_number > 0
+    )
+
+
+def _validate_quote_cache_metadata_binding(
+    *,
+    csv: Path,
+    symbol: str,
+    raw_meta: Mapping[str, Any],
+) -> dict[str, Any]:
+    metadata_path = quote_cache_metadata_path(csv)
+    if not metadata_path.is_file() or metadata_path.is_symlink():
+        raise PositionAdviceSourceError(
+            "required-data final CSV metadata is unavailable"
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data final CSV metadata is unreadable"
+        ) from exc
+    if not isinstance(metadata, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data final CSV metadata is invalid"
+        )
+    expected_market = str(symbol_market(symbol) or "").strip().upper()
+    if (
+        metadata.get("schema_version") != QUOTE_CACHE_METADATA_SCHEMA
+        or str(metadata.get("symbol") or "").strip().upper()
+        != str(symbol or "").strip().upper()
+        or str(metadata.get("market") or "").strip().upper() != expected_market
+        or str(metadata.get("source") or "").strip().lower() != "opend"
+        or not str(metadata.get("source_run_id") or "").strip()
+        or str(metadata.get("csv_sha256") or "") != sha256_bytes(csv.read_bytes())
+        or not _same_datetime(
+            metadata.get("source_observed_at"),
+            raw_meta.get("source_observed_at"),
+        )
+    ):
+        raise PositionAdviceSourceError(
+            "required-data final CSV metadata does not bind canonical bytes"
+        )
+    return dict(metadata)
+
+
+def _row_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    option_type = str(row.get("option_type") or "").strip().lower()
+    expiration = str(row.get("expiration") or "").strip()[:10]
+    contract_symbol = str(row.get("contract_symbol") or "").strip()
+    try:
+        strike = float(row.get("strike"))
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data row identity is incomplete"
+        ) from exc
+    if (
+        not symbol
+        or option_type not in {"put", "call"}
+        or len(expiration) != 10
+        or not contract_symbol
+        or not math.isfinite(strike)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data row identity is incomplete"
+        )
+    return symbol, option_type, expiration, contract_symbol, strike
+
+
+def _validate_raw_binding(
+    *,
+    meta: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+    strict: bool,
+) -> None:
+    binding = dict(expected_fetch_contract.get("fetch_binding") or {})
+    observed_source = str(meta.get("source") or "").strip()
+    observed_host = str(meta.get("host") or "").strip()
+    observed_port = meta.get("port")
+    if strict and (not observed_source or not observed_host or observed_port in (None, "")):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks physical binding evidence"
+        )
+    if observed_source and _normalize_fetch_source(observed_source) != str(
+        binding.get("source") or ""
+    ):
+        raise PositionAdviceSourceError("required-data payload source mismatch")
+    if observed_host and observed_host != str(binding.get("host") or ""):
+        raise PositionAdviceSourceError("required-data payload host mismatch")
+    if observed_port not in (None, ""):
+        if isinstance(observed_port, bool) or not isinstance(observed_port, int):
+            raise PositionAdviceSourceError(
+                "required-data payload port is invalid"
+            )
+        if observed_port != binding.get("port"):
+            raise PositionAdviceSourceError(
+                "required-data payload port mismatch"
+            )
+
+
+def _validate_trading_date_binding(
+    *,
+    meta: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+    planned_request: Mapping[str, Any] | None = None,
+) -> None:
+    fetch_plan = expected_fetch_contract.get("fetch_plan")
+    discovery = (
+        fetch_plan.get("expiration_discovery")
+        if isinstance(fetch_plan, Mapping)
+        else None
+    )
+    identity = (
+        discovery.get("request_identity")
+        if isinstance(discovery, Mapping)
+        else None
+    )
+    expected = (
+        identity.get("trading_date")
+        if isinstance(identity, Mapping)
+        else None
+    )
+    if not isinstance(expected, str) or not expected or expected != expected.strip():
+        raise PositionAdviceSourceError(
+            "required-data expected trading date is invalid"
+        )
+    try:
+        parsed_expected = date.fromisoformat(expected)
+    except ValueError as exc:
+        raise PositionAdviceSourceError(
+            "required-data expected trading date is invalid"
+        ) from exc
+    if parsed_expected.isoformat() != expected:
+        raise PositionAdviceSourceError(
+            "required-data expected trading date is invalid"
+        )
+    if (
+        planned_request is not None
+        and planned_request.get("trading_date") != expected
+    ):
+        raise PositionAdviceSourceError(
+            "required-data planned request trading date mismatch"
+        )
+    if meta.get("trading_date") != expected:
+        raise PositionAdviceSourceError(
+            "required-data payload trading date mismatch"
+        )
+
+
+def _validate_fetch_policy_binding(
+    *,
+    fetch_policy: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+) -> None:
+    binding = dict(expected_fetch_contract.get("fetch_binding") or {})
+    if any(fetch_policy.get(field) in (None, "") for field in ("source", "host", "port")):
+        raise PositionAdviceSourceError(
+            "required-data fetch policy lacks physical binding"
+        )
+    actual_port = fetch_policy.get("port")
+    expected_port = binding.get("port")
+    if (
+        isinstance(actual_port, bool)
+        or not isinstance(actual_port, int)
+        or isinstance(expected_port, bool)
+        or not isinstance(expected_port, int)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data fetch policy binding is invalid"
+        )
+    actual = {
+        "source": _normalize_fetch_source(fetch_policy.get("source")),
+        "host": str(fetch_policy.get("host") or "").strip(),
+        "port": actual_port,
+    }
+    expected = {
+        "source": str(binding.get("source") or ""),
+        "host": str(binding.get("host") or ""),
+        "port": expected_port,
+    }
+    if actual != expected:
+        raise PositionAdviceSourceError(
+            "required-data fetch policy binding mismatch"
+        )
+
+
+def _normalize_fetch_source(value: Any) -> str:
+    if not str(value or "").strip():
+        return ""
+    return normalize_fetch_source(value)
+
+
 def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries: int = 400) -> None:
     """Append payload into a bounded JSON list file. Keeps last max_entries records."""
     try:
@@ -101,7 +1264,14 @@ def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries
         pass
 
 
-def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None) -> tuple[Path, Path]:
+def save_outputs(
+    base: Path,
+    symbol: str,
+    payload: dict[str, Any],
+    *,
+    output_root: Path | None = None,
+    publish_cache_metadata: bool = True,
+) -> tuple[Path, Path]:
     root = output_root.resolve() if output_root is not None else (base / "output_shared" / "required_data").resolve()
     raw_dir = root / "raw"
     parsed_dir = root / "parsed"
@@ -167,13 +1337,16 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     buf = io.StringIO()
     df_out.to_csv(buf, index=False)
     atomic_write_text(csv_path, buf.getvalue(), encoding="utf-8")
-    observed_at = datetime.now(timezone.utc)
+    observed_at = _metadata_observed_at(
+        meta=(meta or {}),
+        fallback=datetime.now(timezone.utc),
+    )
     source_run_id = str(
         (meta or {}).get("producer_run_id")
         or (meta or {}).get("run_id")
         or f"opend-save-{observed_at.strftime('%Y%m%dT%H%M%S%fZ')}"
     )
-    if not is_error_payload:
+    if not is_error_payload and publish_cache_metadata:
         publish_quote_cache_metadata(
             csv_path=csv_path,
             symbol=symbol,
@@ -182,6 +1355,417 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
             observed_at=observed_at,
         )
     return raw_path, csv_path
+
+
+def _metadata_observed_at(
+    *,
+    meta: Mapping[str, Any],
+    fallback: datetime,
+) -> datetime:
+    try:
+        return _parse_datetime(meta.get("source_observed_at"))
+    except (TypeError, ValueError):
+        return fallback.astimezone(timezone.utc)
+
+
+def _candidate_source_run_id(
+    *,
+    csv_path: Path,
+    meta: Mapping[str, Any],
+    producer_run_id: str | None,
+    preserve_existing: bool,
+) -> str:
+    if preserve_existing:
+        metadata_path = quote_cache_metadata_path(csv_path)
+        if metadata_path.is_file() and not metadata_path.is_symlink():
+            try:
+                existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                existing = None
+            if isinstance(existing, Mapping):
+                existing_run_id = str(existing.get("source_run_id") or "").strip()
+                if existing_run_id:
+                    return existing_run_id
+    declared_run_id = str(
+        meta.get("producer_run_id") or meta.get("run_id") or ""
+    ).strip()
+    if declared_run_id:
+        return declared_run_id
+    current_run_id = str(producer_run_id or "").strip()
+    if current_run_id:
+        return current_run_id
+    observed = _metadata_observed_at(
+        meta=meta,
+        fallback=datetime.now(timezone.utc),
+    )
+    return f"opend-save-{observed.strftime('%Y%m%dT%H%M%S%fZ')}"
+
+
+def _publish_final_quote_cache_metadata(
+    *,
+    csv_path: Path,
+    symbol: str,
+    meta: Mapping[str, Any],
+    producer_run_id: str | None,
+    preserve_existing_run_id: bool,
+) -> dict[str, Any]:
+    source_run_id = _candidate_source_run_id(
+        csv_path=csv_path,
+        meta=meta,
+        producer_run_id=producer_run_id,
+        preserve_existing=preserve_existing_run_id,
+    )
+    observed_at = _metadata_observed_at(
+        meta=meta,
+        fallback=datetime.now(timezone.utc),
+    )
+    return publish_quote_cache_metadata(
+        csv_path=csv_path,
+        symbol=symbol,
+        source="opend",
+        source_run_id=source_run_id,
+        observed_at=observed_at,
+    )
+
+
+def finalize_unplanned_required_data_candidate(
+    *,
+    base: Path,
+    producer_root: Path,
+    symbol: str,
+    payload: dict[str, Any],
+    source: str,
+    host: str,
+    port: int,
+    require_realized_volatility: bool,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Persist a manual candidate without creating or adopting receipt authority."""
+
+    root = Path(producer_root).resolve()
+    symbol_norm = str(symbol or "").strip().upper()
+    binding = {
+        "source": _normalize_fetch_source(source),
+        "host": str(host or "").strip(),
+        "port": int(port),
+    }
+    meta, _rows, _outcome = _validate_unplanned_required_data_payload(
+        payload=payload,
+        expected_symbol=symbol_norm,
+        expected_binding=binding,
+        require_realized_volatility=require_realized_volatility,
+    )
+    _validate_payload_freshness(meta=meta, now=now)
+    raw_path, csv_path = save_outputs(
+        Path(base),
+        symbol_norm,
+        payload,
+        output_root=root,
+        publish_cache_metadata=False,
+    )
+    _validate_unplanned_required_data_files(
+        raw_path=raw_path,
+        csv_path=csv_path,
+        expected_symbol=symbol_norm,
+        expected_binding=binding,
+        require_realized_volatility=require_realized_volatility,
+        now=now,
+    )
+
+    from src.application.multiplier_steps import (
+        apply_multiplier_cache_to_required_data_csv,
+    )
+
+    apply_multiplier_cache_to_required_data_csv(
+        base=Path(base),
+        required_data_dir=root,
+        symbol=symbol_norm,
+    )
+    _publish_final_quote_cache_metadata(
+        csv_path=csv_path,
+        symbol=symbol_norm,
+        meta=meta,
+        producer_run_id=None,
+        preserve_existing_run_id=False,
+    )
+    _validate_unplanned_required_data_files(
+        raw_path=raw_path,
+        csv_path=csv_path,
+        expected_symbol=symbol_norm,
+        expected_binding=binding,
+        require_realized_volatility=require_realized_volatility,
+        now=now,
+    )
+    return {
+        "mode": "manual_unplanned",
+        "raw_path": raw_path,
+        "csv_path": csv_path,
+        "quote_receipt_path": None,
+        "quote_receipt": None,
+        "evidence": None,
+    }
+
+
+def _validate_unplanned_required_data_payload(
+    *,
+    payload: Mapping[str, Any],
+    expected_symbol: str,
+    expected_binding: Mapping[str, Any],
+    require_realized_volatility: bool,
+) -> tuple[dict[str, Any], list[Any], str]:
+    if not isinstance(payload, dict):
+        raise PositionAdviceSourceError("required-data JSON must be an object")
+    meta = payload.get("meta")
+    meta = dict(meta) if isinstance(meta, Mapping) else {}
+    if str(meta.get("status") or "").strip().lower() != "ok":
+        raise PositionAdviceSourceError(
+            "incomplete required-data payload cannot be persisted"
+        )
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise PositionAdviceSourceError("required-data rows are invalid")
+    _validate_rows_persist_without_loss(rows)
+    source_outcome, _reason = validate_required_data_source_outcome(
+        rows=rows,
+        source_outcome=meta.get("source_outcome"),
+        reason_code=meta.get("reason_code"),
+        subject="manual payload",
+    )
+    if rows and str(meta.get("source_outcome") or "").strip().lower() != "success_rows":
+        raise PositionAdviceSourceError(
+            "required-data payload lacks explicit success-rows evidence"
+        )
+    if str(payload.get("symbol") or "").strip().upper() != expected_symbol:
+        raise PositionAdviceSourceError("required-data payload symbol mismatch")
+    _validate_raw_binding(
+        meta=meta,
+        expected_fetch_contract={"fetch_binding": dict(expected_binding)},
+        strict=True,
+    )
+    _validate_timestamp_evidence(meta)
+    _validate_snapshot_completeness(meta=meta, rows=rows)
+
+    expirations = payload.get("expirations")
+    if not isinstance(expirations, list):
+        raise PositionAdviceSourceError(
+            "required-data expiration evidence is invalid"
+        )
+    normalized_expirations = [str(item or "").strip() for item in expirations]
+    try:
+        expiration_count = int(payload.get("expiration_count") or 0)
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            "required-data expiration evidence is invalid"
+        ) from exc
+    if (
+        any(not item for item in normalized_expirations)
+        or len(normalized_expirations) != len(set(normalized_expirations))
+        or expiration_count != len(normalized_expirations)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data expiration evidence is invalid"
+        )
+    if source_outcome == "success_empty":
+        if normalized_expirations:
+            raise PositionAdviceSourceError(
+                "success-empty required-data contains expirations"
+            )
+        if require_realized_volatility:
+            rv_meta = meta.get("realized_volatility")
+            if (
+                not isinstance(rv_meta, Mapping)
+                or str(rv_meta.get("status") or "").strip().lower()
+                != "not_applicable_no_contracts"
+            ):
+                raise PositionAdviceSourceError(
+                    "success-empty required-data lacks no-contract RV evidence"
+                )
+    elif require_realized_volatility:
+        _validate_required_realized_volatility(meta=meta, rows=rows)
+    return meta, rows, source_outcome
+
+
+def _validate_unplanned_required_data_files(
+    *,
+    raw_path: Path,
+    csv_path: Path,
+    expected_symbol: str,
+    expected_binding: Mapping[str, Any],
+    require_realized_volatility: bool,
+    now: datetime | str | None,
+) -> None:
+    try:
+        payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PositionAdviceSourceError("required-data JSON is unreadable") from exc
+    meta, rows, source_outcome = _validate_unplanned_required_data_payload(
+        payload=payload,
+        expected_symbol=expected_symbol,
+        expected_binding=expected_binding,
+        require_realized_volatility=require_realized_volatility,
+    )
+    _validate_payload_freshness(meta=meta, now=now)
+    try:
+        frame = pd.read_csv(csv_path)
+    except Exception as exc:
+        raise PositionAdviceSourceError("required-data CSV is unreadable") from exc
+    if source_outcome == "success_empty":
+        if not frame.empty or list(frame.columns) != REQUIRED_DATA_COLUMNS:
+            raise PositionAdviceSourceError(
+                "success-empty required-data CSV is not header-only"
+            )
+        return
+    _validate_consumer_csv_projection(
+        rows=rows,
+        frame=frame,
+        csv=csv_path,
+        symbol=expected_symbol,
+        raw_meta=meta,
+    )
+
+
+def finalize_required_data_quote_candidate(
+    *,
+    base: Path,
+    producer_root: Path,
+    producer_run_id: str | None,
+    symbol: str,
+    expected_fetch_contract: Mapping[str, Any],
+    fetch_policy: Mapping[str, Any],
+    mode: str,
+    payload: dict[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Finalize one provider/cache candidate before it gains receipt authority."""
+
+    mode_norm = str(mode or "").strip().lower()
+    if mode_norm not in {"fresh", "cached", "subprocess", "success_empty"}:
+        raise PositionAdviceSourceError("required-data finalizer mode is invalid")
+    root = Path(producer_root).resolve()
+    symbol_norm = str(symbol or "").strip().upper()
+    contract = validate_required_data_expected_fetch_contract(
+        expected_fetch_contract,
+        expected_symbol=symbol_norm,
+    )
+    now_value = _parse_datetime(now or datetime.now(timezone.utc))
+    if mode_norm in {"fresh", "success_empty"}:
+        if not isinstance(payload, dict):
+            raise PositionAdviceSourceError(
+                "fresh required-data finalization lacks provider payload"
+            )
+        candidate_meta, _rows, _outcome, _contract = (
+            _validate_required_data_payload_candidate(
+                raw_payload=payload,
+                expected_fetch_contract=contract,
+            )
+        )
+        _validate_payload_freshness(
+            meta=candidate_meta,
+            now=now_value,
+        )
+        raw_path, csv_path = save_outputs(
+            Path(base),
+            symbol_norm,
+            payload,
+            output_root=root,
+            publish_cache_metadata=False,
+        )
+    else:
+        if payload is not None:
+            raise PositionAdviceSourceError(
+                "cached/subprocess finalization must not resave provider payload"
+            )
+        raw_path = root / "raw" / f"{symbol_norm}_required_data.json"
+        csv_path = root / "parsed" / f"{symbol_norm}_required_data.csv"
+
+    validate_required_data_quote_candidate(
+        producer_root=root,
+        raw_path=raw_path,
+        csv_path=csv_path,
+        expected_fetch_contract=contract,
+        now=now,
+        require_fresh=True,
+    )
+
+    from src.application.multiplier_steps import (
+        apply_multiplier_cache_to_required_data_csv,
+    )
+
+    apply_multiplier_cache_to_required_data_csv(
+        base=Path(base),
+        required_data_dir=root,
+        symbol=symbol_norm,
+    )
+    raw_payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw_meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
+    if not isinstance(raw_meta, Mapping):
+        raise PositionAdviceSourceError("required-data payload metadata is invalid")
+    _publish_final_quote_cache_metadata(
+        csv_path=csv_path,
+        symbol=symbol_norm,
+        meta=raw_meta,
+        producer_run_id=producer_run_id,
+        preserve_existing_run_id=mode_norm in {"cached", "subprocess"},
+    )
+    validate_required_data_quote_candidate(
+        producer_root=root,
+        raw_path=raw_path,
+        csv_path=csv_path,
+        expected_fetch_contract=contract,
+        now=now,
+        require_fresh=True,
+    )
+    source_observed_at = str(raw_meta.get("source_observed_at") or "").strip()
+    completed_at = str(raw_meta.get("completed_at_utc") or "").strip()
+    result: dict[str, Any] = {
+        "mode": mode_norm,
+        "raw_path": raw_path,
+        "csv_path": csv_path,
+        "source_observed_at": source_observed_at,
+        "completed_at": completed_at,
+        "expected_fetch_contract": contract,
+        "quote_receipt_path": None,
+        "quote_receipt": None,
+        "evidence": None,
+    }
+    run_id = str(producer_run_id or "").strip()
+    if not run_id:
+        return result
+    receipt_path, receipt = publish_required_data_quote_snapshot(
+        producer_root=root,
+        producer_run_id=run_id,
+        symbol=symbol_norm,
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan=dict(contract["fetch_plan"]),
+        fetch_policy=dict(fetch_policy or {}),
+        expected_fetch_contract=contract,
+        source_observed_at=source_observed_at,
+        completed_at=completed_at,
+        now=now,
+    )
+    evidence = resolve_exact_fresh_required_data_quote_receipt(
+        producer_root=root,
+        symbol=symbol_norm,
+        expected_producer_run_id=run_id,
+        expected_fetch_contract=contract,
+        expected_source_observed_at=source_observed_at,
+        expected_completed_at=completed_at,
+        now=now,
+    )
+    expected_relpath = receipt_path.resolve().relative_to(root).as_posix()
+    if evidence is None or evidence.get("receipt_relpath") != expected_relpath:
+        raise PositionAdviceSourceError(
+            "finalized quote receipt does not bind current required-data bytes"
+        )
+    result.update(
+        {
+            "quote_receipt_path": receipt_path,
+            "quote_receipt": receipt,
+            "evidence": evidence,
+        }
+    )
+    return result
 
 
 def publish_required_data_quote_snapshot(
@@ -193,8 +1777,10 @@ def publish_required_data_quote_snapshot(
     csv_path: Path,
     fetch_plan: dict[str, Any],
     fetch_policy: dict[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
     source_observed_at: datetime | str,
     completed_at: datetime | str | None = None,
+    now: datetime | str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Bind the exact required-data JSON/CSV bytes and fetch policy immutably."""
 
@@ -217,28 +1803,6 @@ def publish_required_data_quote_snapshot(
         ) from exc
     raw = safe_existing_relative_path(root, raw_relpath)
     csv = safe_existing_relative_path(root, csv_relpath)
-    try:
-        raw_payload = json.loads(raw.read_text(encoding="utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PositionAdviceSourceError("required-data JSON is unreadable") from exc
-    meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else None
-    status = str((meta or {}).get("status") or "").strip().lower()
-    if status != "ok":
-        raise PositionAdviceSourceError(
-            "incomplete required-data payload cannot produce a quote receipt"
-        )
-    rows = raw_payload.get("rows") if isinstance(raw_payload, dict) else None
-    if not isinstance(rows, list):
-        raise PositionAdviceSourceError(
-            "required-data rows are invalid"
-        )
-    validate_required_data_source_outcome(
-        rows=rows,
-        source_outcome=(meta or {}).get("source_outcome"),
-        reason_code=(meta or {}).get("reason_code"),
-        subject="payload",
-    )
-
     symbol_norm = str(symbol or "").strip().upper()
     run_id = str(producer_run_id or "").strip()
     market = str(symbol_market(symbol_norm) or "").strip().upper()
@@ -246,17 +1810,58 @@ def publish_required_data_quote_snapshot(
         raise PositionAdviceSourceError(
             "quote producer run, symbol, or market is unavailable"
         )
+    policy_input = dict(fetch_policy or {})
+    contract = validate_required_data_expected_fetch_contract(
+        expected_fetch_contract,
+        expected_symbol=symbol_norm,
+    )
+    if dict(fetch_plan or {}) != dict(contract.get("fetch_plan") or {}):
+        raise PositionAdviceSourceError(
+            "required-data fetch plan contradicts expected contract"
+        )
+    _validate_required_data_quote_candidate(
+        raw=raw,
+        csv=csv,
+        expected_fetch_contract=contract,
+    )
+    raw_payload = json.loads(raw.read_text(encoding="utf-8"))
+    raw_meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else {}
+    raw_meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+    _validate_quote_cache_metadata_binding(
+        csv=csv,
+        symbol=symbol_norm,
+        raw_meta=raw_meta,
+    )
+    if not _same_datetime(raw_meta.get("source_observed_at"), source_observed_at):
+        raise PositionAdviceSourceError(
+            "required-data source observation timestamp mismatch"
+        )
+    effective_completed_at = completed_at or raw_meta.get("completed_at_utc")
+    if not _same_datetime(raw_meta.get("completed_at_utc"), effective_completed_at):
+        raise PositionAdviceSourceError(
+            "required-data completion timestamp mismatch"
+        )
+    now_value = _validate_payload_freshness(
+        meta=raw_meta,
+        now=now,
+    )
+    _validate_fetch_policy_binding(
+        fetch_policy=policy_input,
+        expected_fetch_contract=contract,
+    )
     policy_payload = {
-        "schema": "required_data_fetch_policy.v1",
-        "fetch_plan": dict(fetch_plan or {}),
-        "fetch_policy": dict(fetch_policy or {}),
+        "schema": "required_data_fetch_policy.v2",
+        "expected_fetch_contract": contract,
+        "fetch_policy": policy_input,
     }
     policy_hash = canonical_sha256(policy_payload)
     bundle = {
         "schema_version": REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
         "symbol": symbol_norm,
         "market": market,
-        "fetch_plan": policy_payload["fetch_plan"],
+        "fetch_plan": dict(contract["fetch_plan"]),
+        "expected_fetch_contract": contract,
+        "expected_fetch_contract_sha256": contract["contract_sha256"],
         "fetch_policy": policy_payload["fetch_policy"],
         "fetch_policy_hash": policy_hash,
         "raw_json_relpath": raw_relpath,
@@ -284,6 +1889,53 @@ def publish_required_data_quote_snapshot(
     prefix = (
         f"position_advice_sources/quotes/{run_key}/{symbol_key}/{snapshot_key}"
     )
+    committed_paths = _same_run_symbol_receipt_paths(
+        root=root,
+        producer_run_id=run_id,
+        symbol=symbol_norm,
+    )
+    existing = (
+        resolve_exact_fresh_required_data_quote_receipt(
+            producer_root=root,
+            symbol=symbol_norm,
+            expected_producer_run_id=run_id,
+            expected_fetch_contract=contract,
+            expected_source_observed_at=source_observed_at,
+            expected_completed_at=effective_completed_at,
+            now=now_value,
+        )
+        if committed_paths
+        else None
+    )
+    if existing is not None and len(committed_paths) == 1:
+        existing_path = safe_existing_relative_path(
+            root,
+            str(existing["receipt_relpath"]),
+        )
+        try:
+            existing_receipt = json.loads(
+                existing_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PositionAdviceSourceError(
+                "existing required-data quote receipt is unreadable"
+            ) from exc
+        return existing_path, existing_receipt
+    if committed_paths:
+        raise PositionAdviceSourceError(
+            "required-data quote receipt conflicts with committed run observation"
+        )
+    _validate_payload_freshness(
+        meta=raw_meta,
+        now=(now if now is not None else datetime.now(timezone.utc)),
+    )
+
+    def _validate_before_receipt_commit(_receipt: Mapping[str, Any]) -> None:
+        _validate_payload_freshness(
+            meta=raw_meta,
+            now=(now if now is not None else datetime.now(timezone.utc)),
+        )
+
     receipt = publish_source_receipt(
         producer_root=root,
         receipt_relpath=f"{prefix}/receipt.json",
@@ -300,10 +1952,31 @@ def publish_required_data_quote_snapshot(
         included_markets=[market],
         source_native_id=source_native_id,
         source_observed_at=source_observed_at,
-        completed_at=completed_at or datetime.now(timezone.utc),
+        completed_at=effective_completed_at,
         producer_policy_hash=policy_hash,
+        before_receipt_commit=_validate_before_receipt_commit,
     )
     return root / f"{prefix}/receipt.json", receipt
+
+
+def _same_run_symbol_receipt_paths(
+    *,
+    root: Path,
+    producer_run_id: str,
+    symbol: str,
+) -> list[Path]:
+    run_key = canonical_sha256({"producer_run_id": producer_run_id})
+    symbol_key = canonical_sha256({"symbol": symbol})
+    receipt_root = (
+        root
+        / "position_advice_sources"
+        / "quotes"
+        / run_key
+        / symbol_key
+    )
+    if not receipt_root.exists():
+        return []
+    return sorted(receipt_root.glob("*/receipt.json"))
 
 
 def find_fresh_required_data_quote_receipts(
@@ -377,6 +2050,9 @@ def resolve_exact_fresh_required_data_quote_receipt(
     symbol: str,
     now: datetime | str | None = None,
     expected_producer_run_id: str | None = None,
+    expected_fetch_contract: Mapping[str, Any] | None = None,
+    expected_source_observed_at: datetime | str | None = None,
+    expected_completed_at: datetime | str | None = None,
 ) -> dict[str, Any] | None:
     """Return a fresh receipt only when it binds the exact current scan bytes."""
 
@@ -409,6 +2085,14 @@ def resolve_exact_fresh_required_data_quote_receipt(
         return None
 
     now_value = now or datetime.now(timezone.utc)
+    expected_contract = (
+        validate_required_data_expected_fetch_contract(
+            expected_fetch_contract,
+            expected_symbol=symbol_norm,
+        )
+        if expected_fetch_contract is not None
+        else None
+    )
     matches: list[tuple[datetime, dict[str, Any]]] = []
     for receipt_path in receipt_root.glob("*/*/*/receipt.json"):
         try:
@@ -431,6 +2115,22 @@ def resolve_exact_fresh_required_data_quote_receipt(
                 != str(expected_producer_run_id).strip()
             ):
                 continue
+            if (
+                expected_source_observed_at is not None
+                and not _same_datetime(
+                    validated.get("source_observed_at"),
+                    expected_source_observed_at,
+                )
+            ):
+                continue
+            if (
+                expected_completed_at is not None
+                and not _same_datetime(
+                    receipt.get("completed_at"),
+                    expected_completed_at,
+                )
+            ):
+                continue
             payload = json.loads(
                 validated["payload_path"].read_text(encoding="utf-8")
             )
@@ -442,6 +2142,32 @@ def resolve_exact_fresh_required_data_quote_receipt(
                 != symbol_norm
             ):
                 continue
+            contract_payload = payload.get("expected_fetch_contract")
+            if not isinstance(contract_payload, Mapping):
+                if expected_contract is not None:
+                    continue
+                contract = None
+            else:
+                contract = validate_required_data_expected_fetch_contract(
+                    contract_payload,
+                    expected_symbol=symbol_norm,
+                )
+            if expected_contract is not None and contract != expected_contract:
+                continue
+            policy_payload = {
+                "schema": "required_data_fetch_policy.v2",
+                "expected_fetch_contract": contract,
+                "fetch_policy": dict(payload.get("fetch_policy") or {}),
+            }
+            if contract is not None:
+                policy_hash = canonical_sha256(policy_payload)
+                if (
+                    str(payload.get("fetch_policy_hash") or "")
+                    != policy_hash
+                    or str(receipt.get("producer_policy_hash") or "")
+                    != policy_hash
+                ):
+                    continue
             captured_raw = base64.b64decode(
                 str(payload.get("raw_json_base64") or ""),
                 validate=True,
@@ -464,7 +2190,13 @@ def resolve_exact_fresh_required_data_quote_receipt(
                         "snapshot_id": validated["snapshot_id"],
                         "payload_sha256": validated["payload_sha256"],
                         "source_observed_at": validated["source_observed_at"],
+                        "completed_at": receipt.get("completed_at"),
                         "expires_at": validated["expires_at"],
+                        "expected_fetch_contract_sha256": (
+                            str(contract.get("contract_sha256"))
+                            if contract is not None
+                            else None
+                        ),
                     },
                 )
             )
@@ -484,14 +2216,41 @@ def resolve_exact_fresh_required_data_quote_receipt(
     return matches[-1][1]
 
 
+def _same_datetime(left: Any, right: Any) -> bool:
+    try:
+        left_dt = (
+            left
+            if isinstance(left, datetime)
+            else datetime.fromisoformat(str(left).replace("Z", "+00:00"))
+        )
+        right_dt = (
+            right
+            if isinstance(right, datetime)
+            else datetime.fromisoformat(str(right).replace("Z", "+00:00"))
+        )
+        if left_dt.tzinfo is None:
+            left_dt = left_dt.replace(tzinfo=timezone.utc)
+        if right_dt.tzinfo is None:
+            right_dt = right_dt.replace(tzinfo=timezone.utc)
+        return left_dt.astimezone(timezone.utc) == right_dt.astimezone(
+            timezone.utc
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 __all__ = [
     "REQUIRED_DATA_COLUMNS",
     "REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA",
     "SUCCESS_EMPTY_REASON_CODES",
     "append_metrics_json",
     "find_fresh_required_data_quote_receipts",
+    "finalize_required_data_quote_candidate",
+    "finalize_unplanned_required_data_candidate",
     "publish_required_data_quote_snapshot",
     "resolve_exact_fresh_required_data_quote_receipt",
     "save_outputs",
+    "validate_required_data_payload_candidate",
+    "validate_required_data_quote_candidate",
     "validate_required_data_source_outcome",
 ]

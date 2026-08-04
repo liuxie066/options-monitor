@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.fetch_source import normalize_fetch_source
 from src.application.opend_symbol_outputs import (
     REQUIRED_DATA_COLUMNS,
     REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
     resolve_exact_fresh_required_data_quote_receipt,
+    validate_required_data_quote_candidate,
     validate_required_data_source_outcome,
 )
 from src.application.position_advice_source_receipts import (
@@ -23,7 +25,10 @@ from src.application.position_advice_source_receipts import (
     sha256_bytes,
     validate_source_receipt,
 )
-from src.application.required_data_plan_identity import required_data_plan_id
+from src.application.required_data_plan_identity import (
+    required_data_plan_id,
+    validate_required_data_expected_fetch_contract,
+)
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -33,6 +38,10 @@ _TERMINAL_STATUSES = frozenset({"complete", "partial", "failed"})
 
 class RequiredDataSnapshotError(RuntimeError):
     """Raised when a run-scoped required-data snapshot cannot be sealed."""
+
+
+class _RequiredDataSnapshotEntryError(RequiredDataSnapshotError):
+    """Raised when manifest structure is valid but bound symbol evidence is not."""
 
 
 class FrozenRequiredDataUnavailable(RuntimeError):
@@ -71,6 +80,29 @@ def seal_required_data_snapshot(
 
     run_id_norm = _required_text(run_id, "run_id")
     root = _existing_directory(required_data_root, "required_data_root")
+    target_input = Path(manifest_path)
+    if target_input.is_symlink():
+        raise RequiredDataSnapshotError(
+            "required-data snapshot manifest path is a symlink"
+        )
+    target = target_input.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing_payload: dict[str, Any] | None = None
+    if target.exists():
+        existing_payload, _ = _load_required_data_snapshot_manifest_for_seal(
+            manifest_path=target,
+            expected_run_id=run_id_norm,
+            expected_required_data_root=root,
+        )
+        seal_time = _manifest_timestamp(
+            existing_payload.get("sealed_at_utc"),
+            "sealed_at_utc",
+        )
+    else:
+        seal_time = _manifest_timestamp(
+            sealed_at or datetime.now(timezone.utc),
+            "sealed_at",
+        )
     summary = dict(prefetch_summary or {})
     plan = summary.get("global_required_data_plan")
     if not isinstance(plan, Mapping):
@@ -87,39 +119,45 @@ def seal_required_data_snapshot(
     expected_plan_id = required_data_plan_id(normalized_plan_symbols)
     if plan_id != expected_plan_id:
         raise RequiredDataSnapshotError("global required-data plan id mismatch")
+    validated_plan_symbols = _validate_global_plan_symbols(
+        normalized_plan_symbols
+    )
     result_index = _prefetch_result_index(summary)
     symbol_entries: dict[str, dict[str, Any]] = {}
-    for plan_item in normalized_plan_symbols:
-        symbol = _required_text(plan_item.get("symbol"), "plan symbol").upper()
-        evidence = resolve_exact_fresh_required_data_quote_receipt(
-            producer_root=root,
-            symbol=symbol,
-            expected_producer_run_id=run_id_norm,
-        )
-        if evidence is None:
-            failure = result_index.get(symbol, {})
+    for plan_item, expected_contract in validated_plan_symbols:
+        symbol = str(expected_contract["symbol"])
+        try:
+            evidence = resolve_exact_fresh_required_data_quote_receipt(
+                producer_root=root,
+                symbol=symbol,
+                now=seal_time,
+                expected_producer_run_id=run_id_norm,
+                expected_fetch_contract=expected_contract,
+            )
+            if evidence is None:
+                symbol_entries[symbol] = _failed_manifest_entry(
+                    result_index.get(symbol, {}),
+                    default_reason="quote_receipt_unavailable",
+                )
+                continue
+            symbol_entries[symbol] = _ready_manifest_entry(
+                root=root,
+                run_id=run_id_norm,
+                symbol=symbol,
+                plan_item=plan_item,
+                expected_fetch_contract=expected_contract,
+                evidence=evidence,
+                now=seal_time,
+            )
+        except Exception as exc:
+            # The global plan was validated before this loop. Everything here
+            # is symbol-scoped receipt/payload work and must fail in isolation.
             symbol_entries[symbol] = {
                 "status": "failed",
-                "reason": str(
-                    failure.get("message")
-                    or failure.get("reason")
-                    or failure.get("status")
-                    or "quote_receipt_unavailable"
-                ).strip(),
-                "error_type": str(
-                    failure.get("error_type")
-                    or failure.get("error_code")
-                    or "RequiredDataFetchError"
-                ).strip(),
+                "reason": "quote_receipt_invalid",
+                "error_type": type(exc).__name__,
+                "detail": str(exc),
             }
-            continue
-        symbol_entries[symbol] = _ready_manifest_entry(
-            root=root,
-            run_id=run_id_norm,
-            symbol=symbol,
-            plan_item=plan_item,
-            evidence=evidence,
-        )
 
     ready = sum(1 for item in symbol_entries.values() if item.get("status") == "ready")
     failed = len(symbol_entries) - ready
@@ -130,15 +168,13 @@ def seal_required_data_snapshot(
     else:
         status = "failed"
 
-    target = Path(manifest_path).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
     root_relpath = os.path.relpath(root, target.parent)
     payload = {
         "schema_version": REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
         "run_id": run_id_norm,
         "status": status,
         "plan_id": plan_id,
-        "sealed_at_utc": (sealed_at or datetime.now(timezone.utc)).isoformat(),
+        "sealed_at_utc": seal_time.isoformat(),
         "required_data_root_relpath": Path(root_relpath).as_posix(),
         "symbols": {key: symbol_entries[key] for key in sorted(symbol_entries)},
         "summary": {
@@ -148,8 +184,13 @@ def seal_required_data_snapshot(
         },
     }
     if close_advice_required_data_plan_path is not None:
-        plan_path = Path(close_advice_required_data_plan_path).resolve()
-        if not plan_path.is_file() or plan_path.is_symlink():
+        plan_path_input = Path(close_advice_required_data_plan_path)
+        if plan_path_input.is_symlink():
+            raise RequiredDataSnapshotError(
+                "close-advice required-data plan is unavailable"
+            )
+        plan_path = plan_path_input.resolve()
+        if not plan_path.is_file():
             raise RequiredDataSnapshotError(
                 "close-advice required-data plan is unavailable"
             )
@@ -169,9 +210,45 @@ def seal_required_data_snapshot(
                 ),
             }
         )
+    _validate_manifest_close_advice_plan_for_seal(
+        manifest_path=target,
+        payload=payload,
+    )
+    _validate_manifest_symbols(
+        payload=payload,
+        root=root,
+        run_id=run_id_norm,
+        sealed_at=seal_time,
+    )
     payload["content_sha256"] = canonical_sha256(payload)
+    if existing_payload is not None:
+        if existing_payload != payload:
+            raise RequiredDataSnapshotError(
+                "terminal required-data snapshot manifest conflicts"
+            )
+        return existing_payload
+    if target.exists():
+        adopted, _ = _load_required_data_snapshot_manifest_for_seal(
+            manifest_path=target,
+            expected_run_id=run_id_norm,
+            expected_required_data_root=root,
+        )
+        if adopted != payload:
+            raise RequiredDataSnapshotError(
+                "terminal required-data snapshot manifest conflicts"
+            )
+        return adopted
     atomic_write_json(target, payload)
-    return payload
+    written, _ = _load_required_data_snapshot_manifest_for_seal(
+        manifest_path=target,
+        expected_run_id=run_id_norm,
+        expected_required_data_root=root,
+    )
+    if written != payload:
+        raise RequiredDataSnapshotError(
+            "terminal required-data snapshot manifest write mismatch"
+        )
+    return written
 
 
 def load_required_data_snapshot_manifest(
@@ -180,13 +257,45 @@ def load_required_data_snapshot_manifest(
     expected_run_id: str,
     expected_required_data_root: Path | None = None,
 ) -> tuple[dict[str, Any], Path]:
-    path = Path(manifest_path).resolve()
+    path_input = Path(manifest_path)
+    if path_input.is_symlink():
+        raise RequiredDataSnapshotError(
+            "required-data snapshot manifest is unavailable"
+        )
+    path = path_input.resolve()
+    if not path.is_file():
+        raise RequiredDataSnapshotError(
+            "required-data snapshot manifest is unreadable"
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RequiredDataSnapshotError("required-data snapshot manifest is unreadable") from exc
     if not isinstance(payload, dict):
         raise RequiredDataSnapshotError("required-data snapshot manifest must be an object")
+    required_fields = {
+        "schema_version",
+        "run_id",
+        "status",
+        "plan_id",
+        "sealed_at_utc",
+        "required_data_root_relpath",
+        "symbols",
+        "summary",
+        "content_sha256",
+    }
+    close_plan_fields = {
+        "close_advice_required_data_plan_relpath",
+        "close_advice_required_data_plan_sha256",
+    }
+    actual_fields = set(payload)
+    if (
+        actual_fields != required_fields
+        and actual_fields != required_fields | close_plan_fields
+    ):
+        raise RequiredDataSnapshotError(
+            "required-data snapshot manifest fields do not match schema"
+        )
     if payload.get("schema_version") != REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA:
         raise RequiredDataSnapshotError("required-data snapshot manifest schema mismatch")
     run_id = _required_text(payload.get("run_id"), "manifest run_id")
@@ -209,18 +318,205 @@ def load_required_data_snapshot_manifest(
     }
     if canonical_sha256(content) != content_sha256:
         raise RequiredDataSnapshotError("required-data snapshot content hash mismatch")
+    sealed_at = _manifest_timestamp(
+        payload.get("sealed_at_utc"),
+        "sealed_at_utc",
+    )
     root_relpath = _required_text(
         payload.get("required_data_root_relpath"),
         "required_data_root_relpath",
     )
     root = (path.parent / root_relpath).resolve()
     root = _existing_directory(root, "manifest required_data_root")
-    if expected_required_data_root is not None and root != Path(expected_required_data_root).resolve():
+    if root.parent != path.parent.parent:
+        raise RequiredDataSnapshotError(
+            "required-data snapshot root is outside the current run"
+        )
+    if (
+        expected_required_data_root is not None
+        and root != Path(expected_required_data_root).resolve()
+    ):
         raise RequiredDataSnapshotError("required-data snapshot root mismatch")
+    _validate_manifest_symbols(
+        payload=payload,
+        root=root,
+        run_id=run_id,
+        sealed_at=sealed_at,
+    )
+    return payload, root
+
+
+def _validate_manifest_close_advice_plan(
+    *,
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    relpath = payload.get("close_advice_required_data_plan_relpath")
+    expected_hash = payload.get("close_advice_required_data_plan_sha256")
+    if relpath is None and expected_hash is None:
+        return
+    if relpath is None or not _is_sha256(expected_hash):
+        raise RequiredDataSnapshotError(
+            "close-advice required-data plan authority is invalid"
+        )
+    try:
+        plan_path = safe_existing_relative_path(
+            manifest_path.parent,
+            _required_text(
+                relpath,
+                "close_advice_required_data_plan_relpath",
+            ),
+        )
+        actual_hash = sha256_bytes(plan_path.read_bytes())
+    except (OSError, PositionAdviceSourceError, ValueError) as exc:
+        raise RequiredDataSnapshotError(
+            "close-advice required-data plan authority is invalid"
+        ) from exc
+    if actual_hash != str(expected_hash):
+        raise RequiredDataSnapshotError(
+            "close-advice required-data plan hash mismatch"
+        )
+
+
+def _validate_manifest_close_advice_plan_for_seal(
+    *,
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    _validate_manifest_close_advice_plan(
+        manifest_path=manifest_path,
+        payload=payload,
+    )
+
+
+def _load_required_data_snapshot_manifest_for_seal(
+    *,
+    manifest_path: Path,
+    expected_run_id: str,
+    expected_required_data_root: Path | None,
+) -> tuple[dict[str, Any], Path]:
+    payload, root = load_required_data_snapshot_manifest(
+        manifest_path=manifest_path,
+        expected_run_id=expected_run_id,
+        expected_required_data_root=expected_required_data_root,
+    )
+    _validate_manifest_close_advice_plan_for_seal(
+        manifest_path=Path(manifest_path).resolve(),
+        payload=payload,
+    )
+    return payload, root
+
+
+def _validate_manifest_symbols(
+    *,
+    payload: Mapping[str, Any],
+    root: Path,
+    run_id: str,
+    sealed_at: datetime,
+) -> None:
     symbols = payload.get("symbols")
     if not isinstance(symbols, dict):
-        raise RequiredDataSnapshotError("required-data snapshot symbols are invalid")
-    return payload, root
+        raise RequiredDataSnapshotError(
+            "required-data snapshot symbols are invalid"
+        )
+    ready_fields = {
+        "status",
+        "fetch_plan",
+        "expected_fetch_contract",
+        "expected_fetch_contract_sha256",
+        "fetch_policy_hash",
+        "receipt_relpath",
+        "receipt_hash",
+        "snapshot_id",
+        "payload_sha256",
+        "source_observed_at",
+        "expires_at",
+        "raw_json_relpath",
+        "required_data_csv_relpath",
+        "source_outcome",
+    }
+    failed_fields = {"status", "reason", "error_type"}
+    ready_count = 0
+    for symbol_key, raw_entry in symbols.items():
+        symbol = _required_text(symbol_key, "manifest symbol").upper()
+        if symbol != symbol_key or not isinstance(raw_entry, Mapping):
+            raise RequiredDataSnapshotError(
+                "required-data snapshot symbol entry is invalid"
+            )
+        entry = dict(raw_entry)
+        entry_status = str(entry.get("status") or "").strip().lower()
+        if entry_status == "ready":
+            allowed_fields = ready_fields | (
+                {"reason_code"} if "reason_code" in entry else set()
+            )
+            if set(entry) != allowed_fields:
+                raise RequiredDataSnapshotError(
+                    f"{symbol} ready manifest entry fields do not match schema"
+                )
+            try:
+                _validate_ready_entry(
+                    root=root,
+                    run_id=run_id,
+                    symbol=symbol,
+                    entry=entry,
+                    now=sealed_at,
+                )
+            except Exception as exc:
+                raise _RequiredDataSnapshotEntryError(
+                    f"{symbol} ready manifest entry is invalid: {exc}"
+                ) from exc
+            ready_count += 1
+            continue
+        if entry_status != "failed":
+            raise RequiredDataSnapshotError(
+                f"{symbol} manifest entry status is invalid"
+            )
+        allowed_fields = failed_fields | (
+            {"detail"} if "detail" in entry else set()
+        )
+        if set(entry) != allowed_fields:
+            raise RequiredDataSnapshotError(
+                f"{symbol} failed manifest entry fields do not match schema"
+            )
+        _required_text(entry.get("reason"), f"{symbol} failure reason")
+        _required_text(entry.get("error_type"), f"{symbol} failure error_type")
+        if "detail" in entry and not isinstance(entry["detail"], str):
+            raise RequiredDataSnapshotError(
+                f"{symbol} failure detail is invalid"
+            )
+
+    total = len(symbols)
+    failed_count = total - ready_count
+    summary = payload.get("summary")
+    if not isinstance(summary, Mapping) or set(summary) != {
+        "symbols_total",
+        "ready",
+        "failed",
+    }:
+        raise RequiredDataSnapshotError(
+            "required-data snapshot summary is invalid"
+        )
+    expected_summary = {
+        "symbols_total": total,
+        "ready": ready_count,
+        "failed": failed_count,
+    }
+    for key, expected in expected_summary.items():
+        actual = summary.get(key)
+        if isinstance(actual, bool) or not isinstance(actual, int) or actual != expected:
+            raise RequiredDataSnapshotError(
+                "required-data snapshot summary contradicts symbol entries"
+            )
+    if ready_count == total and total:
+        expected_status = "complete"
+    elif ready_count:
+        expected_status = "partial"
+    else:
+        expected_status = "failed"
+    if str(payload.get("status") or "").strip().lower() != expected_status:
+        raise RequiredDataSnapshotError(
+            "required-data snapshot status contradicts symbol entries"
+        )
 
 
 def resolve_frozen_required_data(
@@ -256,6 +552,12 @@ def resolve_frozen_required_data_csv_bytes(
             expected_run_id=expected_run_id,
             expected_required_data_root=required_data_root,
         )
+    except _RequiredDataSnapshotEntryError as exc:
+        raise FrozenRequiredDataUnavailable(
+            symbol=symbol_norm,
+            reason="receipt_or_payload_mismatch",
+            detail=str(exc),
+        ) from exc
     except RequiredDataSnapshotError as exc:
         raise FrozenRequiredDataUnavailable(
             symbol=symbol_norm,
@@ -312,13 +614,90 @@ def resolve_frozen_required_data_csv_bytes(
     )
 
 
+def _validate_global_plan_symbols(
+    plan_symbols: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    validated: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    seen_symbols: set[str] = set()
+    for plan_item in plan_symbols:
+        symbol = _required_text(plan_item.get("symbol"), "plan symbol").upper()
+        if symbol in seen_symbols:
+            raise RequiredDataSnapshotError(
+                f"global required-data plan duplicates symbol {symbol}"
+            )
+        seen_symbols.add(symbol)
+        contract_payload = plan_item.get("expected_fetch_contract")
+        if not isinstance(contract_payload, Mapping):
+            raise RequiredDataSnapshotError(
+                f"{symbol} expected fetch contract is unavailable"
+            )
+        try:
+            contract = validate_required_data_expected_fetch_contract(
+                contract_payload,
+                expected_symbol=symbol,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RequiredDataSnapshotError(
+                f"{symbol} expected fetch contract is invalid: {exc}"
+            ) from exc
+        fetch_plan = plan_item.get("fetch_plan")
+        fetch_binding = plan_item.get("fetch_binding")
+        if not isinstance(fetch_plan, Mapping) or dict(fetch_plan) != dict(
+            contract["fetch_plan"]
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} global plan fetch plan contradicts its contract"
+            )
+        if not isinstance(fetch_binding, Mapping) or dict(fetch_binding) != dict(
+            contract["fetch_binding"]
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} global plan physical binding contradicts its contract"
+            )
+        contract_plan = dict(contract["fetch_plan"])
+        if str(contract_plan.get("symbol") or "").strip().upper() != symbol:
+            raise RequiredDataSnapshotError(
+                f"{symbol} expected fetch plan symbol mismatch"
+            )
+        coverage = dict(contract.get("coverage_policy") or {})
+        projection_outcome = str(
+            contract_plan.get("projection_outcome") or ""
+        ).strip()
+        if projection_outcome not in {"success_rows", "success_empty"}:
+            raise RequiredDataSnapshotError(
+                f"{symbol} expected fetch projection is not terminal-success"
+            )
+        if str(coverage.get("projection_outcome") or "").strip() != (
+            projection_outcome
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} coverage projection contradicts its fetch plan"
+            )
+        if str(plan_item.get("projection_outcome") or "").strip() != (
+            projection_outcome
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} global plan projection contradicts its contract"
+            )
+        if _normalize_source(plan_item.get("source")) != str(
+            contract["fetch_binding"].get("source") or ""
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} global plan source contradicts its contract"
+            )
+        validated.append((plan_item, contract))
+    return validated
+
+
 def _ready_manifest_entry(
     *,
     root: Path,
     run_id: str,
     symbol: str,
     plan_item: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
     evidence: Mapping[str, Any],
+    now: datetime,
 ) -> dict[str, Any]:
     receipt_relpath = _required_text(evidence.get("receipt_relpath"), "receipt_relpath")
     receipt_path = safe_existing_relative_path(root, receipt_relpath)
@@ -327,7 +706,7 @@ def _ready_manifest_entry(
     validated = validate_source_receipt(
         receipt,
         producer_root=root,
-        now=datetime.now(timezone.utc),
+        now=now,
         expected_source_kind="quotes",
     )
     if str(validated.get("producer_run_id") or "") != run_id:
@@ -339,19 +718,32 @@ def _ready_manifest_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise RequiredDataSnapshotError(f"{symbol} quote bundle is invalid")
-    source_outcome, reason_code = _validate_complete_required_data_bundle(
-        bundle
+    contract = _validate_bundle_authority(
+        bundle=bundle,
+        receipt=receipt,
+        symbol=symbol,
+        expected_fetch_contract=expected_fetch_contract,
     )
-    fetch_policy_hash = str(
-        bundle.get("fetch_policy_hash")
-        or receipt.get("producer_policy_hash")
-        or ""
-    ).strip()
-    if not _is_sha256(fetch_policy_hash):
-        raise RequiredDataSnapshotError(f"{symbol} fetch policy hash is invalid")
+    if str(evidence.get("expected_fetch_contract_sha256") or "") != str(
+        contract["contract_sha256"]
+    ):
+        raise RequiredDataSnapshotError(
+            f"{symbol} resolver contract evidence mismatch"
+        )
+    _validate_canonical_bundle_candidate(
+        root=root,
+        bundle=bundle,
+        expected_fetch_contract=contract,
+    )
+    source_outcome, reason_code = _validate_complete_required_data_bundle(bundle)
+    if dict(plan_item.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
+        raise RequiredDataSnapshotError(f"{symbol} plan fetch contract mismatch")
+    fetch_policy_hash = str(bundle["fetch_policy_hash"])
     entry = {
         "status": "ready",
-        "fetch_plan": dict(bundle.get("fetch_plan") or plan_item.get("fetch_plan") or {}),
+        "fetch_plan": dict(contract["fetch_plan"]),
+        "expected_fetch_contract": contract,
+        "expected_fetch_contract_sha256": str(contract["contract_sha256"]),
         "fetch_policy_hash": fetch_policy_hash,
         "receipt_relpath": receipt_relpath,
         "receipt_hash": sha256_bytes(receipt_bytes),
@@ -414,9 +806,33 @@ def _validate_ready_entry(
         or str(bundle.get("symbol") or "").strip().upper() != symbol
     ):
         raise PositionAdviceSourceError("required-data quote bundle mismatch")
-    source_outcome, reason_code = _validate_complete_required_data_bundle(
-        bundle
+    expected_contract_payload = entry.get("expected_fetch_contract")
+    if not isinstance(expected_contract_payload, Mapping):
+        raise PositionAdviceSourceError(
+            "manifest expected fetch contract is missing"
+        )
+    expected_contract = validate_required_data_expected_fetch_contract(
+        expected_contract_payload,
+        expected_symbol=symbol,
     )
+    if str(entry.get("expected_fetch_contract_sha256") or "") != str(
+        expected_contract["contract_sha256"]
+    ):
+        raise PositionAdviceSourceError(
+            "manifest expected fetch contract hash mismatch"
+        )
+    contract = _validate_bundle_authority(
+        bundle=bundle,
+        receipt=receipt,
+        symbol=symbol,
+        expected_fetch_contract=expected_contract,
+    )
+    _validate_canonical_bundle_candidate(
+        root=root,
+        bundle=bundle,
+        expected_fetch_contract=contract,
+    )
+    source_outcome, reason_code = _validate_complete_required_data_bundle(bundle)
     raw_relpath = _required_text(entry.get("raw_json_relpath"), "raw_json_relpath")
     csv_relpath = _required_text(
         entry.get("required_data_csv_relpath"),
@@ -426,7 +842,7 @@ def _validate_ready_entry(
         raise PositionAdviceSourceError("required-data JSON path mismatch")
     if csv_relpath != str(bundle.get("required_data_csv_relpath") or ""):
         raise PositionAdviceSourceError("required-data CSV path mismatch")
-    if dict(entry.get("fetch_plan") or {}) != dict(bundle.get("fetch_plan") or {}):
+    if dict(entry.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
         raise PositionAdviceSourceError("required-data fetch plan mismatch")
     if str(entry.get("fetch_policy_hash") or "") != str(
         bundle.get("fetch_policy_hash") or ""
@@ -465,9 +881,158 @@ def _validate_ready_entry(
             "required_data_root": str(root),
             "source_outcome": source_outcome,
             "reason_code": reason_code,
+            "expected_fetch_contract": contract,
+            "expected_fetch_contract_sha256": str(
+                contract["contract_sha256"]
+            ),
         },
         captured_csv,
     )
+
+
+def _validate_bundle_authority(
+    *,
+    bundle: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    symbol: str,
+    expected_fetch_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    contract_payload = bundle.get("expected_fetch_contract")
+    if not isinstance(contract_payload, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data bundle expected fetch contract is missing"
+        )
+    contract = validate_required_data_expected_fetch_contract(
+        contract_payload,
+        expected_symbol=symbol,
+    )
+    expected = validate_required_data_expected_fetch_contract(
+        expected_fetch_contract,
+        expected_symbol=symbol,
+    )
+    if contract != expected:
+        raise PositionAdviceSourceError(
+            "required-data bundle expected fetch contract mismatch"
+        )
+    contract_hash = str(contract["contract_sha256"])
+    if str(bundle.get("expected_fetch_contract_sha256") or "") != contract_hash:
+        raise PositionAdviceSourceError(
+            "required-data bundle expected fetch contract hash mismatch"
+        )
+    if dict(bundle.get("fetch_plan") or {}) != dict(contract["fetch_plan"]):
+        raise PositionAdviceSourceError(
+            "required-data bundle fetch plan contradicts its contract"
+        )
+
+    fetch_policy = bundle.get("fetch_policy")
+    if not isinstance(fetch_policy, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data operational fetch policy is invalid"
+        )
+    policy_payload = {
+        "schema": "required_data_fetch_policy.v2",
+        "expected_fetch_contract": contract,
+        "fetch_policy": dict(fetch_policy),
+    }
+    policy_hash = canonical_sha256(policy_payload)
+    if (
+        str(bundle.get("fetch_policy_hash") or "") != policy_hash
+        or str(receipt.get("producer_policy_hash") or "") != policy_hash
+    ):
+        raise PositionAdviceSourceError(
+            "required-data operational fetch policy hash mismatch"
+        )
+    _validate_physical_binding(
+        observed=fetch_policy,
+        expected=contract["fetch_binding"],
+        subject="operational fetch policy",
+    )
+    try:
+        raw_bytes = base64.b64decode(
+            _required_text(bundle.get("raw_json_base64"), "raw_json_base64"),
+            validate=True,
+        )
+        raw_payload = json.loads(raw_bytes.decode("utf-8"))
+    except (
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        raise PositionAdviceSourceError(
+            "required-data bundle raw JSON is unreadable"
+        ) from exc
+    meta = raw_payload.get("meta") if isinstance(raw_payload, Mapping) else None
+    if not isinstance(meta, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data payload physical binding is missing"
+        )
+    _validate_physical_binding(
+        observed=meta,
+        expected=contract["fetch_binding"],
+        subject="payload",
+    )
+    return contract
+
+
+def _validate_canonical_bundle_candidate(
+    *,
+    root: Path,
+    bundle: Mapping[str, Any],
+    expected_fetch_contract: Mapping[str, Any],
+) -> None:
+    raw_relpath = _required_text(
+        bundle.get("raw_json_relpath"),
+        "raw_json_relpath",
+    )
+    csv_relpath = _required_text(
+        bundle.get("required_data_csv_relpath"),
+        "required_data_csv_relpath",
+    )
+    validate_required_data_quote_candidate(
+        producer_root=root,
+        raw_path=safe_existing_relative_path(root, raw_relpath),
+        csv_path=safe_existing_relative_path(root, csv_relpath),
+        expected_fetch_contract=expected_fetch_contract,
+    )
+
+
+def _validate_physical_binding(
+    *,
+    observed: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    subject: str,
+) -> None:
+    actual_port = observed.get("port")
+    expected_port = expected.get("port")
+    if (
+        isinstance(actual_port, bool)
+        or not isinstance(actual_port, int)
+        or isinstance(expected_port, bool)
+        or not isinstance(expected_port, int)
+    ):
+        raise PositionAdviceSourceError(
+            f"required-data {subject} physical binding is invalid"
+        )
+    try:
+        actual_binding = {
+            "source": _normalize_source(observed.get("source")),
+            "host": _required_text(observed.get("host"), f"{subject} host"),
+            "port": actual_port,
+        }
+        expected_binding = {
+            "source": _normalize_source(expected.get("source")),
+            "host": _required_text(expected.get("host"), "expected fetch host"),
+            "port": expected_port,
+        }
+    except (TypeError, ValueError) as exc:
+        raise PositionAdviceSourceError(
+            f"required-data {subject} physical binding is invalid"
+        ) from exc
+    if not actual_binding["source"] or actual_binding != expected_binding:
+        raise PositionAdviceSourceError(
+            f"required-data {subject} physical binding mismatch"
+        )
 
 
 def _validate_complete_required_data_bundle(
@@ -559,11 +1124,50 @@ def _prefetch_result_index(summary: Mapping[str, Any]) -> dict[str, dict[str, An
     return out
 
 
+def _failed_manifest_entry(
+    failure: Mapping[str, Any],
+    *,
+    default_reason: str,
+) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "reason": str(
+            failure.get("message")
+            or failure.get("reason")
+            or failure.get("status")
+            or default_reason
+        ).strip(),
+        "error_type": str(
+            failure.get("error_type")
+            or failure.get("error_code")
+            or "RequiredDataFetchError"
+        ).strip(),
+    }
+
+
 def _required_text(value: Any, field: str) -> str:
     text = str(value or "").strip()
     if not text:
         raise RequiredDataSnapshotError(f"{field} is required")
     return text
+
+
+def _manifest_timestamp(value: Any, field: str) -> datetime:
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = _required_text(value, field)
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError) as exc:
+        raise RequiredDataSnapshotError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RequiredDataSnapshotError(f"{field} must be timezone-aware")
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise RequiredDataSnapshotError(f"{field} must be UTC")
+    return parsed
 
 
 def _existing_directory(path: Path, field: str) -> Path:
@@ -576,6 +1180,12 @@ def _existing_directory(path: Path, field: str) -> Path:
 def _is_sha256(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
+
+
+def _normalize_source(value: Any) -> str:
+    if not str(value or "").strip():
+        return ""
+    return normalize_fetch_source(value)
 
 
 __all__ = [

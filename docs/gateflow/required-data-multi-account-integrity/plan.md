@@ -79,6 +79,16 @@ Before any fetch, the parent builds a canonical `expected_fetch_contract` per ph
 - the stable coverage policy used by `required_data_frame_covers_fetch_plan`;
 - a canonical SHA-256 included in the global plan identity.
 
+For a multi-spec contract, provider evidence is an ordered child list with one
+entry per ordered exact request. Each entry binds `request_index`, a canonical
+SHA-256 of that planned request, canonical symbol, physical source/host/port,
+typed status/outcome, `source_observed_at`, and `completed_at_utc`. The finalizer
+recomputes the ordered identities and rejects count, order, duplicate, hash,
+symbol, binding, outcome, or time drift. Request identity may be attached by the
+coordinator at the actual invocation boundary; provider outcome and timestamps
+must come from that invoked child and are never synthesized from the aggregate
+plan.
+
 Operational execution metadata such as retry counters, batch budgets, and execution mode remains recorded in the
 receipt with its own canonical hash, but is not falsely claimed to be plan-owned policy. Seal exact-compares the
 plan-owned fetch contract and physical binding, and validates the operational-policy payload/hash for self-integrity.
@@ -320,18 +330,28 @@ No persistent database schema changes are introduced.
 
 - **Objective**: make final snapshot/RV/CSV coverage and exact expected contract mandatory before receipt/seal success.
 - **Expected outcome**: incomplete/wrong provider data and bad identity end as typed symbol failure; valid complete and
-  valid empty discoveries produce one adoptable receipt and terminal authority.
+  valid empty discoveries produce one adoptable receipt and terminal authority. A canonical in-process multi-spec
+  plan executes every exact child and aggregates once; subprocess multi-spec fails typed before execution until S6.
 - **Allowed files/modules**:
   - `src/application/opend_market_snapshot_fetching.py`
+  - `src/application/opend_symbol_chain_fetching.py`
   - `src/application/opend_symbol_fetching.py`
+  - `src/application/opend_symbol_fetching_cli.py`
   - `src/application/opend_symbol_outputs.py`
+  - `src/application/position_advice_source_receipts.py`
+  - `src/application/required_data_planning.py`
   - `src/application/required_data_fetching.py`
   - `src/application/required_data_coverage.py`
   - `src/application/required_data_plan_identity.py`
   - `src/application/required_data_snapshot.py`
   - `src/application/required_data_steps.py`
   - `src/application/multi_tick/required_data_prefetch.py`
+  - `src/infrastructure/futu_gateway_pool.py`
+  - generated `docs/DEPENDENCY_GRAPH.md` and `docs/dependency_graph.mmd`
   - directly corresponding required-data tests
+  - `tests/test_futu_gateway_pool.py`
+  - `tests/test_position_advice_source_producers.py`
+  - `tests/test_required_data_fetch_planning.py`
 - **Prerequisites**: confirmed goal.
 - **Exact changes**:
   - implement code-set reconciliation and typed RV completeness;
@@ -340,23 +360,64 @@ No persistent database schema changes are introduced.
   - adopt exact existing receipts during crash re-entry; never synthesize new timestamps for cached evidence;
   - make receipt mismatch per-symbol failed and terminal seal partial/failed; only corrupt global plan prevents seal;
   - mark gateway success/failure only after typed result inspection.
+  - make worker cleanup reset thread-local health state directly, without
+    reporting cleanup as a provider success observation.
+  - let the generic payload-first/receipt-last publisher run one optional,
+    side-effect-free commit validator immediately before the immutable receipt
+    write; required-data uses it for a final fresh wall-clock TTL check.
+  - preserve every ready Close Advice position requirement as an exact
+    `(option_type, expiration, strike)` demand in both top-level and nested
+    side-plan identity; post-write coverage must prove each exact contract,
+    including an interior strike already contained by a broader strategy range.
+  - bind expiration-discovery and raw provider underlier codes to the canonical
+    plan symbol; a wrong-symbol discovery or raw payload cannot publish a receipt.
+  - strictly validate every ready position requirement before projection; one
+    malformed side/expiration/strike fails the symbol instead of disappearing.
+  - execute every ordered in-process `RequiredDataFetchSpec` as a real child on
+    the existing gateway, aggregate the typed payloads through the shared
+    required-data fetching owner, then save/finalize once.
+  - bind every child to its ordered canonical request SHA-256 and exact physical
+    identity; reject count/order/duplicate/hash/binding/non-ok evidence drift.
+  - reject subprocess multi-spec as typed unsupported before subprocess/output/
+    receipt effects; retain zero/one-spec and success-empty compatibility until
+    S6 supplies exact-spec subprocess JSON plumbing.
+  - use one exact-strike helper in typed and debug coverage with
+    `rel_tol=0.0, abs_tol=1e-9`; range-edge tolerance is not contract identity.
 - **Functions/types and call path**: extend `MarketSnapshotFetchResult`; strengthen `fetch_option_snapshots`,
-  `fetch_symbol_request`, `save_outputs`/receipt publication, and seal resolution. Data flows as
-  `expected contract -> typed provider payload -> finalizer -> exact durable bytes -> receipt -> terminal seal`.
+  `fetch_symbol_request`, `RequiredDataFetchSpec` planning, the shared execution/merge helper,
+  `save_outputs`/receipt publication, and seal resolution. Data flows as
+  `expected contract -> ordered actual child invocations -> typed aggregate -> finalizer -> exact durable bytes ->
+  receipt -> terminal seal`.
 - **Error handling**: safe diagnostics may remain, but no success authority. `success_empty` requires validated empty
   discovery/CSV and RV `not_applicable_no_contracts`.
 - **Invariants**: no receipt before post-write readback; no production publication bypass; at most one immutable receipt
-  per exact observation/contract; cached path never invokes `save_outputs`.
-- **Non-goals**: exact-spec execution and spot reuse are S6; broad timestamp redesign is out of scope.
+  per exact observation/contract; cached path never invokes `save_outputs`; gateway success/failure observations come
+  only from typed provider results, never from connection cleanup; exact position
+  demands retain their expiration dimension through strategy/position merging and
+  cannot be inferred from range endpoints; malformed ready demand is never
+  silently dropped; ordered child evidence equals ordered contract requests.
+- **Non-goals**: scoped-union correction, run-local spot reuse, and subprocess/public CLI multi-spec plumbing are S6;
+  broad timestamp redesign is out of scope. The minimum real in-process per-spec execution needed to make S1's
+  evidence contract true is part of S1.
 - **Tests/validation**:
   - `tests/test_market_snapshot_fetching.py`
   - `tests/test_required_data_snapshot.py`
   - `tests/test_required_data_coverage.py`
   - `tests/test_required_data_prefetch_inprocess.py`
   - `tests/test_required_data_quote_receipts.py`
+  - `tests/test_required_data_fetch_planning.py`
+  - `tests/test_required_data_exact_coverage.py`
+  - `tests/test_required_data_expected_contract_integrity.py`
+  - `tests/test_required_data_output_integrity.py`
+  - `tests/test_futu_gateway_pool.py`
   - regressions for strict subset/unexpected code, full fallback recovery, bad required RV, no-contract RV N/A,
-    direct publisher bypass, raw wrong-binding/error with otherwise covering CSV, per-symbol plan mismatch partial, and
-    receipt-last crash/re-entry adoption.
+    direct publisher bypass, wrong discovery/raw underlier, position-only and
+    strategy-plus-interior exact-strike omission, expiry-local exact-strike
+    non-interchangeability, malformed ready input/exact-strike identity, exact
+    `1e-9` agreement across both coverage entry points, real two-spec child
+    execution and request-hash/order/binding drift, subprocess multi-spec
+    pre-effect rejection, per-symbol plan mismatch partial, and receipt-last
+    crash/re-entry adoption.
 - **Completion signal**: focused tests pass and code search proves every production receipt caller enforces the same
   postcondition.
 - **Stop condition**: current terminal manifest cannot represent per-symbol typed failure without a new public
@@ -495,7 +556,7 @@ No persistent database schema changes are introduced.
 - **Stop condition**: a same-transaction multi-account read cannot be added without changing ledger persistence
   semantics or a policy is needed for an unsupported path-risk consumer.
 
-### S6 — Scoped planning, one spot observation, and exact spec execution
+### S6 — Scoped planning, one spot observation, and complete exact-spec execution
 
 - **Objective**: make provider calls equal the approved cross-account plan.
 - **Expected outcome**: requested opening scope is not expanded, explicit position extras remain traceable, each
@@ -510,12 +571,13 @@ No persistent database schema changes are introduced.
     `tests/test_opend_symbol_fetching_cli.py`
 - **Prerequisites**: S1 accepted.
 - **Exact changes**: filter base opening scope; keep explicit Close Advice extras traceable; run-local spot membership
-  cache and explicit observed-None semantics; canonical exact-spec parser; deterministic aggregate; one gateway and
-  finalizer; subprocess todo always force-refreshes execution result.
+  cache and explicit observed-None semantics; canonical exact-spec parser and CLI adapter; extend S1's request-bound
+  aggregation to subprocess multi-spec with one final save/finalizer; subprocess todo always force-refreshes execution
+  result. Do not replace or weaken S1's in-process child-evidence contract.
 - **Functions/types and call path**: extend `build_cross_account_prefetch_config`,
   `build_required_data_fetch_plan`, `RequiredDataFetchSpec` parse/debug helpers, `fetch_symbol_request`, CLI adapter,
-  and prefetch executor. Flow is `scoped union -> exact specs + shared spot observation -> one gateway execution ->
-  typed aggregate -> S1 finalizer`.
+  and prefetch executor. Flow is `scoped union -> exact specs + shared spot observation -> one execution lifecycle ->
+  S1 request-bound typed aggregate -> S1 finalizer`.
 - **Error handling**: malformed/mixed specs fail before gateway creation; child error/identity disagreement fails the
   aggregate and finalizer; no fallback to Cartesian selectors.
 - **Invariants**: every provider relation equals a declared spec; one binding/day has at most one spot observation,
@@ -528,7 +590,8 @@ No persistent database schema changes are introduced.
   - `tests/test_opend_symbol_fetching_cli.py`
   - regressions for scope, explicit extra, observed `None`, distinct binding/day, exact mixed-side calls, malformed/
     mixed specs, prior successful idempotency record, and gateway/save/finalizer counts.
-- **Completion signal**: spies show exact specs and zero duplicate spot observations.
+- **Completion signal**: spies show exact specs and zero duplicate spot observations; subprocess multi-spec no longer
+  returns the temporary S1 typed-unsupported result and still saves/finalizes once.
 - **Stop condition**: internal exact JSON would have to become an unsupported public API.
 
 ### S7 — Parent event barrier and strict shared event consumption
@@ -675,5 +738,5 @@ Final closeout records:
 ## Plan gate decision
 
 - Decision: accepted after `pass-with-risks`; all material findings are `已修复` and residual risks are classified.
-- Current gate: `accepted plan commit`.
-- Next entry point: create the protected accepted-plan commit, then enter S1 implementation.
+- Current gate: `S1 aggregate DeepReview accepted` with zero material findings.
+- Next entry point: create the protected local S1 commit, then enter S2.

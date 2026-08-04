@@ -49,10 +49,30 @@ SNAPSHOT_KEEP_COLUMNS = [
 class MarketSnapshotFetchResult:
     snap_map: dict[str, dict[str, Any]]
     errors: list[dict[str, Any]]
+    requested_codes: frozenset[str]
+    returned_codes: frozenset[str]
+    missing_codes: frozenset[str]
+    unexpected_codes: frozenset[str]
+    complete: bool
     fallback_filled: int = 0
     fallback_failed: int = 0
     opend_call_count: int = 0
-    requested_codes_count: int = 0
+
+    @property
+    def requested_codes_count(self) -> int:
+        return len(self.requested_codes)
+
+    @property
+    def returned_codes_count(self) -> int:
+        return len(self.returned_codes)
+
+    @property
+    def missing_codes_count(self) -> int:
+        return len(self.missing_codes)
+
+    @property
+    def unexpected_codes_count(self) -> int:
+        return len(self.unexpected_codes)
 
 
 def get_spot_opend(
@@ -183,13 +203,21 @@ def fetch_option_snapshots(
 ) -> MarketSnapshotFetchResult:
     snap_map: dict[str, dict[str, Any]] = {}
     snapshot_errors: list[dict[str, Any]] = []
+    requested_code_order = tuple(dict.fromkeys(
+        code
+        for raw_code in option_codes
+        if (code := str(raw_code or "").strip())
+    ))
+    requested_codes = frozenset(requested_code_order)
+    returned_codes: set[str] = set()
+    duplicate_codes: set[str] = set()
     batch_size = int(snapshot_batch_size) if snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
     batch_size = max(1, batch_size)
     keep_columns = list(SNAPSHOT_KEEP_COLUMNS)
     opend_call_count = 0
 
-    for start in range(0, len(option_codes), batch_size):
-        batch = option_codes[start : start + batch_size]
+    for start in range(0, len(requested_code_order), batch_size):
+        batch = list(requested_code_order[start : start + batch_size])
         try:
             def _call_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_snapshot_call() -> Any:
@@ -232,15 +260,18 @@ def fetch_option_snapshots(
         if not keep:
             continue
 
-        for rec in records:
-            code = str(rec.get("code") or "")
-            if code:
-                snap_map[code] = rec
+        _merge_snapshot_records(
+            records=records,
+            requested_codes=requested_codes,
+            returned_codes=returned_codes,
+            duplicate_codes=duplicate_codes,
+            snap_map=snap_map,
+        )
 
     fallback_filled = 0
     fallback_failed = 0
-    if option_codes and int(snapshot_fallback_max_codes) > 0:
-        missing = [code for code in option_codes if code not in snap_map]
+    if requested_code_order and int(snapshot_fallback_max_codes) > 0:
+        missing = [code for code in requested_code_order if code not in snap_map]
         if missing:
             fallback_filled, fallback_failed, fallback_opend_calls = _fallback_fetch_missing_snapshots(
                 missing_codes=missing,
@@ -259,16 +290,57 @@ def fetch_option_snapshots(
                 retry_max_delay_sec=retry_max_delay_sec,
                 retry_call=retry_call,
                 rate_limited_call=rate_limited_call,
+                requested_codes=requested_codes,
+                returned_codes=returned_codes,
+                duplicate_codes=duplicate_codes,
             )
             opend_call_count += fallback_opend_calls
+
+    returned_code_set = frozenset(returned_codes)
+    missing_codes = frozenset(requested_codes.difference(snap_map))
+    unexpected_codes = frozenset(returned_code_set.difference(requested_codes))
+    if unexpected_codes:
+        snapshot_errors.append(
+            {
+                "stage": "market_snapshot_completeness",
+                "error_code": "SNAPSHOT_UNEXPECTED_CODES",
+                "message": f"provider returned {len(unexpected_codes)} unrequested snapshot codes",
+                "unexpected_codes": sorted(unexpected_codes),
+            }
+        )
+    if missing_codes:
+        snapshot_errors.append(
+            {
+                "stage": "market_snapshot_completeness",
+                "error_code": "SNAPSHOT_COVERAGE_INCOMPLETE",
+                "message": f"missing {len(missing_codes)} requested snapshot codes after fallback",
+                "missing_codes": sorted(missing_codes),
+            }
+        )
+    if duplicate_codes:
+        snapshot_errors.append(
+            {
+                "stage": "market_snapshot_completeness",
+                "error_code": "SNAPSHOT_DUPLICATE_CODES",
+                "message": (
+                    "provider returned duplicate rows for "
+                    f"{len(duplicate_codes)} requested snapshot codes"
+                ),
+                "duplicate_codes": sorted(duplicate_codes),
+            }
+        )
 
     return MarketSnapshotFetchResult(
         snap_map=snap_map,
         errors=snapshot_errors,
+        requested_codes=requested_codes,
+        returned_codes=returned_code_set,
+        missing_codes=missing_codes,
+        unexpected_codes=unexpected_codes,
+        complete=not missing_codes and not duplicate_codes,
         fallback_filled=fallback_filled,
         fallback_failed=fallback_failed,
         opend_call_count=opend_call_count,
-        requested_codes_count=len(option_codes),
     )
 
 
@@ -293,6 +365,29 @@ def keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[li
     return records, keep
 
 
+def _merge_snapshot_records(
+    *,
+    records: list[dict[str, Any]],
+    requested_codes: frozenset[str],
+    returned_codes: set[str],
+    duplicate_codes: set[str],
+    snap_map: dict[str, dict[str, Any]],
+) -> None:
+    """Merge one provider response without hiding duplicate code evidence."""
+
+    for rec in records:
+        code = str(rec.get("code") or "").strip()
+        if code:
+            returned_codes.add(code)
+        if code not in requested_codes or code in duplicate_codes:
+            continue
+        if code in snap_map:
+            duplicate_codes.add(code)
+            snap_map.pop(code, None)
+            continue
+        snap_map[code] = rec
+
+
 def _fallback_fetch_missing_snapshots(
     *,
     missing_codes: list[str],
@@ -311,6 +406,9 @@ def _fallback_fetch_missing_snapshots(
     retry_max_delay_sec: float,
     retry_call: Callable[..., Any],
     rate_limited_call: Callable[..., Any],
+    requested_codes: frozenset[str],
+    returned_codes: set[str],
+    duplicate_codes: set[str],
 ) -> tuple[int, int, int]:
     if not missing_codes or int(max_fallback_codes) <= 0:
         return 0, 0, 0
@@ -399,12 +497,18 @@ def _fallback_fetch_missing_snapshots(
             failed_count += len(batch)
             continue
 
-        filled_before = len(snap_map)
-        for rec in records:
-            code = str(rec.get("code") or "")
-            if code:
-                snap_map[code] = rec
-        filled_count += max(0, len(snap_map) - filled_before)
+        batch_codes = set(batch)
+        filled_before = len(batch_codes.intersection(snap_map))
+        _merge_snapshot_records(
+            records=records,
+            requested_codes=requested_codes,
+            returned_codes=returned_codes,
+            duplicate_codes=duplicate_codes,
+            snap_map=snap_map,
+        )
+        filled_after = len(batch_codes.intersection(snap_map))
+        filled_count += max(0, filled_after - filled_before)
+        failed_count += max(0, len(batch_codes) - filled_after)
 
     return filled_count, failed_count, opend_call_count
 
