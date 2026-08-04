@@ -1,16 +1,90 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import threading
 from typing import Any
 
 
-def is_gateway_connection_error(exc: Exception) -> bool:
-    text = str(exc or "")
+_CONNECTION_ERROR_CODES = frozenset(
+    {
+        "CONNECTION_ERROR",
+        "CONNECTION_RESET",
+        "DISCONNECTED",
+        "OPEND_TIMEOUT",
+        "TIMEOUT",
+        "TRANSIENT",
+    }
+)
+_CONNECTION_ERROR_FIELDS = ("errors", "snapshot_errors", "spot_errors")
+_CONNECTION_TEXT_HINTS = (
+    "broken pipe",
+    "cannot connect",
+    "connection",
+    "disconnected",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
+
+
+def _has_connection_text(value: Any, *, allow_generic_ret_error: bool) -> bool:
+    text = str(value or "")
     low = text.lower()
-    if "ret_error" in low:
+    if allow_generic_ret_error and "ret_error" in low:
         return True
-    keys = ("disconnected", "connection", "broken pipe", "connection reset", "timeout", "temporarily unavailable")
-    return any(key in low for key in keys)
+    return any(key in low for key in _CONNECTION_TEXT_HINTS)
+
+
+def _has_connection_code(value: Any) -> bool:
+    return str(value or "").strip().upper() in _CONNECTION_ERROR_CODES
+
+
+def _provider_failure_meta(
+    failure: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    meta = failure.get("meta")
+    if isinstance(meta, Mapping):
+        return meta
+    if any(key in failure for key in ("error_code", *_CONNECTION_ERROR_FIELDS)):
+        return failure
+    return None
+
+
+def _has_structured_provider_connection_error(
+    failure: Mapping[str, Any],
+) -> bool:
+    meta = _provider_failure_meta(failure)
+    if meta is None:
+        return False
+
+    # A top-level provider classification is health evidence; the top-level
+    # human-readable error is not.  In particular, completeness code rewrites
+    # must not hide (or fabricate) the nested connection cause.
+    if _has_connection_code(meta.get("error_code")):
+        return True
+    for field in _CONNECTION_ERROR_FIELDS:
+        items = meta.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if _has_connection_code(item.get("error_code")):
+                return True
+            if _has_connection_text(
+                item.get("message") or item.get("error"),
+                allow_generic_ret_error=False,
+            ):
+                return True
+    return False
+
+
+def is_gateway_connection_error(
+    failure: Exception | Mapping[str, Any],
+) -> bool:
+    if isinstance(failure, Mapping):
+        return _has_structured_provider_connection_error(failure)
+    return _has_connection_text(failure, allow_generic_ret_error=True)
 
 
 class ThreadLocalFutuGatewayPool:
@@ -77,7 +151,10 @@ class ThreadLocalFutuGatewayPool:
                 gateway.close()
             except Exception:
                 pass
-        self.mark_success()
+        # Resource cleanup is not evidence of a successful provider result.
+        # Reset only the worker-local connection-failure streak here; callers
+        # record typed provider success explicitly through ``mark_success``.
+        self._local.failure_count = 0
 
     def close_registered(self) -> None:
         with self._registry_lock:
@@ -89,9 +166,14 @@ class ThreadLocalFutuGatewayPool:
             except Exception:
                 pass
 
-    def mark_failure(self, exc: Exception, *, close_after: int = 2) -> None:
+    def mark_failure(
+        self,
+        failure: Exception | Mapping[str, Any],
+        *,
+        close_after: int = 2,
+    ) -> None:
         count = int(getattr(self._local, "failure_count", 0) or 0)
-        if is_gateway_connection_error(exc):
+        if is_gateway_connection_error(failure):
             count += 1
         else:
             count = 0
@@ -101,4 +183,3 @@ class ThreadLocalFutuGatewayPool:
 
     def mark_success(self) -> None:
         self._local.failure_count = 0
-

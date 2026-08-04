@@ -199,6 +199,7 @@ def _install_success_empty_strategy_evidence(
         source_dependency_from_receipt,
     )
     from src.application.required_data_plan_identity import (
+        build_required_data_expected_fetch_contract,
         required_data_plan_id,
     )
     from src.application.required_data_snapshot import (
@@ -226,15 +227,72 @@ def _install_success_empty_strategy_evidence(
     run_root = base / "output_runs" / "run-1"
     required_data_root = run_root / "required_data"
     required_data_root.mkdir(parents=True, exist_ok=True)
+    trading_date = observed_at.date().isoformat()
+    fetch_plan = {
+        "symbol": "NVDA",
+        "spot_reference": None,
+        "require_realized_volatility": False,
+        "side_plans": [],
+        "merged_requests": [],
+        "expiration_discovery_complete": True,
+        "expiration_discovery_error": None,
+        "expiration_discovery": {
+            "outcome": "success_empty",
+            "reason_code": reason_code,
+            "expirations": [],
+            "observed_at_utc": observed_at.isoformat(),
+            "completed_at_utc": completed_at.isoformat(),
+            "request_identity": {
+                "symbol": "NVDA",
+                "underlier": "US.NVDA",
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": trading_date,
+            },
+            "error": None,
+        },
+        "projection_outcome": "success_empty",
+        "projected_expirations": [],
+    }
+    expected_contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=fetch_plan,
+        source="futu",
+        host="127.0.0.1",
+        port=11111,
+    )
     raw_path, csv_path = save_outputs(
         base,
         "NVDA",
         {
+            "symbol": "NVDA",
+            "underlier_code": "US.NVDA",
+            "trading_date": trading_date,
+            "expirations": [],
+            "expiration_count": 0,
             "meta": {
                 "status": "ok",
+                "source": "futu",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": trading_date,
                 "source_outcome": "success_empty",
                 "reason_code": reason_code,
                 "source_observed_at": observed_at.isoformat(),
+                "completed_at_utc": completed_at.isoformat(),
+                "snapshot_requested_codes": 0,
+                "snapshot_returned_codes": 0,
+                "snapshot_missing_codes": 0,
+                "snapshot_unexpected_codes": 0,
+                "snapshot_requested_code_set": [],
+                "snapshot_returned_code_set": [],
+                "snapshot_missing_code_set": [],
+                "snapshot_unexpected_code_set": [],
+                "snapshot_complete": True,
+                "realized_volatility": {
+                    "status": "not_applicable_no_contracts",
+                },
             },
             "rows": [],
         },
@@ -247,17 +305,26 @@ def _install_success_empty_strategy_evidence(
             symbol="NVDA",
             raw_path=raw_path,
             csv_path=csv_path,
-            fetch_plan={"symbol": "NVDA"},
-            fetch_policy={"source": "futu"},
+            fetch_plan=fetch_plan,
+            fetch_policy={
+                "source": "futu",
+                "host": "127.0.0.1",
+                "port": 11111,
+            },
+            expected_fetch_contract=expected_contract,
             source_observed_at=observed_at,
             completed_at=completed_at,
+            now=completed_at,
         )
     )
     plan_items = [
         {
             "symbol": "NVDA",
             "source": "futu",
-            "fetch_plan": {"symbol": "NVDA"},
+            "fetch_plan": fetch_plan,
+            "fetch_binding": expected_contract["fetch_binding"],
+            "expected_fetch_contract": expected_contract,
+            "projection_outcome": "success_empty",
             "discovery_status": "complete",
         }
     ]

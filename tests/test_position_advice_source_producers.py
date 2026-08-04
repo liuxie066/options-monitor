@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,6 +39,7 @@ def _raw_source(
     *,
     kind: str,
     account_scope: bool,
+    before_receipt_commit: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[Path, dict[str, object]]:
     path = root / f"{kind}.receipt.json"
     receipt = publish_source_receipt(
@@ -57,8 +60,66 @@ def _raw_source(
         source_observed_at=NOW,
         completed_at=NOW + timedelta(seconds=1),
         producer_policy_hash=POLICY,
+        before_receipt_commit=before_receipt_commit,
     )
     return path, receipt
+
+
+def test_source_receipt_commit_validator_sees_complete_receipt_once(
+    tmp_path: Path,
+) -> None:
+    payload_path = tmp_path / "quotes.payload.json"
+    receipt_path = tmp_path / "quotes.receipt.json"
+    calls: list[dict[str, Any]] = []
+
+    def _validate(receipt: Mapping[str, Any]) -> None:
+        calls.append(dict(receipt))
+        assert receipt["schema_version"] == "position_advice_source_receipt.v1"
+        assert receipt["source_kind"] == "quotes"
+        assert receipt["payload_relpath"] == "quotes.payload.json"
+        assert receipt["completed"] is True
+        assert len(str(receipt["payload_sha256"])) == 64
+        assert payload_path.read_bytes() == b"{}\n"
+        assert not receipt_path.exists()
+
+    committed_path, committed = _raw_source(
+        tmp_path,
+        kind="quotes",
+        account_scope=False,
+        before_receipt_commit=_validate,
+    )
+
+    assert committed_path == receipt_path
+    assert receipt_path.is_file()
+    assert calls == [committed]
+
+
+def test_source_receipt_commit_validator_failure_leaves_only_orphan_payload(
+    tmp_path: Path,
+) -> None:
+    payload_path = tmp_path / "quotes.payload.json"
+    receipt_path = tmp_path / "quotes.receipt.json"
+    calls = 0
+
+    def _reject(receipt: Mapping[str, Any]) -> None:
+        nonlocal calls
+        calls += 1
+        assert receipt["completed"] is True
+        assert payload_path.is_file()
+        assert not receipt_path.exists()
+        raise RuntimeError("commit-time freshness expired")
+
+    with pytest.raises(RuntimeError, match="commit-time freshness expired"):
+        _raw_source(
+            tmp_path,
+            kind="quotes",
+            account_scope=False,
+            before_receipt_commit=_reject,
+        )
+
+    assert calls == 1
+    assert payload_path.read_bytes() == b"{}\n"
+    assert not receipt_path.exists()
 
 
 def test_portfolio_and_ledger_producers_preserve_native_observation(

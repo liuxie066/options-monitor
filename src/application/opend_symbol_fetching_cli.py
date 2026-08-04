@@ -35,6 +35,11 @@ def main() -> None:
     ap.add_argument("--max-strike", type=float, default=None)
     ap.add_argument("--side-strike-windows-json", default=None)
     ap.add_argument("--explicit-expirations", nargs="*", default=None)
+    ap.add_argument(
+        "--trading-date",
+        default=None,
+        help="Immutable YYYY-MM-DD DTE anchor for a planned fetch",
+    )
     ap.add_argument("--min-dte", type=int, default=None, help="Only pick expirations with DTE >= min_dte before applying limit-expirations")
     ap.add_argument("--max-dte", type=int, default=None, help="Only pick expirations with DTE <= max_dte before applying limit-expirations")
     ap.add_argument("--host", default="127.0.0.1")
@@ -107,6 +112,7 @@ def main() -> None:
                 min_dte=args.min_dte,
                 max_dte=args.max_dte,
                 explicit_expirations=list(args.explicit_expirations or []) or None,
+                trading_date=args.trading_date,
                 retry_max_attempts=int(args.retry_max_attempts),
                 retry_time_budget_sec=float(args.retry_time_budget_sec),
                 retry_base_delay_sec=float(args.retry_base_delay_sec),

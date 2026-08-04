@@ -72,3 +72,34 @@ def test_gateway_pool_closes_after_repeated_connection_failures(monkeypatch) -> 
     pool.mark_failure(RuntimeError("connection reset by peer"))
     assert built[0].close_calls == 1
     assert is_gateway_connection_error(RuntimeError("ret_error: timeout"))
+
+
+def test_gateway_pool_cleanup_resets_failure_without_marking_success(
+    monkeypatch,
+) -> None:
+    pool = ThreadLocalFutuGatewayPool()
+    gateway = _Gateway()
+    pool._local.gateways = {  # type: ignore[attr-defined]
+        ("127.0.0.1", 11111, True): gateway,
+        ("127.0.0.1", 11111, False): gateway,
+    }
+    pool._local.failure_count = 1  # type: ignore[attr-defined]
+    success_calls: list[object] = []
+    monkeypatch.setattr(
+        pool,
+        "mark_success",
+        lambda: success_calls.append(object()),
+    )
+
+    pool.close_current_thread()
+
+    assert gateway.close_calls == 1
+    assert pool._local.failure_count == 0  # type: ignore[attr-defined]
+    assert pool._local.gateways == {}  # type: ignore[attr-defined]
+    assert success_calls == []
+
+    pool.close_current_thread()
+
+    assert gateway.close_calls == 1
+    assert pool._local.failure_count == 0  # type: ignore[attr-defined]
+    assert success_calls == []

@@ -18,7 +18,7 @@ Notes:
 
 import math
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -40,7 +40,11 @@ from src.application.opend_utils import normalize_underlier, get_trading_date
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.opend_fetch_config import OpenDFetchLimits
-from src.application.opend_market_snapshot_fetching import fetch_option_snapshots, get_spot_opend
+from src.application.opend_market_snapshot_fetching import (
+    MarketSnapshotFetchResult,
+    fetch_option_snapshots,
+    get_spot_opend,
+)
 from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
@@ -65,9 +69,90 @@ def calc_mid(bid, ask, last_price=None):
     return None
 
 
+REQUIRED_REALIZED_VOLATILITY_INCOMPLETE = "REQUIRED_REALIZED_VOLATILITY_INCOMPLETE"
+SNAPSHOT_COVERAGE_INCOMPLETE = "SNAPSHOT_COVERAGE_INCOMPLETE"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:
+    return RealizedVolatilitySnapshot(
+        status="not_applicable_no_contracts",
+        reason="not_applicable_no_contracts",
+    )
+
+
+def _required_realized_volatility_error(
+    snapshot: RealizedVolatilitySnapshot,
+) -> dict[str, Any] | None:
+    status = str(snapshot.status or "").strip().lower()
+    estimate = to_float(snapshot.rv_estimate)
+    if status == "ok" and estimate is not None and math.isfinite(estimate) and estimate > 0:
+        return None
+    reason = str(snapshot.reason or "").strip()
+    detail = reason or f"status={status or 'missing'}, estimate={snapshot.rv_estimate!r}"
+    return {
+        "stage": "realized_volatility",
+        "error_code": REQUIRED_REALIZED_VOLATILITY_INCOMPLETE,
+        "message": f"required realized volatility is incomplete: {detail}",
+        "realized_volatility_status": status or "missing",
+        "realized_volatility_estimate": snapshot.rv_estimate,
+    }
+
+
+def _snapshot_completeness_meta(
+    result: MarketSnapshotFetchResult | None,
+    *,
+    empty_complete: bool = False,
+) -> dict[str, Any]:
+    if result is None:
+        return {
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+            "snapshot_complete": bool(empty_complete),
+        }
+    return {
+        "snapshot_requested_codes": result.requested_codes_count,
+        "snapshot_returned_codes": result.returned_codes_count,
+        "snapshot_missing_codes": result.missing_codes_count,
+        "snapshot_unexpected_codes": result.unexpected_codes_count,
+        "snapshot_requested_code_set": sorted(result.requested_codes),
+        "snapshot_returned_code_set": sorted(result.returned_codes),
+        "snapshot_missing_code_set": sorted(result.missing_codes),
+        "snapshot_unexpected_code_set": sorted(result.unexpected_codes),
+        "snapshot_complete": bool(result.complete),
+    }
+
+
 def _as_date(s: str) -> date:
     # futu strike_time is usually 'YYYY-MM-DD'
     return datetime.strptime(s[:10], '%Y-%m-%d').date()
+
+
+def _resolve_request_trading_date(
+    *,
+    value: str | None,
+    market: str,
+) -> date:
+    if value is None:
+        return get_trading_date(market)
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("required-data trading date is invalid")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("required-data trading date is invalid") from exc
+    if parsed.isoformat() != value:
+        raise ValueError("required-data trading date is invalid")
+    return parsed
 
 
 def _safe_int(x):
@@ -147,6 +232,7 @@ class FetchSymbolRequest:
     snapshot_fallback_max_codes: int = 100
     snapshot_fallback_batch_size: int = 20
     include_realized_volatility: bool = False
+    trading_date: str | None = None
 
     @property
     def effective_base_dir(self) -> Path:
@@ -167,7 +253,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -183,6 +269,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             min_dte=min_dte,
             max_dte=max_dte,
             explicit_expirations=explicit_expirations,
+            trading_date=trading_date,
             retry_max_attempts=retry_max_attempts,
             retry_time_budget_sec=retry_time_budget_sec,
             retry_base_delay_sec=retry_base_delay_sec,
@@ -256,11 +343,16 @@ def fetch_symbol_request(
         for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
         if exp
     })
+    if request.trading_date is not None and not explicit_expirations_norm:
+        raise ValueError(
+            "anchored required-data request lacks explicit expirations"
+        )
     spot_errors: list[dict[str, Any]] = []
     spot_fetch_meta: dict[str, Any] = {
         "spot_snapshot_opend_calls": 0,
         "spot_snapshot_requested_codes": 0,
     }
+    rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
     if external_gateway:
         gateway = request.gateway
     else:
@@ -290,15 +382,10 @@ def fetch_symbol_request(
             )
 
         # Trading-date anchor for DTE / cache freshness.
-        today = get_trading_date(u.market)
-        if request.include_realized_volatility:
-            rv_snapshot = fetch_realized_volatility_snapshot(
-                gateway,
-                underlier_code=u.code,
-                trading_day=today,
-            )
-        else:
-            rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
+        today = _resolve_request_trading_date(
+            value=request.trading_date,
+            market=u.market,
+        )
 
         chain_bundle = fetch_symbol_option_chain(
             gateway=gateway,
@@ -328,6 +415,13 @@ def fetch_symbol_request(
             )
             raw_fetch_errors = fetch_meta.get('errors')
             fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
+            if request.include_realized_volatility and source_outcome == "success_empty":
+                rv_snapshot = _no_contracts_realized_volatility()
+            elif request.include_realized_volatility:
+                rv_snapshot = RealizedVolatilitySnapshot(
+                    status="skipped",
+                    reason="option_chain_unavailable",
+                )
             error_message = next(
                 (
                     str(item.get('message'))
@@ -366,8 +460,11 @@ def fetch_symbol_request(
                     'rate_gate_wait_sec': float(fetch_meta.get('rate_gate_wait_sec') or 0.0),
                     'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
                     'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
+                    **_snapshot_completeness_meta(None, empty_complete=(source_outcome == "success_empty")),
+                    'realized_volatility': rv_snapshot.to_meta(),
                     'source_observed_at': fetch_meta.get('source_observed_at'),
                     'completed_at_utc': fetch_meta.get('completed_at_utc'),
+                    'trading_date': today.isoformat(),
                 },
             }
 
@@ -449,6 +546,16 @@ def fetch_symbol_request(
         # Fetch snapshots for option codes in batches
         option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
 
+        if request.include_realized_volatility:
+            if option_codes:
+                rv_snapshot = fetch_realized_volatility_snapshot(
+                    gateway,
+                    underlier_code=u.code,
+                    trading_day=today,
+                )
+            else:
+                rv_snapshot = _no_contracts_realized_volatility()
+
         snapshot_result = fetch_option_snapshots(
             option_codes=option_codes,
             gateway=gateway,
@@ -471,7 +578,6 @@ def fetch_symbol_request(
         snapshot_fallback_filled = snapshot_result.fallback_filled
         snapshot_fallback_failed = snapshot_result.fallback_failed
         snapshot_opend_call_count = snapshot_result.opend_call_count
-        snapshot_requested_codes = snapshot_result.requested_codes_count
 
         rows: list[dict[str, Any]] = []
 
@@ -560,27 +666,41 @@ def fetch_symbol_request(
         fetch_result_meta = chain_bundle.fetch_meta or {}
         raw_fetch_errors = fetch_result_meta.get('errors')
         fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
-        combined_errors = [*fetch_errors, *snapshot_errors]
-        snapshot_error_code = next(
-            (
-                str(item.get('error_code'))
-                for item in snapshot_errors
-                if isinstance(item, dict) and str(item.get('error_code') or '').strip()
-            ),
-            None,
+        rv_error = (
+            _required_realized_volatility_error(rv_snapshot)
+            if request.include_realized_volatility and option_codes
+            else None
         )
+        combined_errors = [*fetch_errors, *snapshot_errors, *([rv_error] if rv_error is not None else [])]
         status = str(fetch_result_meta.get('status') or 'ok')
-        error_code = fetch_result_meta.get('error_code') or snapshot_error_code
-        if snapshot_errors and status == 'ok':
-            status = 'partial' if snap_map else 'error'
+        error_code = fetch_result_meta.get('error_code')
+        if not snapshot_result.complete:
+            status = 'error'
+            error_code = SNAPSHOT_COVERAGE_INCOMPLETE
+        elif rv_error is not None:
+            status = 'error'
+            error_code = REQUIRED_REALIZED_VOLATILITY_INCOMPLETE
         fetch_error_message = next(
             (
                 str(item.get('message'))
                 for item in combined_errors
-                if isinstance(item, dict) and str(item.get('message') or '').strip()
+                if isinstance(item, dict)
+                and str(item.get('error_code') or '').strip() == str(error_code or '').strip()
+                and str(item.get('message') or '').strip()
             ),
-            None,
+            next(
+                (
+                    str(item.get('message'))
+                    for item in combined_errors
+                    if status != 'ok'
+                    and isinstance(item, dict)
+                    and str(item.get('message') or '').strip()
+                ),
+                None,
+            ),
         )
+        completed_at_utc = _utc_now_iso()
+        source_observed_at = fetch_result_meta.get('source_observed_at') or completed_at_utc
 
         return {
             'symbol': symbol,
@@ -612,7 +732,7 @@ def fetch_symbol_request(
                 'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
                 'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
                 'option_codes': len(option_codes),
-                'snapshot_requested_codes': int(snapshot_requested_codes),
+                **_snapshot_completeness_meta(snapshot_result),
                 'snapshot_opend_call_count': int(snapshot_opend_call_count),
                 'snapshots_rows': int(len(snap_map)),
                 'snapshot_fallback_filled': int(snapshot_fallback_filled),
@@ -621,8 +741,9 @@ def fetch_symbol_request(
                 'spot_errors': spot_errors,
                 'realized_volatility': rv_snapshot.to_meta(),
                 'side_strike_windows': side_strike_windows or {},
-                'source_observed_at': fetch_result_meta.get('source_observed_at'),
-                'completed_at_utc': fetch_result_meta.get('completed_at_utc'),
+                'source_observed_at': source_observed_at,
+                'completed_at_utc': completed_at_utc,
+                'trading_date': today.isoformat(),
             },
         }
     except Exception as e:
@@ -642,6 +763,8 @@ def fetch_symbol_request(
                 'error_code': classify_option_chain_error(e),
                 'error': error_text,
                 'spot_errors': spot_errors,
+                **_snapshot_completeness_meta(None, empty_complete=False),
+                'realized_volatility': rv_snapshot.to_meta(),
             },
         }
 

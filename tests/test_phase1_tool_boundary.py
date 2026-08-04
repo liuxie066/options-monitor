@@ -14,11 +14,43 @@ if str(BASE) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.application.multi_tick import required_data_prefetch as prefetch_mod
+
     monkeypatch.setattr("src.application.required_data_planning._resolve_spot_reference", lambda **_kwargs: None)
     monkeypatch.setattr(
         "src.application.required_data_planning.list_option_expirations",
         lambda *_args, **_kwargs: ["2026-12-18"],
     )
+
+    def _cache_miss(**_kwargs) -> None:
+        raise FileNotFoundError("fixture cache miss")
+
+    monkeypatch.setattr(
+        prefetch_mod,
+        "validate_required_data_quote_candidate",
+        _cache_miss,
+    )
+    monkeypatch.setattr(
+        prefetch_mod,
+        "finalize_required_data_quote_candidate",
+        lambda **_kwargs: {"quote_receipt_path": None},
+    )
+
+
+def _declared_put_symbol(
+    symbol: str,
+    fetch: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "fetch": fetch,
+        "sell_put": {
+            "enabled": True,
+            "min_dte": 1,
+            "max_dte": 365,
+            "max_strike": 1000,
+        },
+    }
 
 
 def test_scheduler_decision_schema_boundary() -> None:
@@ -119,9 +151,7 @@ def test_prefetch_required_data_idempotency_audit() -> None:
     from src.application.multi_tick import required_data_prefetch as mod
 
     calls: list[tuple[str, str, int]] = []
-    old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
-    mod.has_shared_required_data = lambda symbol, shared_dir: False
 
     def _fake_execute(self, intent):
         calls.append((intent.tool_name, intent.symbol, int(intent.limit_exp)))
@@ -150,8 +180,14 @@ def test_prefetch_required_data_idempotency_audit() -> None:
                 cfg={
                     "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
-                        {"symbol": "AAPL", "fetch": {"source": "yahoo", "limit_expirations": 8}},
-                        {"symbol": "AAPL", "fetch": {"source": "yahoo", "limit_expirations": 8}},
+                        _declared_put_symbol(
+                            "AAPL",
+                            {"source": "yahoo", "limit_expirations": 8},
+                        ),
+                        _declared_put_symbol(
+                            "AAPL",
+                            {"source": "yahoo", "limit_expirations": 8},
+                        ),
                     ]
                 },
                 shared_required=Path(td) / "required_data",
@@ -162,16 +198,13 @@ def test_prefetch_required_data_idempotency_audit() -> None:
         assert len(out["audit"]) == 1
         assert len(calls) == 1
     finally:
-        mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
 
 
 def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:
     from src.application.multi_tick import required_data_prefetch as mod
 
-    old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
-    mod.has_shared_required_data = lambda symbol, shared_dir: False
 
     calls: list[str] = []
     cooldowns: list[float] = []
@@ -243,10 +276,22 @@ def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:
                         "prefetch_fail_budget_total": 2,
                     },
                     "symbols": [
-                        {"symbol": "AAPL", "fetch": {"source": "opend", "limit_expirations": 8}},
-                        {"symbol": "MSFT", "fetch": {"source": "opend", "limit_expirations": 8}},
-                        {"symbol": "TSLA", "fetch": {"source": "opend", "limit_expirations": 8}},
-                        {"symbol": "BABA", "fetch": {"source": "opend", "limit_expirations": 8}},
+                        _declared_put_symbol(
+                            "AAPL",
+                            {"source": "opend", "limit_expirations": 8},
+                        ),
+                        _declared_put_symbol(
+                            "MSFT",
+                            {"source": "opend", "limit_expirations": 8},
+                        ),
+                        _declared_put_symbol(
+                            "TSLA",
+                            {"source": "opend", "limit_expirations": 8},
+                        ),
+                        _declared_put_symbol(
+                            "BABA",
+                            {"source": "opend", "limit_expirations": 8},
+                        ),
                     ],
                 },
                 shared_required=Path(td) / "required_data",
@@ -260,16 +305,13 @@ def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:
         assert calls == ["AAPL", "MSFT", "TSLA", "BABA"]
         assert cooldowns == []
     finally:
-        mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
 
 
 def test_prefetch_required_data_defaults_to_opend_source() -> None:
     from src.application.multi_tick import required_data_prefetch as mod
 
-    old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
-    mod.has_shared_required_data = lambda symbol, shared_dir: False
 
     seen: list[tuple[str, str]] = []
 
@@ -300,7 +342,10 @@ def test_prefetch_required_data_defaults_to_opend_source() -> None:
                 cfg={
                     "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
-                        {"symbol": "CRDO", "fetch": {"limit_expirations": 8}},
+                        _declared_put_symbol(
+                            "CRDO",
+                            {"limit_expirations": 8},
+                        ),
                     ]
                 },
                 shared_required=Path(td) / "required_data",
@@ -308,18 +353,24 @@ def test_prefetch_required_data_defaults_to_opend_source() -> None:
         assert out["fetched_ok"] == 1
         assert seen == [("CRDO", "opend")]
     finally:
-        mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
 
 
-def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> None:
+def test_prefetch_required_data_force_refresh_ignores_existing_local_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from src.application.multi_tick import required_data_prefetch as mod
 
-    old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
-    mod.has_shared_required_data = lambda symbol, shared_dir: True
 
     seen: list[tuple[str, bool]] = []
+    cache_checks: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "validate_required_data_quote_candidate",
+        lambda **kwargs: cache_checks.append(dict(kwargs)),
+    )
 
     def _fake_execute(self, intent):
         seen.append((str(intent.symbol), bool(intent.force_refresh)))
@@ -348,7 +399,10 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> 
                 cfg={
                     "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
-                        {"symbol": "AAPL", "fetch": {"source": "opend", "limit_expirations": 8}},
+                        _declared_put_symbol(
+                            "AAPL",
+                            {"source": "opend", "limit_expirations": 8},
+                        ),
                     ]
                 },
                 shared_required=Path(td) / "required_data",
@@ -357,8 +411,8 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> 
         assert out["fetched_ok"] == 1
         assert out["force_refresh"] is True
         assert seen == [("AAPL", True)]
+        assert cache_checks == []
     finally:
-        mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
 
 

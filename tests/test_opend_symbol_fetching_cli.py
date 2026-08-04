@@ -48,6 +48,50 @@ def test_cli_accepts_snapshot_batch_and_fallback_args(monkeypatch) -> None:
     assert request.snapshot_fallback_batch_size == 7
 
 
+def test_cli_forwards_explicit_trading_date_to_fetch_request(monkeypatch) -> None:
+    mod = _mod()
+
+    captured: list[object] = []
+
+    def _fake_fetch_symbol_request(request):
+        captured.append(request)
+        return {
+            "symbol": request.symbol,
+            "rows": [],
+            "expiration_count": 0,
+            "meta": {},
+        }
+
+    monkeypatch.setattr(mod, "fetch_symbol_request", _fake_fetch_symbol_request)
+    monkeypatch.setattr(
+        mod,
+        "save_outputs",
+        lambda *args, **kwargs: (Path("raw"), Path("csv")),
+    )
+    monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            "--symbols",
+            "NVDA",
+            "--explicit-expirations",
+            "2026-08-07",
+            "--trading-date",
+            "2026-07-27",
+            "--include-realized-volatility",
+            "--quiet",
+        ],
+    )
+
+    mod.main()
+
+    request = _request(captured[0])
+    assert request.explicit_expirations == ["2026-08-07"]
+    assert request.trading_date == "2026-07-27"
+    assert request.include_realized_volatility is True
+
+
 def test_cli_passes_snapshot_batch_and_fallback_args_to_fetch_symbol(monkeypatch) -> None:
     mod = _mod()
 

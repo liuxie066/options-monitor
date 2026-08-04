@@ -84,6 +84,18 @@ def prune_chain_cache(base_dir: Path, keep_days: int) -> None:
         pass
 
 
+def _strict_iso_date(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{field_name} is invalid")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} is invalid") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{field_name} is invalid")
+    return value
+
+
 def list_option_expirations(
     symbol: str,
     *,
@@ -93,15 +105,24 @@ def list_option_expirations(
     expiration_max_wait_sec: float = 30.0,
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
+    asof_date: str | None = None,
 ) -> list[str]:
+    effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
+    underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
+    resolved_asof_date = _strict_iso_date(
+        (
+            get_trading_date(underlier.market).isoformat()
+            if asof_date is None
+            else asof_date
+        ),
+        field_name="option expiration as-of date",
+    )
     gateway = build_ready_futu_gateway(
         host=host,
         port=int(port),
         is_option_chain_cache_enabled=False,
     )
     try:
-        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
-        underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
         expiration_limit = OpenDFetchLimits.from_flat_kwargs(
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
@@ -111,7 +132,7 @@ def list_option_expirations(
             gateway,
             underlier_code=underlier.code,
             base_dir=effective_base_dir,
-            asof_date=get_trading_date(underlier.market).isoformat(),
+            asof_date=resolved_asof_date,
             expiration_limit=expiration_limit,
             retry_call=retry_futu_gateway_call,
             rate_limited_call=rate_limited_opend_call,
@@ -134,13 +155,21 @@ def discover_option_expirations(
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
     list_expirations_fn: Callable[..., list[str]] | None = None,
+    trading_date: str | None = None,
 ) -> OptionExpirationDiscoveryResult:
     """Return the typed result of the scheduled expiration observation."""
 
     effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
     try:
         underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
-        trading_date = get_trading_date(underlier.market).isoformat()
+        resolved_trading_date = _strict_iso_date(
+            (
+                get_trading_date(underlier.market).isoformat()
+                if trading_date is None
+                else trading_date
+            ),
+            field_name="option expiration trading date",
+        )
     except Exception as exc:
         completed_at = _utc_now_iso()
         return OptionExpirationDiscoveryResult(
@@ -166,7 +195,7 @@ def discover_option_expirations(
         "source": str(source or "").strip().lower(),
         "host": str(host),
         "port": int(port),
-        "trading_date": trading_date,
+        "trading_date": resolved_trading_date,
     }
     fetch = list_expirations_fn or list_option_expirations
     try:
@@ -178,6 +207,7 @@ def discover_option_expirations(
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
+            asof_date=resolved_trading_date,
         )
         observed_at = _utc_now_iso()
         if not isinstance(raw_expirations, list):
