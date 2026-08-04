@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.10.1 - 2026-08-05
+
+### Bug Fixes
+- Hardened run-scoped multi-account authority so account selection, runtime paths, prepared portfolio facts, and completion receipts remain bound to one immutable run workspace instead of leaking across accounts or configuration generations.
+- Separated the canonical Futu quote route from per-account broker gateways, validating each broker identity before use and preventing multi-account trade intake, settlement, positions, and health checks from querying an account through the wrong OpenD endpoint.
+
 ## 1.10.0 - 2026-08-04
 
 ### New Features
