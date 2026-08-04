@@ -301,6 +301,83 @@ def test_broker_ready_builder_never_constructs_quote_context() -> None:
     assert gateway.backend._quote_client is None
 
 
+def test_default_broker_adapter_converts_canonical_string_account_id_to_sdk_integer(
+) -> None:
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    account_id = "281756479859383816"
+
+    class Trade:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _record(self, method, kwargs, *, paginated=False):
+            self.calls.append((method, dict(kwargs)))
+            return (0, [], None) if paginated else (0, [])
+
+        def position_list_query(self, **kwargs):
+            return self._record("positions", kwargs)
+
+        def accinfo_query(self, **kwargs):
+            return self._record("balance", kwargs)
+
+        def acctradinginfo_query(self, **kwargs):
+            return self._record("funds", kwargs)
+
+        def order_list_query(self, **kwargs):
+            return self._record("orders", kwargs)
+
+        def deal_list_query(self, **kwargs):
+            return self._record("deals", kwargs)
+
+        def history_order_list_query(self, **kwargs):
+            return self._record("history_orders", kwargs, paginated=True)
+
+        def history_deal_list_query(self, **kwargs):
+            return self._record("history_deals", kwargs, paginated=True)
+
+        def cash_flow_query(self, **kwargs):
+            return self._record("cash_flows", kwargs)
+
+    class Backend:
+        def __init__(self, **_kwargs):
+            self.trade = Trade()
+
+        def _ensure_trade_client(self):
+            return self.trade
+
+    gateway = build_futu_gateway(backend_cls=Backend)
+    common = {"acc_id": account_id, "trd_env": "REAL"}
+
+    gateway.get_positions(**common)
+    gateway.get_account_balance(**common)
+    gateway.get_funds(**common)
+    gateway.get_order_list(**common)
+    gateway.get_deal_list(**common)
+    gateway.get_history_orders(**common)
+    gateway.get_history_deals(**common)
+    gateway.get_account_cash_flows(**common)
+    gateway.get_positions_with_receipt(**common)
+
+    assert [name for name, _kwargs in gateway.backend.trade.calls] == [
+        "positions",
+        "balance",
+        "funds",
+        "orders",
+        "deals",
+        "history_orders",
+        "history_deals",
+        "cash_flows",
+        "positions",
+    ]
+    assert all(
+        kwargs["acc_id"] == int(account_id)
+        and isinstance(kwargs["acc_id"], int)
+        for _name, kwargs in gateway.backend.trade.calls
+    )
+    assert common["acc_id"] == account_id
+
+
 def test_broker_readiness_requires_every_identity_in_requested_environment() -> None:
     from src.infrastructure.futu_gateway import FutuGatewayError, build_ready_futu_broker_gateway
 
