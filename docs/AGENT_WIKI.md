@@ -256,6 +256,8 @@ Tick flow:
 
 Direct `run tick` calls, including `--force`, still produce scan/run artifacts but do not auto-send ordinary Tick notifications. Use the guarded `run tick-cron` entry for scheduled ordinary delivery. `symbols_notification.txt` is a Compact compatibility bundle that may also contain candidate rejection summary and Close Advice sections; it is not evidence that a Daily Brief was prepared or sent. Public runtime reads expose it canonically as `compatibility_notification` with `authority=compatibility_only` and `delivery_evidence=false`; the old `notification` fields are deprecated Phase A/B aliases scheduled for removal in Phase C.
 
+The `scheduler` command is decision/mark-only. Its legacy `--run-if-due` flag remains parseable for compatibility but returns `UNSUPPORTED_OPERATION` without reading runtime config/state or starting a child process. Use `./om run tick ...` for explicit scans and `./om run tick-cron ...` for guarded scheduled execution.
+
 Entrypoint signature:
 
 ```python

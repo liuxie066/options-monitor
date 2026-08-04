@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from src.application.agent_tool_contracts import AgentToolError
 
 
 @dataclass
@@ -634,6 +634,17 @@ def decide(
     )
 
 
+def reject_scheduler_run_if_due(run_if_due: bool) -> None:
+    """Reject the retired scheduler-owned scan execution path."""
+    if not run_if_due:
+        return
+    raise AgentToolError(
+        code="UNSUPPORTED_OPERATION",
+        message="scheduler --run-if-due is retired; scheduler is decision/mark-only",
+        hint="Use `./om run tick ...` or `./om run tick-cron ...` for scan execution.",
+    )
+
+
 def run_scheduler(
     *,
     config: str | Path,
@@ -649,6 +660,7 @@ def run_scheduler(
     base_dir: Path | None = None,
 ) -> dict:
     """执行调度判定并处理状态副作用。"""
+    reject_scheduler_run_if_due(run_if_due)
     base = _resolve_base(base_dir)
     config_path = _resolve_config_path(config, base=base)
     state_path = _resolve_state_path(base=base, state_dir=state_dir, state=state)
@@ -715,30 +727,6 @@ def run_scheduler(
         write_state(state_path, state_data)
         print(f'[DONE] marked scanned -> {state_path}')
         return payload
-
-    if run_if_due and decision.should_run_scan:
-        cmd = [sys.executable, '-m', 'src.interfaces.cli.main', 'scan-pipeline', '--config', str(config_path)]
-        print(f"[RUN] {' '.join(cmd)}")
-        result = subprocess.run(cmd, cwd=str(base))
-        if result.returncode != 0:
-            raise SystemExit(result.returncode)
-        if account:
-            account_key = str(account)
-            m = state_data.get('last_run_utc_by_account')
-            if not isinstance(m, dict):
-                m = {}
-            m[account_key] = to_iso(datetime.now(timezone.utc))
-            state_data['last_run_utc_by_account'] = m
-            if decision.scheduled_scan_target_market:
-                processed = state_data.get('last_processed_scan_target_utc_by_account')
-                if not isinstance(processed, dict):
-                    processed = {}
-                processed[account_key] = to_iso(maybe_parse_dt(decision.scheduled_scan_target_market))
-                state_data['last_processed_scan_target_utc_by_account'] = processed
-        write_state(state_path, state_data)
-        print(f'[DONE] scheduler state -> {state_path}')
-    elif run_if_due:
-        print('[SKIP] 当前未到应扫描时间。')
 
     return payload
 
