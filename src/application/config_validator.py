@@ -15,7 +15,12 @@ from domain.domain import (
 )
 from domain.domain.fetch_source import normalize_fetch_source
 from domain.domain.candidate_defaults import EVENT_RISK_MODES
-from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
+from src.application.account_config import (
+    ACCOUNT_TYPES,
+    account_settings_from_config,
+    accounts_from_config,
+    parse_lossless_integer,
+)
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import provider_requires_api_key, supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -1239,12 +1244,11 @@ def validate_config(cfg: dict):
                     if key not in futu_cfg or futu_cfg.get(key) in (None, ''):
                         continue
                     value = futu_cfg.get(key)
-                    if isinstance(value, bool):
+                    parsed_port = parse_lossless_integer(value)
+                    if parsed_port is None:
                         die(f'account_settings.{account}.futu.{key} must be an integer')
-                    try:
-                        int(value)
-                    except Exception:
-                        die(f'account_settings.{account}.futu.{key} must be an integer')
+                    if parsed_port < 1 or parsed_port > 65535:
+                        die(f'account_settings.{account}.futu.{key} must be between 1 and 65535')
                 futu_account_settings.append((account, futu_cfg))
         if len(futu_account_settings) > 1:
             for account, futu_cfg in futu_account_settings:
