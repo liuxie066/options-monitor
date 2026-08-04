@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 
-from src.application.copilot import tools as copilot_tools
-from src.application.copilot import channel_facade
+import pytest
+
+from src.application.copilot import channel_facade, local_harness, tools as copilot_tools
 from src.application.copilot.agent import ModelRequest, ModelTurn, ToolCall
 from src.application.copilot.contracts import AppResult, CopilotRequest, new_id
-from src.application.copilot.conversation_memory import prepare_contract_with_memory
+from src.application.copilot.conversation_memory import prepare_contract_with_existing_memory
 from src.application.copilot.host import run_contract
 from src.application.copilot.host_store import CopilotHostStore
 from src.application.copilot.model_client import CopilotModelSettings, build_model_runner
 from src.application.copilot.service import prepare_contract
 
 
-def test_conversation_memory_compacts_old_turns_and_injects_pinned_state(tmp_path) -> None:
+def test_conversation_memory_injects_existing_state_without_mutation(tmp_path) -> None:
     store = CopilotHostStore(tmp_path / "copilot.sqlite3")
     for index in range(9):
         store.record_session_turn(
@@ -23,50 +24,228 @@ def test_conversation_memory_compacts_old_turns_and_injects_pinned_state(tmp_pat
             max_messages=20,
             tool_uses=({"name": "runtime_status", "ok": True},),
         )
+    expected_memory = {
+        "version": 1,
+        "compacted_turn_count": 7,
+        "pinned_state": {
+            "current_goal": "分析账户收益",
+            "confirmed_scope": ["lx", "2026-07"],
+            "user_constraints": ["只看lx"],
+            "open_questions": ["风险集中度"],
+        },
+        "episodes": [
+            {
+                "goal": "分析账户收益",
+                "confirmed_facts": ["7月收益为正"],
+                "completed_actions": ["读取收益"],
+                "tool_findings": ["runtime_status正常"],
+                "user_constraints": ["只看lx"],
+                "open_questions": ["风险集中度"],
+                "next_step": "读取持仓",
+            }
+        ],
+    }
+    assert store.update_session_memory(
+        "wechat:chat",
+        expected_memory,
+        expected_compacted_turn_count=0,
+    )
+    expected_turns = store.session_turns("wechat:chat")
     prepared = _contract("结论呢")
 
-    result = prepare_contract_with_memory(
+    result = prepare_contract_with_existing_memory(
         prepared,
         store=store,
         session_key="wechat:chat",
-        model_runner=lambda _request: ModelTurn(
-            text=(
-                '{"episode_summary":{"goal":"分析账户收益","confirmed_facts":["7月收益为正"],'
-                '"completed_actions":["读取收益"],"tool_findings":["runtime_status正常"],'
-                '"user_constraints":["只看lx"],"open_questions":["风险集中度"],'
-                '"next_step":"读取持仓"},"pinned_state":{"current_goal":"分析账户收益",'
-                '"confirmed_scope":["lx","2026-07"],"user_constraints":["只看lx"],'
-                '"open_questions":["风险集中度"]}}'
-            )
-        ),
     )
 
-    memory = store.session_memory("wechat:chat")
-    assert memory["compacted_turn_count"] == 7
-    assert memory["pinned_state"]["confirmed_scope"] == ["lx", "2026-07"]
-    assert memory["episodes"][0]["confirmed_facts"] == ["7月收益为正"]
+    assert store.session_memory("wechat:chat") == expected_memory
+    assert store.session_turns("wechat:chat") == expected_turns
     context = result.input["messages"][-2]
     assert context["role"] == "system"
     assert "Conversation memory from earlier turns" in context["content"]
     assert "风险集中度" in context["content"]
 
 
-def test_invalid_memory_compaction_preserves_raw_turns(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "raw_memory",
+    (
+        "not-json",
+        '{"version":"bad","compacted_turn_count":"bad","pinned_state":"bad","episodes":1}',
+        '{"version":1e309,"compacted_turn_count":0,"pinned_state":{},"episodes":[]}',
+        '{"version":1,"compacted_turn_count":Infinity,"pinned_state":{},"episodes":[]}',
+    ),
+)
+def test_malformed_stored_memory_fails_open_without_rewrite(tmp_path, raw_memory: str) -> None:
     store = CopilotHostStore(tmp_path / "copilot.sqlite3")
     for index in range(9):
         store.record_session_turn("wechat:chat", f"q{index}", f"a{index}", max_messages=20)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE copilot_sessions SET memory_json = ? WHERE session_key = 'wechat:chat'",
+            (raw_memory,),
+        )
+    expected_turns = store.session_turns("wechat:chat")
     prepared = _contract("继续")
 
-    result = prepare_contract_with_memory(
+    result = prepare_contract_with_existing_memory(
         prepared,
         store=store,
         session_key="wechat:chat",
-        model_runner=lambda _request: ModelTurn(text="not-json"),
     )
 
-    assert store.session_memory("wechat:chat")["compacted_turn_count"] == 0
-    assert len(store.session_turns("wechat:chat")) == 9
     assert result == prepared
+    assert store.session_turns("wechat:chat") == expected_turns
+    with sqlite3.connect(store.path) as conn:
+        stored_row = conn.execute(
+            "SELECT memory_json FROM copilot_sessions WHERE session_key = 'wechat:chat'"
+        ).fetchone()
+    assert stored_row == (raw_memory,)
+
+
+def test_memory_update_rejects_nonfinite_numbers_without_rewrite(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    expected_memory = {
+        "version": 1,
+        "compacted_turn_count": 3,
+        "pinned_state": {"current_goal": "保留现有记忆"},
+        "episodes": [],
+    }
+    assert store.update_session_memory("feishu:chat", expected_memory)
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        store.update_session_memory(
+            "feishu:chat",
+            {
+                "version": float("inf"),
+                "compacted_turn_count": 3,
+                "pinned_state": {},
+                "episodes": [],
+            },
+        )
+
+    assert store.session_memory("feishu:chat") == expected_memory
+
+
+def test_feishu_channel_nonfinite_memory_fails_open_to_single_main_model_call(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database = tmp_path / "copilot.sqlite3"
+    store = CopilotHostStore(database)
+    for index in range(9):
+        store.record_session_turn("feishu:chat_1", f"q{index}", f"a{index}", max_messages=20)
+    raw_memory = (
+        '{"version":1e309,"compacted_turn_count":0,'
+        '"pinned_state":{"current_goal":"不应注入"},"episodes":[]}'
+    )
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE copilot_sessions SET memory_json = ? WHERE session_key = 'feishu:chat_1'",
+            (raw_memory,),
+        )
+    expected_turns = store.session_turns("feishu:chat_1")
+    requests: list[ModelRequest] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        return ModelTurn(text="结论：主模型正常回答。")
+
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+
+    result = channel_facade.run_channel_request(
+        user_message="继续分析",
+        config_key="us",
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="chat_1",
+        host_db_path=str(database),
+    )
+
+    assert result.status == "answered"
+    assert len(requests) == 1
+    assert "不应注入" not in str(requests[0].messages)
+    turns = store.session_turns("feishu:chat_1")
+    assert turns[:-1] == expected_turns
+    assert turns[-1]["user_text"] == "继续分析"
+    assert turns[-1]["assistant_final"] == "结论：主模型正常回答。"
+    with sqlite3.connect(store.path) as conn:
+        stored_row = conn.execute(
+            "SELECT memory_json FROM copilot_sessions WHERE session_key = 'feishu:chat_1'"
+        ).fetchone()
+    assert stored_row == (raw_memory,)
+
+
+def test_missing_stored_memory_returns_original_contract_without_creating_session(tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    prepared = _contract("继续")
+
+    result = prepare_contract_with_existing_memory(
+        prepared,
+        store=store,
+        session_key="feishu:missing",
+    )
+
+    assert result == prepared
+    with sqlite3.connect(store.path) as conn:
+        session_count = conn.execute(
+            "SELECT COUNT(*) FROM copilot_sessions WHERE session_key = 'feishu:missing'"
+        ).fetchone()
+    assert session_count == (0,)
+
+
+def test_online_run_with_uncompacted_backlog_only_invokes_main_model(monkeypatch, tmp_path) -> None:
+    store = CopilotHostStore(tmp_path / "copilot.sqlite3")
+    for index in range(9):
+        store.record_session_turn("feishu:chat", f"q{index}", f"a{index}", max_messages=20)
+    requests: list[ModelRequest] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        requests.append(request)
+        return ModelTurn(text="结论：已完成主模型回答。")
+
+    monkeypatch.setattr(local_harness, "_resolve_model_runner", lambda **_kwargs: (model, None))
+
+    result = local_harness.run_prepared_contract(
+        _contract("继续"),
+        host_store=store,
+        session_key="feishu:chat",
+    )
+
+    assert result.status == "answered"
+    assert len(requests) == 1
+    assert all(
+        "Compact conversation history" not in str(item.get("content") or "")
+        for item in requests[0].messages
+    )
+    assert store.session_memory("feishu:chat")["compacted_turn_count"] == 0
+    assert len(store.session_turns("feishu:chat")) == 9
+
+
+def test_successful_channel_answer_records_turn_after_run(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "copilot.sqlite3"
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+    monkeypatch.setattr(
+        channel_facade,
+        "run_prepared_contract",
+        lambda _prepared, **_kwargs: AppResult(status="answered", user_response="结论：运行正常。"),
+    )
+
+    result = channel_facade.run_channel_request(
+        user_message="检查运行状态",
+        config_key="us",
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="chat_1",
+        host_db_path=str(database),
+    )
+
+    assert result.status == "answered"
+    turns = CopilotHostStore(database).session_turns("feishu:chat_1")
+    assert len(turns) == 1
+    assert turns[0]["user_text"] == "检查运行状态"
+    assert turns[0]["assistant_final"] == "结论：运行正常。"
 
 
 def test_host_store_migrates_existing_session_schema(tmp_path) -> None:
