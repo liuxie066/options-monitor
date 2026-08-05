@@ -1,0 +1,34 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.10",
+  "base": {
+    "tag": "v1.10.9",
+    "commit": "e6b7993dbafb80b3d3b61090ec97d757a190e260"
+  },
+  "reviewed_head": "420064afb6e2b0d18ff5b91d39dd62e0fd71e8ea",
+  "commits": [
+    {
+      "sha": "e402c66f7e93f2df3440ab5324bad2fb0ec36562",
+      "subject": "refactor: simplify required-data validation"
+    },
+    {
+      "sha": "420064afb6e2b0d18ff5b91d39dd62e0fd71e8ea",
+      "subject": "Merge pull request #133 from liuxie066/refactor/required-data-validation-cleanup"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Simplified required-data validation by consolidating typed coverage evaluation and removing redundant output-layer and post-failure revalidation, while preserving fail-closed checks at the canonical OpenD evidence boundary.",
+      "commits": [
+        "e402c66f7e93f2df3440ab5324bad2fb0ec36562"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "420064afb6e2b0d18ff5b91d39dd62e0fd71e8ea",
+      "reason": "Merge commit for PR #133; it contains no independent user-facing change beyond the mapped implementation commit."
+    }
+  ]
+}

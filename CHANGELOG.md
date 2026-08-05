@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.10 - 2026-08-06
+
+### Improvements
+- Simplified required-data validation by consolidating typed coverage evaluation and removing redundant output-layer and post-failure revalidation, while preserving fail-closed checks at the canonical OpenD evidence boundary.
+
 ## 1.10.9 - 2026-08-06
 
 ### Bug Fixes
