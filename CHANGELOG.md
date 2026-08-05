@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.9 - 2026-08-06
+
+### Bug Fixes
+- Accepted complete OpenD required-data evidence independently of scope, child-request, and contract-code ordering, and treated fully observed filtered-empty grids as successful empty results while retaining fail-closed checks for missing snapshots, exact contracts, stale evidence, and identity mismatches.
+
 ## 1.10.8 - 2026-08-05
 
 ### Bug Fixes

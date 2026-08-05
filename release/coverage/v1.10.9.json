@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.9",
+  "base": {
+    "tag": "v1.10.8",
+    "commit": "e5c9a36212fa18ed497298f6c926191e61cf1041"
+  },
+  "reviewed_head": "08a419046c6e94653bf3a78371d0c2adbdebe405",
+  "commits": [
+    {
+      "sha": "08a419046c6e94653bf3a78371d0c2adbdebe405",
+      "subject": "fix: slim required data validation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Accepted complete OpenD required-data evidence independently of scope, child-request, and contract-code ordering, and treated fully observed filtered-empty grids as successful empty results while retaining fail-closed checks for missing snapshots, exact contracts, stale evidence, and identity mismatches.",
+      "commits": [
+        "08a419046c6e94653bf3a78371d0c2adbdebe405"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
