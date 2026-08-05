@@ -270,6 +270,33 @@ def test_account_run_publishes_complete_receipt_dependency_graph(
     )
 
 
+def test_account_run_accepts_prepared_portfolio_context_without_legacy_filename(
+    tmp_path: Path,
+) -> None:
+    state, quotes, _quote, snapshot = _account_run_inputs(tmp_path)
+    context = json.loads((state / "portfolio_context.json").read_text())
+    (state / "portfolio_context.json").unlink()
+    (state / ("portfolio_context." + "a" * 64 + ".json")).write_text(
+        json.dumps(context),
+        encoding="utf-8",
+    )
+
+    result = publish_account_run_sources(
+        account_run_id="run-1",
+        normalized_account="lx",
+        broker="futu",
+        included_markets=["US"],
+        account_state_dir=state,
+        required_data_root=quotes,
+        decision_snapshot_reader=lambda: snapshot,
+        portfolio_context_override=context,
+        completed_at=NOW + timedelta(seconds=3),
+    )
+
+    assert "portfolio" in result["source_kinds"]
+    assert result["cash_capacity"]["status"] == "available"
+
+
 def test_account_run_publishes_completed_zero_candidate_source_with_quote_dependency(
     tmp_path: Path,
 ) -> None:
