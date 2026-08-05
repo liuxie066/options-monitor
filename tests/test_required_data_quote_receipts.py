@@ -586,7 +586,7 @@ def test_quote_receipt_rejects_incomplete_snapshot_evidence(tmp_path: Path) -> N
     raw_path, csv_path = save_outputs(tmp_path, "NVDA", payload, output_root=tmp_path)
     fetch_plan = _fetch_plan()
 
-    with pytest.raises(PositionAdviceSourceError, match="complete snapshot evidence"):
+    with pytest.raises(PositionAdviceSourceError, match=r"^provider_incomplete:"):
         publish_required_data_quote_snapshot(
             producer_root=tmp_path,
             producer_run_id="run-1",
