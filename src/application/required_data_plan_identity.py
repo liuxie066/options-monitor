@@ -122,12 +122,14 @@ def build_required_data_expected_fetch_contract(
         "fetch_plan": plan_payload,
         "fetch_binding": binding,
         "coverage_policy": {
-            "schema_version": "required_data_coverage_policy.v1",
+            "schema_version": "required_data_coverage_policy.v2",
             "projection_outcome": str(
                 plan_payload.get("projection_outcome") or "success_rows"
             ).strip(),
             "require_realized_volatility": require_rv,
-            "coverage_evaluator": "required_data_frame_covers_fetch_plan.v1",
+            "coverage_evaluator": "required_data_frame_covers_fetch_plan.v2",
+            "completion_unit": "request_option_type_expiration",
+            "allow_proven_empty_scopes": True,
         },
     }
     contract["contract_sha256"] = _canonical_sha256(contract)
@@ -285,10 +287,12 @@ def validate_required_data_expected_fetch_contract(
         )
     coverage_payload = dict(coverage)
     expected_coverage = {
-        "schema_version": "required_data_coverage_policy.v1",
+        "schema_version": "required_data_coverage_policy.v2",
         "projection_outcome": projection_outcome,
         "require_realized_volatility": require_rv,
-        "coverage_evaluator": "required_data_frame_covers_fetch_plan.v1",
+        "coverage_evaluator": "required_data_frame_covers_fetch_plan.v2",
+        "completion_unit": "request_option_type_expiration",
+        "allow_proven_empty_scopes": True,
     }
     if coverage_payload != expected_coverage:
         raise ValueError("required-data coverage policy contradicts fetch plan")

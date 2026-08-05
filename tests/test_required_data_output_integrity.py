@@ -23,6 +23,10 @@ from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
     required_data_request_sha256,
 )
+from src.application.required_data_fetching import (
+    bind_merged_payload_evidence,
+    merge_required_data_payloads,
+)
 
 
 NOW = datetime(2026, 8, 4, 2, 0, tzinfo=timezone.utc)
@@ -313,6 +317,18 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
             "snapshot_missing_code_set": [],
             "snapshot_unexpected_code_set": [],
             "snapshot_complete": True,
+            "option_chain_scope_coverage": {
+                "schema_version": "option_chain_scope_coverage.v1",
+                "scopes": [
+                    {
+                        "option_type": "put",
+                        "expiration": "2026-08-21",
+                        "chain_status": "fetched",
+                        "filtered_contract_codes": [CONTRACT_CODE],
+                        "filtered_contract_count": 1,
+                    }
+                ],
+            },
             "realized_volatility": deepcopy(realized_volatility),
         },
         {
@@ -338,6 +354,18 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
             "snapshot_missing_code_set": [],
             "snapshot_unexpected_code_set": [],
             "snapshot_complete": True,
+            "option_chain_scope_coverage": {
+                "schema_version": "option_chain_scope_coverage.v1",
+                "scopes": [
+                    {
+                        "option_type": "call",
+                        "expiration": "2026-08-21",
+                        "chain_status": "cache",
+                        "filtered_contract_codes": [CALL_CONTRACT_CODE],
+                        "filtered_contract_count": 1,
+                    }
+                ],
+            },
             "realized_volatility": deepcopy(realized_volatility),
         },
     ]
@@ -349,6 +377,129 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
         port=PORT,
     )
     return payload, contract
+
+
+def test_merge_accepts_proven_empty_child_and_uses_nonempty_child_rv() -> None:
+    nonempty = _payload()
+    empty = deepcopy(_payload())
+    empty["rows"] = []
+    empty_meta = empty["meta"]
+    assert isinstance(empty_meta, dict)
+    empty_meta.update(
+        {
+            "source_outcome": "success_rows",
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+            "snapshot_complete": True,
+            "option_chain_scope_coverage": {
+                "schema_version": "option_chain_scope_coverage.v1",
+                "scopes": [
+                    {
+                        "option_type": "call",
+                        "expiration": "2026-08-21",
+                        "chain_status": "fetched",
+                        "filtered_contract_codes": [],
+                        "filtered_contract_count": 0,
+                    }
+                ],
+            },
+            "realized_volatility": {
+                "status": "not_applicable_no_contracts",
+                "reason": "not_applicable_no_contracts",
+            },
+        }
+    )
+    merged = merge_required_data_payloads(
+        symbol="NVDA", payloads=[nonempty, empty]
+    )
+
+    bind_merged_payload_evidence(
+        merged_payload=merged, payloads=[nonempty, empty]
+    )
+
+    merged_meta = merged["meta"]
+    assert isinstance(merged_meta, dict)
+    assert merged_meta["status"] == "ok"
+    assert merged_meta["source_outcome"] == "success_rows"
+    assert merged_meta["realized_volatility"] == nonempty["meta"][
+        "realized_volatility"
+    ]
+
+
+def test_multi_request_payload_accepts_proven_empty_child() -> None:
+    payload, _contract_unused = _valid_multi_child_candidate()
+    rows = payload["rows"]
+    meta = payload["meta"]
+    assert isinstance(rows, list) and isinstance(meta, dict)
+    rows.pop()
+    meta.update(
+        {
+            "snapshot_requested_codes": 1,
+            "snapshot_returned_codes": 1,
+            "snapshot_requested_code_set": [CONTRACT_CODE],
+            "snapshot_returned_code_set": [CONTRACT_CODE],
+        }
+    )
+    children = meta["requests"]
+    assert isinstance(children, list)
+    empty_child = children[1]
+    assert isinstance(empty_child, dict)
+    empty_child.update(
+        {
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "option_chain_scope_coverage": {
+                "schema_version": "option_chain_scope_coverage.v1",
+                "scopes": [
+                    {
+                        "option_type": "call",
+                        "expiration": "2026-08-21",
+                        "chain_status": "fetched",
+                        "filtered_contract_codes": [],
+                        "filtered_contract_count": 0,
+                    }
+                ],
+            },
+            "realized_volatility": {
+                "status": "not_applicable_no_contracts",
+                "reason": "not_applicable_no_contracts",
+            },
+        }
+    )
+    plan = _fetch_plan(request_count=2)
+    top_side_plans = plan["side_plans"]
+    requests = plan["merged_requests"]
+    assert isinstance(top_side_plans, list) and isinstance(requests, list)
+    call_request = requests[1]
+    assert isinstance(call_request, dict)
+    call_side_plans = call_request["side_plans"]
+    assert isinstance(call_side_plans, list)
+    for side_plan in (top_side_plans[1], call_side_plans[0]):
+        assert isinstance(side_plan, dict)
+        side_plan["required_exact_strikes_by_expiration"] = {}
+    empty_child["planned_request_sha256"] = required_data_request_sha256(
+        call_request
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=plan,
+        source="opend",
+        host=HOST,
+        port=PORT,
+    )
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=contract,
+    )
 
 
 def _assert_fresh_finalizer_rejects_without_artifacts(
@@ -769,6 +920,38 @@ def test_multi_request_payload_accepts_exact_stable_child_timestamps_and_rv() ->
         payload=payload,
         expected_fetch_contract=contract,
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "wrong_schema", "wrong_status", "wrong_code", "wrong_count"],
+)
+def test_multi_request_payload_rejects_scope_coverage_tampering(case: str) -> None:
+    payload, contract = _valid_multi_child_candidate()
+    children = payload["meta"]["requests"]
+    assert isinstance(children, list)
+    scope_evidence = children[1]["option_chain_scope_coverage"]
+    assert isinstance(scope_evidence, dict)
+    scopes = scope_evidence["scopes"]
+    assert isinstance(scopes, list)
+    scope = scopes[0]
+    assert isinstance(scope, dict)
+    if case == "missing":
+        children[1].pop("option_chain_scope_coverage")
+    elif case == "wrong_schema":
+        scope_evidence["schema_version"] = "option_chain_scope_coverage.v0"
+    elif case == "wrong_status":
+        scope["chain_status"] = "stale_cache"
+    elif case == "wrong_code":
+        scope["filtered_contract_codes"] = [CONTRACT_CODE]
+    else:
+        scope["filtered_contract_count"] = 2
+
+    with pytest.raises(PositionAdviceSourceError, match="does not cover"):
+        validate_required_data_payload_candidate(
+            payload=payload,
+            expected_fetch_contract=contract,
+        )
 
 
 @pytest.mark.parametrize("case", ["missing", "status_error"])

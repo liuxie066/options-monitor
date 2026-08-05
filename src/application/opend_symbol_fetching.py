@@ -45,6 +45,7 @@ from src.application.opend_market_snapshot_fetching import (
     fetch_option_snapshots,
     get_spot_opend,
 )
+from src.application.opend_normalize import normalize_opend_option_type
 from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
@@ -71,6 +72,7 @@ def calc_mid(bid, ask, last_price=None):
 
 REQUIRED_REALIZED_VOLATILITY_INCOMPLETE = "REQUIRED_REALIZED_VOLATILITY_INCOMPLETE"
 SNAPSHOT_COVERAGE_INCOMPLETE = "SNAPSHOT_COVERAGE_INCOMPLETE"
+OPTION_CHAIN_SCOPE_COVERAGE_SCHEMA = "option_chain_scope_coverage.v1"
 
 
 def _utc_now_iso() -> str:
@@ -100,6 +102,121 @@ def _required_realized_volatility_error(
         "realized_volatility_status": status or "missing",
         "realized_volatility_estimate": snapshot.rv_estimate,
     }
+
+
+def _filter_option_chain_for_request(
+    *,
+    chain: pd.DataFrame,
+    option_types: str,
+    min_strike: float | None,
+    max_strike: float | None,
+    side_strike_windows: dict[str, dict[str, float | None]] | None,
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    """Apply the request-owned filters without turning malformed input into emptiness."""
+
+    requested_types = tuple(
+        dict.fromkeys(
+            normalized
+            for value in str(option_types or "").split(",")
+            if (normalized := normalize_opend_option_type(value)) in {"put", "call"}
+        )
+    )
+    if not requested_types:
+        raise ValueError("required-data option types are missing or invalid")
+    required_columns = {"option_type", "strike_price", "expiration", "code"}
+    missing_columns = required_columns.difference(str(column) for column in chain.columns)
+    if missing_columns:
+        raise ValueError(
+            "option chain lacks required filter columns: "
+            + ",".join(sorted(missing_columns))
+        )
+
+    filtered = cast(pd.DataFrame, chain.copy())
+    filtered["_ot"] = filtered["option_type"].map(normalize_opend_option_type)
+    if filtered["_ot"].isin({"put", "call"}).sum() != len(filtered):
+        raise ValueError("option chain contains an invalid option type")
+    filtered = cast(
+        pd.DataFrame,
+        filtered[filtered["_ot"].isin(requested_types)].copy(),
+    )
+    strikes = pd.to_numeric(filtered["strike_price"], errors="coerce")
+    if strikes.isna().any():
+        raise ValueError("option chain contains an invalid strike price")
+
+    def _validated_bound(value: object, *, name: str) -> float | None:
+        if value is None:
+            return None
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{name} is invalid")
+        return parsed
+
+    global_min = _validated_bound(min_strike, name="minimum strike")
+    global_max = _validated_bound(max_strike, name="maximum strike")
+    if global_min is not None and global_max is not None and global_min > global_max:
+        raise ValueError("minimum strike exceeds maximum strike")
+    windows = side_strike_windows or {}
+    if not isinstance(windows, dict):
+        raise ValueError("side strike windows are invalid")
+    unknown_sides = set(windows).difference({"put", "call"})
+    if unknown_sides:
+        raise ValueError("side strike windows contain an invalid option type")
+
+    keep = pd.Series(True, index=filtered.index, dtype=bool)
+    for option_type in requested_types:
+        raw_window = windows.get(option_type) or {}
+        if not isinstance(raw_window, dict):
+            raise ValueError("side strike window is invalid")
+        side_min = _validated_bound(
+            raw_window.get("min_strike"), name=f"{option_type} minimum strike"
+        )
+        side_max = _validated_bound(
+            raw_window.get("max_strike"), name=f"{option_type} maximum strike"
+        )
+        effective_min = side_min if side_min is not None else global_min
+        effective_max = side_max if side_max is not None else global_max
+        if effective_min is not None and effective_max is not None and effective_min > effective_max:
+            raise ValueError(f"{option_type} minimum strike exceeds maximum strike")
+        side_mask = filtered["_ot"] == option_type
+        if effective_min is not None:
+            keep &= ~side_mask | (strikes >= effective_min)
+        if effective_max is not None:
+            keep &= ~side_mask | (strikes <= effective_max)
+    return cast(pd.DataFrame, filtered[keep].copy()), requested_types
+
+
+def _build_option_chain_scope_coverage(
+    *,
+    chain: pd.DataFrame,
+    option_types: tuple[str, ...],
+    expirations: list[str],
+    expiration_statuses: object,
+) -> dict[str, object]:
+    statuses = expiration_statuses if isinstance(expiration_statuses, dict) else {}
+    scopes: list[dict[str, object]] = []
+    for option_type in option_types:
+        for expiration in expirations:
+            scoped = chain[
+                (chain["_ot"] == option_type)
+                & (chain["expiration"].astype(str) == expiration)
+            ]
+            codes = sorted(
+                {
+                    str(value).strip()
+                    for value in scoped["code"].tolist()
+                    if str(value).strip()
+                }
+            )
+            scopes.append(
+                {
+                    "option_type": option_type,
+                    "expiration": expiration,
+                    "chain_status": str(statuses.get(expiration) or "").strip(),
+                    "filtered_contract_codes": codes,
+                    "filtered_contract_count": len(codes),
+                }
+            )
+    return {"schema_version": OPTION_CHAIN_SCOPE_COVERAGE_SCHEMA, "scopes": scopes}
 
 
 def _snapshot_completeness_meta(
@@ -483,69 +600,21 @@ def fetch_symbol_request(
 
         chain = cast(pd.DataFrame, chain[chain['expiration'].isin(expirations)].copy())
 
-        # Early filters BEFORE snapshots (performance-critical):
-        # - option type (put/call)
-        # - strike range (min_strike/max_strike)
-        try:
-            ot_set = {s.strip().lower() for s in str(option_types or '').split(',') if s.strip()}
-            if ot_set and 'option_type' in chain.columns:
-                def _norm_ot(x):
-                    s = str(x or '').lower()
-                    if s in ('call','put'):
-                        return s
-                    if 'call' in s:
-                        return 'call'
-                    if 'put' in s:
-                        return 'put'
-                    return s
-                chain['_ot'] = chain['option_type'].apply(_norm_ot)
-                chain = cast(pd.DataFrame, chain[chain['_ot'].isin(list(ot_set))].copy())
-        except Exception:
-            pass
-
-        try:
-            if (min_strike is not None) or (max_strike is not None) or side_strike_windows:
-                if 'strike_price' in chain.columns:
-                    sp = pd.to_numeric(chain['strike_price'], errors='coerce')
-                    if side_strike_windows:
-                        def _row_keep(raw_option_type, raw_strike) -> bool:
-                            strike_v = to_float(raw_strike)
-                            if strike_v is None:
-                                return False
-                            opt = str(raw_option_type or '').lower()
-                            if opt not in ('put', 'call'):
-                                if 'put' in opt:
-                                    opt = 'put'
-                                elif 'call' in opt:
-                                    opt = 'call'
-                            side_window = (side_strike_windows or {}).get(opt) if opt else None
-                            side_min = to_float((side_window or {}).get('min_strike')) if isinstance(side_window, dict) else None
-                            side_max = to_float((side_window or {}).get('max_strike')) if isinstance(side_window, dict) else None
-                            effective_min = side_min if side_min is not None else min_strike
-                            effective_max = side_max if side_max is not None else max_strike
-                            if effective_min is not None and strike_v < float(effective_min):
-                                return False
-                            if effective_max is not None and strike_v > float(effective_max):
-                                return False
-                            return True
-                        option_type_values = (
-                            chain['option_type'].tolist()
-                            if 'option_type' in chain.columns
-                            else [None] * len(chain)
-                        )
-                        mask = [
-                            _row_keep(raw_option_type, raw_strike)
-                            for raw_option_type, raw_strike in zip(option_type_values, chain['strike_price'].tolist())
-                        ]
-                        chain = cast(pd.DataFrame, chain[mask].copy())
-                    else:
-                        if min_strike is not None:
-                            chain = cast(pd.DataFrame, chain[cast(Any, sp) >= float(min_strike)].copy())
-                            sp = pd.to_numeric(chain['strike_price'], errors='coerce')
-                        if max_strike is not None:
-                            chain = cast(pd.DataFrame, chain[cast(Any, sp) <= float(max_strike)].copy())
-        except Exception:
-            pass
+        # Early filters BEFORE snapshots (performance-critical). Malformed provider
+        # data or request bounds are provider failures, never proof of emptiness.
+        chain, requested_option_types = _filter_option_chain_for_request(
+            chain=chain,
+            option_types=option_types,
+            min_strike=min_strike,
+            max_strike=max_strike,
+            side_strike_windows=side_strike_windows,
+        )
+        option_chain_scope_coverage = _build_option_chain_scope_coverage(
+            chain=chain,
+            option_types=requested_option_types,
+            expirations=expirations,
+            expiration_statuses=(chain_bundle.fetch_meta or {}).get("expiration_statuses"),
+        )
 
         # Fetch snapshots for option codes in batches
         option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
@@ -745,6 +814,7 @@ def fetch_symbol_request(
                 'spot_errors': spot_errors,
                 'realized_volatility': rv_snapshot.to_meta(),
                 'side_strike_windows': side_strike_windows or {},
+                'option_chain_scope_coverage': option_chain_scope_coverage,
                 'source_observed_at': source_observed_at,
                 'completed_at_utc': completed_at_utc,
                 'trading_date': today.isoformat(),

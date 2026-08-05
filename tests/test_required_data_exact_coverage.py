@@ -9,6 +9,7 @@ from src.application.required_data_coverage import (
     required_data_frame_covers_fetch_plan,
     required_data_frame_covers_fetch_plan_debug,
 )
+from src.application.required_data_plan_identity import required_data_request_sha256
 from src.application.opend_symbol_chain_fetching import (
     OptionExpirationDiscoveryResult,
 )
@@ -147,6 +148,51 @@ def _frame(
     if rv is not None:
         row["realized_volatility_estimate"] = rv
     return pd.DataFrame([row])
+
+
+def _scope_evidence(
+    *,
+    request: dict[str, object],
+    codes_by_scope: dict[tuple[str, str], list[str]],
+    statuses: dict[str, str] | None = None,
+) -> dict[str, object]:
+    codes = sorted({code for values in codes_by_scope.values() for code in values})
+    expirations = list(request["explicit_expirations"])
+    option_types = list(request["option_types"])
+    return {
+        "status": "ok",
+        "source_outcome": "success_rows",
+        "errors": [],
+        "stale_cache_expirations": [],
+        "option_codes": len(codes),
+        "snapshot_complete": True,
+        "snapshot_requested_codes": len(codes),
+        "snapshot_returned_codes": len(codes),
+        "snapshot_missing_codes": 0,
+        "snapshot_unexpected_codes": 0,
+        "snapshot_requested_code_set": codes,
+        "snapshot_returned_code_set": codes,
+        "snapshot_missing_code_set": [],
+        "snapshot_unexpected_code_set": [],
+        "option_chain_scope_coverage": {
+            "schema_version": "option_chain_scope_coverage.v1",
+            "scopes": [
+                {
+                    "option_type": option_type,
+                    "expiration": expiration,
+                    "chain_status": (statuses or {}).get(expiration, "cache"),
+                    "filtered_contract_codes": codes_by_scope.get(
+                        (option_type, expiration), []
+                    ),
+                    "filtered_contract_count": len(
+                        codes_by_scope.get((option_type, expiration), [])
+                    ),
+                }
+                for option_type in option_types
+                for expiration in expirations
+            ],
+        },
+    }
 
 
 def _typed_plan(
@@ -351,6 +397,7 @@ def test_exact_coverage_requires_interior_position_strike_independently_of_range
         maximum=120.0,
         base_minimum=80.0,
         base_maximum=120.0,
+        max_dte=60,
         exact_strikes_by_expiration={EXPIRATION: [100.0]},
     )
     rows = pd.DataFrame(
@@ -378,27 +425,238 @@ def test_exact_coverage_accepts_complete_provider_strike_grid_without_numeric_ed
         maximum=120.0,
         base_minimum=80.0,
         base_maximum=120.0,
+        max_dte=60,
         exact_strikes_by_expiration={},
     )
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-C1")
     plan = _plan(requests=[request])
-    evidence = {
-        "status": "ok",
-        "source_outcome": "success_rows",
-        "errors": [],
-        "stale_cache_expirations": [],
-        "expiration_statuses": {EXPIRATION: "cache"},
-        "option_codes": 1,
-        "snapshot_complete": True,
-        "snapshot_requested_codes": 1,
-        "snapshot_requested_code_set": ["NVDA-C1"],
-    }
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-C1"]},
+    )
 
     assert not required_data_frame_covers_fetch_plan_debug(frame, plan)
     assert required_data_frame_covers_fetch_plan_debug(
         frame,
         plan,
         option_chain_evidence=evidence,
+    )
+
+
+def test_exact_coverage_keeps_legacy_global_chain_evidence_strict() -> None:
+    request = _request(
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
+    legacy_evidence = {
+        "status": "ok",
+        "source_outcome": "success_rows",
+        "expiration_statuses": {EXPIRATION: "fetched"},
+        "option_codes": 1,
+        "snapshot_complete": True,
+        "snapshot_requested_codes": 1,
+        "snapshot_requested_code_set": ["NVDA-P1"],
+    }
+
+    assert not required_data_frame_covers_fetch_plan_debug(
+        frame,
+        _plan(requests=[request]),
+        option_chain_evidence=legacy_evidence,
+    )
+
+
+def test_exact_coverage_rejects_globally_proven_empty_plan() -> None:
+    request = _request(
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+    )
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): []},
+    )
+
+    assert not required_data_frame_covers_fetch_plan_debug(
+        pd.DataFrame(),
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+
+def test_exact_coverage_accepts_proven_partial_empty_expiration() -> None:
+    second_expiration = "2026-09-18"
+    request = _request(
+        expirations=[EXPIRATION, second_expiration],
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+        max_dte=60,
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={
+            ("put", EXPIRATION): ["NVDA-P1"],
+            ("put", second_expiration): [],
+        },
+    )
+
+    assert required_data_frame_covers_fetch_plan_debug(
+        frame, _plan(requests=[request]), option_chain_evidence=evidence
+    )
+
+
+def test_exact_coverage_accepts_proven_empty_child_when_another_child_has_rows() -> None:
+    put_request = _request(
+        option_type="put",
+        minimum=80.0,
+        maximum=100.0,
+        base_minimum=80.0,
+        base_maximum=100.0,
+    )
+    call_request = _request(
+        option_type="call",
+        minimum=120.0,
+        maximum=140.0,
+        base_minimum=120.0,
+        base_maximum=140.0,
+    )
+    frame = _frame(strike=90.0).assign(contract_symbol="NVDA-P90")
+    put_evidence = _scope_evidence(
+        request=put_request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]},
+    )
+    call_evidence = _scope_evidence(
+        request=call_request,
+        codes_by_scope={("call", EXPIRATION): []},
+    )
+    for index, (request, child) in enumerate(
+        ((put_request, put_evidence), (call_request, call_evidence))
+    ):
+        child["request_index"] = index
+        child["planned_request_sha256"] = required_data_request_sha256(request)
+    evidence = deepcopy(put_evidence)
+    evidence["requests"] = [put_evidence, call_evidence]
+
+    assert required_data_frame_covers_fetch_plan_debug(
+        frame,
+        _plan(requests=[put_request, call_request]),
+        option_chain_evidence=evidence,
+    )
+
+
+def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() -> None:
+    lower_request = _request(
+        minimum=80.0,
+        maximum=100.0,
+        base_minimum=80.0,
+        base_maximum=100.0,
+    )
+    upper_request = _request(
+        minimum=110.0,
+        maximum=130.0,
+        base_minimum=110.0,
+        base_maximum=130.0,
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "option_type": "put",
+                "expiration": EXPIRATION,
+                "dte": 25,
+                "strike": strike,
+                "spot": 110.0,
+                "contract_symbol": code,
+            }
+            for strike, code in ((90.0, "NVDA-P90"), (120.0, "NVDA-P120"))
+        ]
+    )
+    lower_evidence = _scope_evidence(
+        request=lower_request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]},
+    )
+    upper_evidence = _scope_evidence(
+        request=upper_request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P120"]},
+    )
+    for index, (request, child) in enumerate(
+        ((lower_request, lower_evidence), (upper_request, upper_evidence))
+    ):
+        child["request_index"] = index
+        child["planned_request_sha256"] = required_data_request_sha256(request)
+    evidence = deepcopy(lower_evidence)
+    all_codes = ["NVDA-P120", "NVDA-P90"]
+    evidence.update(
+        {
+            "option_codes": 2,
+            "snapshot_requested_codes": 2,
+            "snapshot_returned_codes": 2,
+            "snapshot_requested_code_set": all_codes,
+            "snapshot_returned_code_set": all_codes,
+            "requests": [lower_evidence, upper_evidence],
+        }
+    )
+
+    assert required_data_frame_covers_fetch_plan_debug(
+        frame,
+        _plan(requests=[lower_request, upper_request]),
+        option_chain_evidence=evidence,
+    )
+
+
+def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None:
+    second_expiration = "2026-09-18"
+    request = _request(
+        expirations=[EXPIRATION, second_expiration],
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+        max_dte=60,
+        exact_strikes_by_expiration={second_expiration: [100.0]},
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={
+            ("put", EXPIRATION): ["NVDA-P1"],
+            ("put", second_expiration): [],
+        },
+    )
+
+    assert not required_data_frame_covers_fetch_plan_debug(
+        frame, _plan(requests=[request]), option_chain_evidence=evidence
+    )
+
+
+@pytest.mark.parametrize("status", ["empty", "stale_cache", "error", ""])
+def test_exact_coverage_rejects_unreliable_empty_scope_status(status: str) -> None:
+    second_expiration = "2026-09-18"
+    request = _request(
+        expirations=[EXPIRATION, second_expiration],
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+        max_dte=60,
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={
+            ("put", EXPIRATION): ["NVDA-P1"],
+            ("put", second_expiration): [],
+        },
+        statuses={second_expiration: status},
+    )
+
+    assert not required_data_frame_covers_fetch_plan_debug(
+        frame, _plan(requests=[request]), option_chain_evidence=evidence
     )
 
 
