@@ -946,6 +946,85 @@ def test_missing_cash_context_blocks_snapshot_without_fabricating_zero(tmp_path:
     assert "cash_total_unavailable" in brief["actions"][0]["reason"]
 
 
+def test_prepared_portfolio_context_is_used_when_legacy_file_is_absent(
+    tmp_path: Path,
+) -> None:
+    from src.application.position_advice_source_receipts import sha256_bytes
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    account_dir = _account_dir(tmp_path)
+    state_dir = account_dir / "state"
+    (state_dir / "portfolio_context.json").unlink()
+    config = _config()
+    config["portfolio"] = {"account": "lx", "source": "futu"}
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        config=config,
+    )
+    context = {
+        "as_of_utc": "2026-07-17T13:59:00+00:00",
+        "source_observed_at": "2026-07-17T13:59:00+00:00",
+        "filters": {"account": "lx"},
+        "portfolio_source_name": "futu",
+        "cash_by_currency": {"HKD": 480_000, "USD": 18_000},
+    }
+    payload_bytes = (
+        json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    payload_digest = sha256_bytes(payload_bytes)
+    payload_name = f"portfolio_context.{payload_digest}.json"
+    (state_dir / payload_name).write_bytes(payload_bytes)
+    manifest = {
+        "schema_version": "prepared_portfolio_context.v1",
+        "run_id": "run-1",
+        "account": "lx",
+        "status": "ready",
+        "account_config_sha256": authority.account_config_sha256,
+        "portfolio_context_relpath": payload_name,
+        "payload_sha256": payload_digest,
+        "portfolio_source_name": "futu",
+        "portfolio_source_account": "lx",
+    }
+    (state_dir / "prepared_portfolio_context.v1.json").write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pd.DataFrame(columns=_put_row().keys()).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+
+    brief = _assemble(tmp_path, config=config)
+
+    assert brief["funds"]["cash_total_by_currency"] == {
+        "HKD": 480_000.0,
+        "USD": 18_000.0,
+    }
+    assert not any(
+        item.get("kind") == "portfolio_context"
+        for item in brief["data_gaps"]
+    )
+    assert any(
+        item.get("kind") == "prepared_portfolio_context"
+        for item in brief["source_artifacts"]
+    )
+
+
 def test_candidate_index_uses_one_ranked_candidate_per_symbol_beyond_display_limit(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(

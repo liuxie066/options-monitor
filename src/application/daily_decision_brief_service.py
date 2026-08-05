@@ -58,6 +58,10 @@ from src.application.position_advice_source_receipts import (
     sha256_bytes,
     validate_source_receipt,
 )
+from src.application.prepared_portfolio_context import (
+    PreparedPortfolioContextError,
+    load_prepared_portfolio_context,
+)
 from src.application.required_data_snapshot import (
     FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
@@ -468,13 +472,14 @@ def assemble_daily_decision_brief(
                 _position_advice_action(row, account=account_norm)
             )
 
-    portfolio_context = _load_json_artifact(
-        path=state_dir / "portfolio_context.json",
+    portfolio_context = _load_portfolio_context(
+        base=base_path,
+        run_id=run_id_norm,
+        account=account_norm,
+        state_dir=state_dir,
         run_account_dir=run_account_dir,
-        source_kind="portfolio_context",
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
-        required=True,
     )
     option_positions_context = _load_json_artifact(
         path=state_dir / "option_positions_context.json",
@@ -1321,6 +1326,91 @@ def _load_json_artifact(
         return {}
     source_artifacts.append({"kind": source_kind, "path": _source_path(run_account_dir, path), "row_count": 1})
     return _json_safe(raw)
+
+
+def _load_portfolio_context(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+    state_dir: Path,
+    run_account_dir: Path,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Load the immutable prepared portfolio generation when one exists."""
+
+    manifest_path = state_dir / "prepared_portfolio_context.v1.json"
+    if not manifest_path.exists():
+        return _load_json_artifact(
+            path=state_dir / "portfolio_context.json",
+            run_account_dir=run_account_dir,
+            source_kind="portfolio_context",
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+            required=True,
+        )
+
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        if not isinstance(manifest, Mapping):
+            raise PreparedPortfolioContextError(
+                "prepared portfolio manifest must be an object"
+            )
+        account_config_path = state_dir / "config.override.json"
+        account_config_bytes = account_config_path.read_bytes()
+        account_config = json.loads(account_config_bytes.decode("utf-8"))
+        if not isinstance(account_config, Mapping):
+            raise PreparedPortfolioContextError(
+                "prepared portfolio account config must be an object"
+            )
+        account_config_sha256 = str(
+            manifest.get("account_config_sha256") or ""
+        ).strip().lower()
+        if not account_config_sha256 or sha256_bytes(account_config_bytes) != account_config_sha256:
+            raise PreparedPortfolioContextError(
+                "prepared portfolio account config hash mismatch"
+            )
+        context = load_prepared_portfolio_context(
+            manifest_path=manifest_path,
+            expected_base=base,
+            expected_run_id=run_id,
+            expected_account=account,
+            expected_account_config_sha256=account_config_sha256,
+            expected_manifest_sha256=sha256_bytes(manifest_bytes),
+            expected_runtime_config=account_config,
+        )
+        if not isinstance(context, dict):
+            raise PreparedPortfolioContextError(
+                "prepared portfolio context is unavailable"
+            )
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        PreparedPortfolioContextError,
+    ) as exc:
+        data_gaps.append(
+            {
+                "scope": "source",
+                "kind": "portfolio_context",
+                "path": _source_path(run_account_dir, manifest_path),
+                "reason": "prepared_portfolio_context_unavailable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return {}
+
+    source_artifacts.append(
+        {
+            "kind": "prepared_portfolio_context",
+            "path": _source_path(run_account_dir, manifest_path),
+            "row_count": 1,
+        }
+    )
+    return _json_safe(context)
 
 
 def _load_event_snapshot(
@@ -2409,7 +2499,7 @@ def _append_strategy_status_gaps(
         if not symbol or not family:
             continue
         relevant.append(item)
-        if status == "completed":
+        if status in {"completed", "not_applicable"}:
             continue
         data_gaps.append(
             {
