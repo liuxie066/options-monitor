@@ -12,7 +12,7 @@ from src.infrastructure.io_utils import atomic_write_json
 
 STRATEGY_SCAN_STATUS_SCHEMA = "strategy_scan_status.v1"
 STRATEGY_SCAN_STATUS_INDEX_SCHEMA = "strategy_scan_status_index.v1"
-_TERMINAL = frozenset({"completed", "unavailable", "failed"})
+_TERMINAL = frozenset({"completed", "unavailable", "failed", "not_applicable"})
 
 
 class StrategyScanStatusError(RuntimeError):
@@ -212,7 +212,7 @@ def publish_strategy_scan_status_index(
         )
     counts = {
         status: sum(1 for item in items if item.get("status") == status)
-        for status in ("completed", "unavailable", "failed")
+        for status in ("completed", "unavailable", "failed", "not_applicable")
     }
     payload = {
         "schema_version": STRATEGY_SCAN_STATUS_INDEX_SCHEMA,
