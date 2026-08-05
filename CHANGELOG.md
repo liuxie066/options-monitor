@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.7 - 2026-08-05
+
 ### Bug Fixes
 - Made Daily Brief consume the immutable run-scoped prepared portfolio context and recognize non-applicable strategy scans as terminal, preventing valid account runs from being downgraded to missing-context or scan-failure states.
 
