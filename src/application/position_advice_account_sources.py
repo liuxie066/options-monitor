@@ -48,6 +48,7 @@ def publish_account_run_sources(
     account_state_dir: Path,
     required_data_root: Path,
     decision_snapshot_reader: Callable[[], Mapping[str, Any]],
+    portfolio_context_override: Mapping[str, Any] | None = None,
     fx_payload_override: Mapping[str, Any] | None = None,
     completed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
@@ -62,10 +63,13 @@ def publish_account_run_sources(
     markets = _markets(included_markets)
     state_root = _existing_directory(account_state_dir, "account_state_dir")
     quote_root = _existing_directory(required_data_root, "required_data_root")
-    portfolio_context = _read_json_object(
-        state_root / "portfolio_context.json",
-        "portfolio context",
-    )
+    if isinstance(portfolio_context_override, Mapping):
+        portfolio_context = dict(portfolio_context_override)
+    else:
+        portfolio_context = _read_json_object(
+            state_root / "portfolio_context.json",
+            "portfolio context",
+        )
     portfolio_source = normalize_portfolio_source(
         portfolio_context.get("portfolio_source_name")
     )
@@ -312,6 +316,7 @@ def publish_account_position_advice_sources(
     broker: str,
     included_markets: Iterable[str],
     decision_state_snapshot_override: Mapping[str, Any] | None = None,
+    portfolio_context_override: Mapping[str, Any] | None = None,
     fx_payload_override: Mapping[str, Any] | None = None,
     completed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
@@ -337,6 +342,7 @@ def publish_account_position_advice_sources(
         account_state_dir=account_state_dir,
         required_data_root=quote_producer_root,
         decision_snapshot_reader=decision_snapshot_reader,
+        portfolio_context_override=portfolio_context_override,
         fx_payload_override=fx_payload_override,
         completed_at=completed_at,
     )
