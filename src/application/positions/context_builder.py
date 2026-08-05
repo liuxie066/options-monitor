@@ -5,7 +5,7 @@ from pathlib import Path
 
 import argparse
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
@@ -43,6 +43,74 @@ from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 JsonDict = dict[str, Any]
 
 
+def validate_option_positions_context_account(
+    context: Mapping[str, Any],
+    *,
+    account: str | None,
+    broker: str | None = None,
+) -> None:
+    """Validate raw account identity before adapters can supply defaults."""
+
+    expected_account = normalize_account(account) if account else None
+    if not expected_account:
+        return
+    filters = context.get("filters")
+    if not isinstance(filters, Mapping):
+        raise ValueError("option context filters are missing")
+    actual_account = normalize_account(filters.get("account"))
+    if actual_account != expected_account:
+        raise ValueError(
+            "option context filters.account mismatch: "
+            f"expected={expected_account} actual={actual_account or 'missing'}"
+        )
+    expected_broker = normalize_broker(broker) if broker else None
+    if expected_broker:
+        actual_broker = normalize_broker(filters.get("broker"))
+        if actual_broker != expected_broker:
+            raise ValueError(
+                "option context filters.broker mismatch: "
+                f"expected={expected_broker} actual={actual_broker or 'missing'}"
+            )
+    rows = context.get("open_positions_min")
+    if not isinstance(rows, list):
+        raise ValueError("option context open_positions_min is invalid")
+    for index, item in enumerate(rows):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"option context open_positions_min[{index}] is invalid"
+            )
+        fields = item.get("fields")
+        raw_payload = item.get("raw_payload")
+        raw_fields = (
+            raw_payload.get("fields")
+            if isinstance(raw_payload, Mapping)
+            else None
+        )
+        row_account = normalize_account(
+            item.get("account")
+            or (
+                fields.get("account")
+                if isinstance(fields, Mapping)
+                else None
+            )
+            or (
+                raw_payload.get("account")
+                if isinstance(raw_payload, Mapping)
+                else None
+            )
+            or (
+                raw_fields.get("account")
+                if isinstance(raw_fields, Mapping)
+                else None
+            )
+        )
+        if row_account != expected_account:
+            raise ValueError(
+                "option context open_positions_min account mismatch: "
+                f"expected={expected_account} actual={row_account or 'missing'}"
+            )
+
+
 def _empty_context(
     *,
     broker_norm: str,
@@ -51,10 +119,11 @@ def _empty_context(
     rates: JsonDict | None,
     raw_selected_count: int,
     ledger_status: JsonDict | None = None,
+    as_of_utc: str | None = None,
 ) -> JsonDict:
     out = {
         "context_status": "unavailable",
-        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "as_of_utc": as_of_utc or datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_status": "unavailable",
         "locked_shares_unavailable_reason": "option_position_ledger_unavailable",
@@ -103,6 +172,7 @@ def build_context(
     rates: JsonDict | None = None,
     decision_snapshot: JsonDict | None = None,
     lifecycle_now_ms: int | None = None,
+    observed_at: datetime | None = None,
 ) -> JsonDict:
     """Build risk context from projected position-lot records.
 
@@ -110,6 +180,10 @@ def build_context(
     without adding extra list calls.
     """
 
+    observed_at_dt = observed_at or datetime.now(timezone.utc)
+    if observed_at_dt.tzinfo is None:
+        observed_at_dt = observed_at_dt.replace(tzinfo=timezone.utc)
+    observed_at_utc = observed_at_dt.astimezone(timezone.utc).isoformat()
     broker_norm = normalize_broker(broker)
     account_norm = normalize_account(account) if account else None
     selected_items: list[RiskPositionView] = []
@@ -132,6 +206,7 @@ def build_context(
             rates=rates,
             raw_selected_count=len(selected_items),
             ledger_status=ledger_status,
+            as_of_utc=observed_at_utc,
         )
 
     # Aggregate open short positions for constraints
@@ -159,7 +234,7 @@ def build_context(
 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[JsonDict] = []
-    as_of_date = datetime.now(EXPIRATION_DATE_TZ).date()
+    as_of_date = observed_at_dt.astimezone(EXPIRATION_DATE_TZ).date()
     lifecycle_by_lot = build_lifecycle_read_models_from_decision_snapshot(
         decision_snapshot,
         now_ms=lifecycle_now_ms,
@@ -246,7 +321,7 @@ def build_context(
 
     out = {
         "context_status": "available",
-        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "as_of_utc": observed_at_utc,
         "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_status": "available",
         "locked_shares_unavailable_reason": None,
@@ -316,9 +391,15 @@ def build_shared_context(
     *,
     decision_snapshots_by_account: dict[str, JsonDict] | None = None,
     lifecycle_now_ms: int | None = None,
+    accounts: Iterable[str] | None = None,
+    observed_at: datetime | None = None,
 ) -> JsonDict:
     broker_norm = normalize_broker(broker)
-    accounts: set[str] = set()
+    account_labels = {
+        normalized
+        for raw in (accounts or [])
+        if (normalized := normalize_account(raw))
+    }
     for rec in records:
         fields = position_lot_snapshot(rec).fields
         if not fields:
@@ -327,7 +408,7 @@ def build_shared_context(
             continue
         acct = fields.get("account")
         if acct:
-            accounts.add(acct)
+            account_labels.add(acct)
     snapshots = decision_snapshots_by_account or {}
     by_account = {
         acct: build_context(
@@ -337,13 +418,23 @@ def build_shared_context(
             rates=rates,
             decision_snapshot=snapshots.get(acct),
             lifecycle_now_ms=lifecycle_now_ms,
+            observed_at=observed_at,
         )
-        for acct in sorted(accounts)
+        for acct in sorted(account_labels)
     }
+    observed_at_dt = observed_at or datetime.now(timezone.utc)
+    if observed_at_dt.tzinfo is None:
+        observed_at_dt = observed_at_dt.replace(tzinfo=timezone.utc)
     return {
-        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "as_of_utc": observed_at_dt.astimezone(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm},
-        "all_accounts": build_context(records, broker=broker_norm, account=None, rates=rates),
+        "all_accounts": build_context(
+            records,
+            broker=broker_norm,
+            account=None,
+            rates=rates,
+            observed_at=observed_at_dt,
+        ),
         "by_account": by_account,
     }
 

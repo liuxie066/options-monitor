@@ -60,12 +60,23 @@ def run_position_advice_v2_from_account_run(
     capacity_pool_authority_id: str | None,
     source_receipts: Iterable[Mapping[str, Any]],
     data_config_path: Path,
+    decision_state_snapshot_override: Mapping[str, Any] | None = None,
     now: datetime | str | None = None,
 ) -> dict[str, Any]:
-    """Account Run facade. It reads the ledger but never mutates it."""
+    """Account Run facade over retained or live ledger decision facts."""
 
     normalized_account = normalize_account_label(account)
-    repo = open_position_ledger(Path(data_config_path))
+    if isinstance(decision_state_snapshot_override, Mapping):
+        decision_snapshot_reader = lambda: dict(
+            decision_state_snapshot_override
+        )
+    else:
+        repo = open_position_ledger(Path(data_config_path))
+        decision_snapshot_reader = lambda: decision_state_snapshot(
+            repo,
+            account=normalized_account,
+            portfolio_scope_id=scope_for(normalized_account),
+        )
     return run_position_advice_v2(
         base=base,
         account_run_root=account_run_root,
@@ -77,11 +88,7 @@ def run_position_advice_v2_from_account_run(
         portfolio_account_identity_hash=portfolio_account_identity_hash,
         capacity_pool_authority_id=capacity_pool_authority_id,
         source_receipts=source_receipts,
-        decision_snapshot_reader=lambda: decision_state_snapshot(
-            repo,
-            account=normalized_account,
-            portfolio_scope_id=scope_for(normalized_account),
-        ),
+        decision_snapshot_reader=decision_snapshot_reader,
         now=now,
     )
 
