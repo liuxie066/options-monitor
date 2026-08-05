@@ -61,7 +61,11 @@ PASSTHROUGH_KEYS = {
     "watchdog",
 }
 ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
-TRADE_INTAKE_AUTHORING_KEYS = {"combo_reconciliation", "holdings_sync"}
+TRADE_INTAKE_AUTHORING_KEYS = {
+    "combo_reconciliation",
+    "holdings_sync",
+    "settlement_observation",
+}
 ROOT_KEYS = {
     "accounts",
     "features",
@@ -471,6 +475,29 @@ def _normalize_trade_intake_authoring(raw: Any, *, path: str) -> dict[str, Any]:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object")
     _reject_unknown_keys(raw, allowed=TRADE_INTAKE_AUTHORING_KEYS, path=path)
     out: dict[str, Any] = {}
+    if "settlement_observation" in raw:
+        settlement_observation = raw.get("settlement_observation")
+        if not isinstance(settlement_observation, dict):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=(
+                    f"{path}.settlement_observation must be an object"
+                ),
+            )
+        _reject_unknown_keys(
+            settlement_observation,
+            allowed={"enabled"},
+            path=f"{path}.settlement_observation",
+        )
+        enabled = settlement_observation.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=(
+                    f"{path}.settlement_observation.enabled must be a boolean"
+                ),
+            )
+        out["settlement_observation"] = {"enabled": enabled}
     if "holdings_sync" in raw:
         holdings_sync = raw.get("holdings_sync")
         if not isinstance(holdings_sync, dict):

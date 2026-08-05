@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.lifecycle_allocation import (
@@ -15,12 +15,15 @@ from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
-    lifecycle_evidence_facts,
+    lifecycle_account_coherent_facts,
     lifecycle_case_coherent_facts,
-    lifecycle_option_close_anchor_facts,
+    lifecycle_case_coherent_facts_many_from_account_snapshot,
     lifecycle_reconciliation_facts,
     record_lifecycle_allocation,
     record_lifecycle_evidence_issue,
+)
+from src.application.trades.settlement_attempts import (
+    SETTLEMENT_OBSERVATION_CONTEXT_KEY,
 )
 from src.application.trades.close_reason_evidence import (
     canonical_hash,
@@ -108,6 +111,191 @@ def lifecycle_case_read_model(
         void_event_ids=tuple(facts["effective_void_event_ids"]),
         now_ms=now_ms,
     )
+
+
+def lifecycle_case_read_models_for_account(
+    repo: Any,
+    *,
+    account: str,
+    now_ms: int | None = None,
+    settlement_context_case_ids: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Build every case model from one coherent account materialization."""
+
+    facts = lifecycle_account_coherent_facts(
+        repo,
+        account=str(account or "").strip().lower(),
+    )
+    cases = [
+        dict(item)
+        for item in facts.get("account_lifecycle_cases") or []
+        if isinstance(item, dict)
+    ]
+    allocations = [
+        dict(item)
+        for item in facts.get("account_lifecycle_allocations") or []
+        if isinstance(item, dict)
+    ]
+    timing_policies = [
+        dict(item)
+        for item in facts.get("account_lifecycle_timing_policies") or []
+        if isinstance(item, dict)
+    ]
+    position_lots = [
+        dict(item)
+        for item in facts.get("account_position_lots") or []
+        if isinstance(item, dict)
+    ]
+    account_resolution = facts.get("account_lifecycle_resolution")
+    if not isinstance(account_resolution, Mapping):
+        raise LifecycleCaseDataError(
+            "lifecycle_account_resolution_unavailable"
+        )
+
+    cases_by_id = {
+        str(item.get("case_id") or "").strip(): item
+        for item in cases
+        if str(item.get("case_id") or "").strip()
+    }
+    allocations_by_case: dict[str, list[dict[str, Any]]] = {}
+    for item in allocations:
+        allocations_by_case.setdefault(
+            str(item.get("case_id") or "").strip(),
+            [],
+        ).append(item)
+    timing_by_case = {
+        str(item.get("case_id") or "").strip(): item
+        for item in timing_policies
+        if str(item.get("case_id") or "").strip()
+    }
+    lots_by_id = {
+        str(item.get("record_id") or "").strip(): dict(
+            item.get("fields") or {}
+        )
+        for item in position_lots
+        if str(item.get("record_id") or "").strip()
+    }
+    tokens_by_case = {
+        str(item.get("case_id") or "").strip(): dict(item)
+        for item in account_resolution.get("generation_tokens") or []
+        if isinstance(item, Mapping)
+        and str(item.get("case_id") or "").strip()
+    }
+    context_case_ids = {
+        str(item or "").strip()
+        for item in settlement_context_case_ids
+        if str(item or "").strip()
+    }
+    resolved_case_ids = {
+        str(item.get("case_id") or "").strip()
+        for item in account_resolution.get("case_resolutions") or []
+        if isinstance(item, Mapping)
+        and str(item.get("case_id") or "").strip()
+    }
+    available_context_ids = (
+        context_case_ids
+        & set(cases_by_id)
+        & set(tokens_by_case)
+        & resolved_case_ids
+    )
+    context_facts_by_case = (
+        lifecycle_case_coherent_facts_many_from_account_snapshot(
+            facts,
+            case_ids=sorted(available_context_ids),
+        )
+        if available_context_ids
+        else {}
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for raw_resolution in account_resolution.get("case_resolutions") or []:
+        if not isinstance(raw_resolution, Mapping):
+            continue
+        case_resolution = dict(raw_resolution)
+        case_id = str(case_resolution.get("case_id") or "").strip()
+        lifecycle_case = cases_by_id.get(case_id)
+        generation_token = tokens_by_case.get(case_id)
+        if lifecycle_case is None or generation_token is None:
+            continue
+        try:
+            model = build_lifecycle_case_read_model_from_resolved_facts(
+                lifecycle_case=lifecycle_case,
+                case_resolution=case_resolution,
+                generation_token=generation_token,
+                allocations=allocations_by_case.get(case_id, []),
+                timing_policy=timing_by_case.get(case_id),
+                position_lot_fields_by_id=lots_by_id,
+                void_event_ids=tuple(
+                    facts.get("effective_void_event_ids") or ()
+                ),
+                now_ms=now_ms,
+            )
+            if case_id in context_case_ids:
+                case_facts = context_facts_by_case[case_id]
+                model[SETTLEMENT_OBSERVATION_CONTEXT_KEY] = (
+                    _settlement_observation_context(case_facts)
+                )
+            output[case_id] = model
+        except LifecycleCaseDataError as exc:
+            output[case_id] = _isolated_case_error_model(
+                lifecycle_case=lifecycle_case,
+                case_id=case_id,
+                generation_token=generation_token,
+                error=exc,
+            )
+    return output
+
+
+def _settlement_observation_context(
+    case_facts: Mapping[str, Any],
+) -> dict[str, Any]:
+    lifecycle_case = dict(case_facts.get("lifecycle_case") or {})
+    target_lot_ids = {
+        str(item or "").strip()
+        for item in dict(
+            lifecycle_case.get("target_contracts_by_lot") or {}
+        )
+        if str(item or "").strip()
+    }
+    lot_fields = dict(
+        case_facts.get("position_lot_fields_by_id") or {}
+    )
+    return {
+        "schema_version": "settlement_observation_context.v1",
+        "lifecycle_case": lifecycle_case,
+        "case_resolution": dict(
+            case_facts.get("case_resolution") or {}
+        ),
+        "generation_token": dict(
+            case_facts.get("generation_token") or {}
+        ),
+        "case_allocations": [
+            dict(item)
+            for item in case_facts.get("case_allocations") or []
+            if isinstance(item, Mapping)
+        ],
+        "timing_policy": (
+            dict(case_facts["timing_policy"])
+            if isinstance(case_facts.get("timing_policy"), Mapping)
+            else None
+        ),
+        "position_lot_fields_by_id": {
+            lot_id: dict(lot_fields.get(lot_id) or {})
+            for lot_id in sorted(target_lot_ids)
+        },
+        "effective_void_event_ids": list(
+            case_facts.get("effective_void_event_ids") or []
+        ),
+        "validated_anchors": [
+            dict(item)
+            for item in case_facts.get("validated_anchors") or []
+            if isinstance(item, Mapping)
+        ],
+        "anchor_source_claims": [
+            dict(item)
+            for item in case_facts.get("anchor_source_claims") or []
+            if isinstance(item, Mapping)
+        ],
+    }
 
 
 def build_lifecycle_read_models_from_resolved_account(
@@ -519,6 +707,7 @@ def reconcile_lifecycle_evidence(
     expected_lifecycle_generation_token: str | None = None,
     correction_void_events: tuple[Any, ...] = (),
     notification_transition_type: str | None = None,
+    refresh_read_model: bool = True,
 ) -> LifecycleReconciliationResult:
     try:
         normalized = _normalize_evidence(evidence)
@@ -602,6 +791,7 @@ def reconcile_lifecycle_evidence(
             expected_lifecycle_generation_token=(
                 expected_lifecycle_generation_token
             ),
+            refresh_read_model=refresh_read_model,
         )
 
     allocations = list(facts["allocations"])
@@ -657,6 +847,7 @@ def reconcile_lifecycle_evidence(
             expected_lifecycle_generation_token=(
                 expected_lifecycle_generation_token
             ),
+            refresh_read_model=refresh_read_model,
         )
 
     resolution = resolve_allocations(
@@ -746,10 +937,11 @@ def reconcile_lifecycle_evidence(
             apply_changes=apply_changes,
             allocation_plan=tuple(dict(item) for item in evidence_allocations),
             ledger_result=ledger_result,
-            lifecycle_read_model=lifecycle_case_read_model(
+            lifecycle_read_model=_refreshed_lifecycle_case_read_model(
                 repo,
                 case_id=matched_case_id,
                 now_ms=now_ms,
+                refresh=refresh_read_model,
             ),
         )
     existing_terminal_types = set(
@@ -770,6 +962,7 @@ def reconcile_lifecycle_evidence(
             expected_lifecycle_generation_token=(
                 expected_lifecycle_generation_token
             ),
+            refresh_read_model=refresh_read_model,
         )
     plan = plan_evidence_allocation(
         case_id=matched_case_id,
@@ -792,6 +985,7 @@ def reconcile_lifecycle_evidence(
             expected_lifecycle_generation_token=(
                 expected_lifecycle_generation_token
             ),
+            refresh_read_model=refresh_read_model,
         )
     event_rows = [
         _terminal_event(
@@ -835,10 +1029,11 @@ def reconcile_lifecycle_evidence(
             terminal_type=terminal_type,
             apply_changes=False,
             allocation_plan=tuple(dict(item) for item in plan.allocations),
-            lifecycle_read_model=lifecycle_case_read_model(
+            lifecycle_read_model=_refreshed_lifecycle_case_read_model(
                 repo,
                 case_id=matched_case_id,
                 now_ms=now_ms,
+                refresh=refresh_read_model,
             ),
         )
     ledger_result = record_lifecycle_allocation(
@@ -865,10 +1060,11 @@ def reconcile_lifecycle_evidence(
         apply_changes=True,
         allocation_plan=tuple(dict(item) for item in plan.allocations),
         ledger_result=ledger_result,
-        lifecycle_read_model=lifecycle_case_read_model(
+        lifecycle_read_model=_refreshed_lifecycle_case_read_model(
             repo,
             case_id=matched_case_id,
             now_ms=now_ms,
+            refresh=refresh_read_model,
         ),
     )
 
@@ -903,6 +1099,7 @@ def _record_issue_result(
     now_ms: int | None,
     plan: AllocationPlan | None = None,
     expected_lifecycle_generation_token: str | None = None,
+    refresh_read_model: bool = True,
 ) -> LifecycleReconciliationResult:
     case_id = str(lifecycle_case.get("case_id") or "")
     ledger_result = None
@@ -928,11 +1125,28 @@ def _record_issue_result(
             dict(item) for item in (plan.allocations if plan is not None else ())
         ),
         ledger_result=ledger_result,
-        lifecycle_read_model=lifecycle_case_read_model(
+        lifecycle_read_model=_refreshed_lifecycle_case_read_model(
             repo,
             case_id=case_id,
             now_ms=now_ms,
+            refresh=refresh_read_model,
         ),
+    )
+
+
+def _refreshed_lifecycle_case_read_model(
+    repo: Any,
+    *,
+    case_id: str,
+    now_ms: int | None,
+    refresh: bool,
+) -> dict[str, Any] | None:
+    if not refresh:
+        return None
+    return lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
     )
 
 
@@ -1324,5 +1538,6 @@ __all__ = [
     "LifecycleReconciliationResult",
     "discover_lifecycle_cases",
     "lifecycle_case_read_model",
+    "lifecycle_case_read_models_for_account",
     "reconcile_lifecycle_evidence",
 ]
