@@ -141,16 +141,7 @@ def ensure_required_data(
         if not should_refetch:
             if fetch_plan is not None:
                 try:
-                    if required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan):
-                        _write_fetch_plan_debug(
-                            symbol=sym,
-                            required_data_dir=required_data_dir,
-                            report_dir=report_dir,
-                            fetch_plan=fetch_plan,
-                            merged_payload=load_required_data_payload_from_csv(parsed=parsed, symbol=sym),
-                        )
-                        if not producer_run_id or expected_fetch_contract is None:
-                            return None
+                    if producer_run_id and expected_fetch_contract is not None:
                         finalized = finalize_required_data_quote_candidate(
                             base=base,
                             producer_root=required_data_dir,
@@ -160,12 +151,32 @@ def ensure_required_data(
                             expected_fetch_contract=expected_fetch_contract,
                             mode="cached",
                         )
+                        _write_fetch_plan_debug(
+                            symbol=sym,
+                            required_data_dir=required_data_dir,
+                            report_dir=report_dir,
+                            fetch_plan=fetch_plan,
+                            merged_payload=load_required_data_payload_from_csv(parsed=parsed, symbol=sym),
+                        )
                         evidence = finalized.get("evidence")
                         return (
                             dict(evidence)
                             if isinstance(evidence, dict)
                             else None
                         )
+                    if required_data_csv_covers_fetch_plan(
+                        parsed=parsed, fetch_plan=fetch_plan
+                    ):
+                        _write_fetch_plan_debug(
+                            symbol=sym,
+                            required_data_dir=required_data_dir,
+                            report_dir=report_dir,
+                            fetch_plan=fetch_plan,
+                            merged_payload=load_required_data_payload_from_csv(
+                                parsed=parsed, symbol=sym
+                            ),
+                        )
+                        return None
                 except Exception:
                     should_refetch = True
             elif min_dte is not None:

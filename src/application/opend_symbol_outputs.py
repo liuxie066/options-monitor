@@ -215,6 +215,14 @@ def _validate_required_data_payload_candidate(
             rows=rows,
             canonical_realized_volatility=canonical_realized_volatility,
         )
+        if not required_data_frame_covers_fetch_plan_debug(
+            pd.DataFrame(rows),
+            dict(contract.get("fetch_plan") or {}),
+            option_chain_evidence=meta,
+        ):
+            raise PositionAdviceSourceError(
+                "required-data payload does not cover expected fetch contract"
+            )
     return meta, rows, source_outcome, contract
 
 
@@ -550,7 +558,9 @@ def _validate_expected_child_request_evidence(
             raise PositionAdviceSourceError(
                 "required-data planned child request is invalid"
             )
-        aggregate_requested = _validate_child_snapshot_code_evidence(meta)
+        aggregate_requested = _validate_child_snapshot_code_evidence(
+            meta, allow_empty=True
+        )
         _validate_child_rows_against_planned_request(
             planned_request=planned_request,
             requested_codes=aggregate_requested,
@@ -649,7 +659,10 @@ def _validate_expected_child_request_evidence(
             raise PositionAdviceSourceError(
                 "required-data child request outcome evidence is invalid"
             )
-        if canonical_realized_volatility is not None:
+        requested_codes = _validate_child_snapshot_code_evidence(
+            child, allow_empty=True
+        )
+        if canonical_realized_volatility is not None and requested_codes:
             child_realized_volatility = _required_realized_volatility_values(
                 child
             )
@@ -659,7 +672,6 @@ def _validate_expected_child_request_evidence(
                 raise PositionAdviceSourceError(
                     "required-data child request realized volatility mismatch"
                 )
-        requested_codes = _validate_child_snapshot_code_evidence(child)
         child_requested_union.update(requested_codes)
         _validate_child_rows_against_planned_request(
             planned_request=planned_request,
@@ -693,6 +705,8 @@ def _required_data_rows_by_code(
 
 def _validate_child_snapshot_code_evidence(
     child: Mapping[str, Any],
+    *,
+    allow_empty: bool = False,
 ) -> frozenset[str]:
     requested = _code_set(child.get("snapshot_requested_code_set"))
     returned = _code_set(child.get("snapshot_returned_code_set"))
@@ -718,7 +732,7 @@ def _validate_child_snapshot_code_evidence(
             "required-data child request snapshot counts mismatch"
         )
     if (
-        not requested
+        (not requested and not allow_empty)
         or requested != returned
         or missing
         or unexpected
@@ -737,7 +751,7 @@ def _validate_child_rows_against_planned_request(
     row_by_code: Mapping[str, Mapping[str, Any]],
     contract: Mapping[str, Any],
 ) -> None:
-    if not requested_codes or any(code not in row_by_code for code in requested_codes):
+    if any(code not in row_by_code for code in requested_codes):
         raise PositionAdviceSourceError(
             "required-data child request rows do not match requested codes"
         )
