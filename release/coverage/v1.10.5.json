@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.5",
+  "base": {
+    "tag": "v1.10.4",
+    "commit": "c9605d6f3754b335270987403669cbb0452d8040"
+  },
+  "reviewed_head": "afd03702d9f85de9d59d5a22de6309c83ad60359",
+  "commits": [
+    {
+      "sha": "c6143d426a4302ea84f8cb45f1ae2fe44a18f755",
+      "subject": "fix: harden settlement collector resilience"
+    },
+    {
+      "sha": "afd03702d9f85de9d59d5a22de6309c83ad60359",
+      "subject": "fix: accept complete finite option strike grids"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Accepted complete OpenD finite strike grids whose configured interval endpoints are not listed contracts, while retaining strict endpoint validation when provider completeness evidence is absent.",
+      "commits": [
+        "afd03702d9f85de9d59d5a22de6309c83ad60359"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bounded settlement observation retries around unavailable or repeating provider results while preserving canonical ledger authority and local deadline reconciliation, preventing expensive lifecycle retry loops.",
+      "commits": [
+        "c6143d426a4302ea84f8cb45f1ae2fe44a18f755"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
