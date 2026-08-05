@@ -54,6 +54,9 @@ from src.application.trades.lifecycle_runtime import (
     ensure_lifecycle_timing_after_intake,
     reconcile_due_lifecycle_cases_for_source,
 )
+from src.application.trades.settlement_observation import (
+    build_settlement_observation_collector,
+)
 from src.application.trades.receipt import (
     resolve_trade_lifecycle_notification_batch_route,
     send_trade_lifecycle_outbox_payload,
@@ -68,6 +71,7 @@ from src.application.trades.inbox import (
     list_retryable_trade_payloads,
     mark_trade_payload_retryable,
     settle_trade_payload_result,
+    trade_inbox_revision,
     trade_inbox_summary,
 )
 from src.application.opend_fetch_config import opend_fetch_kwargs
@@ -1151,6 +1155,9 @@ def _legacy_override_sources(intake_cfg: dict[str, Any], *, host: str | None, po
             "reconnect_sec": int(intake_cfg.get("reconnect_sec") or 5),
             "receipt": dict(intake_cfg.get("receipt") or {}),
             "backfill": dict(intake_cfg.get("backfill") or {}),
+            "settlement_observation": dict(
+                intake_cfg.get("settlement_observation") or {}
+            ),
             "account_mapping": dict(intake_cfg.get("account_mapping") or {}),
             "futu_account_ids": list(intake_cfg.get("futu_account_ids") or []),
         }
@@ -1267,6 +1274,9 @@ def _source_status_payload(source: dict[str, Any]) -> dict[str, Any]:
         "combo_reconciliation_mode": str(
             source.get("combo_reconciliation_mode") or "off"
         ),
+        "settlement_observation": dict(
+            source.get("settlement_observation") or {}
+        ),
     }
 
 
@@ -1290,6 +1300,11 @@ def _status_base_for_source(
     source_cfg["futu_account_ids"] = list(source.get("futu_account_ids") or [])
     source_cfg["receipt"] = dict(source.get("receipt") or intake_cfg.get("receipt") or {})
     source_cfg["backfill"] = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
+    source_cfg["settlement_observation"] = dict(
+        source.get("settlement_observation")
+        or intake_cfg.get("settlement_observation")
+        or {}
+    )
     out = _status_base_payload(
         cfg_path=cfg_path,
         intake_cfg=source_cfg,
@@ -1360,11 +1375,21 @@ def _run_listener_source_loop(
         runtime_root=runtime_root,
         runtime_root_source=runtime_root_source,
     )
+    inbox_summary_cache: dict[str, Any] = {}
+    lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
+
+    def current_inbox_summary() -> dict[str, Any]:
+        return _cached_trade_inbox_summary(
+            inbox_path,
+            cache=inbox_summary_cache,
+        )
+
     _refresh_lifecycle_delivery_status(
         status_state,
         repo=repo,
         account=str(source.get("account") or ""),
         dispatcher_status_fn=lifecycle_dispatcher_status_fn,
+        snapshot_cache=lifecycle_delivery_snapshot_cache,
     )
     stop = stop_event or threading.Event()
     settlement_broker_gateway = build_futu_gateway(
@@ -1388,6 +1413,29 @@ def _run_listener_source_loop(
         if quote_route.ok
         else None
     )
+    settlement_collector = None
+
+    def _settlement_collector_factory():
+        nonlocal settlement_collector
+        if settlement_collector is None:
+            settlement_collector = build_settlement_observation_collector(
+                repo=repo,
+                broker_gateway=settlement_broker_gateway,
+                quote_gateway=settlement_quote_gateway,
+                quote_dependency_error=quote_dependency_error,
+                futu_account_ids=list(
+                    source.get("futu_account_ids") or []
+                ),
+                trd_env="REAL",
+                now_ms_fn=lambda: int(time.time() * 1000),
+                source_id=str(source.get("id") or "settlement"),
+            )
+        return settlement_collector
+    settlement_process_metrics = {
+        "collector_attempt_count": 0,
+        "semantic_admission_count": 0,
+        "semantic_duplicate_count": 0,
+    }
 
     def _close_settlement_gateways() -> None:
         settlement_broker_gateway.close()
@@ -1555,7 +1603,7 @@ def _run_listener_source_loop(
                 {
                     "last_push_received_utc": push_received_at,
                     "last_push_deal_id": payload_deal_id(payload) or None,
-                    "inbox": trade_inbox_summary(inbox_path),
+                    "inbox": current_inbox_summary(),
                 }
             )
             _write_listener_status(
@@ -1579,7 +1627,7 @@ def _run_listener_source_loop(
                     "last_error_at": utc_now(),
                     "last_push_received_utc": push_received_at,
                     "last_push_deal_id": payload_deal_id(payload) or None,
-                    "inbox": trade_inbox_summary(inbox_path),
+                    "inbox": current_inbox_summary(),
                 }
             )
             _write_listener_status(
@@ -1604,7 +1652,7 @@ def _run_listener_source_loop(
                     if isinstance(result.get("stock_holdings_sync"), dict)
                     else None
                 ),
-                "inbox": trade_inbox_summary(inbox_path),
+                "inbox": current_inbox_summary(),
                 "last_combo_reconciliation": (
                     dict(result.get("combo_reconciliation"))
                     if isinstance(result.get("combo_reconciliation"), dict)
@@ -1617,6 +1665,7 @@ def _run_listener_source_loop(
             repo=repo,
             account=str(source.get("account") or ""),
             dispatcher_status_fn=lifecycle_dispatcher_status_fn,
+            snapshot_cache=lifecycle_delivery_snapshot_cache,
         )
         _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
@@ -1679,7 +1728,7 @@ def _run_listener_source_loop(
                             )
                             break
                     last_inbox_retry_monotonic = now_mono
-                    status_state["inbox"] = trade_inbox_summary(inbox_path)
+                    status_state["inbox"] = current_inbox_summary()
                     if (
                         int(status_state["inbox"].get("pending_count") or 0) == 0
                         and status_state.get("last_error")
@@ -1710,6 +1759,12 @@ def _run_listener_source_loop(
                                     trd_env="REAL",
                                     now_ms=int(time.time() * 1000),
                                     apply_changes=True,
+                                    settlement_collector_factory=(
+                                        _settlement_collector_factory
+                                    ),
+                                    process_metrics=(
+                                        settlement_process_metrics
+                                    ),
                                 )
                             )
                         status_state[
@@ -1826,6 +1881,9 @@ def _run_listener_source_loop(
                         dispatcher_status_fn=(
                             lifecycle_dispatcher_status_fn
                         ),
+                        snapshot_cache=(
+                            lifecycle_delivery_snapshot_cache
+                        ),
                     )
                     _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                     last_heartbeat_monotonic = now_mono
@@ -1921,6 +1979,9 @@ def _status_base_payload(
         "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
         "receipt": dict(intake_cfg.get("receipt") or {}),
         "backfill": dict(intake_cfg.get("backfill") or {}),
+        "settlement_observation": dict(
+            intake_cfg.get("settlement_observation") or {}
+        ),
         "holdings_sync": _holdings_sync_status_payload(
             intake_cfg.get("holdings_sync")
         ),
@@ -1936,6 +1997,20 @@ def _lifecycle_delivery_status(
     *,
     account: str,
     now_ms: int,
+) -> dict[str, Any]:
+    return _render_lifecycle_delivery_status(
+        _build_lifecycle_delivery_status_snapshot(
+            repo,
+            account=account,
+        ),
+        now_ms=now_ms,
+    )
+
+
+def _build_lifecycle_delivery_status_snapshot(
+    repo: Any,
+    *,
+    account: str,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     if not account_value:
@@ -2004,9 +2079,6 @@ def _lifecycle_delivery_status(
                         "expiration_ymd"
                     ),
                     "settlement_deadline_ms": deadline_ms or None,
-                    "overdue": bool(
-                        deadline_ms and int(now_ms) >= deadline_ms
-                    ),
                 }
             )
 
@@ -2051,20 +2123,15 @@ def _lifecycle_delivery_status(
         str(item.get("status") or "").strip().lower() or "unknown"
         for item in notifications
     )
-    eligible_unbound_rows = [
+    unbound_retry_rows = [
         item
         for item in notifications
         if not str(item.get("delivery_batch_id") or "").strip()
         and str(item.get("status") or "").strip().lower()
         in {"pending", "explicit_failed"}
         and int(item.get("attempt_count") or 0) < MAX_ATTEMPTS
-        and (
-            item.get("next_attempt_at_ms") is None
-            or int(item.get("next_attempt_at_ms") or 0)
-            <= int(now_ms)
-        )
     ]
-    eligible_unbound_rows.sort(
+    unbound_retry_rows.sort(
         key=lambda item: (
             int(item.get("created_at_ms") or 0),
             str(item.get("outbox_id") or ""),
@@ -2204,18 +2271,10 @@ def _lifecycle_delivery_status(
         )
     )
     return {
-        "schema_version": "trade_lifecycle_delivery_status.v2",
-        "status": "ok",
         "account": account_value,
-        "observed_at_ms": int(now_ms),
         "lifecycle_case_count": len(cases),
         "reason_state_counts": reason_state_counts,
-        "oldest_pending_case": (
-            pending_cases[0] if pending_cases else None
-        ),
-        "overdue_pending_count": sum(
-            1 for item in pending_cases if item["overdue"]
-        ),
+        "pending_cases": pending_cases,
         "observation_incomplete_reason_counts": dict(
             sorted(observation_incomplete_reasons.items())
         ),
@@ -2225,30 +2284,7 @@ def _lifecycle_delivery_status(
             if count > 1
         ),
         "outbox_status_counts": outbox_status_counts,
-        "unbound_eligible_count": len(eligible_unbound_rows),
-        "oldest_unbound_eligible": (
-            {
-                "outbox_id": eligible_unbound_rows[0].get(
-                    "outbox_id"
-                ),
-                "case_id": eligible_unbound_rows[0].get("case_id"),
-                "created_at_ms": eligible_unbound_rows[0].get(
-                    "created_at_ms"
-                ),
-                "age_ms": max(
-                    0,
-                    int(now_ms)
-                    - int(
-                        eligible_unbound_rows[0].get(
-                            "created_at_ms"
-                        )
-                        or 0
-                    ),
-                ),
-            }
-            if eligible_unbound_rows
-            else None
-        ),
+        "unbound_retry_rows": unbound_retry_rows,
         "batch_status_counts": batch_status_counts,
         "delivery_batch_count": len(delivery_batches),
         "batched_member_count": len(
@@ -2310,6 +2346,107 @@ def _lifecycle_delivery_status(
     }
 
 
+def _render_lifecycle_delivery_status(
+    snapshot: dict[str, Any],
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    observed_at_ms = int(now_ms)
+    pending_cases = [
+        {
+            **dict(item),
+            "overdue": bool(
+                item.get("settlement_deadline_ms")
+                and observed_at_ms
+                >= int(item["settlement_deadline_ms"])
+            ),
+        }
+        for item in snapshot.get("pending_cases") or []
+        if isinstance(item, dict)
+    ]
+    eligible_unbound_rows = [
+        dict(item)
+        for item in snapshot.get("unbound_retry_rows") or []
+        if isinstance(item, dict)
+        and (
+            item.get("next_attempt_at_ms") is None
+            or int(item.get("next_attempt_at_ms") or 0)
+            <= observed_at_ms
+        )
+    ]
+    eligible_unbound_rows.sort(
+        key=lambda item: (
+            int(item.get("created_at_ms") or 0),
+            str(item.get("outbox_id") or ""),
+        )
+    )
+    return {
+        "schema_version": "trade_lifecycle_delivery_status.v2",
+        "status": "ok",
+        "account": snapshot.get("account"),
+        "observed_at_ms": observed_at_ms,
+        "lifecycle_case_count": int(
+            snapshot.get("lifecycle_case_count") or 0
+        ),
+        "reason_state_counts": dict(
+            snapshot.get("reason_state_counts") or {}
+        ),
+        "oldest_pending_case": pending_cases[0] if pending_cases else None,
+        "overdue_pending_count": sum(
+            1 for item in pending_cases if item["overdue"]
+        ),
+        "observation_incomplete_reason_counts": dict(
+            snapshot.get("observation_incomplete_reason_counts") or {}
+        ),
+        "duplicate_canonical_broker_evidence_count": int(
+            snapshot.get("duplicate_canonical_broker_evidence_count") or 0
+        ),
+        "outbox_status_counts": dict(
+            snapshot.get("outbox_status_counts") or {}
+        ),
+        "unbound_eligible_count": len(eligible_unbound_rows),
+        "oldest_unbound_eligible": (
+            {
+                "outbox_id": eligible_unbound_rows[0].get("outbox_id"),
+                "case_id": eligible_unbound_rows[0].get("case_id"),
+                "created_at_ms": eligible_unbound_rows[0].get(
+                    "created_at_ms"
+                ),
+                "age_ms": max(
+                    0,
+                    observed_at_ms
+                    - int(
+                        eligible_unbound_rows[0].get("created_at_ms") or 0
+                    ),
+                ),
+            }
+            if eligible_unbound_rows
+            else None
+        ),
+        "batch_status_counts": dict(
+            snapshot.get("batch_status_counts") or {}
+        ),
+        "delivery_batch_count": int(
+            snapshot.get("delivery_batch_count") or 0
+        ),
+        "batched_member_count": int(
+            snapshot.get("batched_member_count") or 0
+        ),
+        "active_batched_member_count": int(
+            snapshot.get("active_batched_member_count") or 0
+        ),
+        "oldest_unknown_batch": snapshot.get("oldest_unknown_batch"),
+        "messages_avoided": dict(snapshot.get("messages_avoided") or {}),
+        "oldest_unknown_outbox": snapshot.get("oldest_unknown_outbox"),
+        "migration_receipt_count": int(
+            snapshot.get("migration_receipt_count") or 0
+        ),
+        "last_migration_receipt_target": snapshot.get(
+            "last_migration_receipt_target"
+        ),
+    }
+
+
 def _refresh_lifecycle_delivery_status(
     status_state: dict[str, Any],
     *,
@@ -2318,6 +2455,7 @@ def _refresh_lifecycle_delivery_status(
     dispatcher_status_fn: (
         Callable[[], dict[str, Any]] | None
     ) = None,
+    snapshot_cache: dict[str, Any] | None = None,
 ) -> None:
     dispatcher_status: dict[str, Any] | None = None
     if dispatcher_status_fn is not None:
@@ -2333,15 +2471,48 @@ def _refresh_lifecycle_delivery_status(
             dispatcher_status["error"] = (
                 f"{type(exc).__name__}: {exc}"
             )
+    account_value = str(account or "").strip().lower()
+    revision_reader = getattr(
+        repo,
+        "get_trade_lifecycle_delivery_status_revision",
+        None,
+    )
+    revision_before: int | None = None
+    snapshot: dict[str, Any] | None = None
     try:
-        status_state["lifecycle_delivery"] = (
-            _lifecycle_delivery_status(
+        if snapshot_cache is not None and callable(revision_reader):
+            revision_before = int(revision_reader())
+            cached_entry = snapshot_cache.get("entry")
+            if (
+                isinstance(cached_entry, dict)
+                and cached_entry.get("token")
+                == (account_value, revision_before)
+                and isinstance(cached_entry.get("snapshot"), dict)
+            ):
+                snapshot = dict(cached_entry["snapshot"])
+        if snapshot is None:
+            snapshot = _build_lifecycle_delivery_status_snapshot(
                 repo,
-                account=account,
+                account=account_value,
+            )
+            if snapshot_cache is not None and revision_before is not None:
+                revision_after = int(revision_reader())
+                if revision_after == revision_before:
+                    snapshot_cache["entry"] = {
+                        "token": (account_value, revision_after),
+                        "snapshot": dict(snapshot),
+                    }
+                else:
+                    snapshot_cache.clear()
+        status_state["lifecycle_delivery"] = (
+            _render_lifecycle_delivery_status(
+                snapshot,
                 now_ms=int(time.time() * 1000),
             )
         )
     except Exception as exc:
+        if snapshot_cache is not None:
+            snapshot_cache.clear()
         status_state["lifecycle_delivery"] = {
             "schema_version": "trade_lifecycle_delivery_status.v2",
             "status": "unavailable",
@@ -2352,6 +2523,32 @@ def _refresh_lifecycle_delivery_status(
         status_state["lifecycle_delivery"]["dispatcher"] = (
             dispatcher_status
         )
+
+
+def _cached_trade_inbox_summary(
+    path: Path,
+    *,
+    cache: dict[str, Any],
+) -> dict[str, Any]:
+    path_key = str(path)
+    revision_before = trade_inbox_revision(path)
+    cached_entry = cache.get("entry")
+    if (
+        isinstance(cached_entry, dict)
+        and cached_entry.get("token") == (path_key, revision_before)
+        and isinstance(cached_entry.get("summary"), dict)
+    ):
+        return dict(cached_entry["summary"])
+    summary = trade_inbox_summary(path)
+    revision_after = trade_inbox_revision(path)
+    if revision_after == revision_before:
+        cache["entry"] = {
+            "token": (path_key, revision_after),
+            "summary": dict(summary),
+        }
+    else:
+        cache.clear()
+    return summary
 
 
 def _is_canonical_broker_source_key(value: str) -> bool:

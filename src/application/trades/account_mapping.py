@@ -41,6 +41,11 @@ def resolve_trade_intake_config(
     receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
     backfill_cfg = resolve_trade_intake_backfill_config(ti.get("backfill"))
     holdings_sync_cfg = resolve_trade_intake_holdings_sync_config(ti.get("holdings_sync"))
+    settlement_observation_cfg = (
+        resolve_trade_intake_settlement_observation_config(
+            ti.get("settlement_observation")
+        )
+    )
     combo_reconciliation_cfg = resolve_combo_reconciliation_config(src)
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
@@ -50,6 +55,7 @@ def resolve_trade_intake_config(
         enabled=enabled,
         receipt=receipt_cfg,
         backfill=backfill_cfg,
+        settlement_observation=settlement_observation_cfg,
         reconnect_sec=reconnect_sec,
         fallback_state_path=state_path,
         fallback_audit_path=audit_path,
@@ -68,10 +74,38 @@ def resolve_trade_intake_config(
         "receipt": receipt_cfg,
         "backfill": backfill_cfg,
         "holdings_sync": holdings_sync_cfg,
+        "settlement_observation": settlement_observation_cfg,
         "combo_reconciliation": combo_reconciliation_cfg,
         "account_mapping": account_mapping,
         "futu_account_ids": futu_lookup_account_ids,
         "sources": sources,
+    }
+
+
+def resolve_trade_intake_settlement_observation_config(
+    value: Any,
+) -> dict[str, Any]:
+    if value is None:
+        section: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        section = value
+    else:
+        raise ValueError(
+            "trade_intake.settlement_observation must be an object"
+        )
+    unknown = sorted(set(section) - {"enabled"})
+    if unknown:
+        raise ValueError(
+            "trade_intake.settlement_observation has unsupported keys: "
+            + ", ".join(unknown)
+        )
+    return {
+        "enabled": _bool_from_config(
+            section,
+            "enabled",
+            default=True,
+            section="settlement_observation",
+        )
     }
 
 
@@ -329,6 +363,7 @@ def resolve_trade_intake_sources(
     enabled: bool | None = None,
     receipt: dict[str, Any] | None = None,
     backfill: dict[str, Any] | None = None,
+    settlement_observation: dict[str, Any] | None = None,
     reconnect_sec: int | None = None,
     fallback_state_path: str | Path | None = None,
     fallback_audit_path: str | Path | None = None,
@@ -341,6 +376,18 @@ def resolve_trade_intake_sources(
     base_enabled = True if enabled is None else bool(enabled)
     base_receipt = dict(receipt or {})
     base_backfill = dict(backfill or {})
+    base_settlement_observation = dict(
+        settlement_observation
+        or resolve_trade_intake_settlement_observation_config(
+            (
+                dict(src.get("trade_intake") or {}).get(
+                    "settlement_observation"
+                )
+                if isinstance(src.get("trade_intake"), dict)
+                else None
+            )
+        )
+    )
     base_reconnect_sec = int(reconnect_sec or 5)
     base_state_path = Path(fallback_state_path or "output_shared/state/auto_trade_intake_state.json")
     base_audit_path = Path(fallback_audit_path or "output_shared/state/auto_trade_intake_audit.jsonl")
@@ -374,6 +421,9 @@ def resolve_trade_intake_sources(
                 "reconnect_sec": base_reconnect_sec,
                 "receipt": base_receipt,
                 "backfill": base_backfill,
+                "settlement_observation": (
+                    base_settlement_observation
+                ),
                 "account_mapping": {plan.futu_account_id: account},
                 "futu_account_ids": [plan.futu_account_id],
                 "combo_reconciliation_mode": str(
@@ -414,6 +464,7 @@ def resolve_trade_intake_sources(
             "reconnect_sec": base_reconnect_sec,
             "receipt": base_receipt,
             "backfill": base_backfill,
+            "settlement_observation": base_settlement_observation,
             "account_mapping": base_mapping,
             "futu_account_ids": base_account_ids,
             "combo_reconciliation_mode": "off",

@@ -273,6 +273,50 @@ def _ensure_notification_delivery_batches_v1(
     )
 
 
+def _ensure_lifecycle_delivery_status_revision_v1(
+    conn: sqlite3.Connection,
+) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_lifecycle_status_revisions (
+          scope TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL CHECK(revision >= 0)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_lifecycle_status_revisions (scope, revision)
+        VALUES ('delivery', 0)
+        ON CONFLICT(scope) DO NOTHING
+        """
+    )
+    status_tables = {
+        "cases": "trade_lifecycle_cases",
+        "evidence": "trade_lifecycle_evidence",
+        "timing": "trade_lifecycle_timing_policies",
+        "outbox": "trade_lifecycle_notification_outbox",
+        "batches": "trade_lifecycle_notification_delivery_batches",
+        "receipts": "trade_lifecycle_migration_receipts",
+    }
+    for alias, table in status_tables.items():
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            conn.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS
+                trg_lifecycle_delivery_status_{alias}_{operation.lower()}
+                AFTER {operation} ON {table}
+                BEGIN
+                  INSERT INTO trade_lifecycle_status_revisions (
+                    scope, revision
+                  ) VALUES ('delivery', 1)
+                  ON CONFLICT(scope) DO UPDATE SET
+                    revision = revision + 1;
+                END
+                """
+            )
+
+
 def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -413,6 +457,17 @@ class SQLiteOptionPositionsRepository:
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_cases_due
+                ON trade_lifecycle_cases(
+                  account, updated_at_ms DESC, case_id DESC
+                )
+                WHERE status NOT IN (
+                  'ledger_written', 'conflict', 'superseded'
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS trade_lifecycle_evidence (
                   evidence_id TEXT PRIMARY KEY,
                   case_id TEXT,
@@ -443,6 +498,101 @@ class SQLiteOptionPositionsRepository:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_lifecycle_evidence_case_id
                 ON trade_lifecycle_evidence(case_id, evidence_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_evidence_settlement_latest
+                ON trade_lifecycle_evidence(
+                  case_id, source_type, created_at_ms, evidence_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_evidence_revisions (
+                  case_id TEXT PRIMARY KEY,
+                  revision INTEGER NOT NULL CHECK(revision >= 0)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS
+                trg_trade_lifecycle_evidence_revision_insert
+                AFTER INSERT ON trade_lifecycle_evidence
+                WHEN NEW.case_id IS NOT NULL AND NEW.case_id != ''
+                BEGIN
+                  INSERT INTO trade_lifecycle_evidence_revisions (
+                    case_id, revision
+                  ) VALUES (NEW.case_id, 1)
+                  ON CONFLICT(case_id) DO UPDATE SET
+                    revision = revision + 1;
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS
+                trg_trade_lifecycle_evidence_revision_update_old
+                AFTER UPDATE OF case_id ON trade_lifecycle_evidence
+                WHEN OLD.case_id IS NOT NEW.case_id
+                  AND OLD.case_id IS NOT NULL
+                  AND OLD.case_id != ''
+                BEGIN
+                  INSERT INTO trade_lifecycle_evidence_revisions (
+                    case_id, revision
+                  ) VALUES (OLD.case_id, 1)
+                  ON CONFLICT(case_id) DO UPDATE SET
+                    revision = revision + 1;
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS
+                trg_trade_lifecycle_evidence_revision_update_new
+                AFTER UPDATE OF case_id ON trade_lifecycle_evidence
+                WHEN OLD.case_id IS NOT NEW.case_id
+                  AND NEW.case_id IS NOT NULL
+                  AND NEW.case_id != ''
+                BEGIN
+                  INSERT INTO trade_lifecycle_evidence_revisions (
+                    case_id, revision
+                  ) VALUES (NEW.case_id, 1)
+                  ON CONFLICT(case_id) DO UPDATE SET
+                    revision = revision + 1;
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS
+                trg_trade_lifecycle_evidence_revision_delete
+                AFTER DELETE ON trade_lifecycle_evidence
+                WHEN OLD.case_id IS NOT NULL AND OLD.case_id != ''
+                BEGIN
+                  INSERT INTO trade_lifecycle_evidence_revisions (
+                    case_id, revision
+                  ) VALUES (OLD.case_id, 1)
+                  ON CONFLICT(case_id) DO UPDATE SET
+                    revision = revision + 1;
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_settlement_admission_heads (
+                  case_id TEXT PRIMARY KEY,
+                  semantic_schema TEXT NOT NULL,
+                  semantic_fingerprint TEXT NOT NULL,
+                  evidence_id TEXT NOT NULL,
+                  evidence_created_at_ms INTEGER NOT NULL,
+                  updated_at_ms INTEGER NOT NULL,
+                  FOREIGN KEY(case_id) REFERENCES trade_lifecycle_cases(case_id),
+                  FOREIGN KEY(case_id, evidence_id)
+                    REFERENCES trade_lifecycle_evidence(case_id, evidence_id)
+                )
                 """
             )
             conn.execute(
@@ -539,6 +689,7 @@ class SQLiteOptionPositionsRepository:
                 )
                 """
             )
+            _ensure_lifecycle_delivery_status_revision_v1(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS strategy_group_identities (
@@ -1014,6 +1165,80 @@ class SQLiteOptionPositionsRepository:
                 out.append(dict(payload))
         return out
 
+    def list_trade_lifecycle_due_candidates(
+        self,
+        *,
+        account: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return compact case/timing/evidence invalidation facts only."""
+
+        account_value = str(account or "").strip().lower()
+        if not account_value:
+            raise ValueError("due lifecycle candidate account is required")
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT
+                  lifecycle_case.raw_json AS case_raw_json,
+                  lifecycle_case.updated_at_ms AS case_updated_at_ms,
+                  timing.raw_json AS timing_raw_json,
+                  COALESCE(evidence_revision.revision, 0)
+                    AS evidence_revision
+                FROM trade_lifecycle_cases AS lifecycle_case
+                LEFT JOIN trade_lifecycle_timing_policies AS timing
+                  ON timing.case_id = lifecycle_case.case_id
+                LEFT JOIN trade_lifecycle_evidence_revisions
+                  AS evidence_revision
+                  ON evidence_revision.case_id = lifecycle_case.case_id
+                WHERE lifecycle_case.account = ?
+                  AND lifecycle_case.status NOT IN (
+                    'ledger_written', 'conflict', 'superseded'
+                  )
+                ORDER BY lifecycle_case.updated_at_ms DESC,
+                         lifecycle_case.case_id DESC
+                """,
+                (account_value,),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            lifecycle_case = _json_object(row["case_raw_json"])
+            timing_policy = (
+                _json_object(row["timing_raw_json"])
+                if row["timing_raw_json"] is not None
+                else None
+            )
+            output.append(
+                {
+                    "lifecycle_case": lifecycle_case,
+                    "case_updated_at_ms": int(
+                        row["case_updated_at_ms"] or 0
+                    ),
+                    "timing_policy": timing_policy,
+                    "evidence_revision": int(
+                        row["evidence_revision"] or 0
+                    ),
+                }
+            )
+        return output
+
+    def get_trade_lifecycle_delivery_status_revision(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT revision
+                FROM trade_lifecycle_status_revisions
+                WHERE scope = 'delivery'
+                """
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("lifecycle delivery status revision is missing")
+        return int(row["revision"] or 0)
+
     def upsert_trade_lifecycle_evidence(
         self,
         evidence: dict[str, Any],
@@ -1428,6 +1653,95 @@ class SQLiteOptionPositionsRepository:
                 (str(evidence_id or "").strip(),),
             ).fetchone()
         return _json_object(row["raw_json"]) if row is not None else None
+
+    def get_latest_trade_lifecycle_settlement_evidence(
+        self,
+        *,
+        case_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        case_value = str(case_id or "").strip()
+        if not case_value:
+            raise ValueError("settlement evidence case_id is required")
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT rowid, raw_json, created_at_ms
+                FROM trade_lifecycle_evidence
+                WHERE case_id = ?
+                  AND source_type = 'broker_settlement_observation'
+                  AND json_type(raw_json, '$.observation') = 'object'
+                ORDER BY created_at_ms DESC, rowid DESC
+                LIMIT 1
+                """,
+                (case_value,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _json_object(row["raw_json"])
+        return {
+            **payload,
+            "_created_at_ms": int(row["created_at_ms"] or 0),
+            "_rowid": int(row["rowid"] or 0),
+        }
+
+    def get_trade_lifecycle_settlement_admission_head(
+        self,
+        *,
+        case_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                """
+                SELECT case_id, semantic_schema, semantic_fingerprint,
+                       evidence_id, evidence_created_at_ms, updated_at_ms
+                FROM trade_lifecycle_settlement_admission_heads
+                WHERE case_id = ?
+                """,
+                (str(case_id or "").strip(),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def upsert_trade_lifecycle_settlement_admission_head(
+        self,
+        *,
+        case_id: str,
+        semantic_schema: str,
+        semantic_fingerprint: str,
+        evidence_id: str,
+        evidence_created_at_ms: int,
+        updated_at_ms: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        values = (
+            str(case_id or "").strip(),
+            str(semantic_schema or "").strip(),
+            str(semantic_fingerprint or "").strip(),
+            str(evidence_id or "").strip(),
+        )
+        if not all(values) or int(evidence_created_at_ms or 0) <= 0:
+            raise ValueError("settlement admission head is incomplete")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_settlement_admission_heads (
+                  case_id, semantic_schema, semantic_fingerprint, evidence_id,
+                  evidence_created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(case_id) DO UPDATE SET
+                  semantic_schema = excluded.semantic_schema,
+                  semantic_fingerprint = excluded.semantic_fingerprint,
+                  evidence_id = excluded.evidence_id,
+                  evidence_created_at_ms = excluded.evidence_created_at_ms,
+                  updated_at_ms = excluded.updated_at_ms
+                """,
+                (
+                    *values,
+                    int(evidence_created_at_ms),
+                    int(updated_at_ms),
+                ),
+            )
 
     def insert_trade_lifecycle_source_consumption_once(
         self,

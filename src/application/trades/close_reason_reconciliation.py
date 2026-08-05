@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_close_reason import (
@@ -28,6 +28,7 @@ from src.application.trades.lifecycle import (
     reconcile_polled_stock_settlement_evidence,
 )
 from src.application.trades.settlement_observation import (
+    LifecycleObservationGenerationChanged,
     SettlementObservationDataError,
 )
 
@@ -39,10 +40,22 @@ def reconcile_lifecycle_close_reason(
     now_ms: int,
     observation: dict[str, Any] | None = None,
     apply_changes: bool = False,
+    coherent_facts: Mapping[str, Any] | None = None,
+    refresh_read_model: bool = True,
 ) -> dict[str, Any]:
     observation_payload = dict(observation or {})
-    facts = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    facts = (
+        dict(coherent_facts)
+        if isinstance(coherent_facts, Mapping)
+        else lifecycle_case_coherent_facts(repo, case_id=case_id)
+    )
     lifecycle_case = dict(facts["lifecycle_case"])
+    if str(lifecycle_case.get("case_id") or "").strip() != str(
+        case_id or ""
+    ).strip():
+        raise LifecycleObservationGenerationChanged(
+            "prepared lifecycle facts belong to another case"
+        )
     prepared_generation_token = str(
         observation_payload.get(
             "expected_lifecycle_generation_token"
@@ -56,7 +69,7 @@ def reconcile_lifecycle_close_reason(
         prepared_generation_token
         and prepared_generation_token != current_generation_token
     ):
-        raise ValueError(
+        raise LifecycleObservationGenerationChanged(
             "lifecycle generation changed after provider collection"
         )
     expected_generation_token = (
@@ -98,10 +111,11 @@ def reconcile_lifecycle_close_reason(
             "lifecycle_generation_token": current_generation_token,
             "poll_settlement_results": [],
             "write_status": "not_attempted",
-            "lifecycle_read_model": lifecycle_case_read_model(
+            "lifecycle_read_model": _refreshed_lifecycle_read_model(
                 repo,
                 case_id=case_id,
                 now_ms=now_ms,
+                refresh=refresh_read_model,
             ),
         }
     poll_results: list[dict[str, Any]] = []
@@ -135,10 +149,11 @@ def reconcile_lifecycle_close_reason(
             "case_id": case_id,
             "apply_changes": bool(apply_changes),
             "poll_settlement_results": poll_results,
-            "lifecycle_read_model": lifecycle_case_read_model(
+            "lifecycle_read_model": _refreshed_lifecycle_read_model(
                 repo,
                 case_id=case_id,
                 now_ms=now_ms,
+                refresh=refresh_read_model,
             ),
         }
     case_resolution = dict(facts["case_resolution"])
@@ -408,8 +423,23 @@ def reconcile_lifecycle_close_reason(
                 observation_payload.get("observed_at_ms") or now_ms
             ),
             "currency": lifecycle_case.get("currency"),
-            "observation_hash": canonical_hash(
-                observation_payload
+            "observation_hash": str(
+                observation_payload.get("semantic_fingerprint")
+                or canonical_hash(observation_payload)
+            ),
+            "semantic_schema": observation_payload.get(
+                "semantic_schema"
+            ),
+            "semantic_fingerprint": observation_payload.get(
+                "semantic_fingerprint"
+            ),
+            "semantic_projection": observation_payload.get(
+                "semantic_projection"
+            ),
+            "previous_settlement_evidence_id": (
+                observation_payload.get(
+                    "previous_settlement_evidence_id"
+                )
             ),
             "observation": observation_payload,
         }
@@ -422,6 +452,7 @@ def reconcile_lifecycle_close_reason(
             expected_lifecycle_generation_token=(
                 expected_generation_token
             ),
+            refresh_read_model=refresh_read_model,
         )
         return {**preview, "write_result": result.to_dict()}
     summary = {
@@ -446,7 +477,10 @@ def reconcile_lifecycle_close_reason(
             )
         ),
         "observation_hash": (
-            canonical_hash(observation_payload)
+            str(
+                observation_payload.get("semantic_fingerprint")
+                or canonical_hash(observation_payload)
+            )
             if observation_payload
             else None
         ),
@@ -466,8 +500,23 @@ def reconcile_lifecycle_close_reason(
             "contracts": sum(
                 resolution.remaining_contracts_by_lot.values()
             ),
-            "observation_hash": canonical_hash(
-                observation_payload
+            "observation_hash": str(
+                observation_payload.get("semantic_fingerprint")
+                or canonical_hash(observation_payload)
+            ),
+            "semantic_schema": observation_payload.get(
+                "semantic_schema"
+            ),
+            "semantic_fingerprint": observation_payload.get(
+                "semantic_fingerprint"
+            ),
+            "semantic_projection": observation_payload.get(
+                "semantic_projection"
+            ),
+            "previous_settlement_evidence_id": (
+                observation_payload.get(
+                    "previous_settlement_evidence_id"
+                )
             ),
             "observation": observation_payload,
         }
@@ -511,12 +560,29 @@ def reconcile_lifecycle_close_reason(
     return {
         **preview,
         "write_result": write_result,
-        "lifecycle_read_model": lifecycle_case_read_model(
+        "lifecycle_read_model": _refreshed_lifecycle_read_model(
             repo,
             case_id=case_id,
             now_ms=now_ms,
+            refresh=refresh_read_model,
         ),
     }
+
+
+def _refreshed_lifecycle_read_model(
+    repo: Any,
+    *,
+    case_id: str,
+    now_ms: int,
+    refresh: bool,
+) -> dict[str, Any] | None:
+    if not refresh:
+        return None
+    return lifecycle_case_read_model(
+        repo,
+        case_id=case_id,
+        now_ms=now_ms,
+    )
 
 
 def _reconcile_deadline_without_effective_pairing(
@@ -617,10 +683,24 @@ def reconcile_due_lifecycle_cases(
         Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
         | None
     ) = None,
+    case_ids: Iterable[str] | None = None,
+    prepared_read_models: (
+        Mapping[str, dict[str, Any]] | None
+    ) = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
     if not account_value:
         raise ValueError("due reconciliation account is required")
+    selected_case_ids = (
+        {
+            str(item or "").strip()
+            for item in case_ids
+            if str(item or "").strip()
+        }
+        if case_ids is not None
+        else None
+    )
+    prepared = dict(prepared_read_models or {})
     results: list[dict[str, Any]] = []
     for lifecycle_case in repo.list_trade_lifecycle_cases(
         account=account_value
@@ -628,6 +708,10 @@ def reconcile_due_lifecycle_cases(
         case_id = str(lifecycle_case.get("case_id") or "").strip()
         if (
             not case_id
+            or (
+                selected_case_ids is not None
+                and case_id not in selected_case_ids
+            )
             or str(lifecycle_case.get("schema_version") or "").strip() != LIFECYCLE_CASE_SCHEMA
             or str(lifecycle_case.get("status") or "").strip().lower() == "superseded"
         ):
@@ -645,10 +729,14 @@ def reconcile_due_lifecycle_cases(
             )
             continue
         try:
-            read_model = lifecycle_case_read_model(
-                repo,
-                case_id=case_id,
-                now_ms=now_ms,
+            read_model = (
+                dict(prepared[case_id])
+                if isinstance(prepared.get(case_id), dict)
+                else lifecycle_case_read_model(
+                    repo,
+                    case_id=case_id,
+                    now_ms=now_ms,
+                )
             )
             pairing_until = read_model.get("pairing_until_ms")
             settlement_deadline = read_model.get("pending_until_ms")

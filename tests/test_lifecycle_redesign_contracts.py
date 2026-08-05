@@ -35,6 +35,7 @@ from src.application.ledger.source_consumption import (
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.auto_intake import (
     _lifecycle_delivery_status,
+    _refresh_lifecycle_delivery_status,
 )
 from src.application.trades.lifecycle_reconciliation import (
     discover_lifecycle_cases,
@@ -2037,3 +2038,174 @@ def test_lifecycle_delivery_status_reports_batch_scope_without_target(
     }
     assert status["oldest_unknown_batch"] is None
     assert target not in str(status)
+
+
+def test_lifecycle_delivery_status_cache_skips_unchanged_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.auto_intake as auto_intake
+
+    repo, case_id, observed_at_ms = _case_with_option_anchor(
+        tmp_path
+    )
+    lifecycle_case = repo.get_trade_lifecycle_case(case_id)
+    assert lifecycle_case is not None
+    lifecycle_case["status"] = "waiting_settlement_evidence"
+    lifecycle_case["derived_summary"] = {
+        "reason_state": "cause_pending",
+        "settlement_deadline_ms": observed_at_ms + 500,
+    }
+    assert repo.upsert_trade_lifecycle_case(lifecycle_case)
+
+    evidence_reads = 0
+    dispatcher_reads = 0
+    original_evidence_reader = repo.list_trade_lifecycle_evidence
+
+    def counted_evidence_reader(*args, **kwargs):
+        nonlocal evidence_reads
+        evidence_reads += 1
+        return original_evidence_reader(*args, **kwargs)
+
+    def dispatcher_status() -> dict:
+        nonlocal dispatcher_reads
+        dispatcher_reads += 1
+        return {"status": "running", "sample": dispatcher_reads}
+
+    monkeypatch.setattr(
+        repo,
+        "list_trade_lifecycle_evidence",
+        counted_evidence_reader,
+    )
+    wall_time_ms = observed_at_ms + 100
+    monkeypatch.setattr(
+        auto_intake.time,
+        "time",
+        lambda: wall_time_ms / 1000,
+    )
+    status_state: dict = {}
+    cache: dict = {}
+
+    for _ in range(10):
+        _refresh_lifecycle_delivery_status(
+            status_state,
+            repo=repo,
+            account="lx",
+            dispatcher_status_fn=dispatcher_status,
+            snapshot_cache=cache,
+        )
+
+    assert evidence_reads == 1
+    assert dispatcher_reads == 10
+    assert status_state["lifecycle_delivery"][
+        "overdue_pending_count"
+    ] == 0
+    wall_time_ms = observed_at_ms + 1_000
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        dispatcher_status_fn=dispatcher_status,
+        snapshot_cache=cache,
+    )
+    assert evidence_reads == 1
+    assert status_state["lifecycle_delivery"][
+        "overdue_pending_count"
+    ] == 1
+    assert status_state["lifecycle_delivery"]["dispatcher"][
+        "sample"
+    ] == 11
+
+    assert repo.insert_trade_lifecycle_evidence_once(
+        {
+            "evidence_id": "delivery-status-cache-invalidation",
+            "case_id": case_id,
+            "source_type": "status_cache_test",
+            "source_event_id": "delivery-status-cache-invalidation",
+            "evidence_type": "status_cache_test",
+            "account": "lx",
+            "symbol": lifecycle_case["symbol"],
+        }
+    )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        dispatcher_status_fn=dispatcher_status,
+        snapshot_cache=cache,
+    )
+    assert evidence_reads == 2
+
+    with repo._connect() as conn:  # noqa: SLF001 - trigger coverage
+        trigger_names = {
+            str(row["name"])
+            for row in conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'trigger'
+                  AND name LIKE 'trg_lifecycle_delivery_status_%'
+                """
+            ).fetchall()
+        }
+    assert len(trigger_names) == 18
+
+    cache.clear()
+    stable_revision = (
+        repo.get_trade_lifecycle_delivery_status_revision()
+    )
+    racing_revisions = iter(
+        (stable_revision, stable_revision + 1)
+    )
+    monkeypatch.setattr(
+        repo,
+        "get_trade_lifecycle_delivery_status_revision",
+        lambda: next(racing_revisions),
+    )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        snapshot_cache=cache,
+    )
+    assert evidence_reads == 3
+    assert cache == {}
+
+    monkeypatch.setattr(
+        repo,
+        "get_trade_lifecycle_delivery_status_revision",
+        lambda: stable_revision + 1,
+    )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        snapshot_cache=cache,
+    )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        snapshot_cache=cache,
+    )
+    assert evidence_reads == 4
+
+    def broken_revision_reader() -> int:
+        raise RuntimeError("revision unavailable")
+
+    monkeypatch.setattr(
+        repo,
+        "get_trade_lifecycle_delivery_status_revision",
+        broken_revision_reader,
+    )
+    _refresh_lifecycle_delivery_status(
+        status_state,
+        repo=repo,
+        account="lx",
+        snapshot_cache=cache,
+    )
+    assert cache == {}
+    assert status_state["lifecycle_delivery"]["status"] == "unavailable"
+    assert "revision unavailable" in status_state[
+        "lifecycle_delivery"
+    ]["error"]

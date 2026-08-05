@@ -2,17 +2,29 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Iterable
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from src.application.ledger.api import (
+    latest_trade_lifecycle_settlement_evidence,
     lifecycle_case_coherent_facts,
 )
 from src.application.trades.close_reason_evidence import (
     build_broker_settlement_observation,
     build_settlement_source_receipt,
     canonical_hash,
+    settlement_receipt_retcode_succeeded,
+)
+from src.application.trades.settlement_attempts import (
+    SettlementAttemptOutcome,
+    SettlementCapabilitySnapshot,
+    SettlementCollectorContract,
+    SETTLEMENT_OBSERVATION_CONTEXT_KEY,
+    classify_exception_outcome,
+    classify_observation_outcome,
+    inspect_settlement_capabilities,
 )
 
 
@@ -22,6 +34,112 @@ class SettlementObservationDataError(ValueError):
 
 class LifecycleObservationGenerationChanged(RuntimeError):
     """The lifecycle facts changed after the due decision was prepared."""
+
+
+@dataclass(frozen=True)
+class SettlementObservationCollector:
+    repo: Any
+    broker_gateway: Any | None
+    quote_gateway: Any | None
+    quote_dependency_error: str | None
+    allowed_futu_account_ids: frozenset[str]
+    trd_env: str
+    now_ms_fn: Callable[[], int]
+    source_id: str
+    contract: SettlementCollectorContract
+    capability: SettlementCapabilitySnapshot
+
+    def __call__(
+        self,
+        lifecycle_case: dict[str, Any],
+        read_model: dict[str, Any],
+    ) -> dict[str, Any]:
+        case_account_id = str(
+            lifecycle_case.get("futu_account_id") or ""
+        ).strip()
+        if case_account_id not in self.allowed_futu_account_ids:
+            raise SettlementObservationDataError(
+                "lifecycle case Futu account binding is outside the source binding set"
+            )
+        return collect_broker_settlement_observation(
+            self.repo,
+            lifecycle_case=lifecycle_case,
+            read_model=read_model,
+            broker_gateway=self.broker_gateway,
+            quote_gateway=self.quote_gateway,
+            quote_dependency_error=self.quote_dependency_error,
+            futu_account_id=case_account_id,
+            trd_env=self.trd_env,
+            now_ms=int(self.now_ms_fn()),
+        )
+
+    def collect_outcome(
+        self,
+        lifecycle_case: dict[str, Any],
+        read_model: dict[str, Any],
+    ) -> SettlementAttemptOutcome:
+        case_id = str(lifecycle_case.get("case_id") or "").strip()
+        account = str(
+            lifecycle_case.get("account") or ""
+        ).strip().lower()
+        if not self.capability.supported:
+            return SettlementAttemptOutcome(
+                kind="blocked_static",
+                source_id=self.source_id,
+                account=account,
+                case_id=case_id,
+                contract_version=self.contract.contract_version,
+                capability_fingerprint=(
+                    self.capability.capability_fingerprint
+                ),
+                reason_code="missing_static_capability",
+                error_class="missing_static",
+            )
+        try:
+            observation = self(lifecycle_case, read_model)
+        except LifecycleObservationGenerationChanged:
+            return SettlementAttemptOutcome(
+                kind="stale_generation",
+                source_id=self.source_id,
+                account=account,
+                case_id=case_id,
+                contract_version=self.contract.contract_version,
+                capability_fingerprint=(
+                    self.capability.capability_fingerprint
+                ),
+                reason_code="lifecycle_generation_changed",
+                error_class="stale_generation",
+            )
+        except SettlementObservationDataError:
+            return SettlementAttemptOutcome(
+                kind="unknown_error",
+                source_id=self.source_id,
+                account=account,
+                case_id=case_id,
+                contract_version=self.contract.contract_version,
+                capability_fingerprint=(
+                    self.capability.capability_fingerprint
+                ),
+                reason_code="settlement_observation_data_invalid",
+                error_class="case_data",
+            )
+        except Exception as exc:
+            return classify_exception_outcome(
+                exc,
+                source_id=self.source_id,
+                account=account,
+                case_id=case_id,
+                contract=self.contract,
+                capability=self.capability,
+            )
+        return classify_observation_outcome(
+            observation,
+            source_id=self.source_id,
+            account=account,
+            case_id=case_id,
+            contract=self.contract,
+            capability=self.capability,
+        )
 
 
 def collect_broker_settlement_observation(
@@ -65,7 +183,12 @@ def collect_broker_settlement_observation(
         raise SettlementObservationDataError(
             "lifecycle case Futu account binding mismatch"
         )
-    facts = lifecycle_case_coherent_facts(repo, case_id=case_id)
+    prepared_facts = read_model.get(SETTLEMENT_OBSERVATION_CONTEXT_KEY)
+    facts = (
+        dict(prepared_facts)
+        if isinstance(prepared_facts, Mapping)
+        else lifecycle_case_coherent_facts(repo, case_id=case_id)
+    )
     prepared_token = str(
         read_model.get("lifecycle_generation_token") or ""
     ).strip()
@@ -272,6 +395,7 @@ def collect_broker_settlement_observation(
                 str(quote_dependency_error or "").strip()
                 or "Futu quote dependency is unavailable"
             ),
+            error_class="dependency_unavailable",
         )
     else:
         calendar = _query_receipt(
@@ -471,6 +595,14 @@ def collect_broker_settlement_observation(
         resolution.status != "ok"
         or case_resolution.get("status") == "conflict"
     )
+    latest_settlement = latest_trade_lifecycle_settlement_evidence(
+        repo,
+        case_id=case_id,
+    )
+    previous_settlement_evidence_id = (
+        str((latest_settlement or {}).get("evidence_id") or "").strip()
+        or None
+    )
     observation = build_broker_settlement_observation(
         case_id=case_id,
         account=account,
@@ -504,6 +636,15 @@ def collect_broker_settlement_observation(
         stock_settlement_candidates=stock_candidates,
         normal_order_present=normal_order_present,
         additional_incomplete_reason_codes=extra_incomplete,
+        observation_start_ms=(
+            int(lifecycle_case["observation_start_ms"])
+            if lifecycle_case.get("observation_start_ms") is not None
+            else None
+        ),
+        expected_lifecycle_generation_token=observed_token,
+        previous_settlement_evidence_id=(
+            previous_settlement_evidence_id
+        ),
     )
     return {
         **observation,
@@ -522,7 +663,12 @@ def build_settlement_observation_collector(
     futu_account_ids: Iterable[str] | None = None,
     trd_env: str = "REAL",
     now_ms_fn: Callable[[], int],
-) -> Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]:
+    source_id: str = "settlement",
+    required_capability_keys: Iterable[str] | None = None,
+    additional_capability_requirements: (
+        dict[str, tuple[str, str]] | None
+    ) = None,
+) -> SettlementObservationCollector:
     broker = broker_gateway or gateway
     quote = quote_gateway or gateway
     allowed = {
@@ -531,25 +677,33 @@ def build_settlement_observation_collector(
         if str(value or "").strip()
     }
 
-    def collect(lifecycle_case: dict[str, Any], read_model: dict[str, Any]) -> dict[str, Any]:
-        case_account_id = str(lifecycle_case.get("futu_account_id") or "").strip()
-        if case_account_id not in allowed:
-            raise SettlementObservationDataError(
-                "lifecycle case Futu account binding is outside the source binding set"
-            )
-        return collect_broker_settlement_observation(
-            repo,
-            lifecycle_case=lifecycle_case,
-            read_model=read_model,
-            broker_gateway=broker,
-            quote_gateway=quote,
-            quote_dependency_error=quote_dependency_error,
-            futu_account_id=case_account_id,
-            trd_env=trd_env,
-            now_ms=int(now_ms_fn()),
+    contract = SettlementCollectorContract(
+        required_capability_keys=(
+            tuple(str(item) for item in required_capability_keys)
+            if required_capability_keys is not None
+            else SettlementCollectorContract().required_capability_keys
         )
-
-    return collect
+    )
+    capability = inspect_settlement_capabilities(
+        broker_gateway=broker,
+        quote_gateway=quote,
+        contract=contract,
+        additional_requirements=(
+            additional_capability_requirements
+        ),
+    )
+    return SettlementObservationCollector(
+        repo=repo,
+        broker_gateway=broker,
+        quote_gateway=quote,
+        quote_dependency_error=quote_dependency_error,
+        allowed_futu_account_ids=frozenset(allowed),
+        trd_env=str(trd_env or "REAL").strip().upper(),
+        now_ms_fn=now_ms_fn,
+        source_id=str(source_id or "settlement").strip(),
+        contract=contract,
+        capability=capability,
+    )
 
 
 def _query_receipt(
@@ -562,6 +716,17 @@ def _query_receipt(
     try:
         result = query()
     except Exception as exc:
+        provider_code = str(
+            getattr(exc, "code", "") or ""
+        ).strip().upper()
+        error_class = {
+            "TRANSIENT": "transient",
+            "RATE_LIMIT": "rate_limit",
+            "AUTH_EXPIRED": "auth_expired",
+            "NEED_2FA": "need_2fa",
+            "TIMEOUT": "timeout",
+            "PROVIDER_UNAVAILABLE": "provider_unavailable",
+        }.get(provider_code, "timeout" if isinstance(exc, TimeoutError) else "unknown")
         return build_settlement_source_receipt(
             source=source,
             query_input=query_input,
@@ -571,6 +736,11 @@ def _query_receipt(
             coverage_complete=False,
             pagination_complete=False,
             error=f"{type(exc).__name__}: {exc}",
+            error_class=error_class,
+            provider_code=provider_code or None,
+            retry_after_ms=_positive_integer(
+                getattr(exc, "retry_after_ms", None)
+            ),
         )
     if not isinstance(result, dict) or not isinstance(
         result.get("rows"), list
@@ -584,7 +754,21 @@ def _query_receipt(
             coverage_complete=False,
             pagination_complete=False,
             error="gateway query receipt is unavailable",
+            error_class="malformed_response",
         )
+    retcode = result.get("retcode")
+    error = str(result.get("error") or "") or None
+    error_class = str(result.get("error_class") or "") or None
+    provider_code = str(result.get("provider_code") or "") or None
+    if (
+        not error_class
+        and not provider_code
+        and (
+            error is not None
+            or not settlement_receipt_retcode_succeeded(retcode)
+        )
+    ):
+        error_class = "unknown"
     return build_settlement_source_receipt(
         source=source,
         query_input=query_input,
@@ -594,14 +778,19 @@ def _query_receipt(
             if isinstance(item, dict)
         ],
         observed_at_ms=observed_at_ms,
-        retcode=result.get("retcode"),
+        retcode=retcode,
         coverage_complete=bool(result.get("coverage_complete")),
         pagination_complete=bool(
             result.get("pagination_complete")
         ),
         stale=bool(result.get("stale")),
         fallback_cache=bool(result.get("fallback_cache")),
-        error=str(result.get("error") or "") or None,
+        error=error,
+        error_class=error_class,
+        provider_code=provider_code,
+        retry_after_ms=_positive_integer(
+            result.get("retry_after_ms")
+        ),
     )
 
 
@@ -1092,6 +1281,7 @@ def _nonzero_position(row: dict[str, Any]) -> bool:
 
 
 __all__ = [
+    "SettlementObservationCollector",
     "build_settlement_observation_collector",
     "collect_broker_settlement_observation",
 ]

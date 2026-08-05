@@ -3,8 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
+
+from src.application.ledger.api import (
+    attach_settlement_semantics,
+    settlement_evidence_id,
+)
 
 
 TIMING_POLICY_SCHEMA = "lifecycle_timing_policy.v1"
@@ -161,6 +167,9 @@ def build_settlement_source_receipt(
     stale: bool = False,
     fallback_cache: bool = False,
     error: str | None = None,
+    error_class: str | None = None,
+    provider_code: str | None = None,
+    retry_after_ms: int | None = None,
 ) -> dict[str, Any]:
     canonical_rows = [
         dict(item)
@@ -168,7 +177,7 @@ def build_settlement_source_receipt(
         if isinstance(item, dict)
     ]
     complete = (
-        retcode in {0, "0", "OK", "ok", None}
+        settlement_receipt_retcode_succeeded(retcode)
         and bool(coverage_complete)
         and bool(pagination_complete)
         and not stale
@@ -189,7 +198,26 @@ def build_settlement_source_receipt(
         "payload_hash": canonical_hash(canonical_rows),
         "status": "complete" if complete else "incomplete",
         "error": str(error or "").strip() or None,
+        "error_class": str(error_class or "").strip().lower() or None,
+        "provider_code": str(provider_code or "").strip().upper() or None,
+        "retry_after_ms": (
+            int(retry_after_ms)
+            if retry_after_ms is not None
+            else None
+        ),
     }
+
+
+def settlement_receipt_retcode_succeeded(retcode: Any) -> bool:
+    if retcode is None:
+        return True
+    if isinstance(retcode, bool):
+        return False
+    if isinstance(retcode, str):
+        return retcode.strip() in {"0", "OK", "ok"}
+    if isinstance(retcode, (int, float, Decimal)):
+        return retcode == 0
+    return False
 
 
 def build_broker_settlement_observation(
@@ -218,6 +246,9 @@ def build_broker_settlement_observation(
     ] = (),
     normal_order_present: bool,
     additional_incomplete_reason_codes: Iterable[str] = (),
+    observation_start_ms: int | None = None,
+    expected_lifecycle_generation_token: str | None = None,
+    previous_settlement_evidence_id: str | None = None,
 ) -> dict[str, Any]:
     incomplete: set[str] = {
         str(item or "").strip()
@@ -276,7 +307,13 @@ def build_broker_settlement_observation(
             anchor_option_deal_key or ""
         ).strip(),
         "anchor_execution_time_ms": int(anchor_execution_time_ms or 0),
+        "observation_start_ms": (
+            int(observation_start_ms)
+            if observation_start_ms is not None
+            else None
+        ),
         "observed_at_ms": int(observed_at_ms or 0),
+        "settlement_deadline_ms": int(settlement_deadline_ms or 0),
         "query_window": dict(query_window or {}),
         "required_sources": list(REQUIRED_SETTLEMENT_SOURCES),
         "source_results": {
@@ -317,8 +354,35 @@ def build_broker_settlement_observation(
         "complete": not incomplete,
         "incomplete_reason_codes": sorted(incomplete),
     }
-    observation_id = "observation_" + canonical_hash(payload)
-    return {"observation_id": observation_id, **payload}
+    semantic_payload = attach_settlement_semantics(payload)
+    generation_token = str(
+        expected_lifecycle_generation_token or ""
+    ).strip()
+    if generation_token:
+        observation_id = settlement_evidence_id(
+            case_id=str(case_id or "").strip(),
+            semantic_fingerprint=str(
+                semantic_payload["semantic_fingerprint"]
+            ),
+            expected_generation_token=generation_token,
+            previous_evidence_id=previous_settlement_evidence_id,
+        )
+    else:
+        observation_id = "observation_" + canonical_hash(
+            {
+                "case_id": str(case_id or "").strip(),
+                "semantic_fingerprint": semantic_payload[
+                    "semantic_fingerprint"
+                ],
+            }
+        )
+    return {
+        "observation_id": observation_id,
+        "previous_settlement_evidence_id": (
+            str(previous_settlement_evidence_id or "").strip() or None
+        ),
+        **semantic_payload,
+    }
 
 
 def _normalize_trading_days(
@@ -365,4 +429,5 @@ __all__ = [
     "build_lifecycle_timing_policy",
     "build_settlement_source_receipt",
     "canonical_hash",
+    "settlement_receipt_retcode_succeeded",
 ]

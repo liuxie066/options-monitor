@@ -1222,6 +1222,73 @@ markets:
     assert cfg["trade_intake"]["holdings_sync"] == {"enabled": True}
 
 
+def test_yaml_config_accepts_settlement_observation_kill_switch(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  settlement_observation:
+    enabled: false
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert cfg["trade_intake"]["settlement_observation"] == {
+        "enabled": False
+    }
+
+
+@pytest.mark.parametrize(
+    "settlement_yaml",
+    [
+        'enabled: "false"',
+        "enabled: true\n    retry_policy: custom",
+    ],
+)
+def test_yaml_config_rejects_invalid_settlement_observation(
+    tmp_path: Path,
+    settlement_yaml: str,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        f"""\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+trade_intake:
+  settlement_observation:
+    {settlement_yaml}
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="settlement_observation"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=config_path,
+        )
+
+
 def test_yaml_config_accepts_account_scoped_combo_reconciliation(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
