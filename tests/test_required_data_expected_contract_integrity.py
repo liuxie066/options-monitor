@@ -196,6 +196,14 @@ def test_expected_contract_accepts_empty_top_evidence_without_executable_child()
 
     assert contract["fetch_plan"] == plan
     assert contract["coverage_policy"]["require_realized_volatility"] is True
+    assert contract["coverage_policy"] == {
+        "schema_version": "required_data_coverage_policy.v2",
+        "projection_outcome": "success_rows",
+        "require_realized_volatility": True,
+        "coverage_evaluator": "required_data_frame_covers_fetch_plan.v2",
+        "completion_unit": "request_option_type_expiration",
+        "allow_proven_empty_scopes": True,
+    }
 
 
 def test_expected_contract_accepts_closed_success_empty_projection() -> None:

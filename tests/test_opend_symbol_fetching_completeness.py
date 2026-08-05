@@ -23,6 +23,9 @@ def _chain_bundle(*, rows: list[dict[str, object]], source_outcome: str) -> Symb
             "errors": [],
             "source_outcome": source_outcome,
             "reason_code": "no_contract_rows" if not rows else None,
+            "expiration_statuses": (
+                {"2026-06-19": "fetched"} if rows else {}
+            ),
             "source_observed_at": "2026-08-04T01:00:00+00:00",
             "completed_at_utc": "2026-08-04T01:00:01+00:00",
         },
@@ -110,6 +113,7 @@ def test_required_realized_volatility_failure_is_typed_overall_error(
             base_dir=tmp_path,
             gateway=object(),
             spot_override=100.0,
+            option_types="put",
             include_realized_volatility=True,
         )
     )
@@ -120,6 +124,18 @@ def test_required_realized_volatility_failure_is_typed_overall_error(
     assert payload["meta"]["source_observed_at"] == "2026-08-04T01:00:00+00:00"
     assert payload["meta"]["completed_at_utc"] == "2026-08-04T01:00:02+00:00"
     assert completion_events == ["rv", "snapshot", "completed"]
+    assert payload["meta"]["option_chain_scope_coverage"] == {
+        "schema_version": "option_chain_scope_coverage.v1",
+        "scopes": [
+            {
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "chain_status": "fetched",
+                "filtered_contract_codes": [code],
+                "filtered_contract_count": 1,
+            }
+        ],
+    }
     assert any(
         item["error_code"] == "REQUIRED_REALIZED_VOLATILITY_INCOMPLETE"
         for item in payload["meta"]["errors"]
@@ -191,6 +207,48 @@ def test_observed_missing_spot_is_not_fetched_again(
     assert payload["spot"] is None
     assert payload["meta"]["spot_snapshot_opend_calls"] == 0
     assert payload["meta"]["source_outcome"] == "success_empty"
+
+
+def test_malformed_chain_filter_input_is_a_provider_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    _install_symbol_dependencies(
+        monkeypatch,
+        chain_bundle=_chain_bundle(
+            rows=[
+                {
+                    "code": "US.NVDA.2026-06-19.P100",
+                    "strike_time": "2026-06-19",
+                    "option_type": "PUT",
+                    "lot_size": 100,
+                }
+            ],
+            source_outcome="success_rows",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "fetch_option_snapshots",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("malformed chain must fail before snapshots")
+        ),
+    )
+
+    payload = mod.fetch_symbol_request(
+        mod.FetchSymbolRequest(
+            symbol="NVDA",
+            base_dir=tmp_path,
+            gateway=object(),
+            spot_override=100.0,
+            option_types="put",
+        )
+    )
+
+    assert payload["meta"]["status"] == "error"
+    assert "lacks required filter columns" in str(payload["meta"]["error"])
 
 
 def test_duplicate_snapshot_code_is_a_typed_overall_error(

@@ -12,6 +12,7 @@ from pandas.api.types import is_bool
 from src.application.opend_normalize import normalize_opend_option_type
 from src.application.required_data_plan_identity import (
     required_data_expiration_dtes,
+    required_data_request_sha256,
 )
 from src.application.required_data_planning import RequiredDataFetchPlanBundle
 
@@ -71,12 +72,32 @@ def load_required_data_payload_from_csv(*, parsed: Path, symbol: str) -> dict[st
     }
 
 
-def required_data_csv_covers_fetch_plan(*, parsed: Path, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
+def required_data_csv_covers_fetch_plan(
+    *,
+    parsed: Path,
+    fetch_plan: RequiredDataFetchPlanBundle,
+    option_chain_evidence: Mapping[str, Any] | None = None,
+) -> bool:
     df = _read_required_data_csv(parsed)
-    return required_data_frame_covers_fetch_plan(df=df, fetch_plan=fetch_plan)
+    return required_data_frame_covers_fetch_plan(
+        df=df,
+        fetch_plan=fetch_plan,
+        option_chain_evidence=option_chain_evidence,
+    )
 
 
-def required_data_frame_covers_fetch_plan(*, df: pd.DataFrame, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
+def required_data_frame_covers_fetch_plan(
+    *,
+    df: pd.DataFrame,
+    fetch_plan: RequiredDataFetchPlanBundle,
+    option_chain_evidence: Mapping[str, Any] | None = None,
+) -> bool:
+    if option_chain_evidence is not None:
+        return required_data_frame_covers_fetch_plan_debug(
+            df,
+            fetch_plan.to_debug_dict(),
+            option_chain_evidence=option_chain_evidence,
+        )
     if df.empty:
         return False
     if not _spot_reference_matches_frame(df=df, spot_reference=fetch_plan.spot_reference):
@@ -257,7 +278,7 @@ def required_data_frame_covers_fetch_plan(*, df: pd.DataFrame, fetch_plan: Requi
             if exact_strikes_by_expiration is None:
                 return False
             side_df = _filter_option_type(df, option_type)
-            if side_df.empty or "expiration" not in side_df.columns:
+            if "expiration" not in side_df.columns:
                 return False
             for expiration in requested_expirations:
                 exp_df = side_df[
@@ -327,13 +348,17 @@ def required_data_frame_covers_fetch_plan_debug(
     )
     if not isinstance(require_realized_volatility, bool):
         return False
-    allow_available_strike_grid = _complete_option_chain_evidence(
+    scope_evidence = _validated_option_chain_scope_evidence(
         df=df,
         fetch_plan=fetch_plan,
         evidence=option_chain_evidence,
     )
+    if scope_evidence is None and _contains_option_chain_scope_evidence(
+        option_chain_evidence
+    ):
+        return False
     active_request_count = 0
-    for raw_request in merged_requests:
+    for request_index, raw_request in enumerate(merged_requests):
         if not isinstance(raw_request, Mapping):
             return False
         if raw_request.get("trading_date") != trading_date.isoformat():
@@ -420,6 +445,12 @@ def required_data_frame_covers_fetch_plan_debug(
             raw_request_window = raw_request_windows.get(option_type)
             if not _valid_request_strike_window(raw_request_window):
                 return False
+            request_scope_min = _strict_optional_positive_float(
+                raw_request_window, "min_strike"
+            )
+            request_scope_max = _strict_optional_positive_float(
+                raw_request_window, "max_strike"
+            )
             raw_side_plan = side_plans[option_type]
             side_expirations = _strict_expiration_list(
                 raw_side_plan.get("explicit_expirations")
@@ -454,9 +485,16 @@ def required_data_frame_covers_fetch_plan_debug(
                 return False
             effective_min, effective_max = effective_bounds
             side_df = _filter_option_type(df, option_type)
-            if side_df.empty or "expiration" not in side_df.columns:
+            if scope_evidence is None and (
+                side_df.empty or "expiration" not in side_df.columns
+            ):
                 return False
             for expiration in requested_expirations:
+                proven_codes = (
+                    scope_evidence.get((request_index, option_type, expiration))
+                    if scope_evidence is not None
+                    else None
+                )
                 expected_dte = expected_dtes[expiration]
                 if not _value_within_optional_range(
                     value=expected_dte,
@@ -464,10 +502,21 @@ def required_data_frame_covers_fetch_plan_debug(
                     maximum=side_max_dte,
                 ):
                     return False
-                exp_df = side_df[
-                    side_df["expiration"].astype(str) == expiration
-                ].copy()
-                if exp_df.empty or not _frame_dte_matches(
+                if proven_codes is not None:
+                    exp_df = df[
+                        df["contract_symbol"].astype(str).str.strip().isin(
+                            proven_codes
+                        )
+                    ].copy()
+                else:
+                    exp_df = side_df[
+                        side_df["expiration"].astype(str) == expiration
+                    ].copy()
+                if exp_df.empty:
+                    if proven_codes != frozenset() or exact_strikes_by_expiration.get(expiration):
+                        return False
+                    continue
+                if not _frame_dte_matches(
                     df=exp_df,
                     expected_dte=expected_dte,
                     minimum=request_min_dte,
@@ -482,12 +531,21 @@ def required_data_frame_covers_fetch_plan_debug(
                 ):
                     return False
                 strikes = _numeric_series(exp_df, "strike")
+                row_codes = _frame_contract_codes(exp_df)
+                if proven_codes is not None and row_codes != proven_codes:
+                    return False
+                if proven_codes is not None and not _strikes_within_bounds(
+                    strikes=strikes,
+                    minimum=request_scope_min,
+                    maximum=request_scope_max,
+                ):
+                    return False
                 if not _strikes_cover_bounds(
                     strikes=strikes,
                     base_min=effective_min,
                     base_max=effective_max,
                 ) and (
-                    not allow_available_strike_grid
+                    proven_codes is None
                     or not _strikes_overlap_bounds(
                         strikes=strikes,
                         base_min=effective_min,
@@ -511,87 +569,213 @@ def required_data_frame_covers_fetch_plan_debug(
     return True
 
 
-def _complete_option_chain_evidence(
+def _validated_option_chain_scope_evidence(
     *,
     df: pd.DataFrame,
     fetch_plan: Mapping[str, Any],
     evidence: Mapping[str, Any] | None,
-) -> bool:
-    """Prove that a filtered finite strike grid came from complete chain data.
-
-    A configured strike interval does not imply that its numeric endpoints are
-    listed contracts.  The strict coverage path still requires both range
-    edges.  This evidence-backed path is only available after the producer
-    proves every requested expiration was loaded from a complete current-day
-    chain and every resulting contract received a complete snapshot.
-    """
+) -> dict[tuple[int, str, str], frozenset[str]] | None:
+    """Validate request-scoped complete-chain proof for finite or empty grids."""
 
     if not isinstance(evidence, Mapping):
-        return False
+        return None
     if (
         str(evidence.get("status") or "").strip().lower() != "ok"
         or str(evidence.get("source_outcome") or "").strip().lower()
         != "success_rows"
+        or evidence.get("errors") not in (None, [])
+        or evidence.get("stale_cache_expirations") not in (None, [])
     ):
-        return False
-    for key in ("errors", "stale_cache_expirations"):
-        value = evidence.get(key)
-        if value not in (None, []):
-            return False
+        return None
 
     merged_requests = fetch_plan.get("merged_requests")
     if not isinstance(merged_requests, list) or not merged_requests:
-        return False
-    expected_expirations: set[str] = set()
-    for request in merged_requests:
+        return None
+    child_evidence: list[Mapping[str, Any]]
+    if len(merged_requests) == 1:
+        child_evidence = [evidence]
+    else:
+        raw_children = evidence.get("requests")
+        if (
+            not isinstance(raw_children, list)
+            or len(raw_children) != len(merged_requests)
+            or any(not isinstance(item, Mapping) for item in raw_children)
+        ):
+            return None
+        child_evidence = list(raw_children)
+
+    aggregate_codes = _validated_snapshot_codes(evidence)
+    frame_codes = _frame_contract_codes(df)
+    if aggregate_codes is None or not frame_codes or aggregate_codes != frame_codes:
+        return None
+
+    resolved: dict[tuple[int, str, str], frozenset[str]] = {}
+    child_union: set[str] = set()
+    any_scope_rows = False
+    for request_index, (request, child) in enumerate(
+        zip(merged_requests, child_evidence, strict=True)
+    ):
         if not isinstance(request, Mapping):
-            return False
+            return None
+        if len(merged_requests) > 1 and (
+            child.get("request_index") != request_index
+            or child.get("planned_request_sha256")
+            != required_data_request_sha256(request)
+        ):
+            return None
+        if (
+            str(child.get("status") or "").strip().lower() != "ok"
+            or str(child.get("source_outcome") or "").strip().lower()
+            != "success_rows"
+            or child.get("errors") not in (None, [])
+            or child.get("stale_cache_expirations") not in (None, [])
+        ):
+            return None
+        child_codes = _validated_snapshot_codes(child)
+        if child_codes is None:
+            return None
+        scope_payload = child.get("option_chain_scope_coverage")
+        if (
+            not isinstance(scope_payload, Mapping)
+            or scope_payload.get("schema_version")
+            != "option_chain_scope_coverage.v1"
+        ):
+            return None
+        raw_scopes = scope_payload.get("scopes")
+        option_types = request.get("option_types")
         expirations = request.get("explicit_expirations")
-        if not isinstance(expirations, list) or not expirations:
-            return False
-        if any(not isinstance(expiration, str) for expiration in expirations):
-            return False
-        expected_expirations.update(expirations)
+        if (
+            not isinstance(raw_scopes, list)
+            or not isinstance(option_types, list)
+            or not isinstance(expirations, list)
+        ):
+            return None
+        expected_keys = [
+            (str(option_type), str(expiration))
+            for option_type in option_types
+            for expiration in expirations
+        ]
+        scope_union: set[str] = set()
+        observed_keys: list[tuple[str, str]] = []
+        for raw_scope in raw_scopes:
+            if not isinstance(raw_scope, Mapping):
+                return None
+            key = (
+                str(raw_scope.get("option_type") or ""),
+                str(raw_scope.get("expiration") or ""),
+            )
+            observed_keys.append(key)
+            status = str(raw_scope.get("chain_status") or "").strip()
+            codes = _strict_code_list(raw_scope.get("filtered_contract_codes"))
+            count = raw_scope.get("filtered_contract_count")
+            if (
+                status not in _COMPLETE_OPTION_CHAIN_STATUSES
+                or codes is None
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count != len(codes)
+                or codes != sorted(codes)
+                or scope_union.intersection(codes)
+            ):
+                return None
+            scope_union.update(codes)
+            any_scope_rows = any_scope_rows or bool(codes)
+            resolved[(request_index, *key)] = frozenset(codes)
+        if observed_keys != expected_keys or scope_union != set(child_codes):
+            return None
+        child_union.update(child_codes)
+    if child_union != set(aggregate_codes) or not any_scope_rows:
+        return None
+    for (request_index, option_type, expiration), codes in resolved.items():
+        for code in codes:
+            matches = df[df["contract_symbol"].astype(str).str.strip() == code]
+            if len(matches) != 1:
+                return None
+            row = matches.iloc[0]
+            if (
+                normalize_opend_option_type(row.get("option_type")) != option_type
+                or str(row.get("expiration") or "").strip() != expiration
+            ):
+                return None
+    return resolved
 
-    statuses = evidence.get("expiration_statuses")
-    if not isinstance(statuses, Mapping):
-        return False
-    if set(statuses) != expected_expirations:
-        return False
-    if any(
-        status not in _COMPLETE_OPTION_CHAIN_STATUSES
-        for status in statuses.values()
-    ):
-        return False
 
-    requested_codes = evidence.get("snapshot_requested_code_set")
-    if not isinstance(requested_codes, list):
+def _contains_option_chain_scope_evidence(
+    evidence: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(evidence, Mapping):
         return False
-    if any(not isinstance(code, str) or not code.strip() for code in requested_codes):
-        return False
-    row_codes = [
-        str(value).strip()
-        for value in df.get("contract_symbol", pd.Series(dtype=object)).tolist()
-    ]
+    if "option_chain_scope_coverage" in evidence:
+        return True
+    requests = evidence.get("requests")
+    return isinstance(requests, list) and any(
+        isinstance(item, Mapping) and "option_chain_scope_coverage" in item
+        for item in requests
+    )
+
+
+def _strict_code_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    codes = [str(code).strip() for code in value]
+    if any(not code for code in codes) or len(codes) != len(set(codes)):
+        return None
+    return codes
+
+
+def _validated_snapshot_codes(evidence: Mapping[str, Any]) -> frozenset[str] | None:
+    requested = _strict_code_list(evidence.get("snapshot_requested_code_set"))
+    returned = _strict_code_list(evidence.get("snapshot_returned_code_set"))
+    missing = _strict_code_list(evidence.get("snapshot_missing_code_set"))
+    unexpected = _strict_code_list(evidence.get("snapshot_unexpected_code_set"))
+    if None in (requested, returned, missing, unexpected):
+        return None
+    assert requested is not None and returned is not None
+    assert missing is not None and unexpected is not None
+    counts = (
+        evidence.get("snapshot_requested_codes"),
+        evidence.get("snapshot_returned_codes"),
+        evidence.get("snapshot_missing_codes"),
+        evidence.get("snapshot_unexpected_codes"),
+    )
+    expected_counts = (len(requested), len(returned), len(missing), len(unexpected))
     if (
-        not row_codes
-        or len(row_codes) != len(set(row_codes))
-        or set(row_codes) != set(requested_codes)
-    ):
-        return False
-    option_codes = evidence.get("option_codes")
-    requested_count = evidence.get("snapshot_requested_codes")
-    if (
-        isinstance(option_codes, bool)
-        or not isinstance(option_codes, int)
-        or option_codes != len(row_codes)
-        or isinstance(requested_count, bool)
-        or not isinstance(requested_count, int)
-        or requested_count != len(requested_codes)
+        any(isinstance(value, bool) or not isinstance(value, int) for value in counts)
+        or counts != expected_counts
+        or requested != returned
+        or missing
+        or unexpected
         or evidence.get("snapshot_complete") is not True
+        or (
+            evidence.get("option_codes") is not None
+            and evidence.get("option_codes") != len(requested)
+        )
     ):
+        return None
+    return frozenset(requested)
+
+
+def _frame_contract_codes(df: pd.DataFrame) -> frozenset[str] | None:
+    if "contract_symbol" not in df.columns:
+        return None
+    codes = [str(value).strip() for value in df["contract_symbol"].tolist()]
+    if any(not code for code in codes) or len(codes) != len(set(codes)):
+        return None
+    return frozenset(codes)
+
+
+def _strikes_within_bounds(
+    *,
+    strikes: pd.Series,
+    minimum: float | None | object,
+    maximum: float | None | object,
+) -> bool:
+    if strikes.empty or minimum is _INVALID or maximum is _INVALID:
         return False
-    return True
+    return not (
+        (minimum is not None and bool((strikes < minimum).any()))
+        or (maximum is not None and bool((strikes > maximum).any()))
+    )
 
 
 def required_data_csv_covers_strategy_bounds(

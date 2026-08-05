@@ -437,9 +437,43 @@ def _provider_payload_outcome_is_consistent(
         reason = str(meta.get("reason_code") or "").strip().lower()
     if has_rows:
         return outcome == "success_rows" and not reason
+    if outcome == "success_rows" and not reason:
+        return _provider_proves_filtered_empty(meta)
     return (
         outcome == "success_empty"
         and reason in {"no_expirations", "no_contract_rows"}
+    )
+
+
+def _provider_proves_filtered_empty(meta: object) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    scope_evidence = meta.get("option_chain_scope_coverage")
+    if (
+        not isinstance(scope_evidence, dict)
+        or scope_evidence.get("schema_version")
+        != "option_chain_scope_coverage.v1"
+    ):
+        return False
+    scopes = scope_evidence.get("scopes")
+    if not isinstance(scopes, list) or not scopes:
+        return False
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            return False
+        codes = scope.get("filtered_contract_codes")
+        if (
+            scope.get("chain_status") not in {"cache", "fetched"}
+            or codes != []
+            or scope.get("filtered_contract_count") != 0
+        ):
+            return False
+    return (
+        meta.get("snapshot_requested_code_set") == []
+        and meta.get("snapshot_returned_code_set") == []
+        and meta.get("snapshot_missing_code_set") == []
+        and meta.get("snapshot_unexpected_code_set") == []
+        and meta.get("snapshot_complete") is True
     )
 
 
@@ -508,7 +542,16 @@ def _merged_provider_code_set(
 def _merged_realized_volatility_meta(
     request_meta: list[dict[str, object]],
 ) -> tuple[dict[str, object] | None, bool]:
-    values = [item.get("realized_volatility") for item in request_meta]
+    nonempty_items = [
+        item
+        for item in request_meta
+        if isinstance(item.get("snapshot_requested_code_set"), list)
+        and bool(item.get("snapshot_requested_code_set"))
+    ]
+    values = [
+        item.get("realized_volatility")
+        for item in (nonempty_items or request_meta)
+    ]
     if not values:
         return None, True
     if any(not isinstance(value, dict) for value in values):
