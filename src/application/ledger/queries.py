@@ -2,20 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.lifecycle_overlay import (
-    lifecycle_case_generation_token,
-    lifecycle_case_resolution,
     resolve_lifecycle_account_rows,
 )
 from src.application.ledger.repository import (
     require_option_positions_event_read_repo,
-    require_option_positions_event_write_repo,
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
@@ -332,6 +329,44 @@ def list_trade_lifecycle_evidence(
     return [dict(row) for row in list(rows or []) if isinstance(row, dict)]
 
 
+def list_trade_lifecycle_due_candidates(
+    repo: Any,
+    *,
+    account: str,
+) -> list[dict[str, Any]]:
+    candidate = getattr(repo, "primary_repo", repo)
+    list_fn = getattr(
+        candidate,
+        "list_trade_lifecycle_due_candidates",
+        None,
+    )
+    if not callable(list_fn):
+        raise TypeError("compact lifecycle due reader is unavailable")
+    rows = list_fn(account=str(account or "").strip().lower())
+    return [
+        dict(row)
+        for row in rows or ()
+        if isinstance(row, dict)
+    ]
+
+
+def latest_trade_lifecycle_settlement_evidence(
+    repo: Any,
+    *,
+    case_id: str,
+) -> dict[str, Any] | None:
+    candidate = getattr(repo, "primary_repo", repo)
+    get_fn = getattr(
+        candidate,
+        "get_latest_trade_lifecycle_settlement_evidence",
+        None,
+    )
+    if not callable(get_fn):
+        raise TypeError("latest settlement evidence reader is unavailable")
+    row = get_fn(case_id=str(case_id or "").strip())
+    return dict(row) if isinstance(row, dict) else None
+
+
 def lifecycle_reconciliation_facts(
     repo: Any,
     *,
@@ -478,78 +513,221 @@ def lifecycle_case_coherent_facts(
     rows = reader(case_id=case_value)
     if not isinstance(rows, dict):
         raise TypeError("coherent lifecycle case reader returned invalid rows")
-    account_resolution = resolve_lifecycle_account_rows(rows)
-    case_resolution = lifecycle_case_resolution(
-        account_resolution,
+    return lifecycle_case_coherent_facts_from_account_snapshot(
+        rows,
         case_id=case_value,
     )
-    generation_token = lifecycle_case_generation_token(
-        account_resolution,
-        case_id=case_value,
+
+
+def lifecycle_case_coherent_facts_from_account_snapshot(
+    account_facts: Mapping[str, Any],
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    """Materialize one case without rereading an account-coherent snapshot."""
+
+    case_value = str(case_id or "").strip()
+    if not case_value or not isinstance(account_facts, Mapping):
+        raise TypeError("coherent lifecycle account snapshot is unavailable")
+    return lifecycle_case_coherent_facts_many_from_account_snapshot(
+        account_facts,
+        case_ids=(case_value,),
+    )[case_value]
+
+
+@dataclass(frozen=True)
+class _LifecycleAccountSnapshotIndex:
+    rows: dict[str, Any]
+    account_resolution: dict[str, Any]
+    lifecycle_cases_by_id: dict[str, dict[str, Any]]
+    case_resolutions_by_id: dict[str, dict[str, Any]]
+    generation_tokens_by_id: dict[str, dict[str, Any]]
+    case_evidence_by_id: dict[str, list[dict[str, Any]]]
+    case_allocations_by_id: dict[str, list[dict[str, Any]]]
+    timing_policies_by_id: dict[str, dict[str, Any]]
+    position_lot_fields_by_id: dict[str, dict[str, Any]]
+    evidence_by_id: dict[str, dict[str, Any]]
+    claim_by_binding: dict[tuple[str, str], dict[str, Any]]
+    effective_void_event_ids: tuple[str, ...]
+
+
+def lifecycle_case_coherent_facts_many_from_account_snapshot(
+    account_facts: Mapping[str, Any],
+    *,
+    case_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Materialize selected cases after indexing one account snapshot once."""
+
+    if not isinstance(account_facts, Mapping):
+        raise TypeError("coherent lifecycle account snapshot is unavailable")
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw_case_id in case_ids:
+        case_value = str(raw_case_id or "").strip()
+        if case_value and case_value not in seen:
+            requested.append(case_value)
+            seen.add(case_value)
+    if not requested:
+        return {}
+    snapshot = _index_lifecycle_account_snapshot(account_facts)
+    return {
+        case_value: _materialize_lifecycle_case_from_account_snapshot_index(
+            snapshot,
+            case_id=case_value,
+        )
+        for case_value in requested
+    }
+
+
+def _index_lifecycle_account_snapshot(
+    account_facts: Mapping[str, Any],
+) -> _LifecycleAccountSnapshotIndex:
+    rows = dict(account_facts)
+    raw_resolution = rows.get("account_lifecycle_resolution")
+    account_resolution = (
+        dict(raw_resolution)
+        if isinstance(raw_resolution, Mapping)
+        else resolve_lifecycle_account_rows(rows)
     )
-    if case_resolution is None or generation_token is None:
-        raise ValueError(f"active lifecycle case not found: {case_value}")
-    lifecycle_case = next(
+
+    lifecycle_cases_by_id: dict[str, dict[str, Any]] = {}
+    for raw_item in rows.get("account_lifecycle_cases") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_id = str(item.get("case_id") or "").strip()
+        if item_id:
+            lifecycle_cases_by_id.setdefault(item_id, item)
+
+    case_resolutions_by_id: dict[str, dict[str, Any]] = {}
+    for raw_item in account_resolution.get("case_resolutions") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_id = str(item.get("case_id") or "").strip()
+        if item_id:
+            case_resolutions_by_id.setdefault(item_id, item)
+
+    generation_tokens_by_id: dict[str, dict[str, Any]] = {}
+    for raw_item in account_resolution.get("generation_tokens") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_id = str(item.get("case_id") or "").strip()
+        if item_id:
+            generation_tokens_by_id.setdefault(item_id, item)
+
+    case_evidence_by_id: dict[str, list[dict[str, Any]]] = {}
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    for raw_item in rows.get("account_lifecycle_evidence") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        case_evidence_by_id.setdefault(
+            str(item.get("case_id") or "").strip(),
+            [],
+        ).append(item)
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        if evidence_id:
+            evidence_by_id[evidence_id] = item
+
+    case_allocations_by_id: dict[str, list[dict[str, Any]]] = {}
+    for raw_item in rows.get("account_lifecycle_allocations") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        case_allocations_by_id.setdefault(
+            str(item.get("case_id") or "").strip(),
+            [],
+        ).append(item)
+
+    timing_policies_by_id: dict[str, dict[str, Any]] = {}
+    for raw_item in rows.get("account_lifecycle_timing_policies") or ():
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = dict(raw_item)
+        item_id = str(item.get("case_id") or "").strip()
+        if item_id:
+            timing_policies_by_id.setdefault(item_id, item)
+
+    position_lot_fields_by_id = {
+        str(item.get("record_id") or "").strip(): dict(
+            item.get("fields") or {}
+        )
+        for item in rows.get("account_position_lots") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("record_id") or "").strip()
+    }
+    claim_by_binding = {
         (
-            dict(item)
-            for item in rows.get("account_lifecycle_cases") or []
-            if isinstance(item, dict)
-            and str(item.get("case_id") or "").strip() == case_value
-        ),
-        None,
+            str(item.get("source_key") or "").strip(),
+            str(item.get("owner_evidence_id") or "").strip(),
+        ): dict(item)
+        for item in rows.get("account_lifecycle_source_consumptions") or ()
+        if isinstance(item, Mapping)
+    }
+    effective_void_event_ids = tuple(
+        rows.get("effective_void_event_ids")
+        or _effective_void_event_ids_from_rows(rows)
     )
+    return _LifecycleAccountSnapshotIndex(
+        rows=rows,
+        account_resolution=account_resolution,
+        lifecycle_cases_by_id=lifecycle_cases_by_id,
+        case_resolutions_by_id=case_resolutions_by_id,
+        generation_tokens_by_id=generation_tokens_by_id,
+        case_evidence_by_id=case_evidence_by_id,
+        case_allocations_by_id=case_allocations_by_id,
+        timing_policies_by_id=timing_policies_by_id,
+        position_lot_fields_by_id=position_lot_fields_by_id,
+        evidence_by_id=evidence_by_id,
+        claim_by_binding=claim_by_binding,
+        effective_void_event_ids=effective_void_event_ids,
+    )
+
+
+def _materialize_lifecycle_case_from_account_snapshot_index(
+    snapshot: _LifecycleAccountSnapshotIndex,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    case_resolution = snapshot.case_resolutions_by_id.get(case_id)
+    generation_token = snapshot.generation_tokens_by_id.get(case_id)
+    if case_resolution is None or generation_token is None:
+        raise ValueError(f"active lifecycle case not found: {case_id}")
+    lifecycle_case = snapshot.lifecycle_cases_by_id.get(case_id)
     if lifecycle_case is None:
-        raise ValueError(f"lifecycle case not found: {case_value}")
-    evidence = [
-        dict(item)
-        for item in rows.get("account_lifecycle_evidence") or []
-        if isinstance(item, dict)
-    ]
-    claims = [
-        dict(item)
-        for item in rows.get("account_lifecycle_source_consumptions") or []
-        if isinstance(item, dict)
-    ]
+        raise ValueError(f"lifecycle case not found: {case_id}")
     validated_anchors, anchor_claims = _materialize_validated_anchors(
         lifecycle_case=lifecycle_case,
         case_resolution=case_resolution,
-        evidence=evidence,
-        source_claims=claims,
+        evidence_by_id=snapshot.evidence_by_id,
+        claim_by_binding=snapshot.claim_by_binding,
     )
     return {
         "schema_version": "lifecycle_case_coherent_facts.v1",
-        **rows,
-        "lifecycle_case": lifecycle_case,
-        "case_evidence": [
-            item
-            for item in evidence
-            if str(item.get("case_id") or "").strip() == case_value
-        ],
-        "case_allocations": [
-            dict(item)
-            for item in rows.get("account_lifecycle_allocations") or []
-            if isinstance(item, dict)
-            and str(item.get("case_id") or "").strip() == case_value
-        ],
-        "timing_policy": next(
-            (
-                dict(item)
-                for item in rows.get("account_lifecycle_timing_policies") or []
-                if isinstance(item, dict)
-                and str(item.get("case_id") or "").strip() == case_value
-            ),
-            None,
+        **snapshot.rows,
+        "lifecycle_case": dict(lifecycle_case),
+        "case_evidence": list(
+            snapshot.case_evidence_by_id.get(case_id, ())
         ),
-        "position_lot_fields_by_id": {
-            str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
-            for item in rows.get("account_position_lots") or []
-            if isinstance(item, dict)
-            and str(item.get("record_id") or "").strip()
-        },
-        "effective_void_event_ids": _effective_void_event_ids_from_rows(rows),
-        "account_lifecycle_resolution": account_resolution,
-        "case_resolution": case_resolution,
-        "generation_token": generation_token,
+        "case_allocations": list(
+            snapshot.case_allocations_by_id.get(case_id, ())
+        ),
+        "timing_policy": (
+            dict(snapshot.timing_policies_by_id[case_id])
+            if case_id in snapshot.timing_policies_by_id
+            else None
+        ),
+        "position_lot_fields_by_id": dict(
+            snapshot.position_lot_fields_by_id
+        ),
+        "effective_void_event_ids": list(
+            snapshot.effective_void_event_ids
+        ),
+        "account_lifecycle_resolution": snapshot.account_resolution,
+        "case_resolution": dict(case_resolution),
+        "generation_token": dict(generation_token),
         "validated_anchors": validated_anchors,
         "anchor_source_claims": anchor_claims,
     }
@@ -571,21 +749,9 @@ def _materialize_validated_anchors(
     *,
     lifecycle_case: dict[str, Any],
     case_resolution: dict[str, Any],
-    evidence: list[dict[str, Any]],
-    source_claims: list[dict[str, Any]],
+    evidence_by_id: Mapping[str, dict[str, Any]],
+    claim_by_binding: Mapping[tuple[str, str], dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    evidence_by_id = {
-        str(item.get("evidence_id") or "").strip(): item
-        for item in evidence
-        if str(item.get("evidence_id") or "").strip()
-    }
-    claim_by_binding = {
-        (
-            str(item.get("source_key") or "").strip(),
-            str(item.get("owner_evidence_id") or "").strip(),
-        ): item
-        for item in source_claims
-    }
     anchors: list[dict[str, Any]] = []
     claims: list[dict[str, Any]] = []
     for raw_fact in case_resolution.get("anchor_facts") or []:
@@ -683,9 +849,13 @@ __all__ = [
     "list_position_lot_sync_snapshots",
     "list_position_rows",
     "list_trade_lifecycle_cases",
+    "list_trade_lifecycle_due_candidates",
     "list_trade_lifecycle_evidence",
+    "latest_trade_lifecycle_settlement_evidence",
     "lifecycle_account_coherent_facts",
     "lifecycle_case_coherent_facts",
+    "lifecycle_case_coherent_facts_from_account_snapshot",
+    "lifecycle_case_coherent_facts_many_from_account_snapshot",
     "lifecycle_option_close_anchor_facts",
     "lifecycle_reconciliation_facts",
     "normalize_position_lot_fields",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.trades.account_mapping import (
     resolve_futu_account_mapping,
     resolve_futu_lookup_account_ids,
@@ -98,6 +100,7 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
         "default_mode": "off",
         "accounts": {},
     }
+    assert out["settlement_observation"] == {"enabled": True}
 
 
 def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
@@ -120,6 +123,38 @@ def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
     assert out["receipt"]["notify_unresolved"] is False
     assert out["receipt"]["notify_duplicate"] is True
     assert out["receipt"]["notify_applied"] is True
+
+
+def test_resolve_trade_intake_config_accepts_settlement_kill_switch() -> None:
+    cfg = {
+        "accounts": ["lx"],
+        "trade_intake": {
+            "settlement_observation": {"enabled": False}
+        },
+    }
+
+    out = resolve_trade_intake_config(cfg)
+
+    assert out["settlement_observation"] == {"enabled": False}
+    assert out["sources"][0]["settlement_observation"] == {
+        "enabled": False
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["false", {"enabled": "false"}, {"retry_policy": "custom"}],
+)
+def test_resolve_trade_intake_config_rejects_invalid_settlement_config(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="settlement_observation"):
+        resolve_trade_intake_config(
+            {
+                "accounts": ["lx"],
+                "trade_intake": {"settlement_observation": value},
+            }
+        )
 
 
 def test_resolve_trade_intake_config_rejects_non_boolean_enabled() -> None:

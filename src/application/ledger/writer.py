@@ -47,6 +47,14 @@ from src.application.ledger.lifecycle_overlay import (
     lifecycle_evidence_facts,
     resolve_lifecycle_account_rows,
 )
+from src.application.ledger.lifecycle_settlement_semantics import (
+    LegacySettlementSemanticUnavailable,
+    SETTLEMENT_SEMANTIC_SCHEMA,
+    SettlementAdmissionStateIncoherent,
+    SettlementSemanticUnavailable,
+    settlement_evidence_id,
+    settlement_semantic_from_evidence,
+)
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
@@ -142,6 +150,164 @@ def _require_lifecycle_generation(
         raise ValueError(
             "lifecycle generation compare-and-set failed"
         )
+
+
+def _prepare_settlement_admission(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    case_id: str,
+    evidence: dict[str, Any],
+    expected_generation_token: str | None,
+) -> dict[str, Any] | None:
+    if (
+        str(evidence.get("source_type") or "").strip().lower()
+        != "broker_settlement_observation"
+    ):
+        return None
+    if not isinstance(evidence.get("observation"), dict):
+        # Historical/manual terminal evidence reused this source label before
+        # the collector observation envelope existed.  It is not eligible for
+        # semantic admission because there is no frozen observation to compare.
+        return None
+    expected = str(expected_generation_token or "").strip()
+    if not expected:
+        raise ValueError(
+            "settlement admission requires lifecycle generation token"
+        )
+    try:
+        semantic, fingerprint = settlement_semantic_from_evidence(
+            evidence
+        )
+    except SettlementSemanticUnavailable:
+        raise
+    except Exception as exc:
+        raise SettlementSemanticUnavailable(
+            "settlement semantic projection failed"
+        ) from exc
+
+    latest = (
+        sqlite_repo.get_latest_trade_lifecycle_settlement_evidence(
+            case_id=case_id,
+            conn=conn,
+        )
+    )
+    head = sqlite_repo.get_trade_lifecycle_settlement_admission_head(
+        case_id=case_id,
+        conn=conn,
+    )
+    latest_id = str((latest or {}).get("evidence_id") or "").strip()
+    if latest is not None and (
+        head is None
+        or str(head.get("evidence_id") or "").strip() != latest_id
+    ):
+        try:
+            _latest_semantic, latest_fingerprint = (
+                settlement_semantic_from_evidence(latest)
+            )
+        except SettlementSemanticUnavailable as exc:
+            raise LegacySettlementSemanticUnavailable(
+                "legacy_semantic_unavailable"
+            ) from exc
+        sqlite_repo.upsert_trade_lifecycle_settlement_admission_head(
+            case_id=case_id,
+            semantic_schema=SETTLEMENT_SEMANTIC_SCHEMA,
+            semantic_fingerprint=latest_fingerprint,
+            evidence_id=latest_id,
+            evidence_created_at_ms=int(
+                latest.get("_created_at_ms") or 0
+            ),
+            updated_at_ms=int(utc_now_ms()),
+            conn=conn,
+        )
+        head = (
+            sqlite_repo.get_trade_lifecycle_settlement_admission_head(
+                case_id=case_id,
+                conn=conn,
+            )
+        )
+    elif latest is None and head is not None:
+        raise SettlementSemanticUnavailable(
+            "settlement admission head has no evidence"
+        )
+
+    if (
+        head is not None
+        and str(head.get("semantic_schema") or "").strip()
+        == SETTLEMENT_SEMANTIC_SCHEMA
+        and str(head.get("semantic_fingerprint") or "").strip()
+        == fingerprint
+    ):
+        return {
+            "duplicate": True,
+            "semantic": semantic,
+            "semantic_fingerprint": fingerprint,
+            "evidence_id": str(head.get("evidence_id") or "").strip(),
+            "previous_evidence_id": latest_id or None,
+        }
+
+    expected_evidence_id = settlement_evidence_id(
+        case_id=case_id,
+        semantic_fingerprint=fingerprint,
+        expected_generation_token=expected,
+        previous_evidence_id=latest_id or None,
+    )
+    incoming_evidence_id = str(
+        evidence.get("evidence_id") or ""
+    ).strip()
+    if incoming_evidence_id != expected_evidence_id:
+        raise ValueError(
+            "settlement evidence id does not match semantic admission"
+        )
+    if (
+        str(evidence.get("semantic_schema") or "").strip()
+        != SETTLEMENT_SEMANTIC_SCHEMA
+        or str(evidence.get("semantic_fingerprint") or "").strip()
+        != fingerprint
+    ):
+        raise ValueError("settlement evidence semantic metadata mismatch")
+    return {
+        "duplicate": False,
+        "semantic": semantic,
+        "semantic_fingerprint": fingerprint,
+        "evidence_id": incoming_evidence_id,
+        "previous_evidence_id": latest_id or None,
+    }
+
+
+def _advance_settlement_admission_head(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    case_id: str,
+    admission: dict[str, Any] | None,
+) -> None:
+    if admission is None or bool(admission.get("duplicate")):
+        return
+    latest = sqlite_repo.get_latest_trade_lifecycle_settlement_evidence(
+        case_id=case_id,
+        conn=conn,
+    )
+    evidence_id = str(admission.get("evidence_id") or "").strip()
+    if (
+        latest is None
+        or str(latest.get("evidence_id") or "").strip()
+        != evidence_id
+    ):
+        raise ValueError(
+            "settlement admission evidence is not the latest case row"
+        )
+    sqlite_repo.upsert_trade_lifecycle_settlement_admission_head(
+        case_id=case_id,
+        semantic_schema=SETTLEMENT_SEMANTIC_SCHEMA,
+        semantic_fingerprint=str(
+            admission.get("semantic_fingerprint") or ""
+        ),
+        evidence_id=evidence_id,
+        evidence_created_at_ms=int(latest.get("_created_at_ms") or 0),
+        updated_at_ms=int(utc_now_ms()),
+        conn=conn,
+    )
 
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
@@ -956,6 +1122,271 @@ def _lifecycle_state_payload(
     }
 
 
+def _require_settlement_foreign_keys_clean(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+) -> None:
+    try:
+        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+    except RuntimeError as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "settlement canonical foreign keys are incoherent"
+        ) from exc
+
+
+def _require_duplicate_settlement_state_base(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    lifecycle_case: dict[str, Any],
+    admission: dict[str, Any],
+) -> dict[str, Any]:
+    case_id = str(lifecycle_case.get("case_id") or "").strip()
+    evidence_id = str(admission.get("evidence_id") or "").strip()
+    canonical_evidence = sqlite_repo.get_trade_lifecycle_evidence(
+        evidence_id,
+        conn=conn,
+    )
+    if canonical_evidence is None:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement evidence is missing"
+        )
+    if str(canonical_evidence.get("case_id") or "").strip() != case_id:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement evidence case binding is incoherent"
+        )
+    try:
+        _semantic, canonical_fingerprint = (
+            settlement_semantic_from_evidence(canonical_evidence)
+        )
+    except SettlementSemanticUnavailable as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement evidence semantic is incoherent"
+        ) from exc
+    if canonical_fingerprint != str(
+        admission.get("semantic_fingerprint") or ""
+    ).strip():
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement evidence fingerprint is incoherent"
+        )
+
+    summary = (
+        dict(lifecycle_case.get("derived_summary") or {})
+        if isinstance(lifecycle_case.get("derived_summary"), dict)
+        else {}
+    )
+    try:
+        resolution_revision = int(
+            summary.get("resolution_revision") or 0
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement case revision is incoherent"
+        ) from exc
+    if (
+        resolution_revision <= 0
+        or not str(summary.get("state_fingerprint") or "").strip()
+    ):
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement case revision is incoherent"
+        )
+
+    allocations = list(
+        sqlite_repo.list_trade_lifecycle_allocations(
+            case_id=case_id,
+            conn=conn,
+        )
+    )
+    try:
+        void_event_ids = _effective_void_target_ids(
+            sqlite_repo,
+            conn=conn,
+        )
+        resolution = resolve_allocations(
+            lifecycle_case.get("target_contracts_by_lot"),
+            allocations,
+            void_event_ids=void_event_ids,
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement allocations are incoherent"
+        ) from exc
+    if resolution.status != "ok":
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement allocations are incoherent"
+        )
+    expected_summary = {
+        "target_contracts_by_lot": resolution.target_contracts_by_lot,
+        "resolved_contracts_by_lot": resolution.resolved_contracts_by_lot,
+        "remaining_contracts_by_lot": (
+            resolution.remaining_contracts_by_lot
+        ),
+        "resolved_contracts_by_terminal_type": (
+            resolution.resolved_contracts_by_terminal_type
+        ),
+    }
+    for field, expected in expected_summary.items():
+        if summary.get(field) != expected:
+            raise SettlementAdmissionStateIncoherent(
+                f"duplicate settlement case summary is incoherent: {field}"
+            )
+    try:
+        projected_remaining: dict[str, int] = {}
+        for lot_id in sorted(resolution.target_contracts_by_lot):
+            lot_fields = sqlite_repo.get_position_lot_fields(
+                lot_id,
+                conn=conn,
+            )
+            if not isinstance(lot_fields, dict):
+                raise TypeError("position lot fields are unavailable")
+            projected_remaining[lot_id] = int(
+                lot_fields.get("contracts_open") or 0
+            )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement target projection is unavailable"
+        ) from exc
+    if projected_remaining != resolution.remaining_contracts_by_lot:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement target projection is incoherent"
+        )
+    _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
+    return {
+        "canonical_evidence": canonical_evidence,
+        "summary": summary,
+        "allocations": allocations,
+    }
+
+
+def _require_duplicate_settlement_allocation_state(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    lifecycle_case: dict[str, Any],
+    admission: dict[str, Any],
+    requested_status: str,
+) -> dict[str, Any]:
+    state = _require_duplicate_settlement_state_base(
+        sqlite_repo,
+        conn=conn,
+        lifecycle_case=lifecycle_case,
+        admission=admission,
+    )
+    status = str(lifecycle_case.get("status") or "").strip().lower()
+    if status != str(requested_status or "").strip().lower():
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal status is incoherent"
+        )
+    evidence_id = str(admission.get("evidence_id") or "").strip()
+    evidence_allocations = [
+        item
+        for item in state["allocations"]
+        if str(item.get("evidence_id") or "").strip() == evidence_id
+    ]
+    if not evidence_allocations:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal allocations are missing"
+        )
+    canonical_evidence = state["canonical_evidence"]
+    try:
+        expected_contracts = _positive_lifecycle_contracts(
+            canonical_evidence.get("contracts")
+        )
+    except ValueError as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal quantity is incoherent"
+        ) from exc
+    try:
+        allocated_contracts = sum(
+            int(item.get("contracts_allocated") or 0)
+            for item in evidence_allocations
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal allocation quantity is incoherent"
+        ) from exc
+    if allocated_contracts != expected_contracts:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal allocation quantity is incoherent"
+        )
+    terminal_type = str(
+        canonical_evidence.get("terminal_type")
+        or canonical_evidence.get("evidence_type")
+        or ""
+    ).strip().lower()
+    if {
+        str(item.get("terminal_type") or "").strip().lower()
+        for item in evidence_allocations
+    } != {terminal_type}:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement terminal allocation type is incoherent"
+        )
+    return state
+
+
+def _require_duplicate_settlement_issue_state(
+    sqlite_repo: Any,
+    *,
+    conn: Any,
+    lifecycle_case: dict[str, Any],
+    admission: dict[str, Any],
+    requested_status: str,
+    requested_reasons: Sequence[str],
+) -> dict[str, Any]:
+    state = _require_duplicate_settlement_state_base(
+        sqlite_repo,
+        conn=conn,
+        lifecycle_case=lifecycle_case,
+        admission=admission,
+    )
+    status = str(lifecycle_case.get("status") or "").strip().lower()
+    if status != str(requested_status or "").strip().lower():
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue status is incoherent"
+        )
+    evidence_id = str(admission.get("evidence_id") or "").strip()
+    if any(
+        str(item.get("evidence_id") or "").strip() == evidence_id
+        for item in state["allocations"]
+    ):
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue has terminal allocations"
+        )
+    summary = state["summary"]
+    try:
+        actual_reasons = sorted(
+            {
+                str(item or "").strip()
+                for item in summary.get("lifecycle_reason_codes") or []
+                if str(item or "").strip()
+            }
+        )
+    except TypeError as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue reasons are incoherent"
+        ) from exc
+    if actual_reasons != sorted(set(requested_reasons)):
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue reasons are incoherent"
+        )
+    try:
+        conflict_evidence_ids = {
+            str(item or "").strip()
+            for item in summary.get("conflict_evidence_ids") or []
+            if str(item or "").strip()
+        }
+    except TypeError as exc:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue evidence binding is incoherent"
+        ) from exc
+    if evidence_id not in conflict_evidence_ids:
+        raise SettlementAdmissionStateIncoherent(
+            "duplicate settlement issue evidence binding is incoherent"
+        )
+    return state
+
+
 def _lifecycle_notification_transition(
     *,
     case_id: str,
@@ -1002,7 +1433,7 @@ def apply_lifecycle_allocation_atomically(
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("lifecycle allocation requires SQLite transaction authority")
-        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
             raise ValueError(f"lifecycle case not found: {case_id_value}")
@@ -1014,6 +1445,60 @@ def apply_lifecycle_allocation_atomically(
                 expected_lifecycle_generation_token
             ),
         )
+        admission = _prepare_settlement_admission(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            evidence=evidence_payload,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
+        if admission is not None and bool(admission.get("duplicate")):
+            duplicate_state = (
+                _require_duplicate_settlement_allocation_state(
+                    sqlite_repo,
+                    conn=conn,
+                    lifecycle_case=lifecycle_case,
+                    admission=admission,
+                    requested_status=derived_status,
+                )
+            )
+            current_summary = duplicate_state["summary"]
+            return {
+                "case_id": case_id_value,
+                "evidence_id": admission["evidence_id"],
+                "evidence_created": False,
+                "evidence_bound": False,
+                "stock_source_claim_created": False,
+                "close_source_claim_created": False,
+                "terminal_event_ids": [],
+                "terminal_events_created": [],
+                "correction_void_event_ids": [],
+                "correction_void_events_created": [],
+                "allocation_ids": [],
+                "allocations_created": [],
+                "status_changed": False,
+                "resolution_revision": int(
+                    current_summary.get("resolution_revision") or 0
+                ),
+                "state_fingerprint": str(
+                    current_summary.get("state_fingerprint") or ""
+                ),
+                "business_state_changed": False,
+                "notification_outbox_id": None,
+                "notification_outbox_created": False,
+                "notification_audit_codes": list(
+                    current_summary.get("notification_audit_codes") or []
+                ),
+                "position_lot_count": len(
+                    sqlite_repo.list_position_lots(conn=conn)
+                ),
+                "admission_status": "duplicate_semantic",
+                "semantic_fingerprint": admission[
+                    "semantic_fingerprint"
+                ],
+            }
         _validate_broker_settlement_pair_for_write(
             sqlite_repo,
             conn=conn,
@@ -1521,6 +2006,12 @@ def apply_lifecycle_allocation_atomically(
             expected_state_fingerprint=current_state_fingerprint,
             conn=conn,
         )
+        _advance_settlement_admission_head(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            admission=admission,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
@@ -1545,6 +2036,16 @@ def apply_lifecycle_allocation_atomically(
             "notification_outbox_created": outbox_created,
             "notification_audit_codes": notification_audit_codes,
             "position_lot_count": len(projection.lots),
+            "admission_status": (
+                "admitted_semantic"
+                if admission is not None
+                else "not_applicable"
+            ),
+            "semantic_fingerprint": (
+                admission.get("semantic_fingerprint")
+                if admission is not None
+                else None
+            ),
         }
 
     return with_sqlite_repo_transaction(repo, _run)
@@ -2065,7 +2566,7 @@ def record_lifecycle_evidence_issue_atomically(
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("lifecycle evidence issue requires SQLite transaction authority")
-        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        _require_settlement_foreign_keys_clean(sqlite_repo, conn=conn)
         lifecycle_case = sqlite_repo.get_trade_lifecycle_case(case_id_value, conn=conn)
         if lifecycle_case is None:
             raise ValueError(f"lifecycle case not found: {case_id_value}")
@@ -2077,6 +2578,57 @@ def record_lifecycle_evidence_issue_atomically(
                 expected_lifecycle_generation_token
             ),
         )
+        admission = _prepare_settlement_admission(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            evidence=evidence_payload,
+            expected_generation_token=(
+                expected_lifecycle_generation_token
+            ),
+        )
+        if admission is not None and bool(admission.get("duplicate")):
+            duplicate_state = _require_duplicate_settlement_issue_state(
+                sqlite_repo,
+                conn=conn,
+                lifecycle_case=lifecycle_case,
+                admission=admission,
+                requested_status=status_value,
+                requested_reasons=reasons,
+            )
+            prior_summary = duplicate_state["summary"]
+            return {
+                "case_id": case_id_value,
+                "evidence_id": admission["evidence_id"],
+                "evidence_created": False,
+                "evidence_bound": False,
+                "status": str(
+                    lifecycle_case.get("status") or status_value
+                ),
+                "reason_codes": list(
+                    prior_summary.get("lifecycle_reason_codes") or []
+                ),
+                "status_changed": False,
+                "source_claim_created": False,
+                "resolution_revision": int(
+                    prior_summary.get("resolution_revision") or 0
+                ),
+                "state_fingerprint": str(
+                    prior_summary.get("state_fingerprint") or ""
+                ),
+                "business_state_changed": False,
+                "notification_outbox_id": None,
+                "notification_outbox_created": False,
+                "notification_audit_codes": list(
+                    prior_summary.get("notification_audit_codes") or []
+                ),
+                "terminal_event_ids": [],
+                "allocation_ids": [],
+                "admission_status": "duplicate_semantic",
+                "semantic_fingerprint": admission[
+                    "semantic_fingerprint"
+                ],
+            }
         evidence_id = str(evidence_payload.get("evidence_id") or "").strip()
         if not evidence_id:
             raise ValueError("lifecycle evidence_id is required")
@@ -2328,6 +2880,12 @@ def record_lifecycle_evidence_issue_atomically(
             expected_state_fingerprint=prior_fingerprint,
             conn=conn,
         )
+        _advance_settlement_admission_head(
+            sqlite_repo,
+            conn=conn,
+            case_id=case_id_value,
+            admission=admission,
+        )
         sqlite_repo.assert_foreign_keys_clean(conn=conn)
         return {
             "case_id": case_id_value,
@@ -2346,6 +2904,16 @@ def record_lifecycle_evidence_issue_atomically(
             "notification_audit_codes": notification_audit_codes,
             "terminal_event_ids": [],
             "allocation_ids": [],
+            "admission_status": (
+                "admitted_semantic"
+                if admission is not None
+                else "not_applicable"
+            ),
+            "semantic_fingerprint": (
+                admission.get("semantic_fingerprint")
+                if admission is not None
+                else None
+            ),
         }
 
     return with_sqlite_repo_transaction(repo, _run)

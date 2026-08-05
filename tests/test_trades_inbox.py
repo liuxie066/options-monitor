@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import sqlite3
+
+from src.application.trades.auto_intake import (
+    _cached_trade_inbox_summary,
+)
 
 from src.application.trades.inbox import (
     enqueue_trade_payload,
@@ -8,6 +14,7 @@ from src.application.trades.inbox import (
     mark_trade_payload_handled,
     mark_trade_payload_retryable,
     settle_trade_payload_result,
+    trade_inbox_revision,
     trade_inbox_summary,
 )
 
@@ -165,3 +172,134 @@ def test_trade_inbox_quarantines_same_key_economic_drift(
         path,
         retry_delay_sec=0,
     ) == []
+
+
+def test_trade_inbox_summary_cache_is_revision_gated(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.auto_intake as auto_intake
+
+    path = tmp_path / "inbox.sqlite3"
+    first_id = enqueue_trade_payload(
+        path,
+        payload={"deal_id": "seed"},
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:seed",
+    )
+    mark_trade_payload_handled(
+        path,
+        inbox_id=first_id,
+        result={"status": "applied", "reason": "seed"},
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO trade_inbox (
+              inbox_id, source, deal_id, broker_deal_key,
+              identity_status, payload_json, economic_payload_hash,
+              status, attempt_count, received_at_ms, updated_at_ms,
+              last_error, result_status, result_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"historical-{index}",
+                    "backfill",
+                    f"historical-{index}",
+                    f"futu:lx:REAL_1:historical-{index}",
+                    "bound",
+                    json.dumps({"deal_id": f"historical-{index}"}),
+                    f"hash-{index}",
+                    "handled",
+                    0,
+                    index + 1,
+                    index + 1,
+                    None,
+                    "applied",
+                    "historical",
+                )
+                for index in range(1_200)
+            ],
+        )
+
+    summary_reads = 0
+    original_summary = auto_intake.trade_inbox_summary
+
+    def counted_summary(summary_path: Path) -> dict:
+        nonlocal summary_reads
+        summary_reads += 1
+        return original_summary(summary_path)
+
+    monkeypatch.setattr(
+        auto_intake,
+        "trade_inbox_summary",
+        counted_summary,
+    )
+    cache: dict = {}
+    for _ in range(10):
+        summary = _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 1
+    assert summary["handled_count"] == 1_201
+
+    revision_before = trade_inbox_revision(path)
+    pending_id = enqueue_trade_payload(
+        path,
+        payload={"deal_id": "new"},
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:new",
+    )
+    assert trade_inbox_revision(path) == revision_before + 1
+    summary = _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 2
+    assert summary["pending_count"] == 1
+
+    duplicate_revision = trade_inbox_revision(path)
+    assert enqueue_trade_payload(
+        path,
+        payload={"deal_id": "new"},
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:new",
+    ) == pending_id
+    assert trade_inbox_revision(path) == duplicate_revision
+    _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 2
+
+    mark_trade_payload_handled(
+        path,
+        inbox_id=pending_id,
+        result={"status": "applied", "reason": "new"},
+    )
+    _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 3
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM trade_inbox WHERE inbox_id = ?",
+            (first_id,),
+        )
+    final_summary = _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 4
+    assert final_summary["handled_count"] == 1_201
+
+    cache.clear()
+    stable_revision = trade_inbox_revision(path)
+    racing_revisions = iter(
+        (stable_revision, stable_revision + 1)
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "trade_inbox_revision",
+        lambda _path: next(racing_revisions),
+    )
+    _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 5
+    assert cache == {}
+
+    monkeypatch.setattr(
+        auto_intake,
+        "trade_inbox_revision",
+        lambda _path: stable_revision + 1,
+    )
+    _cached_trade_inbox_summary(path, cache=cache)
+    _cached_trade_inbox_summary(path, cache=cache)
+    assert summary_reads == 6
