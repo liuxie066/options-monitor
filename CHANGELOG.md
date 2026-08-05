@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.6 - 2026-08-05
+
 ### Bug Fixes
 - Reused the run-scoped prepared portfolio context when publishing Position Advice sources, preventing valid hashed context artifacts from being misclassified as missing and restoring the authority path for scheduled Daily Brief delivery.
 

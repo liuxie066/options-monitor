@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.6",
+  "base": {
+    "tag": "v1.10.5",
+    "commit": "6af850a2a28d81b13120733733400f189b85b34f"
+  },
+  "reviewed_head": "cb6e008251d2a15725e1704554e11ecfe18df6f1",
+  "commits": [
+    {
+      "sha": "cb6e008251d2a15725e1704554e11ecfe18df6f1",
+      "subject": "fix: reuse prepared portfolio context for advice sources"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Reused the run-scoped prepared portfolio context when publishing Position Advice sources, preventing valid hashed context artifacts from being misclassified as missing and restoring the authority path for scheduled Daily Brief delivery.",
+      "commits": [
+        "cb6e008251d2a15725e1704554e11ecfe18df6f1"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
