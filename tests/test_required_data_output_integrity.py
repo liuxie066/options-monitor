@@ -910,7 +910,7 @@ def test_receipt_rejects_duplicate_requested_contract_rows(
         output_root=tmp_path,
     )
 
-    with pytest.raises(PositionAdviceSourceError, match="duplicate snapshot codes"):
+    with pytest.raises(PositionAdviceSourceError, match=r"^invalid_row_identity:"):
         _publish(root=tmp_path, raw_path=raw_path, csv_path=csv_path)
 
     assert _receipt_paths(tmp_path) == []

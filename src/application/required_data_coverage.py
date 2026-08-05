@@ -123,291 +123,65 @@ def required_data_frame_covers_fetch_plan(
     fetch_plan: RequiredDataFetchPlanBundle,
     option_chain_evidence: Mapping[str, Any] | None = None,
 ) -> bool:
-    if option_chain_evidence is not None:
-        return required_data_frame_covers_fetch_plan_debug(
-            df,
-            fetch_plan.to_debug_dict(),
-            option_chain_evidence=option_chain_evidence,
-        )
-    if df.empty:
-        return False
-    if not _spot_reference_matches_frame(df=df, spot_reference=fetch_plan.spot_reference):
-        return False
-    trading_date = _typed_fetch_plan_trading_date(fetch_plan)
-    if not isinstance(trading_date, date):
-        return False
-    require_realized_volatility = fetch_plan.require_realized_volatility
-    if not isinstance(require_realized_volatility, bool):
-        return False
-    if any(
-        not isinstance(spec.include_realized_volatility, bool)
-        or spec.include_realized_volatility != require_realized_volatility
-        for spec in fetch_plan.merged_specs
-    ):
-        return False
-    if require_realized_volatility and not _has_realized_volatility(df):
-        return False
-    active_side_count = 0
-    for side_plan in fetch_plan.side_plans:
-        requested_expirations = _strict_expiration_list(
-            side_plan.explicit_expirations
-        )
-        if requested_expirations is None:
-            return False
-        if not requested_expirations:
-            continue
-        active_side_count += 1
-        side_min_dte = _strict_optional_nonnegative_int_value(
-            side_plan.min_dte
-        )
-        side_max_dte = _strict_optional_nonnegative_int_value(
-            side_plan.max_dte
-        )
-        if side_min_dte is _INVALID or side_max_dte is _INVALID:
-            return False
-        if not _valid_optional_range(side_min_dte, side_max_dte):
-            return False
-        try:
-            expected_dtes = required_data_expiration_dtes(
-                trading_date=trading_date,
-                expirations=requested_expirations,
-            )
-        except ValueError:
-            return False
-        if any(
-            not _value_within_optional_range(
-                value=dte,
-                minimum=side_min_dte,
-                maximum=side_max_dte,
-            )
-            for dte in expected_dtes.values()
-        ):
-            return False
-        side_df = _filter_option_type(df, side_plan.option_type)
-        if side_df.empty or "expiration" not in side_df.columns:
-            return False
-        base_min = side_plan.strike_window.base_min_strike
-        base_max = side_plan.strike_window.base_max_strike
-        exact_strikes_by_expiration = _strict_exact_strikes_by_expiration(
-            side_plan.required_exact_strikes_by_expiration,
-            allowed_expirations=requested_expirations,
-        )
-        if exact_strikes_by_expiration is None:
-            return False
-        for expiration in requested_expirations:
-            exp_df = side_df[
-                side_df["expiration"].astype(str) == expiration
-            ].copy()
-            if exp_df.empty or not _frame_dte_matches(
-                df=exp_df,
-                expected_dte=expected_dtes[expiration],
-                minimum=side_min_dte,
-                maximum=side_max_dte,
-            ):
-                return False
-            strikes = _numeric_series(exp_df, "strike")
-            if not _strikes_cover_bounds(
-                strikes=strikes,
-                base_min=base_min,
-                base_max=base_max,
-            ):
-                return False
-            if not _strikes_cover_exact_requirements(
-                strikes=strikes,
-                required_strikes=exact_strikes_by_expiration.get(
-                    str(expiration),
-                    [],
-                ),
-            ):
-                return False
-    if active_side_count <= 0:
-        return False
-
-    active_request_count = 0
-    for spec in fetch_plan.merged_specs:
-        if spec.trading_date != trading_date.isoformat():
-            return False
-        requested_expirations = _strict_expiration_list(
-            spec.explicit_expirations
-        )
-        if requested_expirations is None:
-            return False
-        if not requested_expirations:
-            return False
-        active_request_count += 1
-        request_min_dte = _strict_optional_nonnegative_int_value(spec.min_dte)
-        request_max_dte = _strict_optional_nonnegative_int_value(spec.max_dte)
-        if request_min_dte is _INVALID or request_max_dte is _INVALID:
-            return False
-        if not _valid_optional_range(request_min_dte, request_max_dte):
-            return False
-        try:
-            expected_dtes = required_data_expiration_dtes(
-                trading_date=trading_date,
-                expirations=requested_expirations,
-            )
-        except ValueError:
-            return False
-        if any(
-            not _value_within_optional_range(
-                value=dte,
-                minimum=request_min_dte,
-                maximum=request_max_dte,
-            )
-            for dte in expected_dtes.values()
-        ):
-            return False
-
-        option_types = list(spec.option_types)
-        if (
-            not option_types
-            or any(option_type not in {"put", "call"} for option_type in option_types)
-            or len(option_types) != len(set(option_types))
-        ):
-            return False
-        nested_side_plans = {
-            side_plan.option_type: side_plan
-            for side_plan in spec.side_plans
-        }
-        if (
-            len(nested_side_plans) != len(spec.side_plans)
-            or set(nested_side_plans) != set(option_types)
-        ):
-            return False
-        for option_type in option_types:
-            side_plan = nested_side_plans[option_type]
-            side_expirations = _strict_expiration_list(
-                side_plan.explicit_expirations
-            )
-            if side_expirations != requested_expirations:
-                return False
-            side_min_dte = _strict_optional_nonnegative_int_value(
-                side_plan.min_dte
-            )
-            side_max_dte = _strict_optional_nonnegative_int_value(
-                side_plan.max_dte
-            )
-            if side_min_dte is _INVALID or side_max_dte is _INVALID:
-                return False
-            if not _valid_optional_range(side_min_dte, side_max_dte):
-                return False
-            if any(
-                not _value_within_optional_range(
-                    value=dte,
-                    minimum=side_min_dte,
-                    maximum=side_max_dte,
-                )
-                for dte in expected_dtes.values()
-            ):
-                return False
-            exact_strikes_by_expiration = (
-                _strict_exact_strikes_by_expiration(
-                    side_plan.required_exact_strikes_by_expiration,
-                    allowed_expirations=side_expirations,
-                )
-            )
-            if exact_strikes_by_expiration is None:
-                return False
-            side_df = _filter_option_type(df, option_type)
-            if "expiration" not in side_df.columns:
-                return False
-            for expiration in requested_expirations:
-                exp_df = side_df[
-                    side_df["expiration"].astype(str) == expiration
-                ].copy()
-                if exp_df.empty or not _frame_dte_matches(
-                    df=exp_df,
-                    expected_dte=expected_dtes[expiration],
-                    minimum=request_min_dte,
-                    maximum=request_max_dte,
-                ):
-                    return False
-                if not _frame_dte_matches(
-                    df=exp_df,
-                    expected_dte=expected_dtes[expiration],
-                    minimum=side_min_dte,
-                    maximum=side_max_dte,
-                ):
-                    return False
-                strikes = _numeric_series(exp_df, "strike")
-                if not _strikes_cover_bounds(
-                    strikes=strikes,
-                    base_min=side_plan.strike_window.base_min_strike,
-                    base_max=side_plan.strike_window.base_max_strike,
-                ):
-                    return False
-                if not _strikes_cover_exact_requirements(
-                    strikes=strikes,
-                    required_strikes=exact_strikes_by_expiration.get(
-                        expiration,
-                        [],
-                    ),
-                ):
-                    return False
-    if active_request_count <= 0:
-        return False
-    return True
+    return required_data_frame_covers_fetch_plan_debug(
+        df,
+        fetch_plan.to_debug_dict(),
+        option_chain_evidence=option_chain_evidence,
+    )
 
 
-def _required_data_frame_covers_fetch_plan_debug_bool(
+def _evaluate_required_data_rows(
     df: pd.DataFrame,
     fetch_plan: Mapping[str, Any],
     *,
-    option_chain_evidence: Mapping[str, Any] | None = None,
-) -> bool:
-    """Validate CSV rows against the stable ``to_debug_dict`` plan shape."""
+    scope_evidence: Mapping[tuple[int, str, str], frozenset[str]] | None,
+) -> tuple[str | None, bool]:
+    """Validate plan rows once and return ``(reason_code, is_empty)``."""
 
-    if df.empty or not isinstance(fetch_plan, Mapping):
-        return False
-    if not _spot_reference_matches_frame(
-        df=df,
-        spot_reference=fetch_plan.get("spot_reference"),
+    if not isinstance(fetch_plan, Mapping):
+        return "internal_contract_error", False
+    spot_reference = fetch_plan.get("spot_reference")
+    if spot_reference is not None:
+        normalized_spot = _strict_finite_float(spot_reference)
+        if normalized_spot is None or normalized_spot <= 0:
+            return "internal_contract_error", False
+    if not df.empty and (
+        not _spot_reference_matches_frame(
+            df=df,
+            spot_reference=spot_reference,
+        )
+        or _numeric_series(df, "strike").empty
     ):
-        return False
-    if _numeric_series(df, "strike").empty:
-        return False
+        return "invalid_row_identity", False
 
     trading_date = _fetch_plan_trading_date(fetch_plan)
     if not isinstance(trading_date, date):
-        return False
+        return "internal_contract_error", False
 
     merged_requests = fetch_plan.get("merged_requests")
-    if not isinstance(merged_requests, list):
-        return False
-    require_realized_volatility = fetch_plan.get(
-        "require_realized_volatility"
-    )
+    if not isinstance(merged_requests, list) or not merged_requests:
+        return "internal_contract_error", False
+    require_realized_volatility = fetch_plan.get("require_realized_volatility")
     if not isinstance(require_realized_volatility, bool):
-        return False
-    scope_validation = _validated_option_chain_scope_evidence(
-        df=df,
-        fetch_plan=fetch_plan,
-        evidence=option_chain_evidence,
-    )
-    scope_evidence = scope_validation.resolved
-    if scope_evidence is None and _contains_option_chain_scope_evidence(
-        option_chain_evidence
-    ):
-        return False
+        return "internal_contract_error", False
     active_request_count = 0
+    any_rows = False
     for request_index, raw_request in enumerate(merged_requests):
         if not isinstance(raw_request, Mapping):
-            return False
+            return "internal_contract_error", False
         if raw_request.get("trading_date") != trading_date.isoformat():
-            return False
+            return "internal_contract_error", False
         requested_expirations = _strict_expiration_list(
             raw_request.get("explicit_expirations")
         )
-        if requested_expirations is None:
-            return False
+        if not requested_expirations:
+            return "internal_contract_error", False
         raw_rv_flag = raw_request.get("include_realized_volatility")
         if (
             not isinstance(raw_rv_flag, bool)
             or raw_rv_flag != require_realized_volatility
         ):
-            return False
-        if not requested_expirations:
-            return False
+            return "internal_contract_error", False
 
         active_request_count += 1
         request_min_dte = _strict_optional_nonnegative_int(
@@ -419,42 +193,40 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
             "max_dte",
         )
         if request_min_dte is _INVALID or request_max_dte is _INVALID:
-            return False
+            return "internal_contract_error", False
         if not _valid_optional_range(request_min_dte, request_max_dte):
-            return False
+            return "internal_contract_error", False
 
         option_types = raw_request.get("option_types")
         if (
             not isinstance(option_types, list)
             or not option_types
             or any(
-                not isinstance(option_type, str)
-                or option_type not in {"put", "call"}
+                not isinstance(option_type, str) or option_type not in {"put", "call"}
                 for option_type in option_types
             )
             or len(option_types) != len(set(option_types))
         ):
-            return False
+            return "internal_contract_error", False
         raw_side_plans = raw_request.get("side_plans")
         if not isinstance(raw_side_plans, list):
-            return False
+            return "internal_contract_error", False
         side_plans: dict[str, Mapping[str, Any]] = {}
         for raw_side_plan in raw_side_plans:
             if not isinstance(raw_side_plan, Mapping):
-                return False
+                return "internal_contract_error", False
             option_type = raw_side_plan.get("option_type")
             if option_type not in option_types or option_type in side_plans:
-                return False
+                return "internal_contract_error", False
             side_plans[str(option_type)] = raw_side_plan
         if set(side_plans) != set(option_types):
-            return False
+            return "internal_contract_error", False
 
         raw_request_windows = raw_request.get("side_strike_windows")
-        if (
-            not isinstance(raw_request_windows, Mapping)
-            or set(raw_request_windows) != set(option_types)
-        ):
-            return False
+        if not isinstance(raw_request_windows, Mapping) or set(
+            raw_request_windows
+        ) != set(option_types):
+            return "internal_contract_error", False
 
         try:
             expected_dtes = required_data_expiration_dtes(
@@ -462,7 +234,7 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                 expirations=requested_expirations,
             )
         except ValueError:
-            return False
+            return "internal_contract_error", False
         if any(
             not _value_within_optional_range(
                 value=dte,
@@ -471,12 +243,12 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
             )
             for dte in expected_dtes.values()
         ):
-            return False
+            return "internal_contract_error", False
 
         for option_type in option_types:
             raw_request_window = raw_request_windows.get(option_type)
             if not _valid_request_strike_window(raw_request_window):
-                return False
+                return "internal_contract_error", False
             request_scope_min = _strict_optional_positive_float(
                 raw_request_window, "min_strike"
             )
@@ -488,17 +260,13 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                 raw_side_plan.get("explicit_expirations")
             )
             if side_expirations != requested_expirations:
-                return False
-            exact_strikes_by_expiration = (
-                _strict_exact_strikes_by_expiration(
-                    raw_side_plan.get(
-                        "required_exact_strikes_by_expiration"
-                    ),
-                    allowed_expirations=side_expirations,
-                )
+                return "internal_contract_error", False
+            exact_strikes_by_expiration = _strict_exact_strikes_by_expiration(
+                raw_side_plan.get("required_exact_strikes_by_expiration"),
+                allowed_expirations=side_expirations,
             )
             if exact_strikes_by_expiration is None:
-                return False
+                return "internal_contract_error", False
             side_min_dte = _strict_optional_nonnegative_int(
                 raw_side_plan,
                 "min_dte",
@@ -508,19 +276,19 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                 "max_dte",
             )
             if side_min_dte is _INVALID or side_max_dte is _INVALID:
-                return False
+                return "internal_contract_error", False
             if not _valid_optional_range(side_min_dte, side_max_dte):
-                return False
+                return "internal_contract_error", False
 
             effective_bounds = _effective_side_strike_bounds(raw_side_plan)
             if effective_bounds is None:
-                return False
+                return "internal_contract_error", False
             effective_min, effective_max = effective_bounds
             side_df = _filter_option_type(df, option_type)
             if scope_evidence is None and (
                 side_df.empty or "expiration" not in side_df.columns
             ):
-                return False
+                return "invalid_row_identity", False
             for expiration in requested_expirations:
                 proven_codes = (
                     scope_evidence.get((request_index, option_type, expiration))
@@ -533,45 +301,54 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                     minimum=side_min_dte,
                     maximum=side_max_dte,
                 ):
-                    return False
+                    return "internal_contract_error", False
                 if proven_codes is not None:
-                    exp_df = df[
-                        df["contract_symbol"].astype(str).str.strip().isin(
-                            proven_codes
-                        )
-                    ].copy()
+                    if not proven_codes:
+                        exp_df = df.iloc[0:0].copy()
+                    elif "contract_symbol" not in df.columns:
+                        return "invalid_row_identity", False
+                    else:
+                        exp_df = df[
+                            df["contract_symbol"]
+                            .astype(str)
+                            .str.strip()
+                            .isin(proven_codes)
+                        ].copy()
                 else:
                     exp_df = side_df[
                         side_df["expiration"].astype(str) == expiration
                     ].copy()
                 if exp_df.empty:
-                    if proven_codes != frozenset() or exact_strikes_by_expiration.get(expiration):
-                        return False
+                    if proven_codes != frozenset():
+                        return "invalid_row_identity", False
+                    if exact_strikes_by_expiration.get(expiration):
+                        return "required_contract_missing", False
                     continue
+                any_rows = True
                 if not _frame_dte_matches(
                     df=exp_df,
                     expected_dte=expected_dte,
                     minimum=request_min_dte,
                     maximum=request_max_dte,
                 ):
-                    return False
+                    return "invalid_row_identity", False
                 if not _frame_dte_matches(
                     df=exp_df,
                     expected_dte=expected_dte,
                     minimum=side_min_dte,
                     maximum=side_max_dte,
                 ):
-                    return False
+                    return "invalid_row_identity", False
                 strikes = _numeric_series(exp_df, "strike")
                 row_codes = _frame_contract_codes(exp_df)
                 if proven_codes is not None and row_codes != proven_codes:
-                    return False
+                    return "invalid_row_identity", False
                 if proven_codes is not None and not _strikes_within_bounds(
                     strikes=strikes,
                     minimum=request_scope_min,
                     maximum=request_scope_max,
                 ):
-                    return False
+                    return "invalid_row_identity", False
                 if not _strikes_cover_bounds(
                     strikes=strikes,
                     base_min=effective_min,
@@ -584,7 +361,7 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                         base_max=effective_max,
                     )
                 ):
-                    return False
+                    return "invalid_row_identity", False
                 if not _strikes_cover_exact_requirements(
                     strikes=strikes,
                     required_strikes=exact_strikes_by_expiration.get(
@@ -592,13 +369,15 @@ def _required_data_frame_covers_fetch_plan_debug_bool(
                         [],
                     ),
                 ):
-                    return False
+                    return "required_contract_missing", False
 
     if active_request_count <= 0:
-        return False
+        return "internal_contract_error", False
+    if not any_rows:
+        return None, True
     if require_realized_volatility and not _has_realized_volatility(df):
-        return False
-    return True
+        return "invalid_row_identity", False
+    return None, False
 
 
 def required_data_frame_covers_fetch_plan_debug(
@@ -626,74 +405,41 @@ def evaluate_required_data_frame_fetch_plan_debug(
 
     if not isinstance(fetch_plan, Mapping):
         return _blocked_coverage("internal_contract_error")
-    exact_requirement = _fetch_plan_has_exact_strike_requirement(fetch_plan)
-    if exact_requirement is None:
-        return _blocked_coverage("internal_contract_error")
     scope_validation = _validated_option_chain_scope_evidence(
         df=df,
         fetch_plan=fetch_plan,
         evidence=option_chain_evidence,
     )
-    if (
-        scope_validation.reason_code is not None
-        and _contains_option_chain_scope_evidence(option_chain_evidence)
-    ):
+    if scope_validation.reason_code is not None:
         return _blocked_coverage(
             scope_validation.reason_code,
             warnings=scope_validation.warnings,
         )
-
-    if df.empty and scope_validation.resolved is not None:
-        if any(scope_validation.resolved.values()):
-            return _blocked_coverage("invalid_row_identity")
-        if exact_requirement:
-            return _blocked_coverage(
-                "required_contract_missing",
-                provider_coverage="complete",
-                strategy_readiness="blocked",
-            )
-        return RequiredDataCoverageResult(
-            status="success_empty",
-            reason_code=None,
-            provider_coverage="complete",
-            internal_integrity="valid",
-            freshness=_freshness_evidence_strength(option_chain_evidence),
-            strategy_readiness="empty",
-            warnings=scope_validation.warnings,
-            details={"completion_unit": "request_option_type_expiration"},
-        )
-
-    accepted = _required_data_frame_covers_fetch_plan_debug_bool(
+    reason_code, is_empty = _evaluate_required_data_rows(
         df,
         fetch_plan,
-        option_chain_evidence=option_chain_evidence,
+        scope_evidence=scope_validation.resolved,
     )
-    if not accepted:
-        if _fetch_plan_missing_exact_strike(df=df, fetch_plan=fetch_plan):
-            return _blocked_coverage(
-                "required_contract_missing",
-                provider_coverage=(
-                    "complete"
-                    if scope_validation.resolved is not None
-                    else "unproven"
-                ),
-            )
+    if reason_code is not None:
         return _blocked_coverage(
-            "invalid_row_identity",
+            reason_code,
             provider_coverage=(
-                "complete" if scope_validation.resolved is not None else "unproven"
+                "complete"
+                if scope_validation.resolved is not None
+                and reason_code != "internal_contract_error"
+                else "unproven"
             ),
             warnings=scope_validation.warnings,
         )
     return RequiredDataCoverageResult(
-        status="success",
+        status=("success_empty" if is_empty else "success"),
         reason_code=None,
         provider_coverage=(
             "complete" if scope_validation.resolved is not None else "unproven"
         ),
         internal_integrity="valid",
         freshness=_freshness_evidence_strength(option_chain_evidence),
-        strategy_readiness="ready",
+        strategy_readiness=("empty" if is_empty else "ready"),
         warnings=scope_validation.warnings,
         details={"completion_unit": "request_option_type_expiration"},
     )
@@ -743,164 +489,6 @@ def _freshness_evidence_strength(
     )
 
 
-def _fetch_plan_has_exact_strike_requirement(
-    fetch_plan: Mapping[str, Any],
-) -> bool | None:
-    trading_date = _fetch_plan_trading_date(fetch_plan)
-    if not isinstance(trading_date, date):
-        return None
-    spot_reference = fetch_plan.get("spot_reference")
-    if spot_reference is not None:
-        normalized_spot = _strict_finite_float(spot_reference)
-        if normalized_spot is None or normalized_spot <= 0:
-            return None
-    require_rv = fetch_plan.get("require_realized_volatility")
-    if not isinstance(require_rv, bool):
-        return None
-    merged_requests = fetch_plan.get("merged_requests")
-    if not isinstance(merged_requests, list) or not merged_requests:
-        return None
-    has_exact = False
-    for request in merged_requests:
-        if not isinstance(request, Mapping):
-            return None
-        if (
-            request.get("trading_date") != trading_date.isoformat()
-            or request.get("include_realized_volatility") is not require_rv
-        ):
-            return None
-        expirations = _strict_expiration_list(request.get("explicit_expirations"))
-        if not expirations:
-            return None
-        min_dte = _strict_optional_nonnegative_int(request, "min_dte")
-        max_dte = _strict_optional_nonnegative_int(request, "max_dte")
-        if (
-            min_dte is _INVALID
-            or max_dte is _INVALID
-            or not _valid_optional_range(min_dte, max_dte)
-        ):
-            return None
-        try:
-            expected_dtes = required_data_expiration_dtes(
-                trading_date=trading_date,
-                expirations=expirations,
-            )
-        except ValueError:
-            return None
-        if any(
-            not _value_within_optional_range(
-                value=dte,
-                minimum=min_dte,
-                maximum=max_dte,
-            )
-            for dte in expected_dtes.values()
-        ):
-            return None
-        option_types = request.get("option_types")
-        if (
-            not isinstance(option_types, list)
-            or not option_types
-            or any(option_type not in {"put", "call"} for option_type in option_types)
-            or len(option_types) != len(set(option_types))
-        ):
-            return None
-        windows = request.get("side_strike_windows")
-        if (
-            not isinstance(windows, Mapping)
-            or set(windows) != set(option_types)
-            or any(not _valid_request_strike_window(windows.get(option_type)) for option_type in option_types)
-        ):
-            return None
-        side_plans = request.get("side_plans")
-        if not isinstance(side_plans, list):
-            return None
-        normalized_sides: set[str] = set()
-        for side_plan in side_plans:
-            if not isinstance(side_plan, Mapping):
-                return None
-            option_type = side_plan.get("option_type")
-            if option_type not in option_types or option_type in normalized_sides:
-                return None
-            normalized_sides.add(str(option_type))
-            side_expirations = _strict_expiration_list(
-                side_plan.get("explicit_expirations")
-            )
-            if side_expirations != expirations:
-                return None
-            exact = _strict_exact_strikes_by_expiration(
-                side_plan.get("required_exact_strikes_by_expiration"),
-                allowed_expirations=side_expirations,
-            )
-            if exact is None:
-                return None
-            side_min_dte = _strict_optional_nonnegative_int(side_plan, "min_dte")
-            side_max_dte = _strict_optional_nonnegative_int(side_plan, "max_dte")
-            if (
-                side_min_dte is _INVALID
-                or side_max_dte is _INVALID
-                or not _valid_optional_range(side_min_dte, side_max_dte)
-                or any(
-                    not _value_within_optional_range(
-                        value=dte,
-                        minimum=side_min_dte,
-                        maximum=side_max_dte,
-                    )
-                    for dte in expected_dtes.values()
-                )
-            ):
-                return None
-            if _effective_side_strike_bounds(side_plan) is None:
-                return None
-            has_exact = has_exact or bool(exact)
-        if normalized_sides != set(option_types):
-            return None
-    return has_exact
-
-
-def _fetch_plan_missing_exact_strike(
-    *,
-    df: pd.DataFrame,
-    fetch_plan: Mapping[str, Any],
-) -> bool:
-    merged_requests = fetch_plan.get("merged_requests")
-    if not isinstance(merged_requests, list):
-        return False
-    for request in merged_requests:
-        if not isinstance(request, Mapping):
-            return False
-        side_plans = request.get("side_plans")
-        if not isinstance(side_plans, list):
-            return False
-        for side_plan in side_plans:
-            if not isinstance(side_plan, Mapping):
-                return False
-            option_type = str(side_plan.get("option_type") or "")
-            exact = side_plan.get("required_exact_strikes_by_expiration")
-            if not isinstance(exact, Mapping):
-                return False
-            side_df = _filter_option_type(df, option_type)
-            for expiration, raw_strikes in exact.items():
-                if not isinstance(raw_strikes, list):
-                    return False
-                if "expiration" not in side_df.columns:
-                    return bool(raw_strikes)
-                exp_df = side_df[
-                    side_df["expiration"].astype(str) == str(expiration)
-                ]
-                strikes = _numeric_series(exp_df, "strike")
-                required = [
-                    value
-                    for raw_value in raw_strikes
-                    if (value := _strict_finite_float(raw_value)) is not None
-                ]
-                if required and not _strikes_cover_exact_requirements(
-                    strikes=strikes,
-                    required_strikes=required,
-                ):
-                    return True
-    return False
-
-
 def _validated_option_chain_scope_evidence(
     *,
     df: pd.DataFrame,
@@ -911,6 +499,7 @@ def _validated_option_chain_scope_evidence(
 
     if not isinstance(evidence, Mapping):
         return _ScopeEvidenceResult(None)
+    has_scope_evidence = _contains_option_chain_scope_evidence(evidence)
     if evidence.get("stale_cache_expirations") not in (None, []):
         return _ScopeEvidenceResult(None, "stale_data")
     if (
@@ -968,11 +557,11 @@ def _validated_option_chain_scope_evidence(
                 or child_index >= len(merged_requests)
                 or child_index in observed_indexes
             ):
-                return _ScopeEvidenceResult(None, "internal_contract_error")
+                return _ScopeEvidenceResult(None, "scope_identity_mismatch")
             observed_by_hash[child_hash] = child
             observed_indexes.add(child_index)
         if set(observed_by_hash) != set(expected_by_hash):
-            return _ScopeEvidenceResult(None, "internal_contract_error")
+            return _ScopeEvidenceResult(None, "scope_identity_mismatch")
         indexed_children = [
             (request_index, request, observed_by_hash[request_hash])
             for request_hash, (request_index, request) in expected_by_hash.items()
@@ -1012,6 +601,9 @@ def _validated_option_chain_scope_evidence(
         assert child_codes is not None
         warnings.extend(child_snapshot.warnings)
         scope_payload = child.get("option_chain_scope_coverage")
+        if not has_scope_evidence:
+            child_union.update(child_codes)
+            continue
         if (
             not isinstance(scope_payload, Mapping)
             or scope_payload.get("schema_version")
@@ -1067,6 +659,11 @@ def _validated_option_chain_scope_evidence(
         child_union.update(child_codes)
     if child_union != set(aggregate_codes):
         return _ScopeEvidenceResult(None, "internal_contract_error")
+    if not has_scope_evidence:
+        return _ScopeEvidenceResult(
+            None,
+            warnings=tuple(dict.fromkeys(warnings)),
+        )
     for (request_index, option_type, expiration), codes in resolved.items():
         for code in codes:
             matches = df[df["contract_symbol"].astype(str).str.strip() == code]
@@ -1272,18 +869,6 @@ def _fetch_plan_trading_date(
     return trading_date if trading_date is not None else _INVALID
 
 
-def _typed_fetch_plan_trading_date(
-    fetch_plan: RequiredDataFetchPlanBundle,
-) -> date | object:
-    discovery = fetch_plan.expiration_discovery
-    if discovery is None or not isinstance(discovery.request_identity, Mapping):
-        return _INVALID
-    trading_date = _strict_iso_date(
-        discovery.request_identity.get("trading_date")
-    )
-    return trading_date if trading_date is not None else _INVALID
-
-
 def _strict_expiration_list(value: Any) -> list[str] | None:
     if not isinstance(value, list):
         return None
@@ -1348,12 +933,7 @@ def _strict_optional_nonnegative_int(
     mapping: Mapping[str, Any],
     key: str,
 ) -> int | None | object:
-    return _strict_optional_nonnegative_int_value(mapping.get(key))
-
-
-def _strict_optional_nonnegative_int_value(
-    value: Any,
-) -> int | None | object:
+    value = mapping.get(key)
     if value is None:
         return None
     parsed = _strict_finite_float(value)

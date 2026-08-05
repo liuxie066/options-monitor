@@ -20,7 +20,6 @@ from src.application.required_data_coverage import (
     evaluate_required_data_frame_fetch_plan_debug,
 )
 from src.application.required_data_plan_identity import (
-    required_data_request_sha256,
     validate_required_data_expected_fetch_contract,
 )
 from src.application.position_advice_source_receipts import (
@@ -55,6 +54,10 @@ _VALIDATION_REASON_CODES = frozenset(
         "internal_contract_error",
     }
 )
+
+
+class _StaleRequiredDataError(PositionAdviceSourceError):
+    """Internal typed signal for the stale-data reason code."""
 
 
 REQUIRED_DATA_COLUMNS = [
@@ -207,9 +210,9 @@ def _validate_required_data_payload_candidate_impl(
             raise PositionAdviceSourceError(
                 "success-empty required-data RV evidence contradicts fetch contract"
             )
-        _validate_snapshot_completeness(meta=meta, rows=rows)
         discovery = contract.get("fetch_plan", {}).get("expiration_discovery")
         if empty_reason == "no_expirations":
+            _validate_snapshot_completeness(meta=meta, rows=rows)
             if not isinstance(discovery, Mapping):
                 raise PositionAdviceSourceError(
                     "success-empty required-data lacks expected discovery evidence"
@@ -235,12 +238,6 @@ def _validate_required_data_payload_candidate_impl(
                     "success-empty required-data discovery evidence mismatch"
                 )
         elif empty_reason == "no_contract_rows":
-            _validate_expected_child_request_evidence(
-                meta=meta,
-                contract=contract,
-                rows=rows,
-                canonical_realized_volatility=None,
-            )
             coverage = evaluate_required_data_frame_fetch_plan_debug(
                 pd.DataFrame(),
                 dict(contract.get("fetch_plan") or {}),
@@ -251,6 +248,11 @@ def _validate_required_data_payload_candidate_impl(
                     f"{coverage.reason_code or 'internal_contract_error'}: "
                     "required-data filtered-empty evidence is invalid"
                 )
+            _validate_child_request_bindings(
+                meta=meta,
+                contract=contract,
+                canonical_realized_volatility=None,
+            )
         else:
             raise PositionAdviceSourceError(
                 "success-empty required-data reason is invalid"
@@ -263,28 +265,32 @@ def _validate_required_data_payload_candidate_impl(
         identities = _row_identity_counter(rows)
         if any(identity[0] != expected_symbol for identity in identities):
             raise PositionAdviceSourceError("required-data row symbol mismatch")
-        _validate_snapshot_completeness(meta=meta, rows=rows)
-        canonical_realized_volatility = (
-            _validate_required_realized_volatility(meta=meta, rows=rows)
-            if require_realized_volatility
-            else None
-        )
-        _validate_expected_child_request_evidence(
-            meta=meta,
-            contract=contract,
-            rows=rows,
-            canonical_realized_volatility=canonical_realized_volatility,
-        )
         coverage = evaluate_required_data_frame_fetch_plan_debug(
             pd.DataFrame(rows),
             dict(contract.get("fetch_plan") or {}),
             option_chain_evidence=meta,
         )
         if not coverage.accepted:
+            merged_requests = (contract.get("fetch_plan") or {}).get("merged_requests")
+            subject = (
+                "child request evidence"
+                if isinstance(merged_requests, list) and len(merged_requests) > 1
+                else "payload"
+            )
             raise PositionAdviceSourceError(
                 f"{coverage.reason_code or 'internal_contract_error'}: "
-                "required-data payload does not cover expected fetch contract"
+                f"required-data {subject} does not cover expected fetch contract"
             )
+        canonical_realized_volatility = (
+            _validate_required_realized_volatility(meta=meta, rows=rows)
+            if require_realized_volatility
+            else None
+        )
+        _validate_child_request_bindings(
+            meta=meta,
+            contract=contract,
+            canonical_realized_volatility=canonical_realized_volatility,
+        )
     return meta, rows, source_outcome, contract
 
 
@@ -630,59 +636,25 @@ def _validate_timestamp_evidence(meta: Mapping[str, Any]) -> None:
         )
 
 
-def _validate_expected_child_request_evidence(
+def _validate_child_request_bindings(
     *,
     meta: Mapping[str, Any],
     contract: Mapping[str, Any],
-    rows: list[Any],
     canonical_realized_volatility: Mapping[str, float | None] | None,
 ) -> None:
     merged_requests = (contract.get("fetch_plan") or {}).get("merged_requests")
-    if not isinstance(merged_requests, list) or not merged_requests:
-        return
-    row_by_code = _required_data_rows_by_code(rows)
-    aggregate_requested = _code_set(meta.get("snapshot_requested_code_set"))
-    if len(merged_requests) == 1:
-        planned_request = merged_requests[0]
-        if not isinstance(planned_request, Mapping):
-            raise PositionAdviceSourceError(
-                "required-data planned child request is invalid"
-            )
-        aggregate_requested = _validate_child_snapshot_code_evidence(
-            meta, allow_empty=True
-        )
-        _validate_child_rows_against_planned_request(
-            planned_request=planned_request,
-            requested_codes=aggregate_requested,
-            row_by_code=row_by_code,
-            contract=contract,
-        )
+    if not isinstance(merged_requests, list) or len(merged_requests) <= 1:
         return
     requests = meta.get("requests")
-    if (
-        not isinstance(requests, list)
-        or len(requests) != len(merged_requests)
-        or any(not isinstance(item, Mapping) for item in requests)
-    ):
-        raise PositionAdviceSourceError(
-            "required-data child request evidence count mismatch"
-        )
-    request_count = meta.get("request_count")
-    if (
-        isinstance(request_count, bool)
-        or not isinstance(request_count, int)
-        or request_count != len(merged_requests)
-    ):
-        raise PositionAdviceSourceError(
-            "required-data child request evidence count mismatch"
-        )
-    discovery = (contract.get("fetch_plan") or {}).get(
-        "expiration_discovery"
-    )
+    assert isinstance(requests, list)
+    children_by_index = {
+        child["request_index"]: child
+        for child in requests
+        if isinstance(child, Mapping)
+    }
+    discovery = (contract.get("fetch_plan") or {}).get("expiration_discovery")
     discovery_identity = (
-        discovery.get("request_identity")
-        if isinstance(discovery, Mapping)
-        else None
+        discovery.get("request_identity") if isinstance(discovery, Mapping) else None
     )
     expected_underlier = (
         str(discovery_identity.get("underlier") or "").strip()
@@ -690,61 +662,16 @@ def _validate_expected_child_request_evidence(
         else ""
     )
     expected_symbol = str(contract.get("symbol") or "").strip().upper()
-    expected_by_hash: dict[str, tuple[int, Mapping[str, Any]]] = {}
     for expected_index, planned_request in enumerate(merged_requests):
-        if not isinstance(planned_request, Mapping):
-            raise PositionAdviceSourceError(
-                "required-data planned child request is invalid"
-            )
-        expected_hash = required_data_request_sha256(planned_request)
-        if expected_hash in expected_by_hash:
-            raise PositionAdviceSourceError(
-                "internal_contract_error: required-data planned child request "
-                "identity mismatch"
-            )
-        expected_by_hash[expected_hash] = (expected_index, planned_request)
-    child_by_hash: dict[str, Mapping[str, Any]] = {}
-    observed_indexes: set[int] = set()
-    for child in requests:
-        assert isinstance(child, Mapping)
-        child_hash = str(child.get("planned_request_sha256") or "").strip()
-        child_index = child.get("request_index")
+        assert isinstance(planned_request, Mapping)
+        child = children_by_index[expected_index]
         if (
-            not child_hash
-            or child_hash in child_by_hash
-            or isinstance(child_index, bool)
-            or not isinstance(child_index, int)
-            or child_index < 0
-            or child_index >= len(merged_requests)
-            or child_index in observed_indexes
-        ):
-            raise PositionAdviceSourceError(
-                "scope_identity_mismatch: required-data child request identity "
-                "mismatch"
-            )
-        child_by_hash[child_hash] = child
-        observed_indexes.add(child_index)
-    if set(child_by_hash) != set(expected_by_hash):
-        raise PositionAdviceSourceError(
-            "scope_identity_mismatch: required-data child request identity mismatch"
-        )
-    child_requested_union: set[str] = set()
-    for child_hash, (expected_index, planned_request) in expected_by_hash.items():
-        child = child_by_hash[child_hash]
-        if child.get("request_index") != expected_index:
-            raise PositionAdviceSourceError(
-                "internal_contract_error: required-data child request index "
-                "contradicts planned request identity"
-            )
-        if (
-            str(child.get("request_symbol") or "").strip().upper()
-            != expected_symbol
+            str(child.get("request_symbol") or "").strip().upper() != expected_symbol
             or str(child.get("request_underlier_code") or "").strip()
             != expected_underlier
         ):
             raise PositionAdviceSourceError(
-                "scope_identity_mismatch: required-data child request symbol "
-                "identity mismatch"
+                "scope_identity_mismatch: required-data child request symbol identity mismatch"
             )
         try:
             _validate_raw_binding(
@@ -754,8 +681,7 @@ def _validate_expected_child_request_evidence(
             )
         except PositionAdviceSourceError as exc:
             raise PositionAdviceSourceError(
-                "scope_identity_mismatch: required-data child request binding "
-                "mismatch"
+                "scope_identity_mismatch: required-data child request binding mismatch"
             ) from exc
         try:
             _validate_trading_date_binding(
@@ -764,227 +690,15 @@ def _validate_expected_child_request_evidence(
                 planned_request=planned_request,
             )
         except PositionAdviceSourceError as exc:
-            raise PositionAdviceSourceError(
-                f"scope_identity_mismatch: {exc}"
-            ) from exc
-        if str(child.get("status") or "").strip().lower() != "ok":
-            raise PositionAdviceSourceError(
-                "provider_incomplete: required-data child request outcome is not "
-                "successful"
-            )
-        child_outcome = str(child.get("source_outcome") or "").strip().lower()
-        child_reason = str(child.get("reason_code") or "").strip().lower()
-        if not (
-            (child_outcome == "success_rows" and not child_reason)
-            or (
-                child_outcome == "success_empty"
-                and child_reason == "no_contract_rows"
-            )
+            raise PositionAdviceSourceError(f"scope_identity_mismatch: {exc}") from exc
+        if canonical_realized_volatility is not None and child.get(
+            "snapshot_requested_code_set"
         ):
-            raise PositionAdviceSourceError(
-                "required-data child request outcome evidence is invalid"
-            )
-        requested_codes = _validate_child_snapshot_code_evidence(
-            child, allow_empty=True
-        )
-        if canonical_realized_volatility is not None and requested_codes:
-            child_realized_volatility = _required_realized_volatility_values(
-                child
-            )
-            if child_realized_volatility != dict(
-                canonical_realized_volatility
-            ):
+            child_realized_volatility = _required_realized_volatility_values(child)
+            if child_realized_volatility != dict(canonical_realized_volatility):
                 raise PositionAdviceSourceError(
                     "required-data child request realized volatility mismatch"
                 )
-        child_requested_union.update(requested_codes)
-        _validate_child_rows_against_planned_request(
-            planned_request=planned_request,
-            requested_codes=requested_codes,
-            row_by_code=row_by_code,
-            contract=contract,
-        )
-    if child_requested_union != set(aggregate_requested):
-        raise PositionAdviceSourceError(
-            "required-data child request code sets do not match aggregate rows"
-        )
-
-
-def _required_data_rows_by_code(
-    rows: list[Any],
-) -> dict[str, Mapping[str, Any]]:
-    row_by_code: dict[str, Mapping[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, Mapping):
-            raise PositionAdviceSourceError(
-                "required-data child request rows are invalid"
-            )
-        code = str(row.get("contract_symbol") or "").strip()
-        if not code or code in row_by_code:
-            raise PositionAdviceSourceError(
-                "required-data child request rows are invalid"
-            )
-        row_by_code[code] = row
-    return row_by_code
-
-
-def _validate_child_snapshot_code_evidence(
-    child: Mapping[str, Any],
-    *,
-    allow_empty: bool = False,
-) -> frozenset[str]:
-    requested = _code_set(child.get("snapshot_requested_code_set"))
-    returned = _code_set(child.get("snapshot_returned_code_set"))
-    missing = _code_set(child.get("snapshot_missing_code_set"))
-    unexpected = _code_set(child.get("snapshot_unexpected_code_set"))
-    declared = {
-        "requested": child.get("snapshot_requested_codes"),
-        "returned": child.get("snapshot_returned_codes"),
-        "missing": child.get("snapshot_missing_codes"),
-        "unexpected": child.get("snapshot_unexpected_codes"),
-    }
-    expected = {
-        "requested": len(requested),
-        "returned": len(returned),
-        "missing": len(missing),
-        "unexpected": len(unexpected),
-    }
-    if any(
-        isinstance(value, bool) or not isinstance(value, int)
-        for value in declared.values()
-    ) or declared != expected:
-        raise PositionAdviceSourceError(
-            "required-data child request snapshot counts mismatch"
-        )
-    if (
-        (not requested and not allow_empty)
-        or not requested.issubset(returned)
-        or missing
-        or child.get("snapshot_complete") is not True
-    ):
-        raise PositionAdviceSourceError(
-            "provider_incomplete: required-data child request snapshot "
-            "evidence is incomplete"
-        )
-    return requested
-
-
-def _validate_child_rows_against_planned_request(
-    *,
-    planned_request: Mapping[str, Any],
-    requested_codes: frozenset[str],
-    row_by_code: Mapping[str, Mapping[str, Any]],
-    contract: Mapping[str, Any],
-) -> None:
-    if any(code not in row_by_code for code in requested_codes):
-        raise PositionAdviceSourceError(
-            "invalid_row_identity: required-data child request rows do not match "
-            "requested codes"
-        )
-    option_types = planned_request.get("option_types")
-    expirations = planned_request.get("explicit_expirations")
-    windows = planned_request.get("side_strike_windows")
-    if (
-        not isinstance(option_types, list)
-        or not option_types
-        or not isinstance(expirations, list)
-        or not expirations
-        or not isinstance(windows, Mapping)
-    ):
-        raise PositionAdviceSourceError(
-            "internal_contract_error: required-data planned child request is invalid"
-        )
-    discovery = (contract.get("fetch_plan") or {}).get(
-        "expiration_discovery"
-    )
-    identity = (
-        discovery.get("request_identity")
-        if isinstance(discovery, Mapping)
-        else None
-    )
-    try:
-        trading_date = date.fromisoformat(
-            str(
-                identity.get("trading_date")
-                if isinstance(identity, Mapping)
-                else ""
-            )
-        )
-    except ValueError as exc:
-        raise PositionAdviceSourceError(
-            "required-data child request trading date is invalid"
-        ) from exc
-    allowed_option_types = set(option_types)
-    allowed_expirations = set(expirations)
-    for code in requested_codes:
-        row = row_by_code[code]
-        option_type = str(row.get("option_type") or "").strip().lower()
-        expiration = str(row.get("expiration") or "").strip()
-        window = windows.get(option_type)
-        try:
-            strike = float(row.get("strike"))
-            row_dte = float(row.get("dte"))
-            expected_dte = (
-                date.fromisoformat(expiration) - trading_date
-            ).days
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise PositionAdviceSourceError(
-                "invalid_row_identity: required-data child request row identity "
-                "is invalid"
-            ) from exc
-        if option_type not in allowed_option_types or expiration not in allowed_expirations:
-            raise PositionAdviceSourceError(
-                "scope_identity_mismatch: required-data child request rows "
-                "contradict planned request"
-            )
-        if (
-            not isinstance(window, Mapping)
-            or not math.isfinite(strike)
-            or strike <= 0
-            or not math.isfinite(row_dte)
-            or not row_dte.is_integer()
-            or int(row_dte) != expected_dte
-        ):
-            raise PositionAdviceSourceError(
-                "invalid_row_identity: required-data child request rows contradict "
-                "planned request"
-            )
-        min_strike = window.get("min_strike")
-        max_strike = window.get("max_strike")
-        try:
-            parsed_min = (
-                float(min_strike) if min_strike is not None else None
-            )
-            parsed_max = (
-                float(max_strike) if max_strike is not None else None
-            )
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise PositionAdviceSourceError(
-                "required-data child request strike window is invalid"
-            ) from exc
-        if (
-            parsed_min is not None
-            and (not math.isfinite(parsed_min) or parsed_min <= 0)
-        ) or (
-            parsed_max is not None
-            and (not math.isfinite(parsed_max) or parsed_max <= 0)
-        ) or (
-            parsed_min is not None
-            and parsed_max is not None
-            and parsed_min > parsed_max
-        ):
-            raise PositionAdviceSourceError(
-                "required-data child request strike window is invalid"
-            )
-        if (
-            parsed_min is not None and strike < parsed_min
-        ) or (
-            parsed_max is not None and strike > parsed_max
-        ):
-            raise PositionAdviceSourceError(
-                "invalid_row_identity: required-data child request rows contradict "
-                "strike window"
-            )
 
 
 def _validate_raw_underlier_binding(
@@ -1050,7 +764,7 @@ def _validate_quote_freshness(
         seconds=int(SOURCE_MAX_AGE_SECONDS["quotes"])
     )
     if now_value >= expires_at:
-        raise PositionAdviceSourceError("required-data quote observation is stale")
+        raise _StaleRequiredDataError("required-data quote observation is stale")
     return now_value
 
 
@@ -1098,11 +812,10 @@ def _validate_payload_freshness_reason_coded(
 ) -> datetime:
     try:
         return _validate_payload_freshness(meta=meta, now=now)
+    except _StaleRequiredDataError as exc:
+        raise PositionAdviceSourceError(f"stale_data: {exc}") from exc
     except PositionAdviceSourceError as exc:
-        reason_code = (
-            "stale_data" if "stale" in str(exc).lower() else "freshness_unproven"
-        )
-        raise PositionAdviceSourceError(f"{reason_code}: {exc}") from exc
+        raise PositionAdviceSourceError(f"freshness_unproven: {exc}") from exc
 
 
 def _validate_rows_persist_without_loss(rows: list[Any]) -> None:

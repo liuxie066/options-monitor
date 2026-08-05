@@ -1017,7 +1017,7 @@ def test_ensure_required_data_rejects_direct_contract_coverage_gap(
 
     with pytest.raises(
         PositionAdviceSourceError,
-        match="child request rows contradict strike window",
+        match=r"^invalid_row_identity:",
     ):
         mod.ensure_required_data(
             py="python3",

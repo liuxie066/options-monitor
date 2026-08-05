@@ -2270,8 +2270,6 @@ def test_prefetch_refetches_when_cached_required_data_misses_strategy_side(tmp_p
                 "rate_gate_wait_sec": 1.25,
                 "from_cache_expirations": ["2026-06-19"],
                 "fetched_expirations": ["2026-07-17"],
-                "option_codes": 12,
-                "snapshot_requested_codes": 12,
                 "snapshot_opend_call_count": 1,
                 "snapshots_rows": 12,
             },
