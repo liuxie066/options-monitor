@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.7",
+  "base": {
+    "tag": "v1.10.6",
+    "commit": "01736e32dbd2b968e3cc3c0043b0e993fcdecb99"
+  },
+  "reviewed_head": "ad524dc822df8a9d8ca2fd9b53c5256d249d9d88",
+  "commits": [
+    {
+      "sha": "ad524dc822df8a9d8ca2fd9b53c5256d249d9d88",
+      "subject": "fix: restore prepared brief and non-applicable scan states"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Made Daily Brief consume the immutable run-scoped prepared portfolio context and recognize non-applicable strategy scans as terminal, preventing valid account runs from being downgraded to missing-context or scan-failure states.",
+      "commits": [
+        "ad524dc822df8a9d8ca2fd9b53c5256d249d9d88"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
