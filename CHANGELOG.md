@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.10.8 - 2026-08-05
+
+### Bug Fixes
+- Validated required option-chain and volatility coverage against each account's requested symbol and expiry scope, preventing complete scoped runs from being rejected because unrelated catalog rows were absent while still failing closed on genuinely missing inputs.
+
 ## 1.10.7 - 2026-08-05
 
 ### Bug Fixes
