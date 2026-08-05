@@ -133,6 +133,9 @@ def test_pipeline_runtime_passes_validated_account_config_payload_to_loader(
     report_dir = tmp_path / "reports"
     state_dir = tmp_path / "state"
     observed: dict[str, object] = {}
+    pipeline_observed: dict[str, object] = {}
+    prepared_options = tmp_path / "prepared-options.json"
+    prepared_options.write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr(
         mod.report_repo,
@@ -151,16 +154,97 @@ def test_pipeline_runtime_passes_validated_account_config_payload_to_loader(
     monkeypatch.setattr(
         pipeline_watchlist,
         "run_watchlist_pipeline_default",
-        lambda **_kwargs: [],
+        lambda **kwargs: pipeline_observed.update(kwargs) or [],
     )
 
     assert mod.main(
-        _authority_args(authority, base=tmp_path) + ["--stage", "fetch"]
+        _authority_args(authority, base=tmp_path)
+        + [
+            "--stage",
+            "fetch",
+            "--position-advice-account-run-id",
+            "run-pipeline",
+            "--prepared-option-positions-context-manifest",
+            str(prepared_options),
+            "--prepared-option-positions-context-manifest-sha256",
+            "b" * 64,
+        ]
     ) == 0
     assert observed["config_payload"]["runtime"]["marker"] == (
         "validated-authority"
     )
     assert observed["config_path"] == authority.state_path
+    assert pipeline_observed[
+        "prepared_option_positions_context_manifest"
+    ] == prepared_options.resolve()
+    assert pipeline_observed[
+        "prepared_option_positions_context_manifest_sha256"
+    ] == "b" * 64
+
+
+def test_pipeline_runtime_classifies_prepared_option_context_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_runtime as mod
+    from src.application.prepared_option_positions_context import (
+        PreparedOptionPositionsContextError,
+    )
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    authority = publish_account_run_config(
+        base=tmp_path,
+        run_id="run-prepared-option-failure",
+        account="lx",
+        config={
+            "portfolio": {"account": "lx"},
+            "symbols": [],
+        },
+    )
+    prepared_options = tmp_path / "prepared-options.json"
+    prepared_options.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        mod.report_repo,
+        "prepare_dirs",
+        lambda **_kwargs: (tmp_path / "reports", tmp_path / "state"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_runtime_pipeline_config",
+        lambda **_kwargs: {"symbols": []},
+    )
+    from src.application import pipeline_watchlist
+
+    monkeypatch.setattr(
+        pipeline_watchlist,
+        "run_watchlist_pipeline_default",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            PreparedOptionPositionsContextError("payload hash mismatch")
+        ),
+    )
+    _set_authority_env(monkeypatch, authority)
+
+    with pytest.raises(
+        SystemExit,
+        match=(
+            r"\[CONFIG_ERROR\] "
+            r"ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID: "
+            r"payload hash mismatch"
+        ),
+    ):
+        mod.main(
+            _authority_args(authority, base=tmp_path)
+            + [
+                "--stage",
+                "fetch",
+                "--position-advice-account-run-id",
+                authority.run_id,
+                "--prepared-option-positions-context-manifest",
+                str(prepared_options),
+                "--prepared-option-positions-context-manifest-sha256",
+                "b" * 64,
+            ]
+        )
 
 
 def test_pipeline_runtime_uses_retained_generation_after_path_drift(
@@ -221,6 +305,8 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(
     replacement = tmp_path / "replacement.json"
     replacement.write_text("{}\n", encoding="utf-8")
     compatibility.symlink_to(replacement)
+    prepared_options = tmp_path / "prepared-options.json"
+    prepared_options.write_text("{}\n", encoding="utf-8")
     mod.run_pipeline_script(
         vpy=tmp_path / "python",
         base=tmp_path,
@@ -233,6 +319,8 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(
         account_config_compatibility_path=compatibility,
         account_config_sha256="a" * 64,
         account_config_canonical_bytes=b"{}\n",
+        prepared_option_positions_context_manifest=prepared_options,
+        prepared_option_positions_context_manifest_sha256="b" * 64,
     )
 
     command = observed["command"]
@@ -245,4 +333,16 @@ def test_pipeline_subprocess_command_forwards_complete_config_authority(
         command.index("--account-config-compatibility-path") + 1
     ] == str(compatibility)
     assert command[command.index("--account-config-sha256") + 1] == "a" * 64
+    assert command[
+        command.index(
+            "--prepared-option-positions-context-manifest"
+        )
+        + 1
+    ] == str(prepared_options.resolve())
+    assert command[
+        command.index(
+            "--prepared-option-positions-context-manifest-sha256"
+        )
+        + 1
+    ] == "b" * 64
     assert "OM_ACCOUNT_CONFIG_CANONICAL_B64" in observed["env"]

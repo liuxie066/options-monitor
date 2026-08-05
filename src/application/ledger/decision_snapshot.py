@@ -53,15 +53,10 @@ def decision_state_snapshot(
     candidate = getattr(repo, "primary_repo", repo)
     read_rows = getattr(candidate, "read_decision_state_rows", None)
     if not callable(read_rows):
-        return {
-            "schema_version": DECISION_STATE_SNAPSHOT_SCHEMA,
-            "fingerprint_schema_version": DECISION_STATE_FINGERPRINT_SCHEMA,
-            "snapshot_status": "snapshot_unavailable",
-            "actionable": False,
-            "reason_codes": ["coherent_ledger_snapshot_unavailable"],
-            "decision_state_fingerprint": None,
-            "source_observed_at": observed_at,
-        }
+        return _unavailable_snapshot(
+            observed_at=observed_at,
+            reason_code="coherent_ledger_snapshot_unavailable",
+        )
     try:
         rows = read_rows(account=account)
         # A ledger observation is complete only after the coherent read
@@ -70,6 +65,33 @@ def decision_state_snapshot(
         observed_at = (
             observed_at_override or datetime.now(timezone.utc).isoformat()
         )
+        return decision_state_snapshot_from_rows(
+            rows,
+            account=account,
+            portfolio_scope_id=portfolio_scope_id,
+            source_observed_at=observed_at,
+        )
+    except Exception as exc:
+        return _unavailable_snapshot(
+            observed_at=observed_at,
+            reason_code="coherent_ledger_snapshot_failed",
+            error=exc,
+        )
+
+
+def decision_state_snapshot_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    portfolio_scope_id: str,
+    source_observed_at: str,
+) -> dict[str, Any]:
+    """Build one account snapshot from an already-frozen ledger read."""
+
+    observed_at = str(source_observed_at or "").strip()
+    if not observed_at:
+        raise ValueError("source_observed_at is required")
+    try:
         events = list(rows["trade_events"])
         stored_lots = list(rows["stored_position_lots"])
         projection = project_stored_trade_events_to_position_lots(events)
@@ -156,16 +178,52 @@ def decision_state_snapshot(
             "projection_diagnostics": [item.to_dict() for item in projection.diagnostics],
         }
     except Exception as exc:
-        return {
-            "schema_version": DECISION_STATE_SNAPSHOT_SCHEMA,
-            "fingerprint_schema_version": DECISION_STATE_FINGERPRINT_SCHEMA,
-            "snapshot_status": "snapshot_unavailable",
-            "actionable": False,
-            "reason_codes": ["coherent_ledger_snapshot_failed"],
-            "decision_state_fingerprint": None,
-            "source_observed_at": observed_at,
-            "error": str(exc),
-        }
+        return _unavailable_snapshot(
+            observed_at=observed_at,
+            reason_code="coherent_ledger_snapshot_failed",
+            error=exc,
+        )
+
+
+def read_decision_state_rows_many(
+    repo: Any,
+    *,
+    accounts: list[str] | tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Expose the repository's one-transaction multi-account read."""
+
+    candidate = getattr(repo, "primary_repo", repo)
+    read_rows = getattr(candidate, "read_decision_state_rows_many", None)
+    if not callable(read_rows):
+        raise TypeError("coherent multi-account ledger snapshot is unavailable")
+    rows = read_rows(accounts=accounts)
+    if not isinstance(rows, dict):
+        raise TypeError("coherent multi-account ledger snapshot is invalid")
+    return {
+        str(account or "").strip().lower(): dict(payload)
+        for account, payload in rows.items()
+        if str(account or "").strip() and isinstance(payload, Mapping)
+    }
+
+
+def _unavailable_snapshot(
+    *,
+    observed_at: str,
+    reason_code: str,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": DECISION_STATE_SNAPSHOT_SCHEMA,
+        "fingerprint_schema_version": DECISION_STATE_FINGERPRINT_SCHEMA,
+        "snapshot_status": "snapshot_unavailable",
+        "actionable": False,
+        "reason_codes": [str(reason_code)],
+        "decision_state_fingerprint": None,
+        "source_observed_at": str(observed_at),
+    }
+    if error is not None:
+        payload["error"] = str(error)
+    return payload
 
 
 def validate_position_fact_snapshot_contract(
@@ -373,6 +431,8 @@ def _lifecycle_resolution_fact_view(
 __all__ = [
     "POSITION_FACT_SNAPSHOT_CONTRACT",
     "decision_state_snapshot",
+    "decision_state_snapshot_from_rows",
     "decision_state_snapshot_fingerprint",
+    "read_decision_state_rows_many",
     "validate_position_fact_snapshot_contract",
 ]

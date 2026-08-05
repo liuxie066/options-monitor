@@ -261,7 +261,7 @@ def resolve_position_fetch_binding(
                 else {}
             )
             raw_source = str(fetch_cfg.get("source") or "").strip()
-            host = str(fetch_cfg.get("host") or "").strip()
+            host = str(fetch_cfg.get("host") or "").strip().lower()
             port = _positive_int(fetch_cfg.get("port"))
             if not (raw_source and host and port is not None):
                 return None, "required_data_symbol_config_missing"

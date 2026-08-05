@@ -41,6 +41,7 @@ FetchPlanOutcome = Literal[
     "parse_error",
 ]
 ExpirationDiscoveryCacheKey = tuple[str, str, str, int, str]
+SpotObservationCacheKey = tuple[str, str, str, int, str]
 
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
@@ -156,6 +157,7 @@ class RequiredDataFetchPlanBundle:
     projection_outcome: FetchPlanOutcome | None = None
     projected_expirations: list[str] = field(default_factory=list)
     require_realized_volatility: bool = False
+    spot_observation_complete: bool = False
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +175,7 @@ class RequiredDataFetchPlanBundle:
             "projection_outcome": self.projection_outcome,
             "projected_expirations": list(self.projected_expirations),
             "require_realized_volatility": self.require_realized_volatility,
+            "spot_observation_complete": bool(self.spot_observation_complete),
         }
 
 
@@ -579,6 +582,10 @@ def _unique_preserve_order(values: list[str]) -> list[str]:
     return out
 
 
+def _physical_host(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def _expiration_discovery_cache_key(
     *,
     symbol: str,
@@ -590,10 +597,43 @@ def _expiration_discovery_cache_key(
     return (
         str(symbol or "").strip().upper(),
         str(source or "").strip().lower(),
-        str(host),
+        _physical_host(host),
         int(port),
         trading_date,
     )
+
+
+def _spot_observation_cache_key(
+    *,
+    symbol: str,
+    source: str,
+    host: str,
+    port: int,
+    trading_date: str,
+) -> SpotObservationCacheKey:
+    return _expiration_discovery_cache_key(
+        symbol=symbol,
+        source=source,
+        host=host,
+        port=port,
+        trading_date=trading_date,
+    )
+
+
+def _cached_spot_observation(
+    *,
+    cache: MutableMapping[SpotObservationCacheKey, float | None],
+    cache_key: SpotObservationCacheKey,
+) -> float | None:
+    cached = cache[cache_key]
+    if cached is None:
+        return None
+    if isinstance(cached, bool):
+        raise RuntimeError("spot-observation cache contains an invalid value")
+    spot = _safe_float(cached)
+    if spot is None or not math.isfinite(spot) or spot <= 0:
+        raise RuntimeError("spot-observation cache contains an invalid value")
+    return spot
 
 
 def _expiration_discovery_cache_entries(
@@ -610,7 +650,7 @@ def _expiration_discovery_cache_entries(
     prefix = (
         str(symbol or "").strip().upper(),
         str(source or "").strip().lower(),
-        str(host),
+        _physical_host(host),
         int(port),
     )
     return [
@@ -638,7 +678,7 @@ def _expiration_discovery_cache_identity_matches(
     return (
         identity.get("symbol") == expected_symbol
         and identity.get("source") == expected_source
-        and identity.get("host") == expected_host
+        and _physical_host(identity.get("host")) == expected_host
         and identity.get("port") == expected_port
         and identity.get("trading_date") == expected_date
         and _strict_iso_expiration(expected_date) == expected_date
@@ -669,7 +709,7 @@ def _expiration_discovery_cache_failure(
             "symbol": str(symbol or "").strip().upper(),
             "underlier": None,
             "source": str(source or "").strip().lower(),
-            "host": str(host),
+            "host": _physical_host(host),
             "port": int(port),
             "trading_date": trading_date,
         },
@@ -1021,6 +1061,9 @@ def build_required_data_fetch_plan(
         ]
         | None
     ) = None,
+    spot_observation_cache: (
+        MutableMapping[SpotObservationCacheKey, float | None] | None
+    ) = None,
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
@@ -1104,20 +1147,37 @@ def build_required_data_fetch_plan(
             )
         except Exception as exc:
             trading_date_resolution_error = exc
-    spot_reference = (
-        _resolve_spot_reference(
+    spot_observation_complete = frozen_trading_date is not None
+    spot_reference: float | None = None
+    if frozen_trading_date is not None:
+        spot_cache_key = _spot_observation_cache_key(
             symbol=symbol,
+            source=fetch_source,
             host=fetch_host,
             port=fetch_port,
-            base_dir=base,
-            required_data_dir=required_data_dir,
-            snapshot_max_wait_sec=snapshot_max_wait_sec,
-            snapshot_window_sec=snapshot_window_sec,
-            snapshot_max_calls=snapshot_max_calls,
+            trading_date=frozen_trading_date,
         )
-        if frozen_trading_date is not None
-        else None
-    )
+        if (
+            spot_observation_cache is not None
+            and spot_cache_key in spot_observation_cache
+        ):
+            spot_reference = _cached_spot_observation(
+                cache=spot_observation_cache,
+                cache_key=spot_cache_key,
+            )
+        else:
+            spot_reference = _resolve_spot_reference(
+                symbol=symbol,
+                host=fetch_host,
+                port=fetch_port,
+                base_dir=base,
+                required_data_dir=required_data_dir,
+                snapshot_max_wait_sec=snapshot_max_wait_sec,
+                snapshot_window_sec=snapshot_window_sec,
+                snapshot_max_calls=snapshot_max_calls,
+            )
+            if spot_observation_cache is not None:
+                spot_observation_cache[spot_cache_key] = spot_reference
     if (
         discovery_cache_key is None
         and frozen_trading_date is not None
@@ -1271,4 +1331,5 @@ def build_required_data_fetch_plan(
         projection_outcome=projection_outcome,
         projected_expirations=projected_expirations,
         require_realized_volatility=require_realized_volatility,
+        spot_observation_complete=spot_observation_complete,
     )

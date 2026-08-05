@@ -202,6 +202,7 @@ class FetchSymbolRequest:
     host: str = '127.0.0.1'
     port: int = 11111
     spot_override: float | None = None
+    fetch_spot_if_missing: bool = True
     base_dir: Path | None = None
     option_types: str = 'put,call'
     min_strike: float | None = None
@@ -253,7 +254,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -261,6 +262,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             host=host,
             port=port,
             spot_override=spot_override,
+            fetch_spot_if_missing=fetch_spot_if_missing,
             base_dir=base_dir,
             option_types=option_types,
             min_strike=min_strike,
@@ -302,6 +304,8 @@ def fetch_symbol_request(
     snapshot_fallback_max_codes: int | None = None,
     snapshot_fallback_batch_size: int | None = None,
 ) -> dict[str, Any]:
+    if not isinstance(request.fetch_spot_if_missing, bool):
+        raise TypeError("fetch_spot_if_missing must be a bool")
     if snapshot_fallback_max_codes is not None or snapshot_fallback_batch_size is not None:
         request = replace(
             request,
@@ -368,7 +372,7 @@ def fetch_symbol_request(
         # Spot policy:
         # - HK/CN: try OpenD snapshot (usually available)
         # - US: also rely on OpenD only; if quote right is missing, keep spot as None
-        if spot is None:
+        if spot is None and request.fetch_spot_if_missing:
             spot = get_spot_opend(
                 gateway,
                 u.code,

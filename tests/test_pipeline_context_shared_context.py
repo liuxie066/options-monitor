@@ -393,6 +393,56 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
     assert sliced_option["open_positions_min"] == legacy_option["open_positions_min"]
 
 
+def test_option_context_rejects_foreign_account_cache_before_adapter(
+    monkeypatch,
+) -> None:
+    import src.application.pipeline_context as pc
+
+    monkeypatch.setattr(
+        pc,
+        "is_fresh",
+        lambda path, _ttl: Path(path).name
+        == "option_positions_context.json",
+    )
+    monkeypatch.setattr(
+        pc,
+        "load_cached_json",
+        lambda _path: {
+            "filters": {"broker": "富途", "account": "lx"},
+            "open_positions_min": [],
+        },
+    )
+    monkeypatch.setattr(
+        pc,
+        "_load_option_position_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("live ledger unavailable")
+        ),
+    )
+    logs: list[str] = []
+
+    with TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        context, refreshed = pc.load_option_positions_context(
+            base=root,
+            data_config="portfolio.runtime.json",
+            market="富途",
+            account="sy",
+            ttl_sec=3600,
+            state_dir=root / "account-state",
+            shared_state_dir=root / "run-state",
+            log=logs.append,
+        )
+
+    assert context is None
+    assert refreshed is False
+    assert any(
+        "rejected source=account_cache" in message
+        and "expected=sy actual=lx" in message
+        for message in logs
+    )
+
+
 def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error(monkeypatch, tmp_path: Path) -> None:
     import src.application.portfolio_context_builder as fpc
 

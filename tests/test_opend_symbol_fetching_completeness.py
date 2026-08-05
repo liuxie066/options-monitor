@@ -160,6 +160,39 @@ def test_success_empty_marks_rv_not_applicable_without_provider_call(
     assert payload["meta"]["snapshot_requested_code_set"] == []
 
 
+def test_observed_missing_spot_is_not_fetched_again(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    _install_symbol_dependencies(
+        monkeypatch,
+        chain_bundle=_chain_bundle(rows=[], source_outcome="success_empty"),
+    )
+
+    def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("an observed missing spot must not be fetched again")
+
+    monkeypatch.setattr(mod, "get_spot_opend", forbidden)
+    monkeypatch.setattr(mod, "fetch_realized_volatility_snapshot", forbidden)
+    monkeypatch.setattr(mod, "fetch_option_snapshots", forbidden)
+
+    payload = mod.fetch_symbol_request(
+        mod.FetchSymbolRequest(
+            symbol="NVDA",
+            base_dir=tmp_path,
+            gateway=object(),
+            spot_override=None,
+            fetch_spot_if_missing=False,
+        )
+    )
+
+    assert payload["spot"] is None
+    assert payload["meta"]["spot_snapshot_opend_calls"] == 0
+    assert payload["meta"]["source_outcome"] == "success_empty"
+
+
 def test_duplicate_snapshot_code_is_a_typed_overall_error(
     monkeypatch,
     tmp_path: Path,

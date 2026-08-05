@@ -5,6 +5,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -16,7 +18,53 @@ from src.application.ledger.read_model import (
     load_position_lot_records,
     list_position_rows,
 )
-from src.application.positions.context_builder import build_context, build_shared_context
+from src.application.positions.context_builder import (
+    build_context,
+    build_shared_context,
+    validate_option_positions_context_account,
+)
+
+
+def test_raw_option_context_validator_accepts_explicit_trusted_empty_slice() -> None:
+    validate_option_positions_context_account(
+        {
+            "filters": {"broker": "富途", "account": "lx"},
+            "open_positions_min": [],
+        },
+        account="lx",
+        broker="富途",
+    )
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"filters": {"broker": "富途"}, "open_positions_min": []},
+        {
+            "filters": {"broker": "富途", "account": "sy"},
+            "open_positions_min": [],
+        },
+        {
+            "filters": {"broker": "富途", "account": "lx"},
+            "open_positions_min": [{"record_id": "missing-account"}],
+        },
+        {
+            "filters": {"broker": "富途", "account": "lx"},
+            "open_positions_min": [
+                {"record_id": "foreign", "account": "sy"}
+            ],
+        },
+    ],
+)
+def test_raw_option_context_validator_rejects_missing_or_foreign_account(
+    context: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="account"):
+        validate_option_positions_context_account(
+            context,
+            account="lx",
+            broker="富途",
+        )
 
 
 def test_build_context_preserves_record_id_without_position_id() -> None:
@@ -51,6 +99,11 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
     assert ctx["open_positions_min"][0]["premium"] == 1.23
     assert ctx["open_positions_min"][0]["expiration_ymd"] is None
     assert ctx["open_positions_min"][0]["days_to_expiration"] is None
+    validate_option_positions_context_account(
+        ctx,
+        account="lx",
+        broker="富途",
+    )
 
 
 def test_position_lot_risk_view_is_typed_context_read_model() -> None:

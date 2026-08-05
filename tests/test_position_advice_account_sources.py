@@ -11,6 +11,7 @@ from src.application.position_advice_account_sources import (
     PositionAdviceAccountSourceError,
     build_cash_capacity,
     build_share_coverage,
+    publish_account_position_advice_sources,
     publish_account_run_sources,
 )
 from src.application.position_advice_source_receipts import (
@@ -367,3 +368,74 @@ def test_default_completion_timestamp_is_captured_after_ledger_observation(
     assert ledger["completed_at"] == (
         NOW + timedelta(seconds=3)
     ).isoformat().replace("+00:00", "Z")
+
+
+def test_account_run_facade_reuses_prepared_ledger_and_fx_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import position_advice_account_sources as mod
+
+    account_root = tmp_path / "account"
+    state = account_root / "state"
+    required = tmp_path / "required"
+    state.mkdir(parents=True)
+    required.mkdir()
+    decision_snapshot = _decision_snapshot()
+    fx_payload = {
+        "timestamp": NOW.isoformat(),
+        "source": "prepared",
+        "rates": {"USDCNY": 7.2},
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        mod,
+        "open_position_ledger",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("prepared authority must not reopen the ledger")
+        ),
+    )
+
+    def _publish(**kwargs):
+        captured["decision_snapshot"] = kwargs[
+            "decision_snapshot_reader"
+        ]()
+        captured["fx_payload"] = kwargs["fx_payload_override"]
+        return {
+            "schema_version": "position_advice_account_sources.v2",
+            "account_run_id": "run-1",
+            "account": "lx",
+            "broker": "futu",
+            "included_markets": ["US"],
+            "portfolio_scope_id": "account:lx",
+            "normalized_portfolio_source": "futu",
+            "portfolio_account_identity_hash": "a" * 64,
+            "capacity_pool_authority_id": "b" * 64,
+            "decision_state_snapshot": decision_snapshot,
+            "cash_capacity": {},
+            "share_coverage": {},
+            "source_kinds": [],
+            "receipts": [],
+        }
+
+    monkeypatch.setattr(mod, "publish_account_run_sources", _publish)
+
+    result = publish_account_position_advice_sources(
+        account_run_root=account_root,
+        account_state_dir=state,
+        quote_producer_root=required,
+        data_config_path=tmp_path / "portfolio.runtime.json",
+        account_run_id="run-1",
+        account="lx",
+        broker="futu",
+        included_markets=["US"],
+        decision_state_snapshot_override=decision_snapshot,
+        fx_payload_override=fx_payload,
+    )
+
+    assert result["decision_state_snapshot"] == decision_snapshot
+    assert captured == {
+        "decision_snapshot": decision_snapshot,
+        "fx_payload": fx_payload,
+    }

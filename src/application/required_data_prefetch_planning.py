@@ -51,6 +51,18 @@ def build_cross_account_prefetch_config(
     """Build an order-independent union of effective per-account market demand."""
 
     source_items: list[dict[str, Any]] = []
+    configs_by_account = {
+        str(account or "").strip().lower(): cfg
+        for account, cfg in account_configs.items()
+        if str(account or "").strip() and isinstance(cfg, dict)
+    }
+    requested_symbols = {
+        symbol
+        for cfg in configs_by_account.values()
+        for raw in resolve_watchlist_config(cfg)
+        if isinstance(raw, dict)
+        if (symbol := _symbol_key(str(raw.get("symbol") or "")))
+    }
     base_profiles = resolve_templates_config(base_config)
     for raw in resolve_watchlist_config(base_config):
         if not isinstance(raw, dict):
@@ -60,6 +72,8 @@ def build_cross_account_prefetch_config(
             profiles=base_profiles,
             apply_profiles_fn=apply_profiles,
         )
+        if _symbol_key(str(resolved.get("symbol") or "")) not in requested_symbols:
+            continue
         base_item = deepcopy(resolved)
         call_cfg = dict(_as_dict(base_item.get("sell_call")))
         call_cfg["enabled"] = False
@@ -67,11 +81,6 @@ def build_cross_account_prefetch_config(
         if _has_non_account_market_demand(base_item):
             source_items.append(base_item)
 
-    configs_by_account = {
-        str(account or "").strip().lower(): cfg
-        for account, cfg in account_configs.items()
-        if str(account or "").strip() and isinstance(cfg, dict)
-    }
     contexts_by_account = {
         str(account or "").strip().lower(): context
         for account, context in prepared_portfolio_contexts.items()
@@ -284,7 +293,7 @@ def _candidate_binding_tuple(
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
     return (
         source,
-        str(fetch_cfg.get("host") or "127.0.0.1").strip(),
+        _physical_host(fetch_cfg.get("host") or "127.0.0.1"),
         _to_int(fetch_cfg.get("port") or 11111, 11111),
     )
 
@@ -294,8 +303,8 @@ def _requirement_binding_tuple(
 ) -> tuple[str, str, int]:
     binding = _as_dict(requirement.get("fetch_binding"))
     return (
-        str(binding.get("source") or "").strip(),
-        str(binding.get("host") or "").strip(),
+        str(binding.get("source") or "").strip().lower(),
+        _physical_host(binding.get("host")),
         _to_int(binding.get("port"), 0),
     )
 
@@ -630,6 +639,8 @@ def merge_prefetch_symbol_configs(symbol_cfgs: list[dict[str, Any]]) -> dict[str
     merged = deepcopy(items[0])
     fetch_cfg = dict(_as_dict(merged.get("fetch")))
     fetch_cfg.pop("limit_expirations", None)
+    if str(fetch_cfg.get("host") or "").strip():
+        fetch_cfg["host"] = _physical_host(fetch_cfg.get("host"))
     merged["fetch"] = fetch_cfg
     merged["_prefetch_strategy_kwargs"] = _merge_strategy_prefetch_kwargs(
         [strategy_prefetch_kwargs(item, enabled=True) for item in items]
@@ -800,7 +811,7 @@ def _dedupe_key(symbol_cfg: dict[str, Any], *, idx: int) -> tuple[Any, ...]:
         return ("empty", idx)
     fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
-    host = str(fetch_cfg.get("host") or "127.0.0.1").strip()
+    host = _physical_host(fetch_cfg.get("host") or "127.0.0.1")
     port = _to_int(fetch_cfg.get("port") or 11111, 11111)
     return ("symbol", _symbol_key(symbol), source, host, int(port))
 
@@ -810,6 +821,10 @@ def _symbol_key(symbol: str) -> str:
     if not raw:
         return ""
     return raw.upper()
+
+
+def _physical_host(value: Any) -> str:
+    return str(value or "").strip().lower()
 
 
 def _limit_expirations(symbol_cfg: dict[str, Any]) -> int:

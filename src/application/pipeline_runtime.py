@@ -17,6 +17,9 @@ from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,
 )
+from src.application.prepared_option_positions_context import (
+    PreparedOptionPositionsContextError,
+)
 from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.pipeline_symbol import process_symbol
@@ -74,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--prepared-portfolio-context-manifest-sha256",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--prepared-option-positions-context-manifest",
+        default=None,
+        help="Internal: prepared account option-positions context manifest.",
+    )
+    parser.add_argument(
+        "--prepared-option-positions-context-manifest-sha256",
         default=None,
         help=argparse.SUPPRESS,
     )
@@ -199,6 +212,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "[CONFIG_ERROR] prepared portfolio context requires account config authority"
         )
+    if (
+        getattr(
+            args,
+            "prepared_option_positions_context_manifest",
+            None,
+        )
+        and authority_config is None
+    ):
+        raise SystemExit(
+            "[CONFIG_ERROR] prepared option context requires account config authority"
+        )
     prepared_manifest = getattr(
         args,
         "prepared_portfolio_context_manifest",
@@ -212,6 +236,22 @@ def main(argv: list[str] | None = None) -> int:
     if bool(prepared_manifest) != bool(prepared_manifest_sha256):
         raise SystemExit(
             "[CONFIG_ERROR] prepared portfolio context authority is incomplete"
+        )
+    prepared_option_manifest = getattr(
+        args,
+        "prepared_option_positions_context_manifest",
+        None,
+    )
+    prepared_option_manifest_sha256 = getattr(
+        args,
+        "prepared_option_positions_context_manifest_sha256",
+        None,
+    )
+    if bool(prepared_option_manifest) != bool(
+        prepared_option_manifest_sha256
+    ):
+        raise SystemExit(
+            "[CONFIG_ERROR] prepared option context authority is incomplete"
         )
 
     report_dir, state_dir = report_repo.prepare_dirs(
@@ -301,49 +341,80 @@ def main(argv: list[str] | None = None) -> int:
 
         required_data_dir = Path(shared_required_data).resolve() if shared_required_data else (runtime_root / "output_shared" / "required_data").resolve()
 
-        summary_rows = run_watchlist_pipeline_default(
-            py=py,
-            base=runtime_root,
-            cfg=cfg,
-            report_dir=report_dir,
-            state_dir=state_dir,
-            shared_state_dir=shared_context_dir,
-            required_data_dir=required_data_dir,
-            is_scheduled=is_scheduled,
-            top_n=top_n,
-            symbol_timeout_sec=symbol_timeout_sec,
-            portfolio_timeout_sec=portfolio_timeout_sec,
-            want_scan=_want("scan"),
-            no_context=bool(getattr(args, "no_context", False)),
-            symbols_arg=getattr(args, "symbols", None),
-            log=log,
-            want_fn=_want,
-            position_advice_account_run_id=getattr(
-                args,
-                "position_advice_account_run_id",
-                None,
-            ),
-            required_data_snapshot_manifest=(
-                Path(args.required_data_snapshot_manifest).resolve()
-                if getattr(args, "required_data_snapshot_manifest", None)
-                else None
-            ),
-            prepared_portfolio_context_manifest=(
-                Path(args.prepared_portfolio_context_manifest).resolve()
-                if getattr(args, "prepared_portfolio_context_manifest", None)
-                else None
-            ),
-            prepared_portfolio_context_manifest_sha256=(
-                str(args.prepared_portfolio_context_manifest_sha256).strip().lower()
-                if getattr(
+        try:
+            summary_rows = run_watchlist_pipeline_default(
+                py=py,
+                base=runtime_root,
+                cfg=cfg,
+                report_dir=report_dir,
+                state_dir=state_dir,
+                shared_state_dir=shared_context_dir,
+                required_data_dir=required_data_dir,
+                is_scheduled=is_scheduled,
+                top_n=top_n,
+                symbol_timeout_sec=symbol_timeout_sec,
+                portfolio_timeout_sec=portfolio_timeout_sec,
+                want_scan=_want("scan"),
+                no_context=bool(getattr(args, "no_context", False)),
+                symbols_arg=getattr(args, "symbols", None),
+                log=log,
+                want_fn=_want,
+                position_advice_account_run_id=getattr(
                     args,
-                    "prepared_portfolio_context_manifest_sha256",
+                    "position_advice_account_run_id",
                     None,
-                )
-                else None
-            ),
-            account_config_sha256=account_config_sha256,
-        )
+                ),
+                required_data_snapshot_manifest=(
+                    Path(args.required_data_snapshot_manifest).resolve()
+                    if getattr(args, "required_data_snapshot_manifest", None)
+                    else None
+                ),
+                prepared_portfolio_context_manifest=(
+                    Path(args.prepared_portfolio_context_manifest).resolve()
+                    if getattr(args, "prepared_portfolio_context_manifest", None)
+                    else None
+                ),
+                prepared_portfolio_context_manifest_sha256=(
+                    str(
+                        args.prepared_portfolio_context_manifest_sha256
+                    ).strip().lower()
+                    if getattr(
+                        args,
+                        "prepared_portfolio_context_manifest_sha256",
+                        None,
+                    )
+                    else None
+                ),
+                prepared_option_positions_context_manifest=(
+                    Path(
+                        args.prepared_option_positions_context_manifest
+                    ).resolve()
+                    if getattr(
+                        args,
+                        "prepared_option_positions_context_manifest",
+                        None,
+                    )
+                    else None
+                ),
+                prepared_option_positions_context_manifest_sha256=(
+                    str(
+                        args.prepared_option_positions_context_manifest_sha256
+                    ).strip().lower()
+                    if getattr(
+                        args,
+                        "prepared_option_positions_context_manifest_sha256",
+                        None,
+                    )
+                    else None
+                ),
+                account_config_sha256=account_config_sha256,
+            )
+        except PreparedOptionPositionsContextError as exc:
+            raise SystemExit(
+                "[CONFIG_ERROR] "
+                "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID: "
+                f"{exc}"
+            ) from exc
 
         symbols = [str(r.get("symbol")) for r in summary_rows if r.get("symbol")]
 

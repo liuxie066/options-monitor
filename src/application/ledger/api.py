@@ -94,6 +94,7 @@ from src.application.ledger.queries import (
     position_projection_verify_state,
     project_trade_event_log,
     resolve_position_data_config_path,
+    resolve_position_ledger_sqlite_path,
     resolve_position_lot_snapshots,
     summarize_position_lot_shadow_status,
     trade_event_economic_allocations,
@@ -111,7 +112,9 @@ from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.decision_snapshot import (
     POSITION_FACT_SNAPSHOT_CONTRACT,
     decision_state_snapshot,
+    decision_state_snapshot_from_rows,
     decision_state_snapshot_fingerprint,
+    read_decision_state_rows_many,
     validate_position_fact_snapshot_contract,
 )
 from src.application.ledger.combo_membership import (
@@ -170,6 +173,7 @@ __all__ = [
     "CloseTargetResolution",
     "compare_projection_lots",
     "decision_state_snapshot",
+    "decision_state_snapshot_from_rows",
     "discover_expired_lifecycle_cases",
     "ExpiredCloseDecision",
     "ExpiredCloseRunResult",
@@ -212,6 +216,7 @@ __all__ = [
     "position_lot_risk_view",
     "position_lot_snapshot",
     "position_projection_verify_state",
+    "read_decision_state_rows_many",
     "preview_broker_trade_close",
     "preview_broker_trade_open",
     "preview_lifecycle_expire_close",
@@ -224,6 +229,7 @@ __all__ = [
     "preview_trade_event_void",
     "project_trade_event_log",
     "resolve_position_data_config_path",
+    "resolve_position_ledger_sqlite_path",
     "record_broker_trade_close",
     "record_broker_trade_open",
     "record_combo_trade_open",

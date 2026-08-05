@@ -2941,12 +2941,23 @@ class SQLiteOptionPositionsRepository:
         *,
         account: str,
         conn: sqlite3.Connection,
+        shared_trade_events: Sequence[dict[str, Any]] | None = None,
+        shared_position_lots: Sequence[dict[str, Any]] | None = None,
+        shared_assigned_stock_events: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         account_value = str(account or "").strip().lower()
         if not account_value:
             raise ValueError("decision state snapshot requires account")
-        events = self.list_trade_events(conn=conn)
-        lots = self.list_position_lots(conn=conn)
+        events = (
+            list(shared_trade_events)
+            if shared_trade_events is not None
+            else self.list_trade_events(conn=conn)
+        )
+        lots = (
+            list(shared_position_lots)
+            if shared_position_lots is not None
+            else self.list_position_lots(conn=conn)
+        )
         cases = [
             _json_object(row["raw_json"])
             for row in conn.execute(
@@ -3025,16 +3036,20 @@ class SQLiteOptionPositionsRepository:
                 (account_value,),
             ).fetchall()
         ]
-        assigned_stock_events = [
-            _json_object(row["event_json"])
-            for row in conn.execute(
-                """
-                SELECT event_json
-                FROM assigned_stock_events
-                ORDER BY trade_time_ms ASC, stock_event_id ASC
-                """
-            ).fetchall()
-        ]
+        assigned_stock_events = (
+            list(shared_assigned_stock_events)
+            if shared_assigned_stock_events is not None
+            else [
+                _json_object(row["event_json"])
+                for row in conn.execute(
+                    """
+                    SELECT event_json
+                    FROM assigned_stock_events
+                    ORDER BY trade_time_ms ASC, stock_event_id ASC
+                    """
+                ).fetchall()
+            ]
+        )
         identities = self.list_strategy_group_identities(
             account=account_value,
             conn=conn,
@@ -3133,6 +3148,55 @@ class SQLiteOptionPositionsRepository:
 
     def read_decision_state_rows(self, *, account: str) -> dict[str, Any]:
         return self.read_lifecycle_account_rows(account=account)
+
+    def read_decision_state_rows_many(
+        self,
+        *,
+        accounts: Sequence[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Read multiple account decision states from one SQLite snapshot."""
+
+        account_values = sorted(
+            {
+                str(account or "").strip().lower()
+                for account in accounts
+                if str(account or "").strip()
+            }
+        )
+        if not account_values:
+            raise ValueError("decision state batch requires accounts")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            events = self.list_trade_events(conn=conn)
+            lots = self.list_position_lots(conn=conn)
+            assigned_stock_events = [
+                _json_object(row["event_json"])
+                for row in conn.execute(
+                    """
+                    SELECT event_json
+                    FROM assigned_stock_events
+                    ORDER BY trade_time_ms ASC, stock_event_id ASC
+                    """
+                ).fetchall()
+            ]
+            rows = {
+                account: self._read_account_decision_state_rows(
+                    account=account,
+                    conn=conn,
+                    shared_trade_events=events,
+                    shared_position_lots=lots,
+                    shared_assigned_stock_events=assigned_stock_events,
+                )
+                for account in account_values
+            }
+            conn.commit()
+            return rows
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _json_text(value: Any) -> str:

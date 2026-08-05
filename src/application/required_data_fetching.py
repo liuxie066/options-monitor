@@ -23,6 +23,7 @@ class RequiredDataFetchRequest:
     host: str = "127.0.0.1"
     port: int = 11111
     spot_override: float | None = None
+    fetch_spot_if_missing: bool = True
     output_root: Path | None = None
     option_types: str = "put,call"
     min_strike: float | None = None
@@ -61,6 +62,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             host=str(request.host),
             port=int(request.port),
             spot_override=request.spot_override,
+            fetch_spot_if_missing=request.fetch_spot_if_missing,
             base_dir=Path(base),
             chain_cache=bool(request.chain_cache),
             chain_cache_force_refresh=bool(request.chain_cache_force_refresh),
@@ -106,6 +108,7 @@ def build_fetch_request_from_spec(
     chain_cache_force_refresh: bool = False,
     opend_fetch_config: dict[str, float | int] | None = None,
     spot_override: float | None = None,
+    fetch_spot_if_missing: bool = True,
 ) -> RequiredDataFetchRequest:
     if not spec.explicit_expirations:
         raise RuntimeError(
@@ -141,6 +144,7 @@ def build_fetch_request_from_spec(
         host=str(spec.host),
         port=int(spec.port),
         spot_override=spot_override,
+        fetch_spot_if_missing=fetch_spot_if_missing,
         output_root=output_root,
         option_types=",".join(spec.option_types),
         side_strike_windows={k: dict(v) for k, v in spec.side_strike_windows.items()},

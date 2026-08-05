@@ -137,6 +137,7 @@ def _build_prefetch_fetch_plan(
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
+    spot_observation_cache: dict[tuple[Any, ...], float | None] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
@@ -147,6 +148,7 @@ def _build_prefetch_fetch_plan(
                 shared_required=shared_required,
                 opend_fetch_cfg=opend_fetch_cfg,
                 expiration_discovery_cache=expiration_discovery_cache,
+                spot_observation_cache=spot_observation_cache,
             )
             for item in source_cfgs
             if isinstance(item, dict)
@@ -257,6 +259,9 @@ def _build_prefetch_fetch_plan(
                 require_realized_volatility=(
                     require_realized_volatility
                 ),
+                spot_observation_complete=all(
+                    bundle.spot_observation_complete for bundle in bundles
+                ),
             )
     return _build_single_prefetch_fetch_plan(
         symbol_cfg,
@@ -264,6 +269,7 @@ def _build_prefetch_fetch_plan(
         shared_required=shared_required,
         opend_fetch_cfg=opend_fetch_cfg,
         expiration_discovery_cache=expiration_discovery_cache,
+        spot_observation_cache=spot_observation_cache,
     )
 
 
@@ -274,6 +280,7 @@ def _build_single_prefetch_fetch_plan(
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
+    spot_observation_cache: dict[tuple[Any, ...], float | None] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -312,6 +319,7 @@ def _build_single_prefetch_fetch_plan(
         fetch_port=_to_int(fetch_cfg.get("port") or 11111, 11111),
         fetch_source=resolve_symbol_fetch_source(fetch_cfg)[0],
         expiration_discovery_cache=expiration_discovery_cache,
+        spot_observation_cache=spot_observation_cache,
         snapshot_max_wait_sec=float(snapshot_cfg.get("max_wait_sec") or 30.0),
         snapshot_window_sec=float(snapshot_cfg.get("window_sec") or 30.0),
         snapshot_max_calls=int(snapshot_cfg.get("max_calls") or 60),
@@ -462,6 +470,7 @@ def _fetch_symbol_for_required_data_request(
         host=request.host,
         port=request.port,
         spot_override=request.spot_override,
+        fetch_spot_if_missing=request.fetch_spot_if_missing,
         base_dir=base,
         option_types=request.option_types,
         min_strike=request.min_strike,
@@ -868,6 +877,9 @@ def _fetch_one_inprocess(
                         opend_fetch_cfg
                     ),
                     spot_override=fetch_plan.spot_reference,
+                    fetch_spot_if_missing=(
+                        not fetch_plan.spot_observation_complete
+                    ),
                 )
                 child_payload = _fetch_symbol_for_required_data_request(
                     request=request,
@@ -1124,6 +1136,7 @@ def _prefetch_required_data_unlocked(
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
     expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
+    spot_observation_cache: dict[tuple[Any, ...], float | None] = {}
     fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
         id(symbol_cfg): _build_prefetch_fetch_plan(
             symbol_cfg,
@@ -1131,6 +1144,7 @@ def _prefetch_required_data_unlocked(
             shared_required=shared_required,
             opend_fetch_cfg=opend_fetch_cfg,
             expiration_discovery_cache=expiration_discovery_cache,
+            spot_observation_cache=spot_observation_cache,
         )
         for symbol_cfg in fetch_syms
     }

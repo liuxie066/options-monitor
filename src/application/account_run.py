@@ -32,6 +32,10 @@ from src.application.position_advice_account_sources import (
 from src.application.position_advice_runner import (
     run_position_advice_v2_from_account_run,
 )
+from src.application.prepared_option_positions_context import (
+    PreparedOptionPositionsContextError,
+    load_prepared_option_positions_context,
+)
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
@@ -79,6 +83,8 @@ class AccountRunRequest:
     required_data_snapshot_manifest: Path | None = None
     prepared_portfolio_context_manifest: Path | None = None
     prepared_portfolio_context_manifest_sha256: str | None = None
+    prepared_option_positions_context_manifest: Path | None = None
+    prepared_option_positions_context_manifest_sha256: str | None = None
     required_data_snapshot_status: str | None = None
     required_data_snapshot_sha256: str | None = None
     close_advice_required_data_plan: Path | None = None
@@ -356,6 +362,46 @@ def run_one_account(
         }
         _write_acct_run_state("account_metrics.json", payload)
 
+    def _prepared_option_integrity_failure(
+        exc: Exception,
+    ) -> AccountRunOutcome:
+        failure_reason = "prepared_option_context_integrity_failed"
+        acct_metrics["ran_scan"] = True
+        acct_metrics["ran_pipeline"] = False
+        acct_metrics["should_notify"] = False
+        acct_metrics["meaningful"] = False
+        acct_metrics["reason"] = failure_reason
+        acct_metrics["error"] = str(exc)
+        _write_account_metrics_state()
+        audit_fn(
+            "account_run",
+            "prepared_option_context_integrity",
+            run_id=request.run_id,
+            account=acct,
+            status="error",
+            message=str(exc),
+            extra={"error_type": type(exc).__name__},
+        )
+        runlog.safe_event(
+            "prepared_option_positions_context",
+            "error",
+            error_code="PREPARED_OPTION_CONTEXT_INTEGRITY_FAILED",
+            message=str(exc),
+            data={"account": acct},
+        )
+        return AccountRunOutcome(
+            result=AccountResult(
+                account=acct,
+                ran_scan=True,
+                should_notify=False,
+                decision_reason=failure_reason,
+                notification_text="",
+            ),
+            acct_metrics=acct_metrics,
+            prefetch_done=prefetch_done,
+            ran_pipeline=False,
+        )
+
     notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
 
     notify_decisions: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView] = {}
@@ -533,6 +579,12 @@ def run_one_account(
         prepared_portfolio_context_manifest_sha256=(
             request.prepared_portfolio_context_manifest_sha256
         ),
+        prepared_option_positions_context_manifest=(
+            request.prepared_option_positions_context_manifest
+        ),
+        prepared_option_positions_context_manifest_sha256=(
+            request.prepared_option_positions_context_manifest_sha256
+        ),
         account_config_base=request.base,
         account_config_run_id=request.run_id,
         account_config_account=acct,
@@ -632,6 +684,27 @@ def run_one_account(
         data=_safe_runlog_data({"account": acct}),
     )
 
+    prepared_option_context: dict[str, Any] | None = None
+    if request.prepared_option_positions_context_manifest is not None:
+        try:
+            prepared_option_context = load_prepared_option_positions_context(
+                manifest_path=(
+                    request.prepared_option_positions_context_manifest
+                ),
+                expected_base=request.base,
+                expected_run_id=request.run_id,
+                expected_account=acct,
+                expected_account_config_sha256=(
+                    request.account_config_authority.account_config_sha256
+                ),
+                expected_manifest_sha256=(
+                    request.prepared_option_positions_context_manifest_sha256
+                ),
+                expected_runtime_config=cfg,
+            )
+        except PreparedOptionPositionsContextError as exc:
+            return _prepared_option_integrity_failure(exc)
+
     position_advice_sources: dict[str, Any] | None = None
     try:
         portfolio_cfg = (
@@ -654,6 +727,16 @@ def run_one_account(
             included_markets=_position_advice_markets(
                 cfg,
                 request.markets_to_run,
+            ),
+            decision_state_snapshot_override=(
+                prepared_option_context.get("decision_state_snapshot")
+                if isinstance(prepared_option_context, dict)
+                else None
+            ),
+            fx_payload_override=(
+                prepared_option_context.get("exchange_rates")
+                if isinstance(prepared_option_context, dict)
+                else None
             ),
         )
         source_summary = {
@@ -747,6 +830,13 @@ def run_one_account(
                     "source_receipts"
                 ],
                 data_config_path=data_config_path,
+                decision_state_snapshot_override=(
+                    prepared_option_context.get(
+                        "decision_state_snapshot"
+                    )
+                    if isinstance(prepared_option_context, dict)
+                    else None
+                ),
             )
             _write_acct_run_state(
                 "position_advice_v2_run.json",
@@ -841,6 +931,27 @@ def run_one_account(
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
+        if request.prepared_option_positions_context_manifest is not None:
+            try:
+                prepared_option_context = (
+                    load_prepared_option_positions_context(
+                        manifest_path=(
+                            request.prepared_option_positions_context_manifest
+                        ),
+                        expected_base=request.base,
+                        expected_run_id=request.run_id,
+                        expected_account=acct,
+                        expected_account_config_sha256=(
+                            request.account_config_authority.account_config_sha256
+                        ),
+                        expected_manifest_sha256=(
+                            request.prepared_option_positions_context_manifest_sha256
+                        ),
+                        expected_runtime_config=cfg,
+                    )
+                )
+            except PreparedOptionPositionsContextError as exc:
+                return _prepared_option_integrity_failure(exc)
         try:
             close_advice_run_cfg = cfg
             if isinstance(cfg, dict):

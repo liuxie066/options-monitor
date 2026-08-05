@@ -20,9 +20,10 @@ from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
     build_context as build_option_positions_context,
     build_shared_context as build_shared_option_positions_context,
+    validate_option_positions_context_account,
 )
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
-from src.infrastructure.io_utils import is_fresh, load_cached_json
+from src.infrastructure.io_utils import atomic_write_json, is_fresh, load_cached_json
 from src.application.ledger.api import (
     decision_state_snapshot,
     list_position_lot_snapshots,
@@ -37,6 +38,11 @@ from src.application.portfolio_context_service import (
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
+)
+from src.application.prepared_option_positions_context import (
+    PreparedOptionPositionsContextError,
+    exchange_rate_scalars_from_option_context,
+    load_prepared_option_positions_context,
 )
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
@@ -136,11 +142,29 @@ def load_option_positions_context(
     Returns (context, refreshed).
     """
     try:
+        def _is_exact_account(context: dict, *, source: str) -> bool:
+            try:
+                validate_option_positions_context_account(
+                    context,
+                    account=account,
+                    broker=market,
+                )
+                return True
+            except ValueError as exc:
+                log(
+                    "[WARN] option_positions_context rejected "
+                    f"source={source}: {exc}"
+                )
+                return False
+
         opt_path = (state_dir / 'option_positions_context.json').resolve()
         cached = None
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
-        if cached is not None:
+        if isinstance(cached, dict) and _is_exact_account(
+            cached,
+            source="account_cache",
+        ):
             cached = with_context_source(cached, 'account_cache')
             log(f"[CTX] option_positions_context source=account_cache account={account or '-'}")
             snap = adapt_option_positions_context(cached)
@@ -157,10 +181,13 @@ def load_option_positions_context(
                 shared_cached = load_cached_json(shared_path)
                 if isinstance(shared_cached, dict):
                     sliced = slice_shared_option_context_for_account(shared_cached, account)
-                    if isinstance(sliced, dict):
+                    if isinstance(sliced, dict) and _is_exact_account(
+                        sliced,
+                        source="shared_slice",
+                    ):
                         sliced = with_context_source(sliced, 'shared_slice')
                         opt_path.parent.mkdir(parents=True, exist_ok=True)
-                        opt_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                        atomic_write_json(opt_path, sliced)
                         log(f"[CTX] option_positions_context source=shared_slice account={account or '-'}")
                         snap = adapt_option_positions_context(sliced)
                         _persist_source_snapshot(base, snap)
@@ -172,7 +199,11 @@ def load_option_positions_context(
         # Refresh shared cache (single fetch) and produce account context in one command.
         try:
             _repo, records = _load_option_position_records(data_config)
-            rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+            rates = _load_option_position_exchange_rates(
+                base=base,
+                state_dir=shared_root,
+                log=log,
+            )
             shared_ctx = build_shared_option_positions_context(
                 records,
                 broker=str(market),
@@ -182,10 +213,12 @@ def load_option_positions_context(
                     records,
                 ),
             )
-            shared_path.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding='utf-8')
             ctx = dict(slice_shared_option_context_for_account(shared_ctx, account) or {})
+            if not _is_exact_account(ctx, source="shared_refresh"):
+                raise ValueError("shared option context account validation failed")
+            atomic_write_json(shared_path, shared_ctx)
             ctx = with_context_source(ctx, 'shared_refresh')
-            opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+            atomic_write_json(opt_path, ctx)
             log(f"[CTX] option_positions_context source=shared_refresh account={account or '-'}")
             snap = adapt_option_positions_context(ctx)
             _persist_source_snapshot(base, snap)
@@ -195,7 +228,11 @@ def load_option_positions_context(
 
         # Fallback: direct per-account fetch path.
         _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+        rates = _load_option_position_exchange_rates(
+            base=base,
+            state_dir=shared_root,
+            log=log,
+        )
         normalized_account = str(account or "").strip().lower()
         decision_snapshot = (
             decision_state_snapshot(
@@ -213,8 +250,10 @@ def load_option_positions_context(
             rates=rates,
             decision_snapshot=decision_snapshot,
         )
+        if not _is_exact_account(ctx, source="direct_fetch"):
+            raise ValueError("direct option context account validation failed")
         ctx = with_context_source(ctx, 'direct_fetch')
-        opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+        atomic_write_json(opt_path, ctx)
         log(f"[CTX] option_positions_context source=direct_fetch account={account or '-'}")
         snap = adapt_option_positions_context(ctx)
         _persist_source_snapshot(base, snap)
@@ -329,7 +368,11 @@ def load_global_option_positions_risk_context(
                 return cached
 
         _repo, records = _load_option_position_records(data_config)
-        rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+        rates = _load_option_position_exchange_rates(
+            base=base,
+            state_dir=shared_root,
+            log=log,
+        )
         shared_ctx = build_shared_option_positions_context(records, broker="", rates=rates)
         all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
         if not isinstance(all_accounts, dict):
@@ -357,7 +400,9 @@ def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: P
         from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
         rates_obj = get_exchange_rates_or_fetch_latest(
-            cache_path=(state_dir / 'rate_cache.json').resolve(),
+            cache_path=(
+                (shared_state_dir or state_dir) / "rate_cache.json"
+            ).resolve(),
             max_age_hours=24,
             log=log,
         )
@@ -398,6 +443,10 @@ def build_pipeline_context(
     prepared_portfolio_context_run_id: str | None = None,
     prepared_portfolio_context_account_config_sha256: str | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
+    prepared_option_positions_context_manifest: Path | None = None,
+    prepared_option_positions_context_run_id: str | None = None,
+    prepared_option_positions_context_account_config_sha256: str | None = None,
+    prepared_option_positions_context_manifest_sha256: str | None = None,
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
     """Load portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate."""
     if (not want_scan) or bool(no_context):
@@ -450,16 +499,52 @@ def build_pipeline_context(
             portfolio_source=str(portfolio_source),
         )
 
-    option_ctx, _ = load_option_positions_context(
-        base=base,
-        data_config=str(data_config),
-        market=str(broker),
-        account=(str(account) if account else None),
-        ttl_sec=ttl_opt_ctx,
-        state_dir=state_dir,
-        shared_state_dir=shared_state_dir,
-        log=log,
-    )
+    if prepared_option_positions_context_manifest is not None:
+        if _wants_global_path_risk_context(cfg):
+            raise PreparedOptionPositionsContextError(
+                "prepared option context does not support global path risk"
+            )
+        try:
+            option_ctx = load_prepared_option_positions_context(
+                manifest_path=(
+                    prepared_option_positions_context_manifest
+                ),
+                expected_base=base,
+                expected_run_id=str(
+                    prepared_option_positions_context_run_id or ""
+                ),
+                expected_account=str(account or ""),
+                expected_account_config_sha256=str(
+                    prepared_option_positions_context_account_config_sha256
+                    or ""
+                ),
+                expected_manifest_sha256=str(
+                    prepared_option_positions_context_manifest_sha256 or ""
+                ),
+                expected_runtime_config=cfg,
+            )
+            log(
+                "[CTX] option_positions_context source=prepared "
+                f"account={account or '-'}"
+            )
+            _persist_source_snapshot(
+                base,
+                adapt_option_positions_context(option_ctx),
+            )
+        except PreparedOptionPositionsContextError as exc:
+            log(f"[WARN] prepared option context not available: {exc}")
+            raise
+    else:
+        option_ctx, _ = load_option_positions_context(
+            base=base,
+            data_config=str(data_config),
+            market=str(broker),
+            account=(str(account) if account else None),
+            ttl_sec=ttl_opt_ctx,
+            state_dir=state_dir,
+            shared_state_dir=shared_state_dir,
+            log=log,
+        )
 
     if portfolio_ctx is not None and _wants_global_path_risk_context(cfg):
         portfolio_ctx = dict(portfolio_ctx)
@@ -474,22 +559,30 @@ def build_pipeline_context(
             )
             if global_portfolio_ctx is not None:
                 portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
-        global_option_ctx = load_global_option_positions_risk_context(
-            base=base,
-            data_config=str(data_config),
-            ttl_sec=ttl_opt_ctx,
-            shared_state_dir=shared_state_dir,
-            state_dir=state_dir,
-            log=log,
-        )
-        if global_option_ctx is not None:
-            portfolio_ctx["_global_option_ctx"] = global_option_ctx
+        if prepared_option_positions_context_manifest is None:
+            global_option_ctx = load_global_option_positions_risk_context(
+                base=base,
+                data_config=str(data_config),
+                ttl_sec=ttl_opt_ctx,
+                shared_state_dir=shared_state_dir,
+                state_dir=state_dir,
+                log=log,
+            )
+            if global_option_ctx is not None:
+                portfolio_ctx["_global_option_ctx"] = global_option_ctx
 
-    usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = load_exchange_rates(
-        base=base,
-        state_dir=state_dir,
-        shared_state_dir=shared_state_dir,
-        log=log,
-    )
+    if prepared_option_positions_context_manifest is not None:
+        usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
+            exchange_rate_scalars_from_option_context(option_ctx or {})
+        )
+    else:
+        usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
+            load_exchange_rates(
+                base=base,
+                state_dir=state_dir,
+                shared_state_dir=shared_state_dir,
+                log=log,
+            )
+        )
 
     return portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate

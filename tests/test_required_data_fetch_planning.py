@@ -119,6 +119,41 @@ def test_cross_account_prefetch_union_is_order_independent_and_covers_call_costs
     assert merged["_prefetch_strategy_kwargs"]["side_strike_windows"]["put"]
 
 
+def test_prefetch_symbol_plan_normalizes_physical_host_identity() -> None:
+    from src.application.required_data_prefetch_planning import (
+        build_prefetch_symbol_plan,
+    )
+
+    plan = build_prefetch_symbol_plan(
+        [
+            {
+                "symbol": "NVDA",
+                "fetch": {
+                    "source": "futu",
+                    "host": "OpenD.EXAMPLE",
+                    "port": 11111,
+                },
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            {
+                "symbol": "NVDA",
+                "fetch": {
+                    "source": "futu",
+                    "host": "opend.example",
+                    "port": 11111,
+                },
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+        ]
+    )
+
+    assert plan.requested_count == 2
+    assert plan.unique_count == 1
+    assert plan.deduped_count == 1
+
+
 def test_cross_account_prefetch_keeps_put_when_one_context_is_unavailable() -> None:
     from src.application.required_data_prefetch_planning import (
         build_cross_account_prefetch_config,
@@ -152,6 +187,43 @@ def test_cross_account_prefetch_keeps_put_when_one_context_is_unavailable() -> N
 
     assert set(kwargs["option_types"].split(",")) == {"put", "call"}
     assert kwargs["side_strike_windows"]["put"]
+
+
+def test_cross_account_prefetch_does_not_restore_symbols_removed_from_account_scope() -> None:
+    from src.application.required_data_prefetch_planning import (
+        build_cross_account_prefetch_config,
+    )
+
+    base_config = {
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "broker": "US",
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            {
+                "symbol": "PDD",
+                "broker": "US",
+                "sell_put": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+        ]
+    }
+    scoped_config = {
+        **base_config,
+        "symbols": [base_config["symbols"][0]],
+    }
+
+    union = build_cross_account_prefetch_config(
+        base_config=base_config,
+        account_configs={"lx": scoped_config, "sy": scoped_config},
+        prepared_portfolio_contexts={"lx": None, "sy": None},
+    )
+
+    assert {
+        str(item.get("symbol") or "") for item in union["symbols"]
+    } == {"NVDA"}
 
 
 def test_exact_dte_window_preserves_empty_expiration_set() -> None:
@@ -858,6 +930,55 @@ def test_required_data_plan_memoizes_discovery_by_physical_binding(
     assert plans[0].projected_expirations == ["2026-08-21"]
     assert plans[0].merged_specs[0].trading_date == "2026-07-30"
     assert plans[1].merged_specs[0].trading_date == "2026-07-30"
+
+
+def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.required_data_planning as mod
+
+    spot_calls: list[str] = []
+
+    def observe_spot(symbol: str, **_kwargs):
+        spot_calls.append(symbol)
+        return None
+
+    monkeypatch.setattr(mod, "get_underlier_spot", observe_spot)
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *_args, **_kwargs: ["2026-08-21"],
+    )
+    expiration_cache: dict[tuple[object, ...], object] = {}
+    spot_cache: dict[tuple[object, ...], float | None] = {}
+
+    plans = [
+        mod.build_required_data_fetch_plan(
+            base=tmp_path,
+            required_data_dir=tmp_path,
+            symbol="NVDA",
+            limit_expirations=0,
+            want_put=True,
+            want_call=False,
+            sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+            sell_call_cfg={"enabled": False},
+            fetch_source="futu",
+            fetch_host=fetch_host,
+            fetch_port=11111,
+            expiration_discovery_cache=expiration_cache,
+            spot_observation_cache=spot_cache,
+        )
+        for fetch_host in ("OpenD.EXAMPLE", "opend.example")
+    ]
+
+    assert spot_calls == ["NVDA"]
+    assert list(spot_cache) == [
+        ("NVDA", "futu", "opend.example", 11111, "2026-04-30")
+    ]
+    assert list(spot_cache.values()) == [None]
+    assert all(plan.spot_reference is None for plan in plans)
+    assert all(plan.spot_observation_complete is True for plan in plans)
 
 
 def test_required_data_plan_rejects_cached_discovery_date_drift_without_io(

@@ -48,6 +48,7 @@ def publish_account_run_sources(
     account_state_dir: Path,
     required_data_root: Path,
     decision_snapshot_reader: Callable[[], Mapping[str, Any]],
+    fx_payload_override: Mapping[str, Any] | None = None,
     completed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Publish the primary and derived Position Advice receipts for one Account Run.
@@ -175,9 +176,13 @@ def publish_account_run_sources(
         )
     )
 
-    fx_payload = _read_json_object(
-        state_root / "rate_cache.json",
-        "exchange-rate snapshot",
+    fx_payload = (
+        dict(fx_payload_override)
+        if isinstance(fx_payload_override, Mapping)
+        else _read_json_object(
+            state_root / "rate_cache.json",
+            "exchange-rate snapshot",
+        )
     )
     fx_path, fx_receipt = publish_fx_source_snapshot(
         producer_root=state_root,
@@ -306,12 +311,24 @@ def publish_account_position_advice_sources(
     account: str,
     broker: str,
     included_markets: Iterable[str],
+    decision_state_snapshot_override: Mapping[str, Any] | None = None,
+    fx_payload_override: Mapping[str, Any] | None = None,
     completed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Account Run facade with a JSON-safe result for audit/state persistence."""
 
     account_value = normalize_account_label(account)
-    repo = open_position_ledger(Path(data_config_path))
+    if isinstance(decision_state_snapshot_override, Mapping):
+        decision_snapshot_reader = lambda: dict(
+            decision_state_snapshot_override
+        )
+    else:
+        repo = open_position_ledger(Path(data_config_path))
+        decision_snapshot_reader = lambda: decision_state_snapshot(
+            repo,
+            account=account_value,
+            portfolio_scope_id=scope_for(account_value),
+        )
     result = publish_account_run_sources(
         account_run_id=account_run_id,
         normalized_account=account_value,
@@ -319,11 +336,8 @@ def publish_account_position_advice_sources(
         included_markets=included_markets,
         account_state_dir=account_state_dir,
         required_data_root=quote_producer_root,
-        decision_snapshot_reader=lambda: decision_state_snapshot(
-            repo,
-            account=account_value,
-            portfolio_scope_id=scope_for(account_value),
-        ),
+        decision_snapshot_reader=decision_snapshot_reader,
+        fx_payload_override=fx_payload_override,
         completed_at=completed_at,
     )
     account_root = Path(account_run_root).resolve()

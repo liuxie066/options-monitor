@@ -444,6 +444,52 @@ def test_position_only_route_conflict_rejects_all_affected_requirements() -> Non
         )
 
 
+def test_candidate_and_position_routes_normalize_host_case() -> None:
+    from src.application.close_advice_required_data import (
+        build_close_advice_required_data_plan,
+    )
+    from src.application.required_data_prefetch_planning import (
+        merge_close_advice_requirements_into_prefetch_config,
+    )
+
+    position_config = _config(account="lx", host="opend.example")
+    plan = build_close_advice_required_data_plan(
+        run_id="run-host-case",
+        run_started_at_utc=datetime(
+            2026,
+            7,
+            29,
+            1,
+            40,
+            tzinfo=timezone.utc,
+        ),
+        business_date=date(2026, 7, 29),
+        account_configs={"lx": position_config},
+        base_config=position_config,
+        markets_to_run=["US"],
+        position_records_by_account={
+            "lx": [_position(account="lx", lot_id="lot-lx")]
+        },
+    )
+    candidate_config = _config(account="lx", host="OpenD.EXAMPLE")
+
+    merged, resolved_plan = (
+        merge_close_advice_requirements_into_prefetch_config(
+            candidate_config=candidate_config,
+            requirements_plan=plan,
+        )
+    )
+
+    requirement = resolved_plan["accounts"]["lx"]["requirements"][0]
+    diagnostic = merged["_close_advice_required_data_diagnostics"][0]
+    assert resolved_plan["accounts"]["lx"]["status"] == "ready"
+    assert requirement["planning_status"] == "ready"
+    assert diagnostic["rejected_requirement_ids"] == []
+    assert diagnostic["accepted_requirement_ids"] == [
+        requirement["requirement_id"]
+    ]
+
+
 def _frozen_workspace(
     tmp_path: Path,
     *,

@@ -30,6 +30,11 @@ from src.application.prepared_portfolio_context import (
     load_prepared_portfolio_context,
     prepare_portfolio_contexts,
 )
+from src.application.prepared_option_positions_context import (
+    PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
+    PreparedOptionPositionsBatch,
+    prepare_option_positions_contexts,
+)
 from src.application.required_data_prefetch_planning import (
     build_cross_account_prefetch_config,
     merge_close_advice_requirements_into_prefetch_config,
@@ -177,41 +182,65 @@ def _build_close_advice_barrier_plan(
     candidate_config: dict[str, Any],
     run_state_dir: Path,
     run_started_at_utc: datetime,
+    position_records_by_account: Mapping[
+        str, list[dict[str, Any]]
+    ] | None = None,
+    unavailable_by_account: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], Path]:
-    records_by_path: dict[Path, list[dict[str, Any]]] = {}
-    records_by_account: dict[str, list[dict[str, Any]]] = {}
-    unavailable_by_account: dict[str, str] = {}
-    for account in sorted(scanning_configs):
-        config = scanning_configs[account]
-        close_cfg = (
-            config.get("close_advice")
-            if isinstance(config.get("close_advice"), Mapping)
-            else {}
-        )
-        if not bool(close_cfg.get("enabled", False)):
-            continue
-        try:
-            data_config_path = resolve_position_data_config_path(
-                base=request.base,
-                cfg=config,
-                config_path=request.cfg_path,
-            ).resolve()
-            if data_config_path not in records_by_path:
-                _resolved_path, repo = open_position_ledger_from_data_config(
-                    base=request.base,
-                    data_config=data_config_path,
-                )
-                records_by_path[data_config_path] = list(
-                    list_position_lot_snapshots(
-                        repo,
-                        base=request.base,
-                    )
-                )
-            records_by_account[account] = records_by_path[data_config_path]
-        except Exception as exc:
-            unavailable_by_account[account] = (
-                f"position_ledger_unavailable:{type(exc).__name__}"
+    records_by_account: dict[str, list[dict[str, Any]]] = {
+        str(account).strip().lower(): list(records)
+        for account, records in (position_records_by_account or {}).items()
+    }
+    unavailable: dict[str, str] = {
+        str(account).strip().lower(): str(reason)
+        for account, reason in (unavailable_by_account or {}).items()
+    }
+    if position_records_by_account is None:
+        records_by_path: dict[Path, list[dict[str, Any]]] = {}
+        for account in sorted(scanning_configs):
+            config = scanning_configs[account]
+            close_cfg = (
+                config.get("close_advice")
+                if isinstance(config.get("close_advice"), Mapping)
+                else {}
             )
+            if not bool(close_cfg.get("enabled", False)):
+                continue
+            try:
+                data_config_path = resolve_position_data_config_path(
+                    base=request.base,
+                    cfg=config,
+                    config_path=request.cfg_path,
+                ).resolve()
+                if data_config_path not in records_by_path:
+                    _resolved_path, repo = open_position_ledger_from_data_config(
+                        base=request.base,
+                        data_config=data_config_path,
+                    )
+                    records_by_path[data_config_path] = list(
+                        list_position_lot_snapshots(
+                            repo,
+                            base=request.base,
+                        )
+                    )
+                records_by_account[account] = records_by_path[data_config_path]
+            except Exception as exc:
+                unavailable[account] = (
+                    f"position_ledger_unavailable:{type(exc).__name__}"
+                )
+    else:
+        for account, config in sorted(scanning_configs.items()):
+            close_cfg = (
+                config.get("close_advice")
+                if isinstance(config.get("close_advice"), Mapping)
+                else {}
+            )
+            if (
+                bool(close_cfg.get("enabled", False))
+                and account not in records_by_account
+                and account not in unavailable
+            ):
+                unavailable[account] = "prepared_option_context_missing"
 
     plan = build_close_advice_required_data_plan(
         run_id=request.run_id,
@@ -221,7 +250,7 @@ def _build_close_advice_barrier_plan(
         base_config=request.base_cfg,
         markets_to_run=request.markets_to_run,
         position_records_by_account=records_by_account,
-        unavailable_by_account=unavailable_by_account,
+        unavailable_by_account=unavailable,
     )
     merged_config, plan = merge_close_advice_requirements_into_prefetch_config(
         candidate_config=candidate_config,
@@ -329,6 +358,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     snapshot_manifest_path: Path | None = None
     prepared_manifest_paths: dict[str, Path] = {}
     prepared_manifest_sha256_by_account: dict[str, str] = {}
+    prepared_option_manifest_paths: dict[str, Path] = {}
+    prepared_option_manifest_sha256_by_account: dict[str, str] = {}
+    prepared_option_records_by_account: dict[
+        str, list[dict[str, Any]]
+    ] = {}
+    prepared_option_unavailable_by_account: dict[str, str] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -473,6 +508,117 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 if account not in invalid_prepared_accounts
             }
 
+        try:
+            prepared_options = prepare_option_positions_contexts(
+                base=request.base,
+                run_id=request.run_id,
+                config_path=request.cfg_path,
+                account_configs=scanning_configs,
+                account_config_authorities={
+                    account: scanning_config_authorities[account]
+                    for account in scanning_configs
+                },
+                run_state_dir=run_state_dir,
+                log=lambda message: request.runlog.safe_event(
+                    "prepared_option_positions_context",
+                    "degraded" if str(message).startswith("[WARN]") else "info",
+                    message=str(message),
+                ),
+            )
+        except Exception as exc:
+            prepared_options = PreparedOptionPositionsBatch(
+                manifests={},
+                position_records_by_account={},
+                unavailable_by_account={
+                    account: (
+                        "prepared_option_context_failed:"
+                        f"{type(exc).__name__}"
+                    )
+                    for account in scanning_configs
+                },
+                observed_at_utc=datetime.now(timezone.utc).isoformat(),
+                ledger_read_count=0,
+                fx_observation_count=0,
+            )
+        prepared_option_records_by_account = dict(
+            prepared_options.position_records_by_account
+        )
+        prepared_option_unavailable_by_account = dict(
+            prepared_options.unavailable_by_account
+        )
+        invalid_prepared_option_accounts: set[str] = set()
+        for account in sorted(scanning_configs):
+            manifest = prepared_options.manifests.get(account)
+            if (
+                not isinstance(manifest, Mapping)
+                or str(manifest.get("status") or "").strip().lower()
+                != "ready"
+            ):
+                reason = (
+                    str((manifest or {}).get("reason") or "").strip()
+                    if isinstance(manifest, Mapping)
+                    else ""
+                )
+                if not reason:
+                    reason = prepared_option_unavailable_by_account.get(
+                        account,
+                        "prepared option context unavailable",
+                    )
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                    reason,
+                )
+                invalid_prepared_option_accounts.add(account)
+                continue
+            manifest_path = Path(str(manifest.get("manifest_path") or ""))
+            manifest_sha256 = str(
+                manifest.get("manifest_sha256") or ""
+            ).strip().lower()
+            if (
+                not manifest_path.is_file()
+                or len(manifest_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in manifest_sha256
+                )
+            ):
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                    "prepared option context authority is incomplete",
+                )
+                invalid_prepared_option_accounts.add(account)
+                continue
+            prepared_option_manifest_paths[account] = manifest_path.resolve()
+            prepared_option_manifest_sha256_by_account[account] = (
+                manifest_sha256
+            )
+
+        request.runlog.safe_event(
+            "prepared_option_positions_context",
+            (
+                "ok"
+                if not invalid_prepared_option_accounts
+                else "degraded"
+            ),
+            data={
+                "accounts": sorted(scanning_configs),
+                "ready_accounts": sorted(prepared_option_manifest_paths),
+                "ledger_read_count": prepared_options.ledger_read_count,
+                "fx_observation_count": prepared_options.fx_observation_count,
+            },
+        )
+        if invalid_prepared_option_accounts:
+            scanning_accounts = [
+                account
+                for account in scanning_accounts
+                if account not in invalid_prepared_option_accounts
+            ]
+            scanning_configs = {
+                account: config
+                for account, config in scanning_configs.items()
+                if account not in invalid_prepared_option_accounts
+            }
+
         union_cfg = build_cross_account_prefetch_config(
             base_config=request.base_cfg,
             account_configs=scanning_configs,
@@ -489,6 +635,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     candidate_config=union_cfg,
                     run_state_dir=run_state_dir,
                     run_started_at_utc=run_started_at_utc,
+                    position_records_by_account=(
+                        prepared_option_records_by_account
+                    ),
+                    unavailable_by_account=(
+                        prepared_option_unavailable_by_account
+                    ),
                 )
         except Exception as exc:
             request.audit_helper.audit(
@@ -640,19 +792,39 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             if snapshot_status == "failed":
                 barrier_reason = "required_data_snapshot_failed"
             for account in scanning_accounts:
+                account_key = str(account).strip().lower()
                 prepared = (
                     run_repo.get_run_account_state_dir(
                         request.base,
                         request.run_id,
-                        str(account).strip().lower(),
+                        account_key,
                     )
                     / "prepared_portfolio_context.v1.json"
                 ).resolve()
                 if prepared.is_file():
-                    account_key = str(account).strip().lower()
                     prepared_manifest_paths[account_key] = prepared
                     prepared_manifest_sha256_by_account[account_key] = sha256_bytes(
                         prepared.read_bytes()
+                    )
+                prepared_option = (
+                    run_repo.get_run_account_state_dir(
+                        request.base,
+                        request.run_id,
+                        account_key,
+                    )
+                    / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
+                ).resolve()
+                if prepared_option.is_file():
+                    prepared_option_manifest_paths[account_key] = (
+                        prepared_option
+                    )
+                    prepared_option_manifest_sha256_by_account[account_key] = (
+                        sha256_bytes(prepared_option.read_bytes())
+                    )
+                else:
+                    account_config_errors[account_key] = AccountRunConfigError(
+                        "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+                        "prepared option context manifest is unavailable",
                     )
         except (OSError, RequiredDataSnapshotError):
             barrier_reason = "required_data_snapshot_manifest_unavailable"
@@ -698,6 +870,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     ),
                     prepared_portfolio_context_manifest_sha256=(
                         prepared_manifest_sha256_by_account.get(acct)
+                    ),
+                    prepared_option_positions_context_manifest=(
+                        prepared_option_manifest_paths.get(acct)
+                    ),
+                    prepared_option_positions_context_manifest_sha256=(
+                        prepared_option_manifest_sha256_by_account.get(acct)
                     ),
                     account_config_generation_frozen=True,
                     required_data_snapshot_status=snapshot_status,

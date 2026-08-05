@@ -86,6 +86,47 @@ def _snapshot() -> dict[str, object]:
     return snapshot
 
 
+def test_account_run_facade_reuses_prepared_decision_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import position_advice_runner as mod
+
+    snapshot = _snapshot()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "open_position_ledger",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("prepared authority must not reopen the ledger")
+        ),
+    )
+
+    def _run(**kwargs):
+        captured["snapshot"] = kwargs["decision_snapshot_reader"]()
+        return {"status": "published"}
+
+    monkeypatch.setattr(mod, "run_position_advice_v2", _run)
+
+    result = mod.run_position_advice_v2_from_account_run(
+        base=tmp_path,
+        account_run_root=tmp_path / "account",
+        account_run_id="run-1",
+        account="lx",
+        broker="futu",
+        included_markets=["US"],
+        normalized_portfolio_source="futu",
+        portfolio_account_identity_hash="a" * 64,
+        capacity_pool_authority_id="b" * 64,
+        source_receipts=[],
+        data_config_path=tmp_path / "portfolio.runtime.json",
+        decision_state_snapshot_override=snapshot,
+    )
+
+    assert result == {"status": "published"}
+    assert captured["snapshot"] == snapshot
+
+
 def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     account_root = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
     state = account_root / "state"

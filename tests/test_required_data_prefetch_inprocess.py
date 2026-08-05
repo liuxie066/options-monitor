@@ -1238,6 +1238,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         "2026-06-08",
         "2026-06-08",
     ]
+    assert all(call["fetch_spot_if_missing"] is False for call in fetch_calls)
     assert all(call["gateway"] is gateway for call in fetch_calls)
     assert len(merge_calls) == 1
     assert len(finalize_calls) == 1

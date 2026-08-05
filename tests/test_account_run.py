@@ -324,6 +324,108 @@ def test_run_one_account_consumes_barrier_snapshot_and_runs_pipeline_successfull
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
 
+def test_run_one_account_fails_closed_when_prepared_option_context_changes_after_pipeline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.account_run import run_one_account
+    from src.application.prepared_option_positions_context import (
+        PreparedOptionPositionsContextError,
+    )
+
+    manifest_path = tmp_path / "prepared-options.json"
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True),
+        prepared_option_positions_context_manifest=manifest_path,
+        prepared_option_positions_context_manifest_sha256="a" * 64,
+    )
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _run_pipeline_script(**kwargs):
+        assert (
+            kwargs["prepared_option_positions_context_manifest"]
+            == manifest_path
+        )
+        assert (
+            kwargs["prepared_option_positions_context_manifest_sha256"]
+            == "a" * 64
+        )
+        kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
+        (kwargs["report_dir"] / "symbols_notification.txt").write_text(
+            "must not notify\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        env["mod"],
+        "run_pipeline_script",
+        _run_pipeline_script,
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {
+            "returncode": kwargs["returncode"],
+            "adapter": "pipeline",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "load_prepared_option_positions_context",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            PreparedOptionPositionsContextError("payload hash mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "publish_account_position_advice_sources",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Position Advice must not consume changed facts")
+        ),
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **_kwargs: None,
+    )
+
+    assert outcome.ran_pipeline is False
+    assert outcome.result.ran_scan is True
+    assert outcome.result.should_notify is False
+    assert outcome.result.decision_reason == (
+        "prepared_option_context_integrity_failed"
+    )
+    assert any(
+        event["action"] == "prepared_option_context_integrity"
+        for event in env["audit_events"]
+    )
+
+
 def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
     monkeypatch,
     tmp_path: Path,
@@ -409,9 +511,21 @@ def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
     )
 
 
+@pytest.mark.parametrize(
+    ("error_code", "expected_reason"),
+    [
+        ("ACCOUNT_CONFIG_HASH_MISMATCH", "account_config_hash_mismatch"),
+        (
+            "ACCOUNT_CONFIG_PREPARED_OPTION_CONTEXT_INVALID",
+            "account_config_prepared_option_context_invalid",
+        ),
+    ],
+)
 def test_pipeline_child_account_config_failure_preserves_typed_reason(
     monkeypatch,
     tmp_path: Path,
+    error_code: str,
+    expected_reason: str,
 ) -> None:
     from src.application.account_run import run_one_account
 
@@ -437,8 +551,8 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
             returncode=2,
             stdout="",
             stderr=(
-                "[CONFIG_ERROR] ACCOUNT_CONFIG_HASH_MISMATCH: "
-                "retained account config hash mismatch"
+                f"[CONFIG_ERROR] {error_code}: "
+                "retained account authority invalid"
             ),
         ),
     )
@@ -468,8 +582,8 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
     assert outcome.ran_pipeline is False
     assert outcome.result.ran_scan is False
     assert outcome.result.should_notify is False
-    assert outcome.result.decision_reason == "account_config_hash_mismatch"
-    assert outcome.acct_metrics["error_code"] == "ACCOUNT_CONFIG_HASH_MISMATCH"
+    assert outcome.result.decision_reason == expected_reason
+    assert outcome.acct_metrics["error_code"] == error_code
     assert outcome.acct_metrics["ran_scan"] is False
 
 
