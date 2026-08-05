@@ -427,10 +427,14 @@ Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 - Coverage policy v2 evaluates each planned `request x option_type x expiration`
   scope. A scope with no filtered contracts is complete only when the producer's
   `option_chain_scope_coverage.v1` evidence binds an empty code set to a current
-  `cache` or `fetched` chain result. Missing exact held strikes, stale/error/empty
-  provider outcomes, inconsistent child evidence, and a globally empty plan all
-  remain fail-closed. Artifacts without scope evidence retain the legacy strict
-  numeric-boundary coverage behavior.
+  `cache` or `fetched` chain result. Scope and contract-code order are not
+  semantic identity; duplicate or mismatched request/type/expiration identities
+  remain invalid. A fully observed filtered-empty plan is `success_empty` unless
+  an exact held strike is required. Missing requested snapshots, exact held
+  strikes, and stale/error provider outcomes remain fail-closed. Unexpected
+  snapshot codes are quarantined outside consumer rows and reported as warnings.
+  Artifacts without scope evidence retain the legacy strict numeric-boundary
+  coverage behavior.
 
 - Before the single cross-account prefetch, enabled accounts contribute exact active position requirements to `output_runs/<run_id>/state/close_advice_required_data_plan.json`. Disabled accounts are `not_applicable` and are not part of the readiness denominator.
 - Candidate demand owns an already-selected symbol fetch route. A position requirement may join that route only when its resolved source, host, and port match; conflicting or ambiguous requirements become typed `required_data_route_conflict` gaps and never create a second fetch.

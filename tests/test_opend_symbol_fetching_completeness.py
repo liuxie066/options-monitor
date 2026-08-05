@@ -176,6 +176,69 @@ def test_success_empty_marks_rv_not_applicable_without_provider_call(
     assert payload["meta"]["snapshot_requested_code_set"] == []
 
 
+def test_fully_fetched_chain_filtered_to_empty_is_normalized_to_success_empty(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_symbol_fetching as mod
+
+    _install_symbol_dependencies(
+        monkeypatch,
+        chain_bundle=_chain_bundle(
+            rows=[
+                {
+                    "code": "US.NVDA.2026-06-19.P90",
+                    "strike_time": "2026-06-19",
+                    "strike_price": 90.0,
+                    "option_type": "PUT",
+                    "lot_size": 100,
+                }
+            ],
+            source_outcome="success_rows",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "fetch_option_snapshots",
+        lambda **_kwargs: MarketSnapshotFetchResult(
+            snap_map={},
+            errors=[],
+            requested_codes=frozenset(),
+            returned_codes=frozenset(),
+            missing_codes=frozenset(),
+            unexpected_codes=frozenset(),
+            complete=True,
+        ),
+    )
+
+    payload = mod.fetch_symbol_request(
+        mod.FetchSymbolRequest(
+            symbol="NVDA",
+            base_dir=tmp_path,
+            gateway=object(),
+            spot_override=100.0,
+            option_types="put",
+            explicit_expirations=["2026-06-19"],
+            min_strike=100.0,
+            max_strike=100.0,
+        )
+    )
+
+    assert payload["rows"] == []
+    assert payload["meta"]["status"] == "ok"
+    assert payload["meta"]["source_outcome"] == "success_empty"
+    assert payload["meta"]["reason_code"] == "no_contract_rows"
+    assert payload["meta"]["option_chain_scope_coverage"]["scopes"] == [
+        {
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "chain_status": "fetched",
+            "filtered_contract_codes": [],
+            "filtered_contract_count": 0,
+        }
+    ]
+
+
 def test_observed_missing_spot_is_not_fetched_again(
     monkeypatch,
     tmp_path: Path,
