@@ -273,6 +273,7 @@ def _validate_required_data_quote_candidate(
     if not required_data_frame_covers_fetch_plan_debug(
         df=frame,
         fetch_plan=dict(contract.get("fetch_plan") or {}),
+        option_chain_evidence=meta,
     ):
         raise PositionAdviceSourceError(
             "required-data CSV does not cover expected fetch contract"
