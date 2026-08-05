@@ -18,6 +18,7 @@ from src.application.required_data_planning import RequiredDataFetchPlanBundle
 
 _INVALID = object()
 _EXACT_STRIKE_ABS_TOLERANCE = 1e-9
+_COMPLETE_OPTION_CHAIN_STATUSES = frozenset({"cache", "fetched"})
 
 
 def build_required_data_coverage(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -299,6 +300,8 @@ def required_data_frame_covers_fetch_plan(*, df: pd.DataFrame, fetch_plan: Requi
 def required_data_frame_covers_fetch_plan_debug(
     df: pd.DataFrame,
     fetch_plan: Mapping[str, Any],
+    *,
+    option_chain_evidence: Mapping[str, Any] | None = None,
 ) -> bool:
     """Validate CSV rows against the stable ``to_debug_dict`` plan shape."""
 
@@ -324,6 +327,11 @@ def required_data_frame_covers_fetch_plan_debug(
     )
     if not isinstance(require_realized_volatility, bool):
         return False
+    allow_available_strike_grid = _complete_option_chain_evidence(
+        df=df,
+        fetch_plan=fetch_plan,
+        evidence=option_chain_evidence,
+    )
     active_request_count = 0
     for raw_request in merged_requests:
         if not isinstance(raw_request, Mapping):
@@ -478,6 +486,13 @@ def required_data_frame_covers_fetch_plan_debug(
                     strikes=strikes,
                     base_min=effective_min,
                     base_max=effective_max,
+                ) and (
+                    not allow_available_strike_grid
+                    or not _strikes_overlap_bounds(
+                        strikes=strikes,
+                        base_min=effective_min,
+                        base_max=effective_max,
+                    )
                 ):
                     return False
                 if not _strikes_cover_exact_requirements(
@@ -492,6 +507,89 @@ def required_data_frame_covers_fetch_plan_debug(
     if active_request_count <= 0:
         return False
     if require_realized_volatility and not _has_realized_volatility(df):
+        return False
+    return True
+
+
+def _complete_option_chain_evidence(
+    *,
+    df: pd.DataFrame,
+    fetch_plan: Mapping[str, Any],
+    evidence: Mapping[str, Any] | None,
+) -> bool:
+    """Prove that a filtered finite strike grid came from complete chain data.
+
+    A configured strike interval does not imply that its numeric endpoints are
+    listed contracts.  The strict coverage path still requires both range
+    edges.  This evidence-backed path is only available after the producer
+    proves every requested expiration was loaded from a complete current-day
+    chain and every resulting contract received a complete snapshot.
+    """
+
+    if not isinstance(evidence, Mapping):
+        return False
+    if (
+        str(evidence.get("status") or "").strip().lower() != "ok"
+        or str(evidence.get("source_outcome") or "").strip().lower()
+        != "success_rows"
+    ):
+        return False
+    for key in ("errors", "stale_cache_expirations"):
+        value = evidence.get(key)
+        if value not in (None, []):
+            return False
+
+    merged_requests = fetch_plan.get("merged_requests")
+    if not isinstance(merged_requests, list) or not merged_requests:
+        return False
+    expected_expirations: set[str] = set()
+    for request in merged_requests:
+        if not isinstance(request, Mapping):
+            return False
+        expirations = request.get("explicit_expirations")
+        if not isinstance(expirations, list) or not expirations:
+            return False
+        if any(not isinstance(expiration, str) for expiration in expirations):
+            return False
+        expected_expirations.update(expirations)
+
+    statuses = evidence.get("expiration_statuses")
+    if not isinstance(statuses, Mapping):
+        return False
+    if set(statuses) != expected_expirations:
+        return False
+    if any(
+        status not in _COMPLETE_OPTION_CHAIN_STATUSES
+        for status in statuses.values()
+    ):
+        return False
+
+    requested_codes = evidence.get("snapshot_requested_code_set")
+    if not isinstance(requested_codes, list):
+        return False
+    if any(not isinstance(code, str) or not code.strip() for code in requested_codes):
+        return False
+    row_codes = [
+        str(value).strip()
+        for value in df.get("contract_symbol", pd.Series(dtype=object)).tolist()
+    ]
+    if (
+        not row_codes
+        or len(row_codes) != len(set(row_codes))
+        or set(row_codes) != set(requested_codes)
+    ):
+        return False
+    option_codes = evidence.get("option_codes")
+    requested_count = evidence.get("snapshot_requested_codes")
+    if (
+        isinstance(option_codes, bool)
+        or not isinstance(option_codes, int)
+        or option_codes != len(row_codes)
+        or isinstance(requested_count, bool)
+        or not isinstance(requested_count, int)
+        or requested_count != len(requested_codes)
+        or evidence.get("snapshot_complete") is not True
+    ):
         return False
     return True
 
@@ -968,6 +1066,33 @@ def _strikes_cover_bounded_edges(*, unique_strikes: list[float], base_min: float
     nearest_lower_gap = min(abs(strike - base_min) for strike in unique_strikes)
     nearest_upper_gap = min(abs(strike - base_max) for strike in unique_strikes)
     return nearest_lower_gap <= tolerance and nearest_upper_gap <= tolerance
+
+
+def _strikes_overlap_bounds(
+    *,
+    strikes: pd.Series,
+    base_min: float | None,
+    base_max: float | None,
+) -> bool:
+    if strikes.empty:
+        return False
+    normalized_min = None
+    if base_min is not None:
+        normalized_min = _strict_finite_float(base_min)
+        if normalized_min is None or normalized_min <= 0:
+            return False
+    normalized_max = None
+    if base_max is not None:
+        normalized_max = _strict_finite_float(base_max)
+        if normalized_max is None or normalized_max <= 0:
+            return False
+    if not _valid_optional_range(normalized_min, normalized_max):
+        return False
+    return any(
+        (normalized_min is None or float(value) >= normalized_min)
+        and (normalized_max is None or float(value) <= normalized_max)
+        for value in strikes.tolist()
+    )
 
 
 def _strike_edge_tolerance(*, unique_strikes: list[float], base_min: float, base_max: float) -> float:

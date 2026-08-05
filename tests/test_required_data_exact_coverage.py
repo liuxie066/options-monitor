@@ -372,6 +372,36 @@ def test_exact_coverage_requires_interior_position_strike_independently_of_range
     )
 
 
+def test_exact_coverage_accepts_complete_provider_strike_grid_without_numeric_edges() -> None:
+    request = _request(
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+        exact_strikes_by_expiration={},
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-C1")
+    plan = _plan(requests=[request])
+    evidence = {
+        "status": "ok",
+        "source_outcome": "success_rows",
+        "errors": [],
+        "stale_cache_expirations": [],
+        "expiration_statuses": {EXPIRATION: "cache"},
+        "option_codes": 1,
+        "snapshot_complete": True,
+        "snapshot_requested_codes": 1,
+        "snapshot_requested_code_set": ["NVDA-C1"],
+    }
+
+    assert not required_data_frame_covers_fetch_plan_debug(frame, plan)
+    assert required_data_frame_covers_fetch_plan_debug(
+        frame,
+        plan,
+        option_chain_evidence=evidence,
+    )
+
+
 def test_exact_coverage_is_expiration_local() -> None:
     second_expiration = "2026-09-18"
     request = _request(
