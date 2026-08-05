@@ -229,6 +229,119 @@ def _payload(*, multiplier: object = 100.0) -> dict[str, object]:
     }
 
 
+def _filtered_empty_candidate(
+    *,
+    require_realized_volatility: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    plan = _fetch_plan()
+    plan["require_realized_volatility"] = require_realized_volatility
+    side_plans = plan["side_plans"]
+    requests = plan["merged_requests"]
+    assert isinstance(side_plans, list)
+    assert isinstance(requests, list)
+    for side_plan in side_plans:
+        assert isinstance(side_plan, dict)
+        side_plan["required_exact_strikes_by_expiration"] = {}
+    for request in requests:
+        assert isinstance(request, dict)
+        request["include_realized_volatility"] = require_realized_volatility
+        request_side_plans = request["side_plans"]
+        assert isinstance(request_side_plans, list)
+        for side_plan in request_side_plans:
+            assert isinstance(side_plan, dict)
+            side_plan["required_exact_strikes_by_expiration"] = {}
+    payload = _payload()
+    payload["rows"] = []
+    meta = payload["meta"]
+    assert isinstance(meta, dict)
+    meta.update(
+        {
+            "source_outcome": "success_empty",
+            "reason_code": "no_contract_rows",
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "realized_volatility": (
+                {
+                    "status": "not_applicable_no_contracts",
+                    "reason": "not_applicable_no_contracts",
+                }
+                if require_realized_volatility
+                else {"status": "skipped", "reason": "not_requested"}
+            ),
+            "option_chain_scope_coverage": {
+                "schema_version": "option_chain_scope_coverage.v1",
+                "scopes": [
+                    {
+                        "option_type": "put",
+                        "expiration": "2026-08-21",
+                        "chain_status": "fetched",
+                        "filtered_contract_codes": [],
+                        "filtered_contract_count": 0,
+                    }
+                ],
+            },
+        }
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=plan,
+        source="opend",
+        host=HOST,
+        port=PORT,
+    )
+    return payload, contract
+
+
+def _no_expirations_candidate() -> tuple[dict[str, object], dict[str, object]]:
+    plan = _fetch_plan()
+    plan.update(
+        {
+            "side_plans": [],
+            "merged_requests": [],
+            "require_realized_volatility": False,
+            "projection_outcome": "success_empty",
+            "projected_expirations": [],
+        }
+    )
+    discovery = plan["expiration_discovery"]
+    assert isinstance(discovery, dict)
+    discovery.update(
+        {
+            "outcome": "success_empty",
+            "reason_code": "no_expirations",
+            "expirations": [],
+        }
+    )
+    payload = _payload()
+    payload.update({"expiration_count": 0, "expirations": [], "rows": []})
+    meta = payload["meta"]
+    assert isinstance(meta, dict)
+    meta.update(
+        {
+            "source_outcome": "success_empty",
+            "reason_code": "no_expirations",
+            "snapshot_requested_codes": 0,
+            "snapshot_returned_codes": 0,
+            "snapshot_requested_code_set": [],
+            "snapshot_returned_code_set": [],
+            "realized_volatility": {
+                "status": "not_applicable_no_contracts",
+                "reason": "not_applicable_no_contracts",
+            },
+        }
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA",
+        fetch_plan=plan,
+        source="opend",
+        host=HOST,
+        port=PORT,
+    )
+    return payload, contract
+
+
 def _multi_request_payload() -> dict[str, object]:
     payload = _payload()
     call_row = deepcopy(payload["rows"][0])
@@ -377,6 +490,29 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
         port=PORT,
     )
     return payload, contract
+
+
+@pytest.mark.parametrize("require_realized_volatility", [False, True])
+def test_filtered_empty_payload_honors_realized_volatility_authority(
+    require_realized_volatility: bool,
+) -> None:
+    payload, contract = _filtered_empty_candidate(
+        require_realized_volatility=require_realized_volatility,
+    )
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=contract,
+    )
+
+
+def test_no_expirations_without_rv_accepts_no_contract_rv_evidence() -> None:
+    payload, contract = _no_expirations_candidate()
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=contract,
+    )
 
 
 def test_merge_accepts_proven_empty_child_and_uses_nonempty_child_rv() -> None:
@@ -1056,7 +1192,7 @@ def test_finalizer_accepts_matching_child_required_rv_with_none_window(
     [
         "wrong_hash",
         "duplicate_hash",
-        "wrong_order",
+        "duplicate_index",
         "wrong_binding",
         "wrong_symbol",
         "wrong_underlier",
@@ -1075,8 +1211,8 @@ def test_multi_request_payload_rejects_child_identity_or_outcome_drift(
         children[1]["planned_request_sha256"] = children[0][
             "planned_request_sha256"
         ]
-    elif case == "wrong_order":
-        children.reverse()
+    elif case == "duplicate_index":
+        children[1]["request_index"] = children[0]["request_index"]
     elif case == "wrong_binding":
         children[1]["port"] = PORT + 1
     elif case == "wrong_symbol":
@@ -1168,7 +1304,6 @@ def _apply_child_coverage_drift(
         "expiry",
         "window",
         "missing",
-        "unexpected",
     ],
 )
 def test_multi_request_payload_rejects_child_coverage_drift(case: str) -> None:
@@ -1176,6 +1311,78 @@ def test_multi_request_payload_rejects_child_coverage_drift(case: str) -> None:
     _apply_child_coverage_drift(payload, case=case)
 
     with pytest.raises(PositionAdviceSourceError, match="child request"):
+        validate_required_data_payload_candidate(
+            payload=payload,
+            expected_fetch_contract=contract,
+        )
+
+
+def test_multi_request_payload_accepts_quarantined_unexpected_code() -> None:
+    payload, contract = _valid_multi_child_candidate()
+    _apply_child_coverage_drift(payload, case="unexpected")
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=contract,
+    )
+
+
+def test_multi_request_payload_accepts_child_list_reordering() -> None:
+    payload, contract = _valid_multi_child_candidate()
+    meta = payload["meta"]
+    assert isinstance(meta, dict)
+    children = meta["requests"]
+    assert isinstance(children, list)
+    children.reverse()
+
+    validate_required_data_payload_candidate(
+        payload=payload,
+        expected_fetch_contract=contract,
+    )
+
+
+@pytest.mark.parametrize("case", ["wrong_side", "expiry"])
+def test_child_scope_drift_has_scope_identity_reason(case: str) -> None:
+    payload, contract = _valid_multi_child_candidate()
+    _apply_child_coverage_drift(payload, case=case)
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match=r"^scope_identity_mismatch:",
+    ):
+        validate_required_data_payload_candidate(
+            payload=payload,
+            expected_fetch_contract=contract,
+        )
+
+
+def test_child_hash_drift_has_scope_identity_reason() -> None:
+    payload, contract = _valid_multi_child_candidate()
+    children = payload["meta"]["requests"]
+    assert isinstance(children, list)
+    children[0]["planned_request_sha256"] = "0" * 64
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match=r"^scope_identity_mismatch:",
+    ):
+        validate_required_data_payload_candidate(
+            payload=payload,
+            expected_fetch_contract=contract,
+        )
+
+
+def test_child_index_swap_has_internal_contract_reason() -> None:
+    payload, contract = _valid_multi_child_candidate()
+    children = payload["meta"]["requests"]
+    assert isinstance(children, list)
+    children[0]["request_index"] = 1
+    children[1]["request_index"] = 0
+
+    with pytest.raises(
+        PositionAdviceSourceError,
+        match=r"^internal_contract_error:",
+    ):
         validate_required_data_payload_candidate(
             payload=payload,
             expected_fetch_contract=contract,

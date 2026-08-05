@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from src.application.required_data_coverage import (
+    evaluate_required_data_frame_fetch_plan_debug,
     required_data_frame_covers_fetch_plan,
     required_data_frame_covers_fetch_plan_debug,
 )
@@ -468,7 +469,7 @@ def test_exact_coverage_keeps_legacy_global_chain_evidence_strict() -> None:
     )
 
 
-def test_exact_coverage_rejects_globally_proven_empty_plan() -> None:
+def test_exact_coverage_accepts_globally_proven_filtered_empty_plan() -> None:
     request = _request(
         minimum=80.0,
         maximum=120.0,
@@ -480,11 +481,172 @@ def test_exact_coverage_rejects_globally_proven_empty_plan() -> None:
         codes_by_scope={("put", EXPIRATION): []},
     )
 
-    assert not required_data_frame_covers_fetch_plan_debug(
+    result = evaluate_required_data_frame_fetch_plan_debug(
         pd.DataFrame(),
         _plan(requests=[request]),
         option_chain_evidence=evidence,
     )
+
+    assert result.accepted is True
+    assert result.status == "success_empty"
+    assert result.provider_coverage == "complete"
+    assert result.strategy_readiness == "empty"
+    assert required_data_frame_covers_fetch_plan_debug(
+        pd.DataFrame(),
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+
+def test_exact_coverage_accepts_futu_scope_order_independent_of_plan_order() -> None:
+    second_expiration = "2026-09-18"
+    request = _request(
+        option_type="call",
+        expirations=[second_expiration, EXPIRATION],
+        minimum=100.0,
+        maximum=140.0,
+        base_minimum=100.0,
+        base_maximum=140.0,
+        max_dte=60,
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "option_type": "call",
+                "expiration": expiration,
+                "dte": dte,
+                "strike": strike,
+                "spot": 110.0,
+                "contract_symbol": code,
+            }
+            for expiration, dte, strike, code in (
+                (EXPIRATION, 25, 120.0, "NVDA-C-AUG"),
+                (second_expiration, 53, 125.0, "NVDA-C-SEP"),
+            )
+        ]
+    )
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={
+            ("call", EXPIRATION): ["NVDA-C-AUG"],
+            ("call", second_expiration): ["NVDA-C-SEP"],
+        },
+    )
+    scopes = evidence["option_chain_scope_coverage"]["scopes"]
+    assert isinstance(scopes, list)
+    scopes.reverse()
+    evidence["snapshot_requested_code_set"] = ["NVDA-C-SEP", "NVDA-C-AUG"]
+    evidence["snapshot_returned_code_set"] = ["NVDA-C-AUG", "NVDA-C-SEP"]
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        frame,
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is True
+    assert result.status == "success"
+
+
+def test_exact_coverage_classifies_missing_snapshot_as_provider_incomplete() -> None:
+    request = _request(minimum=80.0, maximum=120.0)
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
+    )
+    evidence.update(
+        {
+            "snapshot_returned_codes": 0,
+            "snapshot_missing_codes": 1,
+            "snapshot_returned_code_set": [],
+            "snapshot_missing_code_set": ["NVDA-P1"],
+            "snapshot_complete": False,
+        }
+    )
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        _frame(strike=100.0).assign(contract_symbol="NVDA-P1"),
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is False
+    assert result.reason_code == "provider_incomplete"
+
+
+def test_exact_coverage_warns_on_quarantined_unexpected_snapshot_code() -> None:
+    request = _request(minimum=80.0, maximum=120.0)
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
+    )
+    evidence.update(
+        {
+            "snapshot_returned_codes": 2,
+            "snapshot_unexpected_codes": 1,
+            "snapshot_returned_code_set": ["NVDA-FOREIGN", "NVDA-P1"],
+            "snapshot_unexpected_code_set": ["NVDA-FOREIGN"],
+        }
+    )
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        _frame(strike=100.0).assign(contract_symbol="NVDA-P1"),
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is True
+    assert result.warnings == ("unexpected_snapshot_codes:1",)
+
+
+def test_exact_coverage_classifies_snapshot_count_drift_as_internal_error() -> None:
+    request = _request(minimum=80.0, maximum=120.0)
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
+    )
+    evidence["snapshot_requested_codes"] = 2
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        _frame(strike=100.0).assign(contract_symbol="NVDA-P1"),
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is False
+    assert result.reason_code == "internal_contract_error"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("require_realized_volatility", "false"),
+        ("required_exact_strikes_by_expiration", {EXPIRATION: [True]}),
+    ],
+)
+def test_structured_coverage_classifies_malformed_plan_as_internal_error(
+    field: str,
+    invalid: object,
+) -> None:
+    request = _request(minimum=80.0, maximum=120.0)
+    plan = _plan(requests=[request])
+    if field == "require_realized_volatility":
+        plan[field] = invalid
+    else:
+        request["side_plans"][0][field] = invalid
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
+    )
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        _frame(strike=100.0).assign(contract_symbol="NVDA-P1"),
+        plan,
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is False
+    assert result.reason_code == "internal_contract_error"
 
 
 def test_exact_coverage_accepts_proven_partial_empty_expiration() -> None:
@@ -541,13 +703,26 @@ def test_exact_coverage_accepts_proven_empty_child_when_another_child_has_rows()
         child["request_index"] = index
         child["planned_request_sha256"] = required_data_request_sha256(request)
     evidence = deepcopy(put_evidence)
-    evidence["requests"] = [put_evidence, call_evidence]
+    # OpenD/merge output ordering is not semantic identity. The preserved
+    # request_index values remain valid compatibility evidence.
+    evidence["requests"] = [call_evidence, put_evidence]
+    evidence["request_count"] = 2
 
     assert required_data_frame_covers_fetch_plan_debug(
         frame,
         _plan(requests=[put_request, call_request]),
         option_chain_evidence=evidence,
     )
+
+    call_evidence["request_index"] = 0
+    put_evidence["request_index"] = 1
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        frame,
+        _plan(requests=[put_request, call_request]),
+        option_chain_evidence=evidence,
+    )
+    assert result.accepted is False
+    assert result.reason_code == "internal_contract_error"
 
 
 def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() -> None:
@@ -598,6 +773,7 @@ def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() ->
             "snapshot_returned_codes": 2,
             "snapshot_requested_code_set": all_codes,
             "snapshot_returned_code_set": all_codes,
+            "request_count": 2,
             "requests": [lower_evidence, upper_evidence],
         }
     )
@@ -629,9 +805,14 @@ def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None
         },
     )
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        frame, _plan(requests=[request]), option_chain_evidence=evidence
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        frame,
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
     )
+
+    assert result.accepted is False
+    assert result.reason_code == "required_contract_missing"
 
 
 @pytest.mark.parametrize("status", ["empty", "stale_cache", "error", ""])
@@ -658,6 +839,30 @@ def test_exact_coverage_rejects_unreliable_empty_scope_status(status: str) -> No
     assert not required_data_frame_covers_fetch_plan_debug(
         frame, _plan(requests=[request]), option_chain_evidence=evidence
     )
+
+
+def test_exact_coverage_classifies_stale_scope_as_stale_data() -> None:
+    request = _request(
+        minimum=80.0,
+        maximum=120.0,
+        base_minimum=80.0,
+        base_maximum=120.0,
+    )
+    frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
+    evidence = _scope_evidence(
+        request=request,
+        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
+        statuses={EXPIRATION: "stale_cache"},
+    )
+
+    result = evaluate_required_data_frame_fetch_plan_debug(
+        frame,
+        _plan(requests=[request]),
+        option_chain_evidence=evidence,
+    )
+
+    assert result.accepted is False
+    assert result.reason_code == "stale_data"
 
 
 def test_exact_coverage_is_expiration_local() -> None:

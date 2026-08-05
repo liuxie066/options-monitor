@@ -774,6 +774,32 @@ def fetch_symbol_request(
         )
         completed_at_utc = _utc_now_iso()
         source_observed_at = fetch_result_meta.get('source_observed_at') or completed_at_utc
+        scope_rows = [
+            scope
+            for scope in option_chain_scope_coverage['scopes']
+            if isinstance(scope, dict)
+        ]
+        filtered_empty = (
+            not option_codes
+            and str(fetch_result_meta.get('source_outcome') or '').strip().lower()
+            == 'success_rows'
+            and bool(scope_rows)
+            and all(
+                str(scope.get('chain_status') or '').strip()
+                in {'cache', 'fetched'}
+                for scope in scope_rows
+            )
+        )
+        source_outcome = (
+            'success_empty'
+            if filtered_empty
+            else fetch_result_meta.get('source_outcome')
+        )
+        reason_code = (
+            'no_contract_rows'
+            if filtered_empty
+            else fetch_result_meta.get('reason_code')
+        )
 
         return {
             'symbol': symbol,
@@ -789,8 +815,8 @@ def fetch_symbol_request(
                 'status': status,
                 'error_code': error_code,
                 'error': fetch_error_message,
-                'source_outcome': fetch_result_meta.get('source_outcome'),
-                'reason_code': fetch_result_meta.get('reason_code'),
+                'source_outcome': source_outcome,
+                'reason_code': reason_code,
                 'expiration_statuses': fetch_result_meta.get('expiration_statuses') or {},
                 'errors': combined_errors,
                 'diagnostics': fetch_result_meta.get('diagnostics') or [],
