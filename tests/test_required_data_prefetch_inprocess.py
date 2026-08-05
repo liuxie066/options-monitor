@@ -338,6 +338,10 @@ def test_prefetch_builds_complete_global_plan_before_first_chain_fetch(
         item["expiration_count"]
         for item in result["global_required_data_plan"]["symbols"]
     ] == [2, 2]
+    assert all(
+        item["fetch_binding"] == item["expected_fetch_contract"]["fetch_binding"]
+        for item in result["global_required_data_plan"]["symbols"]
+    )
 
 
 def test_prefetch_fails_closed_when_global_expiration_discovery_is_incomplete(
