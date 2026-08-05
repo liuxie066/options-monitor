@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.10.5 - 2026-08-05
+
+### Bug Fixes
+- Accepted complete OpenD finite strike grids whose configured interval endpoints are not listed contracts, while retaining strict endpoint validation when provider completeness evidence is absent.
+- Bounded settlement observation retries around unavailable or repeating provider results while preserving canonical ledger authority and local deadline reconciliation, preventing expensive lifecycle retry loops.
+
 ## 1.10.4 - 2026-08-05
 
 ### Bug Fixes
