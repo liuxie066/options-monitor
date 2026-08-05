@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.8",
+  "base": {
+    "tag": "v1.10.7",
+    "commit": "d645fa2110b969d553b9ad2300830c7779b2dd82"
+  },
+  "reviewed_head": "4c2909498824fae78a0e0b3794a838fc76101c34",
+  "commits": [
+    {
+      "sha": "4c2909498824fae78a0e0b3794a838fc76101c34",
+      "subject": "fix: validate required-data coverage per request scope"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Validated required option-chain and volatility coverage against each account's requested symbol and expiry scope, preventing complete scoped runs from being rejected because unrelated catalog rows were absent while still failing closed on genuinely missing inputs.",
+      "commits": [
+        "4c2909498824fae78a0e0b3794a838fc76101c34"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
