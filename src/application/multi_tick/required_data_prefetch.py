@@ -19,7 +19,6 @@ from domain.services import (
     adapt_opend_tool_payload,
 )
 from domain.domain.fetch_source import resolve_symbol_fetch_source
-from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.storage.repositories import state_repo
 from src.application.config_sections import (
     resolve_templates_config,
@@ -54,6 +53,7 @@ from src.application.required_data_planning import (
     build_required_data_fetch_plan,
 )
 from src.application.required_data_plan_identity import (
+    build_required_data_fetch_binding,
     build_required_data_expected_fetch_contract,
 )
 from src.application.required_data_prefetch_planning import (
@@ -540,11 +540,11 @@ def _global_required_data_plan_summary(
         binding_source, _binding_decision = resolve_symbol_fetch_source(
             fetch_cfg
         )
-        binding_payload = {
-            "source": binding_source,
-            "host": str(fetch_cfg.get("host") or "127.0.0.1").strip(),
-            "port": _to_int(fetch_cfg.get("port") or 11111, 11111),
-        }
+        binding_payload = build_required_data_fetch_binding(
+            source=binding_source,
+            host=str(fetch_cfg.get("host") or "127.0.0.1").strip(),
+            port=_to_int(fetch_cfg.get("port") or 11111, 11111),
+        )
         expected_fetch_contract = (
             (expected_contracts_by_config_id or {}).get(id(symbol_cfg))
             or _expected_fetch_contract(symbol_cfg, fetch_plan)
@@ -569,7 +569,6 @@ def _global_required_data_plan_summary(
                 "source": binding_source,
                 "fetch_binding": {
                     **binding_payload,
-                    "binding_id": canonical_sha256(binding_payload),
                 },
                 "close_advice_requirement_plan_hash": (
                     str(
