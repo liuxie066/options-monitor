@@ -65,6 +65,32 @@ def required_data_request_sha256(request: Mapping[str, Any]) -> str:
     return required_data_plan_id([request])
 
 
+def build_required_data_fetch_binding(
+    *,
+    source: str,
+    host: str,
+    port: int,
+) -> dict[str, Any]:
+    """Build the canonical physical binding shared by plan and contract."""
+
+    source_norm = _normalize_source(source)
+    if not source_norm:
+        raise ValueError("required-data expected fetch source is missing")
+    port_value = _validated_port(
+        port,
+        error="required-data expected fetch port is invalid",
+    )
+    binding = {
+        "source": source_norm,
+        "host": str(host or "127.0.0.1").strip() or "127.0.0.1",
+        "port": port_value,
+    }
+    return {
+        **binding,
+        "binding_id": _canonical_sha256(binding),
+    }
+
+
 def build_required_data_expected_fetch_contract(
     *,
     symbol: str,
@@ -78,18 +104,11 @@ def build_required_data_expected_fetch_contract(
     symbol_norm = str(symbol or "").strip().upper()
     if not symbol_norm:
         raise ValueError("required-data expected fetch contract symbol is missing")
-    source_norm = _normalize_source(source)
-    if not source_norm:
-        raise ValueError("required-data expected fetch source is missing")
-    port_value = _validated_port(
-        port,
-        error="required-data expected fetch port is invalid",
+    binding = build_required_data_fetch_binding(
+        source=source,
+        host=host,
+        port=port,
     )
-    binding = {
-        "source": source_norm,
-        "host": str(host or "127.0.0.1").strip() or "127.0.0.1",
-        "port": port_value,
-    }
     plan_payload = dict(fetch_plan or {})
     merged_requests = plan_payload.get("merged_requests")
     require_rv = plan_payload.get("require_realized_volatility")
@@ -101,10 +120,7 @@ def build_required_data_expected_fetch_contract(
         "schema_version": REQUIRED_DATA_EXPECTED_FETCH_CONTRACT_SCHEMA,
         "symbol": symbol_norm,
         "fetch_plan": plan_payload,
-        "fetch_binding": {
-            **binding,
-            "binding_id": _canonical_sha256(binding),
-        },
+        "fetch_binding": binding,
         "coverage_policy": {
             "schema_version": "required_data_coverage_policy.v1",
             "projection_outcome": str(
@@ -144,19 +160,12 @@ def validate_required_data_expected_fetch_contract(
         raise ValueError("required-data expected fetch binding is invalid")
     if not isinstance(coverage, Mapping):
         raise ValueError("required-data coverage policy is invalid")
-    binding_payload = {
-        "source": _normalize_source(binding.get("source")),
-        "host": str(binding.get("host") or "").strip(),
-        "port": _validated_port(
-            binding.get("port"),
-            error="required-data expected fetch port is invalid",
-        ),
-    }
-    if not binding_payload["source"]:
-        raise ValueError("required-data expected fetch source is missing")
-    if not binding_payload["host"]:
-        raise ValueError("required-data expected fetch host is missing")
-    if str(binding.get("binding_id") or "") != _canonical_sha256(binding_payload):
+    binding_payload = build_required_data_fetch_binding(
+        source=str(binding.get("source") or ""),
+        host=str(binding.get("host") or ""),
+        port=binding.get("port"),  # type: ignore[arg-type]
+    )
+    if str(binding.get("binding_id") or "") != str(binding_payload["binding_id"]):
         raise ValueError("required-data expected fetch binding hash mismatch")
     plan_payload = dict(fetch_plan)
     plan_symbol = str(plan_payload.get("symbol") or "").strip().upper()
@@ -289,7 +298,6 @@ def validate_required_data_expected_fetch_contract(
         "fetch_plan": plan_payload,
         "fetch_binding": {
             **binding_payload,
-            "binding_id": _canonical_sha256(binding_payload),
         },
         "coverage_policy": expected_coverage,
     }
@@ -970,6 +978,7 @@ def _normalize_source(value: Any) -> str:
 
 __all__ = [
     "REQUIRED_DATA_EXPECTED_FETCH_CONTRACT_SCHEMA",
+    "build_required_data_fetch_binding",
     "build_required_data_expected_fetch_contract",
     "required_data_expiration_dtes",
     "required_data_plan_id",
