@@ -89,6 +89,8 @@ def run_pipeline_script(
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
+    prepared_option_positions_context_manifest: Path | None = None,
+    prepared_option_positions_context_manifest_sha256: str | None = None,
     account_config_base: Path | None = None,
     account_config_run_id: str | None = None,
     account_config_account: str | None = None,
@@ -152,6 +154,32 @@ def run_pipeline_script(
     elif prepared_portfolio_context_manifest_sha256 is not None:
         raise ValueError(
             "prepared portfolio context manifest SHA-256 requires a manifest"
+        )
+    if prepared_option_positions_context_manifest is not None:
+        digest = str(
+            prepared_option_positions_context_manifest_sha256 or ""
+        ).strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                "prepared option context manifest requires its retained SHA-256"
+            )
+        cmd.extend(
+            [
+                "--prepared-option-positions-context-manifest",
+                str(
+                    Path(
+                        prepared_option_positions_context_manifest
+                    ).resolve()
+                ),
+                "--prepared-option-positions-context-manifest-sha256",
+                digest,
+            ]
+        )
+    elif prepared_option_positions_context_manifest_sha256 is not None:
+        raise ValueError(
+            "prepared option context manifest SHA-256 requires a manifest"
         )
     account_config_authority = (
         account_config_base,

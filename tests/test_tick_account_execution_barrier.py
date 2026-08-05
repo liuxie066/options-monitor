@@ -121,6 +121,65 @@ def _fake_prepare(**kwargs):
     return out
 
 
+def _fake_prepare_options(**kwargs):
+    from src.application.prepared_option_positions_context import (
+        PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
+        PreparedOptionPositionsBatch,
+    )
+    from src.infrastructure.io_utils import atomic_write_json
+
+    manifests = {}
+    for account, authority in kwargs[
+        "account_config_authorities"
+    ].items():
+        state_dir = (
+            Path(kwargs["base"])
+            / "output_runs"
+            / kwargs["run_id"]
+            / "accounts"
+            / account
+            / "state"
+        )
+        state_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
+        manifest = {
+            "schema_version": "prepared_option_positions_context.v1",
+            "run_id": kwargs["run_id"],
+            "account": account,
+            "status": "ready",
+            "account_config_sha256": authority.account_config_sha256,
+        }
+        atomic_write_json(manifest_path, manifest)
+        manifests[account] = {
+            **manifest,
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest(),
+        }
+    return PreparedOptionPositionsBatch(
+        manifests=manifests,
+        position_records_by_account={
+            account: [] for account in manifests
+        },
+        unavailable_by_account={},
+        observed_at_utc="2026-07-29T01:40:00+00:00",
+        ledger_read_count=1 if manifests else 0,
+        fx_observation_count=1 if manifests else 0,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_prepared_option_context(monkeypatch):
+    from src.application import tick_account_execution as mod
+
+    monkeypatch.setattr(
+        mod,
+        "prepare_option_positions_contexts",
+        _fake_prepare_options,
+    )
+
+
 @pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("accounts", [["lx", "sy"], ["sy", "lx"]])
 @pytest.mark.parametrize("force", [False, True])
@@ -198,6 +257,10 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     assert {item.acct for item in account_requests} == set(accounts)
     assert all(item.required_data_snapshot_manifest for item in account_requests)
     assert all(item.prepared_portfolio_context_manifest for item in account_requests)
+    assert all(
+        item.prepared_option_positions_context_manifest
+        for item in account_requests
+    )
     assert outcome.prefetch_done is True
     assert set(outcome.ran_pipeline_accounts) == set(accounts)
     summaries = [
@@ -271,7 +334,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         }
         for account in ("lx", "sy")
     ]
-    ledger_reads: list[object] = []
+    prepared_option_calls: list[dict] = []
     prefetch_calls: list[dict] = []
     account_requests = []
 
@@ -281,28 +344,31 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         "expiration_business_today",
         lambda _now: date(2026, 7, 29),
     )
+    def _prepare_options(**kwargs):
+        prepared_option_calls.append(kwargs)
+        baseline = _fake_prepare_options(**kwargs)
+        return mod.PreparedOptionPositionsBatch(
+            manifests=baseline.manifests,
+            position_records_by_account={
+                account: records for account in ("lx", "sy")
+            },
+            unavailable_by_account={},
+            observed_at_utc=baseline.observed_at_utc,
+            ledger_read_count=1,
+            fx_observation_count=1,
+        )
+
     monkeypatch.setattr(
         mod,
-        "resolve_position_data_config_path",
-        lambda **_kwargs: tmp_path / "portfolio.runtime.json",
+        "prepare_option_positions_contexts",
+        _prepare_options,
     )
-    monkeypatch.setattr(
-        mod,
-        "open_position_ledger_from_data_config",
-        lambda **_kwargs: (
-            tmp_path / "portfolio.runtime.json",
-            object(),
-        ),
-    )
-
-    def _list_position_lot_snapshots(repo, **_kwargs):
-        ledger_reads.append(repo)
-        return records
-
     monkeypatch.setattr(
         mod,
         "list_position_lot_snapshots",
-        _list_position_lot_snapshots,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("close-advice planning must reuse prepared rows")
+        ),
     )
 
     def _prefetch(**kwargs):
@@ -356,7 +422,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
 
     outcome = mod.run_tick_account_execution(request)
 
-    assert len(ledger_reads) == 1
+    assert len(prepared_option_calls) == 1
     assert len(prefetch_calls) == 1
     merged_requirements = [
         requirement
@@ -453,6 +519,23 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     }
     manifest["content_sha256"] = canonical_sha256(manifest)
     atomic_write_json(manifest_path, manifest)
+    option_manifest_path = (
+        request.run_dir
+        / "accounts"
+        / "lx"
+        / "state"
+        / "prepared_option_positions_context.v1.json"
+    )
+    option_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        option_manifest_path,
+        {
+            "schema_version": "prepared_option_positions_context.v1",
+            "run_id": request.run_id,
+            "account": "lx",
+            "status": "ready",
+        },
+    )
     account_requests = []
     monkeypatch.setattr(
         mod,
@@ -506,6 +589,10 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
     assert (
         account_requests[0].close_advice_required_data_plan
         == plan_path.resolve()
+    )
+    assert (
+        account_requests[0].prepared_option_positions_context_manifest
+        == option_manifest_path.resolve()
     )
 
 

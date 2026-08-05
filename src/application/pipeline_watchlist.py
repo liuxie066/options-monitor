@@ -266,6 +266,8 @@ def run_watchlist_pipeline(
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
+    prepared_option_positions_context_manifest: Path | None = None,
+    prepared_option_positions_context_manifest_sha256: str | None = None,
     account_config_sha256: str | None = None,
 ) -> list[dict]:
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
@@ -299,6 +301,19 @@ def run_watchlist_pipeline(
         context_kwargs[
             "prepared_portfolio_context_manifest_sha256"
         ] = prepared_portfolio_context_manifest_sha256
+    if prepared_option_positions_context_manifest is not None:
+        context_kwargs[
+            "prepared_option_positions_context_manifest"
+        ] = prepared_option_positions_context_manifest
+        context_kwargs["prepared_option_positions_context_run_id"] = (
+            position_advice_producer_run_id
+        )
+        context_kwargs[
+            "prepared_option_positions_context_account_config_sha256"
+        ] = account_config_sha256
+        context_kwargs[
+            "prepared_option_positions_context_manifest_sha256"
+        ] = prepared_option_positions_context_manifest_sha256
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
         **context_kwargs,
     )
@@ -564,6 +579,8 @@ def run_watchlist_pipeline_default(
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
+    prepared_option_positions_context_manifest: Path | None = None,
+    prepared_option_positions_context_manifest_sha256: str | None = None,
     account_config_sha256: str | None = None,
 ) -> list[dict]:
     from src.application.config_profiles import apply_profiles
@@ -643,6 +660,12 @@ def run_watchlist_pipeline_default(
         prepared_portfolio_context_manifest=prepared_portfolio_context_manifest,
         prepared_portfolio_context_manifest_sha256=(
             prepared_portfolio_context_manifest_sha256
+        ),
+        prepared_option_positions_context_manifest=(
+            prepared_option_positions_context_manifest
+        ),
+        prepared_option_positions_context_manifest_sha256=(
+            prepared_option_positions_context_manifest_sha256
         ),
         account_config_sha256=account_config_sha256,
     )
