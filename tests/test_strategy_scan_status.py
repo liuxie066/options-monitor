@@ -52,6 +52,7 @@ def test_completed_zero_candidates_is_available_and_bound_to_artifacts(
         "completed": 1,
         "unavailable": 0,
         "failed": 0,
+        "not_applicable": 0,
     }
     assert index["items"][0]["candidate_count"] == 0
 
@@ -104,6 +105,48 @@ def test_completed_zero_success_empty_preserves_quote_outcome(
     assert item["reason_code"] == "no_contract_rows"
     assert item["snapshot_id"] == "snapshot-empty"
     assert item["receipt_relpath"] == "quotes/empty/receipt.json"
+
+
+def test_not_applicable_strategy_is_terminal_and_not_failed(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "0883.hk_sell_call_candidates.csv").write_text(
+        "\n",
+        encoding="utf-8",
+    )
+    publish_strategy_scan_status(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="sy",
+        market="HK",
+        symbol="0883.HK",
+        strategy_family="covered_call",
+        status="not_applicable",
+        reason="stock_context_missing",
+    )
+
+    index = publish_strategy_scan_status_index(
+        report_dir=report_dir,
+        run_id="run-1",
+        account="sy",
+        expected=[
+            {
+                "market": "HK",
+                "symbol": "0883.HK",
+                "strategy_family": "covered_call",
+            }
+        ],
+    )
+
+    assert index["counts"] == {
+        "completed": 0,
+        "unavailable": 0,
+        "failed": 0,
+        "not_applicable": 1,
+    }
+    assert index["items"][0]["status"] == "not_applicable"
 
 
 def test_index_synthesizes_missing_and_invalid_statuses(tmp_path: Path) -> None:
