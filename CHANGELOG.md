@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.4 - 2026-08-05
+
 ### Bug Fixes
 - Kept multi-account option data, prepared portfolio facts, and execution context coherent within each run, preventing cross-account state from affecting option monitoring and advice.
 - Unified required-data physical binding identity between global plans and expected fetch contracts, preventing valid scans from being blocked by a mismatched binding hash before candidate generation and notification.

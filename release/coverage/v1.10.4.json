@@ -1,0 +1,36 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.4",
+  "base": {
+    "tag": "v1.10.3",
+    "commit": "2ae7d59f7fa200e4665138a68255bfcd7fb8c696"
+  },
+  "reviewed_head": "b2db76636319d12f9f9fae401779c29fd2696070",
+  "commits": [
+    {
+      "sha": "483dddc6baf306cf1226ef2f0df60bb70be37936",
+      "subject": "fix: make multi-account option data coherent"
+    },
+    {
+      "sha": "b2db76636319d12f9f9fae401779c29fd2696070",
+      "subject": "fix: align required-data fetch binding identity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept multi-account option data, prepared portfolio facts, and execution context coherent within each run, preventing cross-account state from affecting option monitoring and advice.",
+      "commits": [
+        "483dddc6baf306cf1226ef2f0df60bb70be37936"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Unified required-data physical binding identity between global plans and expected fetch contracts, preventing valid scans from being blocked by a mismatched binding hash before candidate generation and notification.",
+      "commits": [
+        "b2db76636319d12f9f9fae401779c29fd2696070"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
