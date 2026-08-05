@@ -36,6 +36,9 @@ from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
 )
+from src.application.prepared_portfolio_context import (
+    load_prepared_portfolio_context,
+)
 from src.application.portfolio_capacity_shadow import write_portfolio_capacity_shadow
 from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
@@ -707,6 +710,25 @@ def run_one_account(
 
     position_advice_sources: dict[str, Any] | None = None
     try:
+        prepared_portfolio_context: dict[str, Any] | None = None
+        if request.prepared_portfolio_context_manifest is not None:
+            prepared_portfolio_context = load_prepared_portfolio_context(
+                manifest_path=request.prepared_portfolio_context_manifest,
+                expected_base=request.base,
+                expected_run_id=request.run_id,
+                expected_account=acct,
+                expected_account_config_sha256=(
+                    request.account_config_authority.account_config_sha256
+                ),
+                expected_manifest_sha256=(
+                    request.prepared_portfolio_context_manifest_sha256
+                ),
+                expected_runtime_config=cfg,
+            )
+            if not isinstance(prepared_portfolio_context, dict):
+                raise RuntimeError(
+                    "prepared portfolio context is unavailable"
+                )
         portfolio_cfg = (
             cfg.get("portfolio")
             if isinstance(cfg.get("portfolio"), dict)
@@ -733,6 +755,7 @@ def run_one_account(
                 if isinstance(prepared_option_context, dict)
                 else None
             ),
+            portfolio_context_override=prepared_portfolio_context,
             fx_payload_override=(
                 prepared_option_context.get("exchange_rates")
                 if isinstance(prepared_option_context, dict)
