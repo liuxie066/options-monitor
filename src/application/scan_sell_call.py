@@ -13,6 +13,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.event_risk_filter import annotate_candidates_with_event_risk
+from domain.domain.engine import CandidateCalculationError, calculate_opening_candidate_metrics
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_CALL_WINDOW,
@@ -35,6 +36,7 @@ from src.application.candidate_scanning import (
 
 SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "symbol",
+    "market",
     "expiration",
     "dte",
     "contract_symbol",
@@ -52,7 +54,11 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "bid",
     "ask",
     "last_price",
+    "raw_mid",
     "mid",
+    "raw_spread",
+    "price_tick",
+    "sell_limit",
     "open_interest",
     "volume",
     "implied_volatility",
@@ -60,20 +66,40 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "realized_volatility_60",
     "realized_volatility_120",
     "realized_volatility_estimate",
+    "term_matched_rv",
+    "term_matched_rv_status",
+    "term_matched_rv_reason",
+    "term_matched_rv_input_hash",
     "iv_rv_ratio",
     "iv_minus_rv",
     "delta",
     "spread",
     "spread_ratio",
+    "gross_premium",
     "gross_income",
+    "estimated_full_sell_fees",
     "futu_fee",
+    "fee_schedule_version",
+    "fee_basis",
+    "fee_schedule_url",
+    "net_premium",
     "net_income",
+    "net_premium_cny",
+    "current_market_value",
+    "period_net_premium_return",
+    "period_net_return",
     "annualized_net_premium_return",
     "if_exercised_total_return",
     "strike_above_spot_pct",
     "strike_above_cost_pct",
     "cc_band",
     "risk_label",
+    "earnings_evidence_status",
+    "earnings_reason_code",
+    "earnings_has_event",
+    "earnings_event_dates",
+    "earnings_snapshot_hash",
+    "earnings_artifact_path",
     "event_flag",
     "event_types",
     "event_dates",
@@ -82,7 +108,6 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "reject_stage_candidate",
 ]
 
-from domain.domain.fee_calc import calc_futu_option_fee
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 
@@ -97,88 +122,30 @@ def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> Candid
 
 def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    mid = contract.mid
-    strike = contract.strike
-    spot = contract.spot
-    dte = contract.dte
-    if mid is None or strike is None or spot is None or dte is None:
+    try:
+        metrics = calculate_opening_candidate_metrics(
+            contract.to_gate_payload(),
+            mode="call",
+            avg_cost=avg_cost,
+        )
+    except CandidateCalculationError:
         return None
-    if dte <= 0 or avg_cost <= 0:
-        return None
-    if mid <= 0 or strike <= 0 or spot <= 0:
-        return None
-
-    multiplier = contract.multiplier
-    m = int(multiplier) if multiplier and multiplier > 0 else None
-    if not m:
-        return None
-
-    gross_income = mid * m
-    fee = calc_futu_option_fee(
-        contract.currency,
-        mid,
-        contracts=1,
-        multiplier=m,
-        is_sell=True,
-    )
-    net_income = gross_income - fee
-    if net_income <= 0:
-        return None
-
-    annualized_net_premium_return = (net_income / (spot * m)) * (365 / dte)
-    if_exercised_total_return = (((strike - avg_cost) * m) + net_income) / (avg_cost * m)
-    strike_above_spot_pct = (strike - spot) / spot
-    strike_above_cost_pct = (strike - avg_cost) / avg_cost
-    risk_band = classify_sell_call_risk(strike_above_spot_pct)
-
-    return {
-        "gross_income": round(gross_income, 6),
-        "futu_fee": round(fee, 6),
-        "net_income": round(net_income, 6),
-        "annualized_net_premium_return": round(annualized_net_premium_return, 6),
-        "if_exercised_total_return": round(if_exercised_total_return, 6),
-        "strike_above_spot_pct": round(strike_above_spot_pct, 6),
-        "strike_above_cost_pct": round(strike_above_cost_pct, 6),
-        "cc_band": risk_band.band,
-        "risk_label": risk_band.risk_label,
-    }
+    risk_band = classify_sell_call_risk(float(metrics["strike_above_spot_pct"]))
+    metrics["cc_band"] = risk_band.band
+    metrics["risk_label"] = risk_band.risk_label
+    return metrics
 
 
 def explain_metrics_rejection(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    mid = contract.mid
-    strike = contract.strike
-    spot = contract.spot
-    dte = contract.dte
-    if mid is None or strike is None or spot is None or dte is None:
-        return {"rule": "metrics_input_missing", "message": "mid, strike, spot, or dte missing"}
-    if dte <= 0:
-        return {"rule": "metrics_dte_non_positive", "metric_value": dte, "threshold": 0, "message": "dte must be positive"}
-    if avg_cost <= 0:
-        return {"rule": "metrics_avg_cost_non_positive", "metric_value": avg_cost, "threshold": 0, "message": "avg_cost must be positive"}
-    if mid <= 0:
-        return {"rule": "metrics_mid_non_positive", "metric_value": mid, "threshold": 0, "message": "mid must be positive"}
-    if strike <= 0:
-        return {"rule": "metrics_strike_non_positive", "metric_value": strike, "threshold": 0, "message": "strike must be positive"}
-    if spot <= 0:
-        return {"rule": "metrics_spot_non_positive", "metric_value": spot, "threshold": 0, "message": "spot must be positive"}
-
-    multiplier = contract.multiplier
-    m = int(multiplier) if multiplier and multiplier > 0 else None
-    if not m:
-        return {"rule": "metrics_multiplier_invalid", "metric_value": multiplier, "threshold": 0, "message": "multiplier must be positive"}
-
-    gross_income = mid * m
-    fee = calc_futu_option_fee(
-        contract.currency,
-        mid,
-        contracts=1,
-        multiplier=m,
-        is_sell=True,
-    )
-    net_income = gross_income - fee
-    if net_income <= 0:
-        return {"rule": "metrics_net_income_non_positive", "metric_value": net_income, "threshold": 0, "message": "net income must be positive"}
+    try:
+        calculate_opening_candidate_metrics(
+            contract.to_gate_payload(),
+            mode="call",
+            avg_cost=avg_cost,
+        )
+    except CandidateCalculationError as exc:
+        return exc.to_payload()
     return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
 
 
@@ -239,15 +206,12 @@ def _build_candidate_row_factory(
 
         shares_total = int(shares)
         shares_locked_value = int(shares_locked or 0)
-        return {
-            "symbol": contract.symbol,
-            "expiration": contract.expiration,
+        payload = contract.to_gate_payload()
+        payload.pop("mode", None)
+        payload.update(
+            {
             "dte": base_values.dte,
-            "contract_symbol": contract.contract_symbol,
-            "multiplier": contract.multiplier,
-            "currency": contract.currency,
             "strike": base_values.strike,
-            "spot": contract.spot,
             "avg_cost": avg_cost,
             "shares_total": shares_total,
             "shares_locked": shares_locked_value,
@@ -255,36 +219,12 @@ def _build_candidate_row_factory(
             "covered_contracts_available": covered_contracts_available,
             "is_fully_covered_available": is_fully_covered_available,
             "shares": shares_total,
-            "bid": contract.bid,
-            "ask": contract.ask,
-            "last_price": contract.last_price,
-            "mid": contract.mid,
             "open_interest": base_values.open_interest,
             "volume": base_values.volume,
-            "implied_volatility": contract.implied_volatility,
-            "realized_volatility_20": contract.realized_volatility_20,
-            "realized_volatility_60": contract.realized_volatility_60,
-            "realized_volatility_120": contract.realized_volatility_120,
-            "realized_volatility_estimate": contract.realized_volatility_estimate,
-            "iv_rv_ratio": (
-                round(contract.implied_volatility / contract.realized_volatility_estimate, 6)
-                if (
-                    contract.implied_volatility is not None
-                    and contract.realized_volatility_estimate is not None
-                    and contract.realized_volatility_estimate > 0
-                )
-                else None
-            ),
-            "iv_minus_rv": (
-                round(contract.implied_volatility - contract.realized_volatility_estimate, 6)
-                if contract.implied_volatility is not None and contract.realized_volatility_estimate is not None
-                else None
-            ),
-            "delta": contract.delta,
-            "spread": base_values.spread,
-            "spread_ratio": base_values.spread_ratio,
             **metrics,
-        }
+            }
+        )
+        return payload
 
     return _build
 
@@ -324,11 +264,11 @@ def run_sell_call_scan(
     max_dte: int = DEFAULT_SELL_CALL_WINDOW.max_dte,
     min_strike: float | None = None,
     max_strike: float | None = None,
-    min_strike_cost_multiplier: float = 1.0,
+    min_strike_cost_multiplier: float = 1.02,
     min_annualized_net_return: float | None = None,
     min_net_income: float = 50.0,
-    min_open_interest: float = DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
-    min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
+    min_open_interest: float | None = None,
+    min_volume: float | None = None,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
     event_risk_cfg: dict[str, Any] | None = None,
     score_weights: dict[str, Any] | None = None,
@@ -341,6 +281,8 @@ def run_sell_call_scan(
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> pd.DataFrame:
     """执行 Covered Call 扫描并写出候选 CSV。"""
+    # OI is a formal tie-break only; volume and delta remain display evidence.
+    del min_open_interest, min_volume
     threshold = validate_min_annualized_net_premium_return(
         min_annualized_net_return,
         source="--min-annualized-net-return",
@@ -366,8 +308,8 @@ def run_sell_call_scan(
             max_dte=int(max_dte),
             min_strike=effective_min_strike,
             max_strike=max_strike,
-            min_open_interest=float(min_open_interest),
-            min_volume=float(min_volume),
+            min_open_interest=None,
+            min_volume=None,
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
@@ -421,11 +363,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-dte", type=int, default=DEFAULT_SELL_CALL_WINDOW.max_dte)
     parser.add_argument("--min-strike", type=float, default=None)
     parser.add_argument("--max-strike", type=float, default=None)
-    parser.add_argument("--min-strike-cost-multiplier", type=float, default=1.0, help="effective min strike also floors at avg_cost multiplied by this value")
+    parser.add_argument("--min-strike-cost-multiplier", type=float, default=1.02, help="effective min strike also floors at avg_cost multiplied by this value")
     parser.add_argument("--min-annualized-net-return", type=float, default=None, help="required; min annualized net premium return in [0,1]")
     parser.add_argument("--min-net-income", type=float, default=50.0)
-    parser.add_argument("--min-open-interest", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest)
-    parser.add_argument("--min-volume", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_volume)
+    parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
+    parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
     parser.add_argument("--event-risk-enabled", dest="event_risk_enabled", action="store_true", default=None)
     parser.add_argument("--no-event-risk-enabled", dest="event_risk_enabled", action="store_false")

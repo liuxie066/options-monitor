@@ -13,6 +13,38 @@ def _add_repo_to_syspath() -> Path:
     return base
 
 
+def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignore[no-untyped-def]
+    market = "HK" if currency == "HKD" else "US"
+    owner = "HK.00700" if market == "HK" else "US.NVDA"
+    row = {
+        "symbol": "0700.HK" if market == "HK" else "NVDA",
+        "market": market,
+        "option_type": mode,
+        "expiration": "2026-06-19",
+        "contract_symbol": f"{owner}-{mode}",
+        "currency": currency,
+        "dte": 21,
+        "strike": 100.0,
+        "spot": 110.0,
+        "bid": 1.0,
+        "ask": 1.2,
+        "price_tick": 0.01,
+        "implied_volatility": 0.30,
+        "term_matched_rv": 0.20,
+        "term_matched_rv_status": "ready",
+        "underlier_observation_status": "ready",
+        "option_standard_type": "STANDARD",
+        "stock_owner": owner,
+        "stock_type": "DRVT",
+        "chain_multiplier": 100,
+        "snapshot_multiplier": 100,
+        "multiplier": 100,
+        "opening_contract_status": "ready",
+    }
+    row.update(overrides)
+    return row
+
+
 def test_calc_futu_hk_option_fee_applies_minimum_commission_and_system_fee() -> None:
     _add_repo_to_syspath()
     from domain.domain.fee_calc import calc_futu_hk_option_fee
@@ -194,22 +226,21 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     from src.application.scan_sell_put import compute_metrics
 
     row = pd.Series(
-        {
-            "market": "US",
-            "quote_update_time": "2026-04-01 10:59:00",
-            "mid": 0.5,
-            "strike": 90.0,
-            "spot": 100.0,
-            "dte": 14,
-            "currency": "USD",
-            "multiplier": 100,
-        }
+        _formal_metric_row(
+            mode="put",
+            currency="USD",
+            bid=0.49,
+            ask=0.51,
+            strike=90.0,
+            spot=100.0,
+            dte=14,
+        )
     )
 
     out = compute_metrics(row, now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc))
 
     assert out is not None
-    assert round(out["futu_fee"], 6) == round(1.99 + 0.3 + 0.013 + 0.02 + 0.18 + 0.0003 + 0.01 + 0.01, 6)
+    assert round(out["futu_fee"], 6) == round(1.99 + 0.6 + 0.013 + 0.02 + 0.18 + 0.0003 + 0.01 + 0.01, 6)
     assert round(out["net_income"], 6) == round(50.0 - out["futu_fee"], 6)
 
 
@@ -218,14 +249,15 @@ def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
     from src.application.scan_sell_call import compute_metrics
 
     row = pd.Series(
-        {
-            "mid": 8.0,
-            "strike": 480.0,
-            "spot": 500.0,
-            "dte": 21,
-            "currency": "HKD",
-            "multiplier": 100,
-        }
+        _formal_metric_row(
+            mode="call",
+            currency="HKD",
+            bid=7.9,
+            ask=8.1,
+            strike=480.0,
+            spot=500.0,
+            dte=21,
+        )
     )
 
     out = compute_metrics(row, avg_cost=430.0)
@@ -233,5 +265,5 @@ def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
     assert out is not None
     assert out["futu_fee"] == 21.0
     assert out["net_income"] == 779.0
-    assert out["annualized_net_premium_return"] == round((779.0 / (500.0 * 100)) * (365 / 21), 6)
-    assert out["if_exercised_total_return"] == round((((480.0 - 430.0) * 100) + 779.0) / (430.0 * 100), 6)
+    assert round(out["annualized_net_premium_return"], 6) == round((779.0 / (500.0 * 100)) * (365 / 21), 6)
+    assert round(out["if_exercised_total_return"], 6) == round((((480.0 - 430.0) * 100) + 779.0) / (430.0 * 100), 6)

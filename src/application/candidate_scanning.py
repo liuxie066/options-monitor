@@ -24,7 +24,9 @@ from domain.domain.engine import (
     empty_reject_log_dataframe,
 )
 from domain.domain.candidate_defaults import normalize_event_risk_mode
+from domain.domain.insurance_underwriting import INSURANCE_UNDERWRITING_PROFILE
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
+from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -286,7 +288,11 @@ def _build_all_decision_context(
         max_spread_ratio=config.max_spread_ratio,
         open_interest=base_values.open_interest,
         volume=base_values.volume,
-        spread_ratio=base_values.spread_ratio,
+        spread_ratio=(
+            metrics.get("spread_ratio")
+            if metrics.get("spread_ratio") is not None
+            else base_values.spread_ratio
+        ),
     )
     return {
         "candidate_id": _candidate_id(
@@ -578,7 +584,11 @@ def run_candidate_scan(
                 max_spread_ratio=config.max_spread_ratio,
                 open_interest=base_values.open_interest,
                 volume=base_values.volume,
-                spread_ratio=base_values.spread_ratio,
+                spread_ratio=(
+                    metrics.get("spread_ratio")
+                    if metrics.get("spread_ratio") is not None
+                    else base_values.spread_ratio
+                ),
             )
             replay_fields = _contract_replay_fields(
                 contract,
@@ -624,9 +634,18 @@ def run_candidate_scan(
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = deps.annotate_event_risk_fn(out, base_dir, event_risk_cfg)
+        out = annotate_candidates_with_earnings_evidence(
+            out,
+            input_root=config.input_root,
+        )
+        formal_opening = (
+            str(config.strategy_profile or "").strip().lower()
+            == INSURANCE_UNDERWRITING_PROFILE
+        )
+        if not formal_opening:
+            out = deps.annotate_event_risk_fn(out, base_dir, event_risk_cfg)
         event_mode = normalize_event_risk_mode((event_risk_cfg or {}).get("mode"))
-        if event_mode == "reject":
+        if not formal_opening and event_mode == "reject":
             kept_rows: list[dict[str, Any]] = []
             out_columns = list(out.columns)
             for candidate in out.to_dict("records"):
@@ -675,7 +694,11 @@ def run_candidate_scan(
                 )
             out = pd.DataFrame(kept_rows, columns=out_columns)
 
-    if not out.empty:
+    should_rank_here = (
+        str(config.strategy_profile or "").strip().lower()
+        != INSURANCE_UNDERWRITING_PROFILE
+    )
+    if not out.empty and should_rank_here:
         ranked_rows = rank_candidate_rows(
             out.to_dict("records"),
             mode=config.mode,

@@ -14,13 +14,13 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.event_risk_filter import annotate_candidates_with_event_risk
+from domain.domain.engine import CandidateCalculationError, calculate_opening_candidate_metrics
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_PUT_WINDOW,
     resolve_event_risk_config,
 )
 from domain.domain.sell_put_config import validate_min_annualized_net_return
-from domain.domain.quote_freshness import evaluate_option_quote_freshness
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
@@ -41,7 +41,11 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "bid",
     "ask",
     "last_price",
+    "raw_mid",
     "mid",
+    "raw_spread",
+    "price_tick",
+    "sell_limit",
     "quote_update_time",
     "quote_observed_at_utc",
     "quote_age_seconds",
@@ -53,20 +57,40 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "realized_volatility_60",
     "realized_volatility_120",
     "realized_volatility_estimate",
+    "term_matched_rv",
+    "term_matched_rv_status",
+    "term_matched_rv_reason",
+    "term_matched_rv_input_hash",
     "iv_rv_ratio",
     "iv_minus_rv",
     "delta",
     "spread",
     "spread_ratio",
+    "gross_premium",
     "gross_income",
+    "estimated_full_sell_fees",
     "futu_fee",
+    "fee_schedule_version",
+    "fee_basis",
+    "fee_schedule_url",
+    "net_premium",
     "net_income",
+    "net_premium_cny",
+    "assignment_notional",
+    "net_cash_basis",
+    "period_net_return",
     "otm_pct",
     "cash_basis",
     "period_net_return_on_cash_basis",
     "breakeven",
     "annualized_net_return_on_strike",
     "annualized_net_return_on_cash_basis",
+    "earnings_evidence_status",
+    "earnings_reason_code",
+    "earnings_has_event",
+    "earnings_event_dates",
+    "earnings_snapshot_hash",
+    "earnings_artifact_path",
     "event_flag",
     "event_types",
     "event_dates",
@@ -77,7 +101,6 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "reject_stage_candidate",
 ]
 
-from domain.domain.fee_calc import calc_futu_option_fee
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 
@@ -93,69 +116,22 @@ def compute_metrics(
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    quote_freshness = evaluate_option_quote_freshness(
-        market=contract.market,
-        update_time=contract.quote_update_time,
-        now_utc=now_utc,
-        max_age_seconds=300,
+    del now_utc
+    try:
+        metrics = calculate_opening_candidate_metrics(
+            contract.to_gate_payload(),
+            mode="put",
+        )
+    except CandidateCalculationError:
+        return None
+    metrics.update(
+        {
+            "quote_observed_at_utc": contract.quote_observed_at_utc,
+            "quote_age_seconds": contract.quote_age_seconds,
+            "quote_freshness_status": contract.opening_contract_status,
+        }
     )
-    if not quote_freshness.rank_eligible:
-        return None
-    mid = contract.mid
-    strike = contract.strike
-    spot = contract.spot
-    dte = contract.dte
-
-    if mid is None or strike is None or spot is None or dte is None:
-        return None
-    if dte <= 0:
-        return None
-    if mid <= 0 or strike <= 0 or spot <= 0:
-        return None
-    if strike > spot:
-        return None
-
-    multiplier = contract.multiplier
-    m = int(multiplier) if multiplier and multiplier > 0 else None
-    if not m:
-        return None
-
-    gross_income = mid * m
-    fee = calc_futu_option_fee(
-        contract.currency,
-        mid,
-        contracts=1,
-        multiplier=m,
-        is_sell=True,
-    )
-    net_income = gross_income - fee
-    if net_income <= 0:
-        return None
-
-    otm_pct = (spot - strike) / spot
-    cash_basis = strike * m - net_income
-    if cash_basis <= 0:
-        return None
-
-    annualized_net_return_on_cash_basis = (net_income / cash_basis) * (365 / dte)
-    period_net_return_on_cash_basis = net_income / cash_basis
-    annualized_net_return_on_strike = (net_income / (strike * m)) * (365 / dte)
-    breakeven = strike - net_income / m
-
-    return {
-        "quote_observed_at_utc": quote_freshness.observed_at_utc,
-        "quote_age_seconds": round(float(quote_freshness.age_seconds or 0.0), 3),
-        "quote_freshness_status": quote_freshness.status,
-        "gross_income": round(gross_income, 6),
-        "futu_fee": round(fee, 6),
-        "net_income": round(net_income, 6),
-        "otm_pct": round(otm_pct, 6),
-        "cash_basis": round(cash_basis, 6),
-        "breakeven": round(breakeven, 6),
-        "period_net_return_on_cash_basis": round(period_net_return_on_cash_basis, 6),
-        "annualized_net_return_on_strike": round(annualized_net_return_on_strike, 6),
-        "annualized_net_return_on_cash_basis": round(annualized_net_return_on_cash_basis, 6),
-    }
+    return metrics
 
 
 def explain_metrics_rejection(
@@ -164,56 +140,11 @@ def explain_metrics_rejection(
     now_utc: datetime | None = None,
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
-    quote_freshness = evaluate_option_quote_freshness(
-        market=contract.market,
-        update_time=contract.quote_update_time,
-        now_utc=now_utc,
-        max_age_seconds=300,
-    )
-    if not quote_freshness.rank_eligible:
-        return {
-            "rule": quote_freshness.status,
-            "metric_value": quote_freshness.age_seconds,
-            "threshold": 300,
-            "message": "OpenD quote is not eligible for active-session ranking",
-        }
-    mid = contract.mid
-    strike = contract.strike
-    spot = contract.spot
-    dte = contract.dte
-    if mid is None or strike is None or spot is None or dte is None:
-        return {"rule": "metrics_input_missing", "message": "mid, strike, spot, or dte missing"}
-    if dte <= 0:
-        return {"rule": "metrics_dte_non_positive", "metric_value": dte, "threshold": 0, "message": "dte must be positive"}
-    if mid <= 0:
-        return {"rule": "metrics_mid_non_positive", "metric_value": mid, "threshold": 0, "message": "mid must be positive"}
-    if strike <= 0:
-        return {"rule": "metrics_strike_non_positive", "metric_value": strike, "threshold": 0, "message": "strike must be positive"}
-    if spot <= 0:
-        return {"rule": "metrics_spot_non_positive", "metric_value": spot, "threshold": 0, "message": "spot must be positive"}
-    if strike > spot:
-        return {"rule": "metrics_put_strike_above_spot", "metric_value": strike, "threshold": spot, "message": "put strike must not exceed spot"}
-
-    multiplier = contract.multiplier
-    m = int(multiplier) if multiplier and multiplier > 0 else None
-    if not m:
-        return {"rule": "metrics_multiplier_invalid", "metric_value": multiplier, "threshold": 0, "message": "multiplier must be positive"}
-
-    gross_income = mid * m
-    fee = calc_futu_option_fee(
-        contract.currency,
-        mid,
-        contracts=1,
-        multiplier=m,
-        is_sell=True,
-    )
-    net_income = gross_income - fee
-    if net_income <= 0:
-        return {"rule": "metrics_net_income_non_positive", "metric_value": net_income, "threshold": 0, "message": "net income must be positive"}
-
-    cash_basis = strike * m - net_income
-    if cash_basis <= 0:
-        return {"rule": "metrics_cash_basis_non_positive", "metric_value": cash_basis, "threshold": 0, "message": "cash basis must be positive"}
+    del now_utc
+    try:
+        calculate_opening_candidate_metrics(contract.to_gate_payload(), mode="put")
+    except CandidateCalculationError as exc:
+        return exc.to_payload()
     return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
 
 
@@ -222,47 +153,13 @@ def _build_candidate_row(
     base_values: CandidateBaseValues,
     metrics: dict[str, Any],
 ) -> dict[str, Any] | None:
-    return {
-        "symbol": contract.symbol,
-        "market": contract.market,
-        "expiration": contract.expiration,
-        "dte": base_values.dte,
-        "contract_symbol": contract.contract_symbol,
-        "multiplier": contract.multiplier,
-        "currency": contract.currency,
-        "strike": contract.strike,
-        "spot": contract.spot,
-        "bid": contract.bid,
-        "ask": contract.ask,
-        "last_price": contract.last_price,
-        "mid": contract.mid,
-        "quote_update_time": contract.quote_update_time,
-        "open_interest": base_values.open_interest,
-        "volume": base_values.volume,
-        "implied_volatility": contract.implied_volatility,
-        "realized_volatility_20": contract.realized_volatility_20,
-        "realized_volatility_60": contract.realized_volatility_60,
-        "realized_volatility_120": contract.realized_volatility_120,
-        "realized_volatility_estimate": contract.realized_volatility_estimate,
-        "iv_rv_ratio": (
-            round(contract.implied_volatility / contract.realized_volatility_estimate, 6)
-            if (
-                contract.implied_volatility is not None
-                and contract.realized_volatility_estimate is not None
-                and contract.realized_volatility_estimate > 0
-            )
-            else None
-        ),
-        "iv_minus_rv": (
-            round(contract.implied_volatility - contract.realized_volatility_estimate, 6)
-            if contract.implied_volatility is not None and contract.realized_volatility_estimate is not None
-            else None
-        ),
-        "delta": contract.delta,
-        "spread": base_values.spread,
-        "spread_ratio": base_values.spread_ratio,
-        **metrics,
-    }
+    payload = contract.to_gate_payload()
+    payload.pop("mode", None)
+    payload["dte"] = base_values.dte
+    payload["open_interest"] = base_values.open_interest
+    payload["volume"] = base_values.volume
+    payload.update(metrics)
+    return payload
 
 
 def _earnings_event_flag(row: dict[str, Any]) -> bool:
