@@ -341,8 +341,23 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "annualized_net_return_on_cash_basis" if mode_norm == "put" else "annualized_net_premium_return",
         "annualized_return",
     )
+    dte = _first_number(row, "dte")
+    period_return = _first_number(
+        row,
+        "period_net_return_on_cash_basis",
+        "period_net_return",
+    )
+    if (
+        mode_norm == "put"
+        and period_return is None
+        and annualized_return is not None
+        and dte is not None
+        and dte > 0
+    ):
+        period_return = annualized_return * dte / 365.0
     score_components = {
         "annualized_return": _sort_number(annualized_return),
+        "period_net_return": _sort_number(period_return),
         "premium_edge_score": _sort_number(row.get("premium_edge_score")),
         margin_key: _sort_number(row.get(margin_key)),
         "concentration_score": _sort_number(row.get("concentration_score")),
@@ -351,6 +366,7 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
     }
     score_inputs = {
         "annualized_return": annualized_return,
+        "period_net_return": period_return,
         "net_income": _first_number(row, "net_income_cny", "net_credit", "net_income"),
         "spread_ratio": _first_number(row, "spread_ratio"),
         "iv_rv_ratio": _first_number(row, "iv_rv_ratio"),
@@ -368,10 +384,12 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "strategy_score": _sort_number(row.get("premium_edge_score")),
         "strategy_score_role": "diagnostic_only",
         "annualized_return": score_inputs["annualized_return"],
+        "period_net_return": score_inputs["period_net_return"],
         "net_income": score_inputs["net_income"],
         "score_components": score_components,
         "score_component_labels": {
             "annualized_return": "年化净收益",
+            "period_net_return": "持有期净收益",
             "premium_edge_score": "承保补偿诊断分",
             margin_key: margin_label,
             "concentration_score": "集中度",
@@ -381,11 +399,24 @@ def _explain_underwriting_rank(row: dict[str, Any], *, mode: str) -> dict[str, A
         "score_inputs": score_inputs,
         "score_warnings": [],
         "risk_notes": [],
-        "primary_drivers": ["annualized_return", margin_key, "concentration_score"],
-        "primary_driver_labels": ["年化净收益", margin_label, "集中度"],
+        "primary_drivers": (
+            ["period_net_return", margin_key, "concentration_score"]
+            if mode_norm == "put"
+            else ["annualized_return", margin_key, "concentration_score"]
+        ),
+        "primary_driver_labels": (
+            ["持有期净收益", margin_label, "集中度"]
+            if mode_norm == "put"
+            else ["年化净收益", margin_label, "集中度"]
+        ),
         "rank_reason": (
-            f"硬门槛通过后先按年化净收益排序；收益相同时再比较{margin_label}和集中度，"
-            "随后比较价差、未平仓量和净收入"
+            (
+                f"硬门槛通过后按持有期净收益形成 0.20 个百分点收益带；同标的带内依次比较"
+                f"{margin_label}、价差、未平仓量和净收入；跨标的代表合约带内先比较接货后集中度，"
+                f"再比较{margin_label}、价差、未平仓量和净收入"
+                if mode_norm == "put"
+                else f"硬门槛通过后先按年化净收益排序；收益相同时再比较{margin_label}和集中度，随后比较价差、未平仓量和净收入"
+            )
         ),
     }
 

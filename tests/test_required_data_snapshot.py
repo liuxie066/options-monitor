@@ -205,8 +205,8 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
             "realized_volatility": {
                 "status": "ok",
                 "realized_volatility_20": 0.2,
-                "realized_volatility_60": None,
-                "realized_volatility_120": None,
+                "realized_volatility_60": 0.2,
+                "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
             },
             "source_observed_at": observed_at,
@@ -225,8 +225,8 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
                 "ask": 2.2,
                 "implied_volatility": 0.3,
                 "realized_volatility_20": 0.2,
-                "realized_volatility_60": None,
-                "realized_volatility_120": None,
+                "realized_volatility_60": 0.2,
+                "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
                 "multiplier": 100,
             }

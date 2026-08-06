@@ -19,7 +19,7 @@
 
 两类候选共享大体流程，但关注点不同：
 
-- **Sell Put**：IV/RV 波动率边际、现金担保能力、年化净收益率、单笔净收益、strike 安全距离、流动性
+- **Sell Put**：愿意接货的 strike 边界、IV/RV 承保边际、完整接货资金能力、持有周期净收益、财报风险和执行质量
 - **Covered Call**：可覆盖股数、IV/RV 波动率边际、strike 上行距离、年化权利金收益、单笔净收益、流动性
 
 ---
@@ -87,7 +87,9 @@
 - `multiplier`
 - `currency`
 - `implied_volatility`
+- `realized_volatility_20/60/120`
 - `realized_volatility_estimate`
+- OpenD 原始 `quote_update_time`
 
 缺少关键字段的合约会被拒绝。
 
@@ -99,9 +101,14 @@
 主要硬约束包括：
 
 - `min_dte <= dte <= max_dte`
-- `min_strike <= strike <= max_strike`
-- put 必须满足基本 moneyness 约束
-- 当 `sell_put.strategy=insurance_underwriting` 时，必须有可评估的收益、IV/RV、事件风险、现金需求和流动性输入
+- `min_strike <= strike <= min(max_strike, spot)`；`max_strike` 缺省时以 spot 为上界
+- 有效双边报价：`bid > 0`、`ask > 0`、`ask >= bid`
+- `(ask-bid)/mid <= 40%`
+- 交易时段内 OpenD 原始 `update_time` 不超过 5 分钟
+- 最低年化净收益和最低单笔净收入
+- `IV/RV >= 1.10` 且 `IV-RV >= 0.05`
+- 到期前无财报，且财报事件覆盖完整、来源可用
+- 账户能够承担完整 `strike * multiplier` 接货金额
 
 ### Covered Call
 主要硬约束包括：
@@ -117,12 +124,14 @@
 - 抓取层与扫描层已分离：
   - 扫描层仍按 `min_dte/max_dte/min_strike/max_strike` 做 stage1 硬过滤
   - 抓取层会先为 put / call 分别规划 expiration 与 strike 窗口，再尽量合并请求
-- put / call 现在按同一套“边界模式”规划窗口，只是方向相反：
-  - `sell_put` 的近端边界是 `max_strike`；若只给 `max_strike`，抓取层向下扩 `20%`
+- put / call 分别按策略方向规划窗口：
+  - `sell_put` 先取 `effective_max_strike=min(configured max, OpenD spot)`；未配置 max 时用 spot，再从该上界向下召回 `20%`
   - Covered Call 的近端边界是 `min_strike`；若只给 `min_strike`，抓取层向上扩 `20%`
 - `min_strike=0` 这种 sentinel 语义已移除；未设置边界时请直接省略该字段
 - call 未配置任何 strike 边界时，抓取层会退回到默认 spot 窗口 `[spot*1.03, spot*1.20]`
-- 抓取层允许加 buffer 防漏抓，但 buffer 不改变扫描硬约束语义
+- Sell Put 显式的更严格 `min_strike` 继续生效
+- OpenD spot 缺失时，Sell Put 召回 fail closed，不回退旧 required-data CSV，也不只凭配置 max 猜测窗口
+- 抓取层窗口不改变扫描硬约束语义
 
 ---
 
@@ -153,18 +162,15 @@ Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。收益门�
 
 ---
 
-## 3.4 流动性门槛
+## 3.4 Sell Put 流动性边界
 
-当前流动性相关门槛主要是：
+Sell Put 只保留有效双边报价和 `max_spread_ratio=0.40` 两个流动性硬门槛。
 
-- `min_open_interest`
-- `min_volume`
-- `max_spread_ratio`
+- OI 不设最低硬门槛，只在收益接近时作为次级排序依据；缺失值明确保留，并排在有可靠 OI 的可比候选之后。
+- 当日 volume 不设硬门槛，也不参与正式排序，只作为观察字段展示。
+- 旧的 `min_open_interest` / `min_volume` Python 与 CLI 参数只为兼容保留，对当前 Sell Put 扫描不起作用。
 
-### 约束
-- 全局模板层允许的硬过滤主要围绕这几个字段
-- symbol 级风险字段必须使用当前配置 schema
-- 具体门禁由 `src/application/config_validator.py` 保证
+Covered Call 与 Combo Yield 仍有各自独立的流动性合同，不能从 Sell Put 推导。
 
 ---
 
@@ -186,7 +192,8 @@ Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。收益门�
 
 验收边界：
 - 同一 tick 内同一 symbol 跨账户、Sell Put、Covered Call、Yield Enhancement 只能走同一份 resolved 事件快照；每个 provider 是否发起获取由 provider chain 和缓存状态决定
-- `ok + events=[]` 表示可信无事件；`error` / `stale` 不能伪装成无事件
+- Sell Put 只把财报作为本轮事件硬门槛；非财报事件仍可展示，但不会自行升级为拒绝规则
+- `ok + earnings coverage=complete + events=[]` 才能证明当前快照内无财报；`error`、`stale` 或 earnings coverage 不完整不能伪装成无财报
 - `ok_with_fallback` 表示主源失败但备源成功，必须在 snapshot 中保留各 provider 的 `source_results`
 - `event_source_fail_closed=true` 时，`error` / `stale` 默认不能进入承保推荐
 - `runtime_status` 暴露最近一轮 `event_prefetch` 摘要，包括 fetch、cache、stale、rate limit 和 error 计数
@@ -195,27 +202,24 @@ Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。收益门�
 
 ## 4. Sell Put 的现金担保规则
 
-这部分是最容易误解的地方。
+收益率与接货能力使用不同资金口径：
 
-当前行为不是“完全在 candidate_engine 的统一阶段里完成”。
+```text
+period_net_return = net_income / (strike * multiplier - net_income)
+cash_required_native = strike * multiplier
+```
 
-更准确地说：
+接货能力不抵扣权利金。已有开放 Short Put 占用的担保现金先按币种扣除，不能重复使用。
 
-- 先跑 Sell Put 基础扫描
-- 再在 `src/application/sell_put_steps.py` 里结合账户现金 context 做补充过滤
+现金转换规则：
 
-关键逻辑：
+- 合约结算币种现金按 100% 计入；
+- 其他币种在可靠汇率折算后按 95% 计入；
+- 不设置额外通用安全缓冲；
+- 汇率最多允许 24 小时；只有过期汇率时，跨币种现金不参与硬门槛，但同结算币种现金仍可使用；
+- 输出以 `cash_required_native`、`cash_free_effective_native`、`cash_native_currency` 和 `cash_fx_status` 记录计算口径；汇率过期显式标为 `fx_stale`。
 
-- 优先看 `cash_required_cny` vs `cash_free_cny`
-- 如果没有 CNY 口径，再 fallback 到 USD 口径
-- 超过现金可用额度的候选会在后处理阶段被剔除
-
-### 重要含义
-因此，Sell Put 的现金担保约束：
-
-- 是真实生效的
-- 但不是完全在单一 Engine 阶段内完成的
-- 某些 reject log 口径与“纯 Engine 硬过滤”并不完全一致
+扫描阶段用同一套 native-currency 结果执行现金硬门槛；后续 cash enrichment 负责把相同事实写入候选 CSV 和 trace，不再创建另一套 CNY/USD 决策逻辑。旧 CNY/USD 字段只保留兼容读取。
 
 ---
 
@@ -226,7 +230,7 @@ Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。收益门�
 当前共享评估由 `domain/domain/insurance_underwriting.py` 负责，规则分三组：
 
 - 波动率边际：`IV/RV >= min_iv_rv_ratio` 且 `IV - RV >= min_iv_minus_rv`
-- 事件风险：默认拒绝 expiry 前有财报等事件的候选；事件源不可用时 fail closed
+- 事件风险：Sell Put 拒绝 expiry 前财报；事件源不可用、过期或 earnings coverage 不完整时 fail closed
 - 收益底线：年化收益率和单笔净收入必须达到最低承保价格
 
 价格边界在基础扫描阶段作为硬门槛执行：Sell Put 的 `strike <= min(max_strike, spot)`，Covered Call 的 `strike >= effective_min_strike`。门槛通过后，价格距离不再形成第二套软门禁。
@@ -254,9 +258,11 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 ### Sell Put
 
 1. 硬门槛全部通过。
-2. 每个标的选择年化净收益率最高的合约。
-3. 不同标的继续按年化净收益率降序。
-4. 年化净收益率相同时，净接货折价和集中度只作 tie-break；再用流动性、净收益额和合约标识稳定排序。
+2. 主排序收益使用持有周期非年化净收益：`net_income / (strike * multiplier - net_income)`。
+3. 每轮以剩余候选最高收益为锚点，与其相差不超过 `0.002` 的候选组成一个收益区间；不用违反传递性的两两比较器。
+4. 同一标的的收益区间内依次比较：净接货折价、较小 spread、可靠且较大 OI、较高净收入、合约标识；集中度不参与同标的选约。
+5. 每个标的先选出代表合约。不同标的的收益区间内依次比较：较低接货后 symbol concentration、净接货折价、spread、OI、净收入、symbol 和合约标识。
+6. 年化净收益只保留为最低资金效率硬门槛；delta、volume、诊断 score 和研究 score 不改变正式排序。
 
 ### Covered Call
 
@@ -265,7 +271,7 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 3. 不同标的继续按年化净权利金收益率降序。
 4. 年化净权利金收益率相同时，strike 上行距离和集中度只作 tie-break；再用流动性、净收益额和合约标识稳定排序。
 
-最终 CSV、summary 和 alerts 使用与当前 opening profile 对应的排序核心。
+最终 CSV、summary 和 alerts 使用 `candidate_engine.rank_candidate_rows()` 这一套排序核心。application adapter、报表和通知层不得再实现平行排序。
 
 需要解释“为什么这个候选排在前面”时，用同一套排序核心：
 
@@ -273,11 +279,20 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 - 历史 `return_first` artifact 仍可由兼容解析和研究工具解释，但不能作为新开仓 profile
 - Tool Gateway 调用方可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
 
-`candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选。
+`candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选，并把 Sell Put 的持有周期收益显示为主排序依据。
 
 ---
 
-## 8. 当前真实代码入口
+## 8. OpenD 数据语义
+
+- OpenD market snapshot 的 `option_implied_volatility` 是百分号前数值，例如 `20` 表示 `20%`；适配层固定除以 100，领域层不再按数值大小猜单位。
+- RV 从 OpenD 前复权日线收盘价计算。DTE `<=30` 使用 70% RV20 + 30% RV60；`31–60` 使用 30%/50%/20%；`61–90` 使用 20%/40%/40%。任一所需窗口缺失即 fail closed，不重新归一化。
+- required-data CSV 必须保留 `market` 和 OpenD 原始 `quote_update_time`。OpenD 文档说明该字段是“当前价更新时间”，并非 bid/ask 各自的时间戳；当前策略把它作为 provider 新鲜度代理，同时仍要求有效 bid/ask 和 spread 门槛，不能把它表述成逐字段报价时间证明。
+- OpenD `update_time` 的无时区字符串按市场本地时区解释：美股为美东时间，港股为香港/北京时间。
+
+---
+
+## 9. 当前真实代码入口
 
 如果你要从代码追当前行为，优先看：
 
@@ -305,7 +320,7 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 
 ---
 
-## 9. 数值真源
+## 10. 数值真源
 
 这份文档描述规则边界；具体阈值以运行配置和代码默认值为准。
 
@@ -314,6 +329,8 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 - 看配置文件
 - 看 `scripts/*_config.py`
 - 看 `candidate_engine.py`
+
+当前 Sell Put 稳定常量包括：最大相对价差 `0.40`、交易时段报价年龄 `300` 秒、收益接近阈值 `0.002`、非结算币种现金折扣 `0.95`、FX 最大年龄 `24` 小时。symbol DTE 和 strike 边界继续来自当前配置。
 
 ---
 

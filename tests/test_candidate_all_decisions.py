@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -25,6 +26,8 @@ def _write_required_data(
     parsed.mkdir(parents=True)
     defaults: dict[str, object] = {
         "symbol": "NVDA",
+        "market": "US",
+        "quote_update_time": "2026-04-01 10:59:00",
         "option_type": option_type,
         "expiration": "2026-08-21",
         "contract_symbol": f"NVDA-20260821-{option_type.upper()}-100",
@@ -165,6 +168,7 @@ def test_all_decisions_sidecar_does_not_change_opening_csv_or_reject_log(
         "min_volume": 0,
         "max_spread_ratio": 1,
         "event_risk_cfg": {"enabled": False, "mode": "warn"},
+        "quote_freshness_now_utc": datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         "quiet": True,
     }
     run_sell_put_scan(output=baseline_output, **common)

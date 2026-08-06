@@ -276,7 +276,7 @@ def test_required_data_plan_fails_closed_when_trading_date_cannot_be_resolved(
     assert "calendar unavailable" in str(plan.expiration_discovery.error)
 
 
-def test_tcom_put_fetch_window_falls_back_to_configured_max_without_spot(monkeypatch, tmp_path: Path) -> None:
+def test_tcom_put_fetch_window_fails_closed_without_opend_spot(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
@@ -297,9 +297,12 @@ def test_tcom_put_fetch_window_falls_back_to_configured_max_without_spot(monkeyp
         fetch_port=11111,
     )
 
-    put_plan = next(item for item in plan.side_plans if item.option_type == "put")
-    assert put_plan.strike_window.min_strike == 36.0
-    assert put_plan.strike_window.max_strike == 45.0
+    assert plan.projection_outcome == "provider_error"
+    assert plan.side_plans == []
+    assert plan.merged_specs == []
+    assert plan.spot_reference is None
+    assert plan.spot_observation_complete is False
+    assert plan.spot_observation_error == "OpenD spot unavailable for TCOM sell-put recall"
 
 
 def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_path: Path) -> None:
@@ -360,7 +363,7 @@ def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, t
     assert plan.side_plans[0].strike_window.max_strike == 79.8
 
 
-def test_fetch_plan_falls_back_to_existing_spot_when_live_spot_missing(monkeypatch, tmp_path: Path) -> None:
+def test_fetch_plan_does_not_reuse_stale_required_data_spot(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
     required_data_dir = tmp_path / "required_data"
@@ -383,8 +386,11 @@ def test_fetch_plan_falls_back_to_existing_spot_when_live_spot_missing(monkeypat
         fetch_port=11111,
     )
 
-    assert plan.spot_reference == 80.15
-    assert plan.side_plans[0].strike_window.max_strike == 80.0
+    assert plan.spot_reference is None
+    assert plan.projection_outcome == "provider_error"
+    assert plan.side_plans == []
+    assert plan.merged_specs == []
+    assert plan.spot_observation_error == "OpenD spot unavailable for NVDA sell-put recall"
 
 
 def test_sell_put_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
@@ -664,7 +670,7 @@ def test_sell_put_max_strike_only_derives_far_bound_from_near_bound(monkeypatch,
     assert put_plan.strike_window.base_min_strike == 368.0
     assert put_plan.strike_window.min_strike == 368.0
     assert put_plan.strike_window.max_strike == 460.0
-    assert "far bound from configured near bound" in put_plan.planning_reason
+    assert "min(configured max, OpenD spot)" in put_plan.planning_reason
 
 
 def test_sell_put_min_strike_only_keeps_direct_lower_bound(monkeypatch, tmp_path: Path) -> None:
@@ -813,7 +819,7 @@ def test_required_data_plan_preserves_discovery_failure_type(
             raise discovery_value
         return discovery_value
 
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(mod, "list_option_expirations", discover)
     monkeypatch.setattr(
         opend_utils,
@@ -897,7 +903,7 @@ def test_required_data_plan_memoizes_discovery_by_physical_binding(
             pytest.fail("cached discovery re-read the trading date")
         return date(2026, 7, 30)
 
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(mod, "list_option_expirations", discover)
     monkeypatch.setattr(
         opend_utils,
@@ -936,6 +942,7 @@ def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    import src.application.opend_utils as opend_utils
     import src.application.required_data_planning as mod
 
     spot_calls: list[str] = []
@@ -945,6 +952,11 @@ def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
         return None
 
     monkeypatch.setattr(mod, "get_underlier_spot", observe_spot)
+    monkeypatch.setattr(
+        opend_utils,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 30),
+    )
     monkeypatch.setattr(
         mod,
         "list_option_expirations",
@@ -974,11 +986,16 @@ def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
 
     assert spot_calls == ["NVDA"]
     assert list(spot_cache) == [
-        ("NVDA", "futu", "opend.example", 11111, "2026-04-30")
+        ("NVDA", "futu", "opend.example", 11111, "2026-07-30")
     ]
     assert list(spot_cache.values()) == [None]
     assert all(plan.spot_reference is None for plan in plans)
-    assert all(plan.spot_observation_complete is True for plan in plans)
+    assert all(plan.spot_observation_complete is False for plan in plans)
+    assert all(plan.projection_outcome == "provider_error" for plan in plans)
+    assert all(
+        plan.spot_observation_error == "OpenD spot unavailable for NVDA sell-put recall"
+        for plan in plans
+    )
 
 
 def test_required_data_plan_rejects_cached_discovery_date_drift_without_io(
@@ -1166,7 +1183,7 @@ def test_strategy_merge_retains_interior_position_exact_strike(
 
     assert len(plan.side_plans) == 1
     side_plan = plan.side_plans[0]
-    assert side_plan.strike_window.base_min_strike == 80.0
+    assert side_plan.strike_window.base_min_strike == 88.0
     assert side_plan.strike_window.base_max_strike == 110.0
     assert side_plan.required_exact_strikes_by_expiration == {
         "2026-08-21": [100.0]
@@ -1216,13 +1233,13 @@ def test_call_max_only_strategy_stays_lower_unbounded_when_merged_with_position(
     }
 
 
-def test_put_min_only_strategy_stays_upper_unbounded_when_merged_with_position(
+def test_put_min_only_strategy_uses_spot_upper_bound_when_merged_with_position(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_planning as mod
 
-    _patch_position_plan_sources(monkeypatch, spot_reference=None)
+    _patch_position_plan_sources(monkeypatch, spot_reference=110.0)
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,
         required_data_dir=tmp_path,
@@ -1250,9 +1267,9 @@ def test_put_min_only_strategy_stays_upper_unbounded_when_merged_with_position(
     side_plan = plan.side_plans[0]
     assert side_plan.option_type == "put"
     assert side_plan.strike_window.min_strike == 80.0
-    assert side_plan.strike_window.max_strike is None
+    assert side_plan.strike_window.max_strike == 110.0
     assert side_plan.strike_window.base_min_strike == 100.0
-    assert side_plan.strike_window.base_max_strike is None
+    assert side_plan.strike_window.base_max_strike == 110.0
     assert side_plan.required_exact_strikes_by_expiration == {
         "2026-08-21": [80.0]
     }
@@ -1273,7 +1290,7 @@ def test_position_expiration_outside_strategy_dte_expands_plan_and_is_coverable(
         build_required_data_expected_fetch_contract,
     )
 
-    _patch_position_plan_sources(monkeypatch, spot_reference=None)
+    _patch_position_plan_sources(monkeypatch, spot_reference=110.0)
     plan = mod.build_required_data_fetch_plan(
         base=tmp_path,
         required_data_dir=tmp_path,

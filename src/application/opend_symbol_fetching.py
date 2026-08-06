@@ -45,7 +45,7 @@ from src.application.opend_market_snapshot_fetching import (
     fetch_option_snapshots,
     get_spot_opend,
 )
-from src.application.opend_normalize import normalize_opend_option_type
+from src.application.opend_normalize import normalize_iv, normalize_opend_option_type
 from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
@@ -88,19 +88,26 @@ def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:
 
 def _required_realized_volatility_error(
     snapshot: RealizedVolatilitySnapshot,
+    *,
+    dtes: list[int | None],
 ) -> dict[str, Any] | None:
     status = str(snapshot.status or "").strip().lower()
-    estimate = to_float(snapshot.rv_estimate)
-    if status == "ok" and estimate is not None and math.isfinite(estimate) and estimate > 0:
+    missing_dtes = [
+        dte
+        for dte in dtes
+        if dte is None
+        or snapshot.to_row_fields(dte=dte).get("realized_volatility_estimate") is None
+    ]
+    if status == "ok" and not missing_dtes:
         return None
     reason = str(snapshot.reason or "").strip()
-    detail = reason or f"status={status or 'missing'}, estimate={snapshot.rv_estimate!r}"
+    detail = reason or f"status={status or 'missing'}, missing_dtes={missing_dtes!r}"
     return {
         "stage": "realized_volatility",
         "error_code": REQUIRED_REALIZED_VOLATILITY_INCOMPLETE,
         "message": f"required realized volatility is incomplete: {detail}",
         "realized_volatility_status": status or "missing",
-        "realized_volatility_estimate": snapshot.rv_estimate,
+        "missing_dtes": missing_dtes,
     }
 
 
@@ -686,14 +693,7 @@ def fetch_symbol_request(
             oi = to_float(oi)
             iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
             iv = to_float(iv)
-            # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
-            try:
-                from src.application.opend_normalize import normalize_iv
-                iv = normalize_iv(iv)
-            except Exception:
-                # fallback: keep existing heuristic
-                if iv is not None and iv > 3.0:
-                    iv = iv / 100.0
+            iv = normalize_iv(iv)
             delta = _pick_col(srow, 'option_delta', 'delta') if srow is not None else None
             delta = to_float(delta)
 
@@ -706,6 +706,7 @@ def fetch_symbol_request(
 
             row = {
                 'symbol': symbol,
+                'market': u.market,
                 'option_type': option_type,
                 'expiration': exp,
                 'dte': dte,
@@ -719,13 +720,16 @@ def fetch_symbol_request(
                 'volume': vol,
                 'open_interest': oi,
                 'implied_volatility': iv,
-                **rv_snapshot.to_row_fields(),
+                **rv_snapshot.to_row_fields(dte=dte),
                 'in_the_money': None,
                 'currency': u.currency,
                 'otm_pct': None,
                 'delta': delta,
                 # contract multiplier (shares per contract)
                 'multiplier': multiplier,
+                # Preserve OpenD's raw business observation time. Candidate
+                # freshness must not substitute fetch completion time.
+                'quote_update_time': _pick_col(srow, 'update_time') if srow is not None else None,
             }
 
             if strike is not None and spot is not None and spot > 0 and option_type in ('put','call'):
@@ -740,7 +744,10 @@ def fetch_symbol_request(
         raw_fetch_errors = fetch_result_meta.get('errors')
         fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
         rv_error = (
-            _required_realized_volatility_error(rv_snapshot)
+            _required_realized_volatility_error(
+                rv_snapshot,
+                dtes=[to_float(row.get("dte")) for row in rows],
+            )
             if request.include_realized_volatility and option_codes
             else None
         )

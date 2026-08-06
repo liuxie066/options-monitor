@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -13,7 +12,6 @@ from domain.domain.insurance_underwriting import (
     rank_underwriting_candidates,
 )
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
-from domain.domain.short_vol_assessment import ShortVolAssessmentConfig
 from domain.domain.symbol_identity import symbol_currency
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
@@ -22,20 +20,7 @@ from src.application.candidate_filter_trace import (
     infer_trace_scope_from_path,
 )
 from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields
-from src.application.strategy_policy import SHORT_VOL_PROFILE, normalize_strategy_profile
 from src.infrastructure.exchange_rates import CurrencyConverter
-
-
-SHORT_VOL_STRATEGY = SHORT_VOL_PROFILE
-
-
-@dataclass(frozen=True)
-class CoveredCallShortVolConfig(ShortVolAssessmentConfig):
-    strategy: str = SHORT_VOL_STRATEGY
-
-    @property
-    def enabled(self) -> bool:
-        return self.strategy == SHORT_VOL_STRATEGY
 
 
 def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> InsuranceUnderwritingConfig:
@@ -60,44 +45,6 @@ def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> Insu
         premium_score_cap=_float_setting_from_sources("premium_score_cap", 1.5, pricing, cfg),
         min_strike=_optional_float_setting(cfg, "min_strike"),
         max_strike=_optional_float_setting(cfg, "max_strike"),
-    )
-
-
-def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> CoveredCallShortVolConfig:
-    cfg = raw if isinstance(raw, dict) else {}
-    raw_strategy = cfg.get("strategy") or cfg.get("strategy_profile")
-    strategy = normalize_strategy_profile(raw_strategy)
-    short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
-    concentration = cfg.get("concentration") if isinstance(cfg.get("concentration"), dict) else {}
-
-    return CoveredCallShortVolConfig(
-        strategy=strategy if strategy == SHORT_VOL_STRATEGY else SHORT_VOL_STRATEGY,
-        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, cfg, short_vol),
-        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, cfg, short_vol),
-        min_abs_delta=_float_setting(short_vol, "min_abs_delta", 0.15),
-        max_abs_delta=_float_setting(short_vol, "max_abs_delta", 0.30),
-        target_abs_delta=_float_setting(short_vol, "target_abs_delta", 0.20),
-        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, cfg, short_vol),
-        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, cfg, short_vol),
-        enable_stress_check=_bool_setting(short_vol, "enable_stress_check", True),
-        stress_down_sigma_multiple=_float_setting(short_vol, "stress_down_sigma_multiple", 2.0),
-        max_put_sigma_stress_loss_nav_pct=_float_setting(short_vol, "max_put_sigma_stress_loss_nav_pct", 0.02),
-        gap_down_pct=_float_setting(short_vol, "gap_down_pct", 0.10),
-        max_put_gap_down_loss_nav_pct=_float_setting(short_vol, "max_put_gap_down_loss_nav_pct", 0.03),
-        call_gap_up_pct=_float_setting(short_vol, "call_gap_up_pct", 0.10),
-        max_call_gap_up_opportunity_cost_nav_pct=_float_setting(
-            short_vol,
-            "max_call_gap_up_opportunity_cost_nav_pct",
-            0.02,
-        ),
-        max_call_gap_up_opportunity_cost_to_premium=_float_setting(
-            short_vol,
-            "max_call_gap_up_opportunity_cost_to_premium",
-            3.0,
-        ),
-        max_single_trade_nav_pct=_float_setting(concentration, "max_single_trade_nav_pct", 0.08),
-        max_symbol_nav_pct=_float_setting(concentration, "max_symbol_nav_pct", 0.20),
-        max_total_short_put_nav_pct=_float_setting(concentration, "max_total_short_put_nav_pct", 0.50),
     )
 
 
@@ -180,7 +127,6 @@ def enrich_and_filter_covered_call_underwriting(
                     "strategy": INSURANCE_UNDERWRITING_PROFILE,
                     "strategy_family": "sell_call",
                     "strategy_profile": INSURANCE_UNDERWRITING_PROFILE,
-                    "legacy_strategy_profile": SHORT_VOL_STRATEGY,
                     "min_annualized_return": cfg.min_annualized_return,
                     "min_net_income": cfg.min_net_income,
                     "min_iv_rv_ratio": cfg.min_iv_rv_ratio,
@@ -200,25 +146,6 @@ def enrich_and_filter_covered_call_underwriting(
         raise RuntimeError(f"failed to persist insurance-underwriting filtered covered-call candidates: {out_path}") from exc
     append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), reject_rows)
     return filtered
-
-
-def enrich_and_filter_covered_call_short_vol(
-    *,
-    df_labeled: pd.DataFrame,
-    symbol: str,
-    sell_call_cfg: dict[str, Any],
-    portfolio_ctx: dict[str, Any] | None,
-    exchange_rate_converter: CurrencyConverter,
-    out_path: Any,
-) -> pd.DataFrame:
-    return enrich_and_filter_covered_call_underwriting(
-        df_labeled=df_labeled,
-        symbol=symbol,
-        sell_call_cfg=sell_call_cfg,
-        portfolio_ctx=portfolio_ctx,
-        exchange_rate_converter=exchange_rate_converter,
-        out_path=out_path,
-    )
 
 
 def evaluate_covered_call_underwriting_row(

@@ -33,6 +33,7 @@ def _as_int(value: Any) -> int | None:
 class CandidateContractInput:
     mode: str
     symbol: str
+    market: str
     option_type: str
     expiration: str
     contract_symbol: str
@@ -53,12 +54,14 @@ class CandidateContractInput:
     realized_volatility_estimate: float | None
     delta: float | None
     multiplier: float | None
+    quote_update_time: str
 
     @classmethod
     def from_row(cls, row: pd.Series, *, mode: str) -> "CandidateContractInput":
         return cls(
             mode=str(mode),
             symbol=str(row.get("symbol") or "").strip().upper(),
+            market=str(row.get("market") or "").strip().upper(),
             option_type=str(row.get("option_type") or "").strip().lower(),
             expiration=str(row.get("expiration") or "").strip(),
             contract_symbol=str(row.get("contract_symbol") or "").strip(),
@@ -79,11 +82,13 @@ class CandidateContractInput:
             realized_volatility_estimate=_as_float(row.get("realized_volatility_estimate")),
             delta=_as_float(row.get("delta")),
             multiplier=_as_float(row.get("multiplier")),
+            quote_update_time=str(row.get("quote_update_time") or "").strip(),
         )
 
     def to_gate_payload(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
+            "market": self.market,
             "option_type": self.option_type,
             "expiration": self.expiration,
             "contract_symbol": self.contract_symbol,
@@ -104,6 +109,7 @@ class CandidateContractInput:
             "realized_volatility_estimate": self.realized_volatility_estimate,
             "delta": self.delta,
             "multiplier": self.multiplier,
+            "quote_update_time": self.quote_update_time,
         }
 
 
@@ -111,7 +117,7 @@ class CandidateContractInput:
 class CandidateBaseValues:
     dte: int
     strike: float
-    open_interest: float
-    volume: float
+    open_interest: float | None
+    volume: float | None
     spread: float | None
     spread_ratio: float | None

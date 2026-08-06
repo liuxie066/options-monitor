@@ -47,8 +47,8 @@ class CandidateScanConfig:
     max_dte: int
     min_strike: float | None
     max_strike: float | None
-    min_open_interest: float
-    min_volume: float
+    min_open_interest: float | None
+    min_volume: float | None
     max_spread_ratio: float | None
     min_annualized_net_return: float | None
     min_net_income: float
@@ -72,6 +72,7 @@ class CandidateScanDependencies:
     print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
     metric_reject_reason_fn: Callable[[CandidateContractInput], dict[str, Any] | None] | None = None
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None
+    event_reject_flag_fn: Callable[[dict[str, Any]], bool] | None = None
 
 
 CANDIDATE_ALL_DECISIONS_SCHEMA = "candidate_all_decisions.v1"
@@ -194,8 +195,8 @@ def _build_base_values(
     return gate, CandidateBaseValues(
         dte=int(contract.dte or 0),
         strike=float(contract.strike or 0.0),
-        open_interest=float(contract.open_interest or 0.0),
-        volume=float(contract.volume or 0.0),
+        open_interest=contract.open_interest,
+        volume=contract.volume,
         spread=spread,
         spread_ratio=spread_ratio,
     )
@@ -224,8 +225,8 @@ def _build_non_resource_base_values(
     return gate, CandidateBaseValues(
         dte=int(contract.dte or 0),
         strike=float(contract.strike or 0.0),
-        open_interest=float(contract.open_interest or 0.0),
-        volume=float(contract.volume or 0.0),
+        open_interest=contract.open_interest,
+        volume=contract.volume,
         spread=spread,
         spread_ratio=spread_ratio,
     )
@@ -336,7 +337,11 @@ def _finalize_all_decisions(
     for index, context in enumerate(contexts):
         annotated_row = dict(annotated_by_index[index])
         annotated_row.pop("__all_decisions_index", None)
-        event_flag = bool(annotated_row.get("event_flag"))
+        event_flag = (
+            deps.event_reject_flag_fn(annotated_row)
+            if deps.event_reject_flag_fn is not None
+            else bool(annotated_row.get("event_flag"))
+        )
         normalized_input = dict(context["normalized_input"])
         normalized_input.update(
             {
@@ -347,6 +352,8 @@ def _finalize_all_decisions(
                     "event_dates",
                     "event_source_status",
                     "event_source_error",
+                    "event_earnings_coverage_status",
+                    "event_earnings_coverage_error",
                 )
                 if key in annotated_row
             }
@@ -623,7 +630,12 @@ def run_candidate_scan(
             kept_rows: list[dict[str, Any]] = []
             out_columns = list(out.columns)
             for candidate in out.to_dict("records"):
-                if not bool(candidate.get("event_flag")):
+                event_reject_flag = (
+                    deps.event_reject_flag_fn(candidate)
+                    if deps.event_reject_flag_fn is not None
+                    else bool(candidate.get("event_flag"))
+                )
+                if not event_reject_flag:
                     kept_rows.append(candidate)
                     continue
                 event_decision = evaluate_candidate_risk_filter(

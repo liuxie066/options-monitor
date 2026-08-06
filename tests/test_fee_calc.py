@@ -189,11 +189,14 @@ def test_broker_trade_writer_preserves_actual_fee_provenance() -> None:
 
 
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
+    from datetime import datetime, timezone
     _add_repo_to_syspath()
     from src.application.scan_sell_put import compute_metrics
 
     row = pd.Series(
         {
+            "market": "US",
+            "quote_update_time": "2026-04-01 10:59:00",
             "mid": 0.5,
             "strike": 90.0,
             "spot": 100.0,
@@ -203,7 +206,7 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
         }
     )
 
-    out = compute_metrics(row)
+    out = compute_metrics(row, now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc))
 
     assert out is not None
     assert round(out["futu_fee"], 6) == round(1.99 + 0.3 + 0.013 + 0.02 + 0.18 + 0.0003 + 0.01 + 0.01, 6)

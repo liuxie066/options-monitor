@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -25,6 +26,8 @@ def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
         [
             {
                 "symbol": "AAPL",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "expiration": "2026-05-15",
                 "contract_symbol": "AAPL260515P00100000",
                 "strike": 100.0,
@@ -59,6 +62,8 @@ def test_sell_put_event_risk_reject_removes_candidate_and_records_reject(tmp_pat
         [
             {
                 "symbol": "AAPL",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "option_type": "put",
                 "expiration": "2026-05-15",
                 "contract_symbol": "AAPL_PUT",
@@ -101,6 +106,7 @@ def test_sell_put_event_risk_reject_removes_candidate_and_records_reject(tmp_pat
                 }
             },
         },
+        quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         quiet=True,
     )
 

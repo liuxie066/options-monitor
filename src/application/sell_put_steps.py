@@ -70,6 +70,9 @@ def _sell_put_cash_block_mask(df: pd.DataFrame) -> pd.Series:
         pd.Series,
         df.apply(
             lambda row: not compute_sell_put_cash_capacity(
+                cash_required_native=_row_value(row, 'cash_required_native'),
+                cash_free_effective_native=_row_value(row, 'cash_free_effective_native'),
+                cash_native_currency=_row_value(row, 'cash_native_currency'),
                 cash_required_cny=_row_value(row, 'cash_required_cny'),
                 cash_free_cny=_row_value(row, 'cash_free_cny'),
                 cash_free_total_cny=_row_value(row, 'cash_free_total_cny'),
@@ -115,6 +118,9 @@ def _sell_put_cash_trace_rows(
         cash_secured_reason = _text_or_empty(row.get("cash_secured_unavailable_reason"))
         requirement_reason = _text_or_empty(row.get("cash_requirement_unavailable_reason"))
         capacity = compute_sell_put_cash_capacity(
+            cash_required_native=_row_value(row, 'cash_required_native'),
+            cash_free_effective_native=_row_value(row, 'cash_free_effective_native'),
+            cash_native_currency=_row_value(row, 'cash_native_currency'),
             cash_required_cny=_row_value(row, 'cash_required_cny'),
             cash_free_cny=_row_value(row, 'cash_free_cny'),
             cash_free_total_cny=_row_value(row, 'cash_free_total_cny'),
@@ -287,8 +293,8 @@ def run_sell_put_scan_and_summarize(
             min_net_income=0.0,
             min_strike=_optional_float(sp, 'min_strike'),
             max_strike=_optional_float(sp, 'max_strike'),
-            min_open_interest=liquidity.min_open_interest,
-            min_volume=liquidity.min_volume,
+            min_open_interest=None,
+            min_volume=None,
             max_spread_ratio=liquidity.max_spread_ratio,
             event_risk_cfg=event_risk,
             score_weights=None,

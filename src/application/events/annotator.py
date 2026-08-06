@@ -38,6 +38,8 @@ def annotate_candidates_with_event_snapshot(
         ("event_dates", ""),
         ("event_source_status", ""),
         ("event_source_error", ""),
+        ("event_earnings_coverage_status", ""),
+        ("event_earnings_coverage_error", ""),
         ("reject_stage_candidate", ""),
     ):
         if col not in out.columns:
@@ -57,6 +59,8 @@ def annotate_candidates_with_event_snapshot(
     dates_list = []
     source_status_list = []
     source_error_list = []
+    earnings_coverage_status_list = []
+    earnings_coverage_error_list = []
     reject_stage = []
     for _, row in out.iterrows():
         sym = _canonical(row.get("symbol"))
@@ -66,12 +70,18 @@ def annotate_candidates_with_event_snapshot(
             item = _missing_snapshot_item(sym)
         source_status = str(item.get("source_status") or "error")
         source_error = str(item.get("source_error") or "")
+        coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+        earnings_coverage = coverage.get("earnings") if isinstance(coverage.get("earnings"), dict) else {}
+        earnings_coverage_status = str(earnings_coverage.get("status") or "missing")
+        earnings_coverage_error = str(earnings_coverage.get("error") or "")
         if not sym or not expiration:
             flagged.append(False)
             types_list.append("")
             dates_list.append("")
             source_status_list.append(source_status)
             source_error_list.append(source_error)
+            earnings_coverage_status_list.append(earnings_coverage_status)
+            earnings_coverage_error_list.append(earnings_coverage_error)
             reject_stage.append(str(row.get("reject_stage_candidate") or ""))
             continue
 
@@ -95,6 +105,8 @@ def annotate_candidates_with_event_snapshot(
             dates_list.append(",".join([d for d, _ in hits]))
             source_status_list.append(source_status)
             source_error_list.append(source_error)
+            earnings_coverage_status_list.append(earnings_coverage_status)
+            earnings_coverage_error_list.append(earnings_coverage_error)
             reject_stage.append("EVENT_WARN" if cfg.get("mode") == "warn" else str(row.get("reject_stage_candidate") or ""))
         else:
             flagged.append(False)
@@ -102,6 +114,8 @@ def annotate_candidates_with_event_snapshot(
             dates_list.append("")
             source_status_list.append(source_status)
             source_error_list.append(source_error)
+            earnings_coverage_status_list.append(earnings_coverage_status)
+            earnings_coverage_error_list.append(earnings_coverage_error)
             reject_stage.append(str(row.get("reject_stage_candidate") or ""))
 
     out["event_flag"] = flagged
@@ -109,6 +123,8 @@ def annotate_candidates_with_event_snapshot(
     out["event_dates"] = dates_list
     out["event_source_status"] = source_status_list
     out["event_source_error"] = source_error_list
+    out["event_earnings_coverage_status"] = earnings_coverage_status_list
+    out["event_earnings_coverage_error"] = earnings_coverage_error_list
     out["reject_stage_candidate"] = reject_stage
     return out
 
