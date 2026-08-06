@@ -95,6 +95,13 @@ _DIFFERENCE_AXES: dict[str, tuple[tuple[str, tuple[str, ...], tuple[str, ...]], 
         ),
     ),
 }
+_CLASSIFIED_INPUT_KEYS = frozenset(
+    key
+    for specs in _DIFFERENCE_AXES.values()
+    for _label, legacy_keys, opening_keys in specs
+    for key in (*legacy_keys, *opening_keys)
+)
+_LEGACY_OUTCOME_KEYS = frozenset({"accepted", "status"})
 
 
 def compare_opening_policy_shadow(
@@ -131,7 +138,13 @@ def compare_opening_policy_shadow(
             differences.append({"category": category, "fields": fields})
 
     opening_accepted = opening_decision.get("accepted") is True
-    unclassified = []
+    unclassified = [
+        f"field:{key}"
+        for key in sorted(set(legacy) | set(opening))
+        if key not in _CLASSIFIED_INPUT_KEYS
+        and key not in _LEGACY_OUTCOME_KEYS
+        and legacy.get(key, _MISSING) != opening.get(key, _MISSING)
+    ]
     if legacy_accepted != opening_accepted and not differences:
         unclassified.append("acceptance_change_without_classified_evidence")
     return {
