@@ -359,8 +359,8 @@ def test_shadow_replay_preserves_and_summarizes_wheel_capacity_context(tmp_path:
     (account_dir / "nvda_sell_call_candidates.csv").write_text(
         (
             "symbol,option_type,contract_symbol,expiration,strike,multiplier,"
-            "shares_total,shares_locked,shares_available_for_cover,covered_contracts_available\n"
-            "NVDA,call,NVDA260619C00120000,2026-06-19,120,100,300,100,200,2\n"
+            "shares_total,shares_can_sell,shares_locked,shares_available_for_cover,covered_contracts_available\n"
+            "NVDA,call,NVDA260619C00120000,2026-06-19,120,100,300,300,100,200,2\n"
         ),
         encoding="utf-8",
     )
@@ -380,6 +380,7 @@ def test_shadow_replay_preserves_and_summarizes_wheel_capacity_context(tmp_path:
     assert put["cash_free_total_cny"] == 50_000
     assert put["existing_short_put_assignment_cny_total"] == 30_000
     assert call["shares_total"] == 300
+    assert call["shares_can_sell"] == 300
     assert call["shares_locked"] == 100
     assert call["shares_available_for_cover"] == 200
 

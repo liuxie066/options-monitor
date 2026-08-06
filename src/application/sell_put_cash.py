@@ -35,6 +35,7 @@ def _effective_cash_in_native_currency(
     cash_secured_by_ccy: dict[str, Any] | None,
     native_currency: str,
     exchange_rate_converter: CurrencyConverter,
+    cash_required_native: Any = None,
     fx_status: str | None = None,
 ) -> SellPutEffectiveCash:
     return compute_sell_put_effective_cash(
@@ -46,7 +47,7 @@ def _effective_cash_in_native_currency(
             from_ccy=source,
             to_ccy=target,
         ),
-        non_native_haircut=0.95,
+        cash_required_native=cash_required_native,
         fx_status=fx_status,
     )
 
@@ -74,6 +75,21 @@ def sell_put_opening_capacity_inputs(
         return {
             "put_cash_capacity_available": False,
             "put_cash_capacity_reason": "assignment_requirement_or_portfolio_context_invalid",
+        }
+
+    portfolio_source = str(
+        portfolio_ctx.get("portfolio_source_name") or ""
+    ).strip().lower()
+    authority = portfolio_ctx.get("capacity_authority")
+    if portfolio_source and (
+        portfolio_source != "futu"
+        or not isinstance(authority, dict)
+        or authority.get("status") != "available"
+    ):
+        return {
+            "put_cash_required": strike_value * multiplier_value,
+            "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "physical_account_capacity_authority_unavailable",
         }
 
     option_ctx = portfolio_ctx.get("option_ctx")
@@ -109,6 +125,7 @@ def sell_put_opening_capacity_inputs(
             cash_secured_by_ccy=total_by_ccy,
             native_currency=native_currency,
             exchange_rate_converter=exchange_rate_converter,
+            cash_required_native=strike_value * multiplier_value,
             fx_status=portfolio_ctx.get("_sell_put_fx_status"),
         )
     except (TypeError, ValueError):
@@ -362,12 +379,34 @@ def enrich_sell_put_candidates_with_cash(
         df_sp_lab['cash_requirement_unavailable_reason'] = 'sell_put_candidate_cash_requirement_calc_failed'
 
     # Canonical Sell Put capacity: gross assignment requirement in the option's
-    # native currency; native cash at 100%, other currencies at 95% after FX.
+    # native currency; native cash first and fresh FX funds at 100%.
     df_sp_lab['cash_required_native'] = pd.NA
     df_sp_lab['cash_free_effective_native'] = pd.NA
     df_sp_lab['cash_available_effective_native'] = pd.NA
     df_sp_lab['cash_native_currency'] = pd.NA
     df_sp_lab['cash_capacity_basis'] = pd.NA
+    df_sp_lab['max_new_contracts'] = 0
+    df_sp_lab['cash_pool_additive_across_candidates'] = False
+    capacity_authority = (
+        portfolio_ctx.get("capacity_authority")
+        if isinstance(portfolio_ctx, dict)
+        and isinstance(portfolio_ctx.get("capacity_authority"), dict)
+        else {}
+    )
+    df_sp_lab['capacity_identity_hash'] = (
+        portfolio_ctx.get("capacity_identity_hash")
+        if isinstance(portfolio_ctx, dict)
+        else pd.NA
+    )
+    df_sp_lab['futu_account_id'] = capacity_authority.get("futu_account_id", pd.NA)
+    df_sp_lab['capacity_trd_env'] = capacity_authority.get("trd_env", pd.NA)
+    df_sp_lab['capacity_market'] = capacity_authority.get("market", pd.NA)
+    df_sp_lab['capacity_source_observed_at'] = capacity_authority.get(
+        "source_observed_at", pd.NA
+    )
+    df_sp_lab['capacity_authority_status'] = capacity_authority.get(
+        "status", pd.NA
+    )
     df_sp_lab['cash_fx_status'] = pd.NA
     cash_by_ccy = (
         portfolio_ctx.get('cash_by_currency')
@@ -401,6 +440,7 @@ def enrich_sell_put_candidates_with_cash(
             cash_secured_by_ccy={},
             native_currency=native_currency,
             exchange_rate_converter=exchange_rate_converter,
+            cash_required_native=required_native,
             fx_status=fx_status,
         )
         free_headroom = _effective_cash_in_native_currency(
@@ -408,6 +448,7 @@ def enrich_sell_put_candidates_with_cash(
             cash_secured_by_ccy=total_by_ccy_norm,
             native_currency=native_currency,
             exchange_rate_converter=exchange_rate_converter,
+            cash_required_native=required_native,
             fx_status=fx_status,
         )
         df_sp_lab.at[idx, 'cash_fx_status'] = free_headroom.reason
@@ -420,9 +461,12 @@ def enrich_sell_put_candidates_with_cash(
                 df_sp_lab.at[idx, 'cash_requirement_unavailable_reason'] = free_headroom.reason
             continue
         df_sp_lab.at[idx, 'cash_free_effective_native'] = free_headroom.cash_free
+        df_sp_lab.at[idx, 'max_new_contracts'] = int(
+            free_headroom.cash_free // required_native
+        )
         if available_headroom.available and available_headroom.cash_free is not None:
             df_sp_lab.at[idx, 'cash_available_effective_native'] = available_headroom.cash_free
-        df_sp_lab.at[idx, 'cash_capacity_basis'] = f'native_plus_haircut:{native_currency}'
+        df_sp_lab.at[idx, 'cash_capacity_basis'] = f'same_currency_then_fx:{native_currency}'
 
         if native_currency == 'USD':
             df_sp_lab.at[idx, 'cash_free_usd'] = free_headroom.cash_free

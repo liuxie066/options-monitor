@@ -255,7 +255,7 @@ def test_tcom_sell_put_cash_filter_accepts_lx_total_cny_capacity(tmp_path: Path)
         for _, row in filtered.iterrows()
     ]
     assert [capacity.accepted for capacity in capacities] == [True, True]
-    assert [capacity.basis for capacity in capacities] == ["native_plus_haircut:USD", "native_plus_haircut:USD"]
+    assert [capacity.basis for capacity in capacities] == ["same_currency_then_fx:USD", "same_currency_then_fx:USD"]
     assert [round(float(capacity.cash_required or 0.0), 2) for capacity in capacities] == [3500.0, 4000.0]
     trace_path = out_path.parent / "candidate_filter_trace.jsonl"
     assert not trace_path.exists()
@@ -298,7 +298,7 @@ def test_tcom_sell_put_cash_filter_rejects_insufficient_total_cny(tmp_path: Path
     assert filtered.empty
     trace_rows = _read_jsonl(out_path.parent / "candidate_filter_trace.jsonl")
     assert [row["rule"] for row in trace_rows] == ["effective_native_cash_insufficient"]
-    assert trace_rows[0]["config_values"] == {"basis": "native_plus_haircut:USD"}
+    assert trace_rows[0]["config_values"] == {"basis": "same_currency_then_fx:USD"}
 
 
 def test_tcom_sell_put_cash_filter_rejects_missing_cash_basis(tmp_path: Path) -> None:

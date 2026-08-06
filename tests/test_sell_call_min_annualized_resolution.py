@@ -176,7 +176,7 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
             report_dir=BASE / 'output' / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            stock={'shares': 300, 'avg_cost': 100},
+            stock={'shares': 300, 'can_sell_qty': 300, 'avg_cost': 100},
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 100},
         )
@@ -218,7 +218,7 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: P
             report_dir=tmp_path / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            stock={'shares': 500, 'avg_cost': 400},
+            stock={'shares': 500, 'can_sell_qty': 500, 'avg_cost': 400},
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={},
             locked_shares_unavailable_by_symbol={'0700.HK': 'short_call_locked_shares_basis_missing'},
@@ -256,7 +256,7 @@ def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
         report_dir=tmp_path / "reports",
         timeout_sec=10,
         is_scheduled=True,
-        stock={"shares": 100, "avg_cost": 100},
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 100},
         exchange_rate_converter=CurrencyConverter(
             ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
         ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, Mapping
 
 
@@ -11,6 +12,7 @@ class SellPutCashCapacity:
     reason: str
     cash_required: float | None
     cash_free: float | None
+    max_new_contracts: int
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,8 @@ class SellCallShareCapacity:
     accepted: bool
     reason: str
     shares_total: int
+    shares_can_sell: int | None
+    shares_eligible: int
     shares_locked: int
     shares_available_for_cover: int
     covered_contracts_available: int
@@ -78,15 +82,16 @@ def compute_sell_put_effective_cash(
     cash_secured_by_currency: Mapping[str, Any] | None,
     native_currency: str,
     convert_currency: Callable[[float, str, str], float | None],
-    non_native_haircut: float = 0.95,
+    cash_required_native: Any = None,
     fx_status: str | None = None,
 ) -> SellPutEffectiveCash:
     """Compute assignment capacity in the option's native currency.
 
-    Native cash receives full weight. Positive cash in another currency receives
-    the configured haircut after conversion. Existing short-put secured cash is
-    deducted in its own currency before conversion; a foreign-currency deficit
-    therefore consumes capacity at full weight rather than receiving a haircut.
+    Existing short-put collateral is deducted in its own currency first. The
+    candidate's native-currency pool is used at 100%; positive free cash in
+    other currencies is used at 100% only when a usable FX observation exists.
+    Missing/stale foreign-currency funds are excluded. They block the candidate
+    only when the remaining known pool cannot cover one gross assignment.
     """
 
     native = str(native_currency or "").strip().upper()
@@ -94,9 +99,6 @@ def compute_sell_put_effective_cash(
         native = "CNY"
     if not native:
         return SellPutEffectiveCash(False, "", None, "native_currency_missing")
-    if not 0.0 <= float(non_native_haircut) <= 1.0:
-        return SellPutEffectiveCash(False, native, None, "invalid_non_native_haircut")
-
     cash = _normalized_currency_amounts(cash_by_currency)
     secured = _normalized_currency_amounts(cash_secured_by_currency or {})
     if cash is None or secured is None:
@@ -104,8 +106,12 @@ def compute_sell_put_effective_cash(
     if not cash:
         return SellPutEffectiveCash(False, native, None, "cash_by_currency_missing")
 
-    total_native = 0.0
-    usable_component_count = 0
+    required = _to_float(cash_required_native)
+    if required is not None and required <= 0:
+        return SellPutEffectiveCash(False, native, None, "cash_required_invalid")
+
+    total_native = cash.get(native, 0.0) - secured.get(native, 0.0)
+    usable_component_count = 1 if native in cash or native in secured else 0
     skipped_positive: list[str] = []
     fx_unavailable_label = (
         "fx_stale"
@@ -115,29 +121,28 @@ def compute_sell_put_effective_cash(
     for currency in sorted(set(cash) | set(secured)):
         net_amount = cash.get(currency, 0.0) - secured.get(currency, 0.0)
         if currency == native:
-            total_native += net_amount
-            usable_component_count += 1
             continue
         if net_amount == 0:
             continue
         converted = convert_currency(net_amount, currency, native)
         converted_value = _to_float(converted)
-        if converted_value is None:
+        if converted_value is None or (
+            net_amount > 0 and converted_value <= 0
+        ) or (
+            net_amount < 0 and converted_value >= 0
+        ):
             if net_amount < 0:
                 return SellPutEffectiveCash(
                     False,
                     native,
                     None,
-                    f"cross_currency_secured_cash_{fx_unavailable_label}:{currency}->{native}",
+                    f"cross_currency_secured_cash_{fx_unavailable_label}:"
+                    f"{currency}->{native}",
                 )
             skipped_positive.append(currency)
             continue
         usable_component_count += 1
-        total_native += (
-            converted_value * float(non_native_haircut)
-            if converted_value > 0
-            else converted_value
-        )
+        total_native += converted_value
 
     if usable_component_count == 0:
         reason = (
@@ -147,16 +152,28 @@ def compute_sell_put_effective_cash(
             else "cash_capacity_unavailable"
         )
         return SellPutEffectiveCash(False, native, None, reason, tuple(skipped_positive))
-    reason = (
-        f"native_cash_only_cross_currency_{fx_unavailable_label}:"
-        + ",".join(skipped_positive)
-        if skipped_positive
-        else "cash_supported_by_native_plus_haircut"
-    )
+    if skipped_positive and required is not None and total_native < required:
+        return SellPutEffectiveCash(
+            False,
+            native,
+            None,
+            f"cross_currency_cash_{fx_unavailable_label}:"
+            + ",".join(skipped_positive),
+            tuple(skipped_positive),
+        )
+    if skipped_positive:
+        reason = (
+            f"known_cash_only_cross_currency_{fx_unavailable_label}:"
+            + ",".join(skipped_positive)
+        )
+    elif usable_component_count > (1 if native in cash or native in secured else 0):
+        reason = "cash_supported_by_same_currency_then_fx"
+    else:
+        reason = "cash_supported_by_same_currency"
     return SellPutEffectiveCash(
         True,
         native,
-        total_native,
+        max(0.0, total_native),
         reason,
         tuple(skipped_positive),
     )
@@ -182,10 +199,11 @@ def compute_sell_put_cash_capacity(
         accepted = req_native <= free_native
         return SellPutCashCapacity(
             accepted=accepted,
-            basis=f"native_plus_haircut:{native_currency}",
+            basis=f"same_currency_then_fx:{native_currency}",
             reason=("cash_supported" if accepted else "effective_native_cash_insufficient"),
             cash_required=req_native,
             cash_free=free_native,
+            max_new_contracts=(max(0, math.floor(free_native / req_native)) if req_native > 0 else 0),
         )
 
     req_cny = _to_float(cash_required_cny)
@@ -202,6 +220,7 @@ def compute_sell_put_cash_capacity(
             reason=("cash_supported" if accepted else "base_cny_cash_insufficient"),
             cash_required=req_cny,
             cash_free=free_cny,
+            max_new_contracts=(max(0, math.floor(free_cny / req_cny)) if req_cny > 0 else 0),
         )
 
     if req_cny is not None and free_total_cny is not None:
@@ -212,6 +231,7 @@ def compute_sell_put_cash_capacity(
             reason=("cash_supported" if accepted else "total_cny_cash_insufficient"),
             cash_required=req_cny,
             cash_free=free_total_cny,
+            max_new_contracts=(max(0, math.floor(free_total_cny / req_cny)) if req_cny > 0 else 0),
         )
 
     if req_usd is not None and free_usd is not None:
@@ -222,6 +242,7 @@ def compute_sell_put_cash_capacity(
             reason=("cash_supported" if accepted else "usd_cash_insufficient"),
             cash_required=req_usd,
             cash_free=free_usd,
+            max_new_contracts=(max(0, math.floor(free_usd / req_usd)) if req_usd > 0 else 0),
         )
 
     return SellPutCashCapacity(
@@ -230,38 +251,67 @@ def compute_sell_put_cash_capacity(
         reason="cash_basis_missing",
         cash_required=None,
         cash_free=None,
+        max_new_contracts=0,
     )
 
 
 def compute_sell_call_share_capacity(
     *,
     shares_total: Any,
+    shares_can_sell: Any = None,
     shares_locked: Any = 0,
     multiplier: Any,
     shares_available_for_cover: Any = None,
 ) -> SellCallShareCapacity:
     """Compute account share capacity for sell-call candidates."""
 
+    total_value = _to_float(shares_total)
     total = _to_nonnegative_int(shares_total)
+    can_sell_value = _to_float(shares_can_sell)
+    can_sell = (
+        _to_nonnegative_int(shares_can_sell)
+        if can_sell_value is not None
+        else None
+    )
     locked = _to_nonnegative_int(shares_locked)
     explicit_available = _to_float(shares_available_for_cover)
-    if explicit_available is None:
-        available = max(0, total - locked)
-    else:
-        available = max(0, int(explicit_available))
+    eligible = min(total, can_sell) if can_sell is not None else total
+    available = eligible - locked
 
-    multiplier_v = _to_float(multiplier)
-    multiplier_int = int(multiplier_v) if multiplier_v is not None else 0
-    if multiplier_v is None or multiplier_int <= 0:
+    def _result(reason: str) -> SellCallShareCapacity:
         return SellCallShareCapacity(
             accepted=False,
-            reason="invalid_multiplier",
+            reason=reason,
             shares_total=total,
+            shares_can_sell=can_sell,
+            shares_eligible=eligible,
             shares_locked=locked,
-            shares_available_for_cover=available,
+            shares_available_for_cover=max(0, available),
             covered_contracts_available=0,
             is_fully_covered_available=False,
         )
+
+    if total_value is None or total_value < 0:
+        return _result("shares_total_invalid")
+    if can_sell_value is None or can_sell_value < 0:
+        return _result("can_sell_qty_missing_or_invalid")
+    if locked > eligible:
+        return _result("locked_shares_exceed_eligible_underlying")
+    if explicit_available is not None and (
+        explicit_available < 0
+        or float(int(explicit_available)) != explicit_available
+        or int(explicit_available) != available
+    ):
+        return _result("share_capacity_facts_inconsistent")
+
+    multiplier_v = _to_float(multiplier)
+    multiplier_int = int(multiplier_v) if multiplier_v is not None else 0
+    if (
+        multiplier_v is None
+        or multiplier_int <= 0
+        or float(multiplier_int) != multiplier_v
+    ):
+        return _result("invalid_multiplier")
 
     covered_contracts = max(0, available) // multiplier_int
     accepted = covered_contracts >= 1
@@ -269,6 +319,8 @@ def compute_sell_call_share_capacity(
         accepted=accepted,
         reason=("share_capacity_supported" if accepted else "share_capacity_insufficient"),
         shares_total=total,
+        shares_can_sell=can_sell,
+        shares_eligible=eligible,
         shares_locked=locked,
         shares_available_for_cover=available,
         covered_contracts_available=covered_contracts,
@@ -332,24 +384,29 @@ def compute_short_put_cash_secured(
 def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Greedily allocate existing ranked candidates without changing their rank."""
 
+    scoped_rows = [
+        {**row, "_capacity_scope": _capacity_scope(row)}
+        for row in ranked_rows
+    ]
     cash_pools = _consistent_pools(
-        ranked_rows,
-        key_fields=("account",),
+        scoped_rows,
+        key_fields=("account", "_capacity_scope"),
         value_fields=("cash_free_cny", "cash_free_total_cny"),
     )
     share_pools = _consistent_pools(
-        ranked_rows,
-        key_fields=("account", "symbol"),
+        scoped_rows,
+        key_fields=("account", "_capacity_scope", "symbol"),
         value_fields=("shares_available_for_cover",),
     )
-    selected_groups: set[tuple[str, str, str]] = set()
+    selected_groups: set[tuple[str, str, str, str]] = set()
     out: list[dict[str, Any]] = []
     for rank, source in enumerate(ranked_rows, start=1):
         row = dict(source)
         account = str(row.get("account") or "").strip().lower()
         symbol = str(row.get("symbol") or "").strip().upper()
+        capacity_scope = _capacity_scope(row)
         family = _strategy_family(row)
-        group = (account, symbol, family)
+        group = (account, capacity_scope, symbol, family)
         result = {
             **row,
             "allocation_rank": rank,
@@ -375,12 +432,12 @@ def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> lis
 
         contracts = max(1, _to_nonnegative_int(row.get("contracts") or row.get("contract_count") or 1))
         if family == "sell_put":
-            pool_key = (account,)
+            pool_key = (account, capacity_scope)
             pool = cash_pools.get(pool_key)
             required = _to_float(row.get("cash_required_cny") or row.get("assignment_notional_cny"))
             unit = "CNY"
         else:
-            pool_key = (account, symbol.lower())
+            pool_key = (account, capacity_scope, symbol.lower())
             pool = share_pools.get(pool_key)
             multiplier = _to_float(row.get("multiplier"))
             required = multiplier * contracts if multiplier is not None and multiplier > 0 else None
@@ -419,6 +476,15 @@ def _strategy_family(row: dict[str, Any]) -> str:
         return value
     option_type = str(row.get("option_type") or row.get("mode") or "").strip().lower()
     return "sell_put" if option_type == "put" else "covered_call" if option_type == "call" else ""
+
+
+def _capacity_scope(row: Mapping[str, Any]) -> str:
+    return str(
+        row.get("capacity_identity_hash")
+        or row.get("futu_account_id")
+        or row.get("account")
+        or ""
+    ).strip().lower()
 
 
 def _consistent_pools(

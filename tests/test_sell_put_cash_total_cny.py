@@ -5,6 +5,51 @@ from pathlib import Path
 import pandas as pd
 
 
+def test_sell_put_opening_capacity_inputs_require_physical_futu_authority() -> None:
+    from src.application.sell_put_cash import sell_put_opening_capacity_inputs
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    common = {
+        "symbol": "NVDA",
+        "strike": 100.0,
+        "multiplier": 100,
+        "currency": "USD",
+        "exchange_rate_converter": CurrencyConverter(ExchangeRates()),
+    }
+    unavailable = sell_put_opening_capacity_inputs(
+        **common,
+        portfolio_ctx={
+            "portfolio_source_name": "futu",
+            "capacity_authority": {"status": "unavailable"},
+            "cash_by_currency": {"USD": 20_000.0},
+            "option_ctx": {"cash_secured_total_by_ccy": {}},
+        },
+    )
+    available = sell_put_opening_capacity_inputs(
+        **common,
+        portfolio_ctx={
+            "portfolio_source_name": "futu",
+            "capacity_authority": {"status": "available"},
+            "cash_by_currency": {"USD": 20_000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+    )
+
+    assert unavailable["put_cash_capacity_available"] is False
+    assert unavailable["put_cash_capacity_reason"] == (
+        "physical_account_capacity_authority_unavailable"
+    )
+    assert available == {
+        "put_cash_required": 10_000.0,
+        "put_cash_free": 20_000.0,
+        "put_cash_capacity_available": True,
+        "put_cash_capacity_reason": "cash_supported_by_same_currency",
+    }
+
+
 def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
     from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
@@ -37,11 +82,13 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
     )
 
     row = result.iloc[0]
-    assert row["cash_available_total_cny"] == 10420.0
-    assert row["cash_free_total_cny"] == 9960.0
-    assert row["cash_available_effective_native"] == 10420.0 / 0.92
-    assert row["cash_free_effective_native"] == 9960.0 / 0.92
-    assert row["cash_capacity_basis"] == "native_plus_haircut:HKD"
+    assert row["cash_available_total_cny"] == 10920.0
+    assert row["cash_free_total_cny"] == 10460.0
+    assert row["cash_available_effective_native"] == 10920.0 / 0.92
+    assert row["cash_free_effective_native"] == 10460.0 / 0.92
+    assert row["cash_capacity_basis"] == "same_currency_then_fx:HKD"
+    assert row["max_new_contracts"] == 0
+    assert row["cash_pool_additive_across_candidates"] == False  # noqa: E712
     assert row["cash_available_cny"] == 10000.0
     assert row["cash_free_cny"] == 9540.0
 
@@ -179,7 +226,7 @@ def test_enrich_sell_put_candidates_keeps_native_cash_when_fx_is_unavailable(tmp
 
     row = result.iloc[0]
     assert row["cash_free_effective_native"] == 18_000.0
-    assert row["cash_fx_status"] == "native_cash_only_cross_currency_fx_unavailable:CNY"
+    assert row["cash_fx_status"] == "known_cash_only_cross_currency_fx_unavailable:CNY"
     assert pd.isna(row["cash_requirement_unavailable_reason"])
 
 
@@ -206,7 +253,7 @@ def test_enrich_sell_put_candidates_marks_expired_fx_without_blocking_native_cas
 
     row = result.iloc[0]
     assert row["cash_free_effective_native"] == 18_000.0
-    assert row["cash_fx_status"] == "native_cash_only_cross_currency_fx_stale:CNY"
+    assert row["cash_fx_status"] == "known_cash_only_cross_currency_fx_stale:CNY"
     assert pd.isna(row["cash_requirement_unavailable_reason"])
 
 

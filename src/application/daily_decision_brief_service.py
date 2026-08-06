@@ -1816,6 +1816,9 @@ def _candidate_contract_is_complete(row: Mapping[str, Any], *, family: str) -> b
 
 def _sell_put_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
     result = compute_sell_put_cash_capacity(
+        cash_required_native=row.get("cash_required_native"),
+        cash_free_effective_native=row.get("cash_free_effective_native"),
+        cash_native_currency=row.get("cash_native_currency"),
         cash_required_cny=row.get("cash_required_cny"),
         cash_free_cny=row.get("cash_free_cny"),
         cash_free_total_cny=row.get("cash_free_total_cny"),
@@ -1824,7 +1827,7 @@ def _sell_put_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
     )
     if result.basis is None or result.cash_required is None or result.cash_free is None or result.cash_required <= 0:
         return None
-    contracts = max(0, int(float(result.cash_free) // float(result.cash_required)))
+    contracts = int(result.max_new_contracts)
     return {
         "contracts_available": contracts,
         "basis": result.basis,
@@ -1840,6 +1843,7 @@ def _covered_call_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
     explicit = _number(row.get("call_covered_contracts_available"))
     result = compute_sell_call_share_capacity(
         shares_total=row.get("shares_total") if row.get("shares_total") is not None else row.get("shares"),
+        shares_can_sell=row.get("shares_can_sell"),
         shares_locked=row.get("shares_locked") or 0,
         shares_available_for_cover=row.get("shares_available_for_cover"),
         multiplier=row.get("multiplier"),
@@ -1850,6 +1854,8 @@ def _covered_call_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
     return {
         "contracts_available": contracts,
         "shares_total": int(result.shares_total),
+        "shares_can_sell": result.shares_can_sell,
+        "shares_eligible": int(result.shares_eligible),
         "shares_locked": int(result.shares_locked),
         "shares_available_for_cover": int(result.shares_available_for_cover),
         "multiplier": _number(row.get("multiplier")),

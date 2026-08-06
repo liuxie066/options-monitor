@@ -41,6 +41,7 @@ from src.application.candidate_filter_trace import (
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
 )
+from domain.domain.risk_capacity import compute_sell_call_share_capacity
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
 
 
@@ -143,8 +144,37 @@ def run_sell_call_scan_and_summarize(
     """
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
-    # sell_call avg_cost/shares are sourced from account-scoped portfolio context.
-    # The upstream portfolio source may be OpenD or holdings, but the downstream stock schema stays the same.
+    portfolio_source = str(
+        (portfolio_ctx or {}).get("portfolio_source_name")
+        if isinstance(portfolio_ctx, dict)
+        else ""
+    ).strip().lower()
+    authority = (
+        portfolio_ctx.get("capacity_authority")
+        if isinstance(portfolio_ctx, dict)
+        and isinstance(portfolio_ctx.get("capacity_authority"), dict)
+        else {}
+    )
+    if portfolio_source and (
+        portfolio_source != "futu" or authority.get("status") != "available"
+    ):
+        _append_share_coverage_trace(
+            output_path=symbol_cc,
+            symbol=symbol,
+            status="unavailable",
+            rule="physical_account_capacity_authority_unavailable",
+            message=f"{COVERED_CALL_TRACE_LABEL} physical OpenD account authority unavailable",
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
+        )
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="unavailable",
+            reason="physical_account_capacity_authority_unavailable",
+        )
     if not stock:
         _append_share_coverage_trace(
             output_path=symbol_cc,
@@ -166,10 +196,12 @@ def run_sell_call_scan_and_summarize(
 
     try:
         shares_raw = stock.get('shares')
+        shares_can_sell_raw = stock.get('can_sell_qty')
         avg_cost_raw = stock.get('avg_cost')
-        if shares_raw is None or avg_cost_raw is None:
+        if shares_raw is None or shares_can_sell_raw is None or avg_cost_raw is None:
             raise ValueError("missing stock context")
         shares_total = int(shares_raw)
+        shares_can_sell = int(shares_can_sell_raw)
         avg_cost = float(avg_cost_raw)
     except Exception:
         _append_share_coverage_trace(
@@ -190,7 +222,7 @@ def run_sell_call_scan_and_summarize(
             reason="stock_context_invalid",
         )
 
-    if shares_total <= 0 or avg_cost <= 0:
+    if shares_total <= 0 or shares_can_sell < 0 or avg_cost <= 0:
         _append_share_coverage_trace(
             output_path=symbol_cc,
             symbol=symbol,
@@ -276,7 +308,33 @@ def run_sell_call_scan_and_summarize(
             status="unavailable",
             reason="share_coverage_calc_failed",
         )
-    shares_available_for_cover = max(0, int(shares_total) - int(locked))
+    share_facts = compute_sell_call_share_capacity(
+        shares_total=shares_total,
+        shares_can_sell=shares_can_sell,
+        shares_locked=locked,
+        multiplier=1,
+    )
+    if share_facts.reason == "locked_shares_exceed_eligible_underlying":
+        _append_share_coverage_trace(
+            output_path=symbol_cc,
+            symbol=symbol,
+            status="unavailable",
+            rule="locked_shares_exceed_eligible_underlying",
+            message=f"{COVERED_CALL_TRACE_LABEL} locked shares exceed OpenD deliverable shares",
+            metric_value=locked,
+            threshold=min(shares_total, shares_can_sell),
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
+        )
+        return _empty_sell_call_result(
+            report_dir=report_dir,
+            symbol_lower=symbol_lower,
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="unavailable",
+            reason=share_facts.reason,
+        )
+    shares_available_for_cover = int(share_facts.shares_available_for_cover)
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
     event_risk = resolve_event_risk_config(global_sell_call_event_risk)
@@ -303,8 +361,17 @@ def run_sell_call_scan_and_summarize(
         output=symbol_cc,
         avg_cost=float(avg_cost),
         shares=int(shares_total),
+        shares_can_sell=int(shares_can_sell),
         shares_locked=int(locked),
         shares_available_for_cover=int(shares_available_for_cover),
+        capacity_facts={
+            "capacity_identity_hash": stock.get("capacity_identity_hash"),
+            "futu_account_id": stock.get("futu_account_id"),
+            "capacity_trd_env": stock.get("trd_env"),
+            "capacity_market": stock.get("market"),
+            "capacity_source_observed_at": stock.get("source_observed_at"),
+            "capacity_authority_status": stock.get("capacity_authority_status"),
+        },
         min_dte=window.min_dte,
         max_dte=window.max_dte,
         min_strike=resolve_effective_sell_call_min_strike(

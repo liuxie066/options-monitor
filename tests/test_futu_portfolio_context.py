@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -156,8 +160,8 @@ def test_build_futu_portfolio_context_merges_explicit_cash_and_fund_assets_and_n
             {"currency": "USD", "us_cash": 1000},
         ],
         position_rows=[
-            {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD", "stock_name": "NVIDIA"},
-            {"code": "HK.00700", "qty": 200, "cost_price": 380, "currency": "港币", "stock_name": "Tencent"},
+            {"code": "US.NVDA", "qty": 100, "can_sell_qty": 80, "cost_price": 120, "currency": "USD", "stock_name": "NVIDIA"},
+            {"code": "HK.00700", "qty": 200, "can_sell_qty": 200, "cost_price": 380, "currency": "港币", "stock_name": "Tencent"},
         ],
         account=" LX ",
         market="富途",
@@ -175,6 +179,8 @@ def test_build_futu_portfolio_context_merges_explicit_cash_and_fund_assets_and_n
         "cn_cash": 100000.0,
     }
     assert out["stocks_by_symbol"]["NVDA"]["shares"] == 100
+    assert out["stocks_by_symbol"]["NVDA"]["can_sell_qty"] == 80
+    assert out["stocks_by_symbol"]["NVDA"]["eligible_underlying_shares"] == 80
     assert out["stocks_by_symbol"]["0700.HK"]["shares"] == 200
     assert out["stocks_by_symbol"]["0700.HK"]["currency"] == "HKD"
     assert out["stocks_by_symbol"]["0700.HK"]["account"] == "lx"
@@ -186,8 +192,8 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
     out = build_futu_portfolio_context(
         balance_rows=[],
         position_rows=[
-            {"code": "HK.09992", "qty": 100, "cost_price": 120, "currency": "HKD", "stock_name": "Pop Mart"},
-            {"symbol": "POP", "qty": 50, "cost_price": 125, "currency": "HKD"},
+            {"code": "HK.09992", "qty": 100, "can_sell_qty": 80, "cost_price": 120, "currency": "HKD", "stock_name": "Pop Mart"},
+            {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "cost_price": 125, "currency": "HKD"},
         ],
         account="lx",
         market="富途",
@@ -196,6 +202,7 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
 
     assert sorted(out["stocks_by_symbol"].keys()) == ["9992.HK"]
     assert out["stocks_by_symbol"]["9992.HK"]["shares"] == 150
+    assert out["stocks_by_symbol"]["9992.HK"]["can_sell_qty"] == 130
     assert out["stocks_by_symbol"]["9992.HK"]["currency"] == "HKD"
 
 
@@ -219,6 +226,137 @@ def test_build_futu_portfolio_context_does_not_apply_partial_cost_basis_to_all_s
     assert stock["cost_basis_complete"] is False
     assert stock["cost_known_shares"] == 50
     assert stock["cost_unknown_shares"] == 50
+
+
+def test_build_futu_portfolio_context_fails_sellability_closed_when_one_row_is_unknown() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {"code": "US.NVDA", "qty": 50, "can_sell_qty": 50, "currency": "USD"},
+            {"code": "US.NVDA", "qty": 50, "currency": "USD"},
+        ],
+        account="lx",
+    )
+
+    stock = out["stocks_by_symbol"]["NVDA"]
+    assert stock["shares"] == 100
+    assert stock["can_sell_qty"] is None
+    assert stock["eligible_underlying_shares"] is None
+
+
+def test_mixed_ordinary_and_assigned_shares_remain_unallocated_for_wheel_return() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {
+                "code": "US.NVDA",
+                "qty": 100,
+                "can_sell_qty": 100,
+                "cost_price": 90,
+                "currency": "USD",
+                "holding_origin": "ordinary",
+            },
+            {
+                "code": "US.NVDA",
+                "qty": 100,
+                "can_sell_qty": 100,
+                "cost_price": 110,
+                "currency": "USD",
+                "holding_origin": "sell_put_assignment",
+            },
+        ],
+        account="lx",
+    )
+
+    stock = out["stocks_by_symbol"]["NVDA"]
+    assert stock["shares"] == 200
+    assert stock["eligible_underlying_shares"] == 200
+    assert stock["coverage_allocation_status"] == "unallocated"
+    assert stock["stock_lot_id"] is None
+    assert stock["wheel_batch_return_status"] == "not_calculated_unallocated"
+
+
+def test_build_futu_portfolio_context_binds_capacity_to_physical_account() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    common = {
+        "balance_rows": [{"currency": "USD", "us_cash": 10_000}],
+        "position_rows": [
+            {"code": "US.NVDA", "qty": 100, "can_sell_qty": 100, "currency": "USD"}
+        ],
+        "account": "lx",
+        "source_observed_at": "2026-08-06T01:02:03+00:00",
+        "trd_env": "REAL",
+        "capacity_market": "us",
+    }
+    primary = build_futu_portfolio_context(
+        **common,
+        broker_account_identifiers=[FAKE_FUTU_ACC_ID_LX_PRIMARY],
+        futu_account_id=FAKE_FUTU_ACC_ID_LX_PRIMARY,
+    )
+    secondary = build_futu_portfolio_context(
+        **common,
+        broker_account_identifiers=[FAKE_FUTU_ACC_ID_LX_SECONDARY],
+        futu_account_id=FAKE_FUTU_ACC_ID_LX_SECONDARY,
+    )
+
+    assert primary["capacity_authority"]["status"] == "available"
+    assert primary["capacity_authority"]["logical_account"] == "lx"
+    assert primary["capacity_authority"]["trd_env"] == "REAL"
+    assert primary["capacity_authority"]["market"] == "us"
+    assert primary["capacity_identity_hash"] != secondary["capacity_identity_hash"]
+    assert primary["cash_capacity_by_currency"]["USD"]["pool_additive_across_candidates"] is False
+
+
+def test_build_opend_exchange_rate_observation_uses_bid_ask_mid_and_provider_time() -> None:
+    from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
+    from src.infrastructure.exchange_rates import exchange_rate_observation_status
+
+    provider_time = datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    observation = build_opend_exchange_rate_observation(
+        [
+            {
+                "code": "FX.USDCNH",
+                "bid_price": 7.20,
+                "ask_price": 7.22,
+                "update_time": provider_time,
+            },
+            {
+                "code": "FX.USDHKD",
+                "bid_price": 7.80,
+                "ask_price": 7.82,
+                "update_time": provider_time,
+            },
+        ]
+    )
+
+    assert observation is not None
+    assert observation["rates"]["USDCNY"] == pytest.approx(7.21)
+    assert observation["rates"]["HKDCNY"] == pytest.approx(7.21 / 7.81)
+    assert observation["source"] == "opend_fx_market_snapshot"
+    assert exchange_rate_observation_status(observation, max_age_hours=24) == "ready"
+
+
+def test_build_opend_exchange_rate_observation_without_provider_time_is_stale() -> None:
+    from src.application.futu_portfolio_context import build_opend_exchange_rate_observation
+    from src.infrastructure.exchange_rates import exchange_rate_observation_status
+
+    observation = build_opend_exchange_rate_observation(
+        [
+            {"code": "FX.USDCNH", "last_price": 7.21},
+            {"code": "FX.USDHKD", "last_price": 7.81},
+        ]
+    )
+
+    assert observation is not None
+    assert "timestamp" not in observation
+    assert exchange_rate_observation_status(observation, max_age_hours=24) == "unavailable_stale"
 
 
 def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> None:
@@ -292,6 +430,32 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
     assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
     assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
+
+
+def test_fetch_futu_portfolio_context_rejects_multiple_physical_accounts() -> None:
+    import src.application.futu_portfolio_context as fc
+
+    with pytest.raises(ValueError, match="exactly one physical account_id"):
+        fc.fetch_futu_portfolio_context(
+            cfg={
+                "portfolio": {
+                    "futu": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
+                        "trd_env": "REAL",
+                    }
+                },
+                "trade_intake": {
+                    "account_mapping": {
+                        "futu": {
+                            FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx",
+                            FAKE_FUTU_ACC_ID_LX_SECONDARY: "lx",
+                        }
+                    }
+                },
+            },
+            account="lx",
+        )
 
 
 def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_trade_mapping() -> None:
