@@ -297,6 +297,16 @@ def test_offline_shadow_classifies_every_approved_policy_difference() -> None:
         "ranking",
     }
 
+    strict = compare_opening_policy_shadow(
+        legacy_candidate={**legacy, "unexpected_policy_metric": 1},
+        opening_candidate=opening,
+        mode="put",
+    )
+    assert strict["unclassified_differences"] == [
+        "field:unexpected_policy_metric"
+    ]
+    assert strict["promotion_ready"] is False
+
 
 def test_offline_shadow_blocks_unexplained_acceptance_change() -> None:
     from src.application.shadow_replay import compare_opening_policy_shadow
