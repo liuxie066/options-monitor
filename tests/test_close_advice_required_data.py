@@ -554,6 +554,22 @@ def _frozen_workspace(
         date.fromisoformat(quote_expiration) - discovery_trading_date
     ).days
     quote_spot = 110.0
+    term_lookback = max(20, quote_dte)
+    term_input_hash = "a" * 64
+    term_entry = {
+        "schema_version": "term_matched_rv.v1",
+        "expiration": quote_expiration,
+        "status": "ok",
+        "reason": None,
+        "term_matched_rv": 0.2,
+        "remaining_sessions": quote_dte,
+        "lookback_sessions": term_lookback,
+        "input_start": "2026-01-02",
+        "input_end": discovery_trading_date.isoformat(),
+        "input_close_session_count": term_lookback + 1,
+        "input_return_count": term_lookback,
+        "input_hash": term_input_hash,
+    }
     side_plan = {
         "option_type": "put",
         "min_dte": quote_dte,
@@ -656,10 +672,14 @@ def _frozen_workspace(
             "snapshot_complete": True,
             "realized_volatility": {
                 "status": "ok",
+                "reason": None,
                 "realized_volatility_20": 0.2,
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "term_matched": {quote_expiration: term_entry},
+                "qfq_history": {"status": "ok"},
+                "trading_calendar": {"status": "ok"},
             },
         },
         "rows": [
@@ -680,6 +700,15 @@ def _frozen_workspace(
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "term_matched_rv": 0.2,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+                "term_matched_rv_remaining_sessions": quote_dte,
+                "term_matched_rv_lookback_sessions": term_lookback,
+                "term_matched_rv_input_start": "2026-01-02",
+                "term_matched_rv_input_end": discovery_trading_date.isoformat(),
+                "term_matched_rv_input_session_count": term_lookback + 1,
+                "term_matched_rv_input_hash": term_input_hash,
                 "delta": -0.3,
                 "multiplier": 100,
             }
