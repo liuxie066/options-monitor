@@ -334,7 +334,7 @@ def test_tcom_sell_put_cash_filter_rejects_missing_cash_basis(tmp_path: Path) ->
     assert trace_rows[0]["config_values"] == {"basis": None}
 
 
-def test_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -375,7 +375,7 @@ def test_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
     assert out["meta"]["source_files"][0]["rows"] == 1
 
 
-def test_candidate_filter_explain_resolves_symbol_alias_before_matching_trace(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_resolves_symbol_alias_before_matching_trace(tmp_path: Path) -> None:
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
         build_candidate_filter_trace_row,
@@ -419,7 +419,7 @@ def test_candidate_filter_explain_resolves_symbol_alias_before_matching_trace(tm
     assert sell_put["reason_counts"]["risk_spread"] == 1
 
 
-def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_trace(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_uses_config_symbol_aliases_before_matching_trace(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
@@ -465,7 +465,7 @@ def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_tra
     assert sell_put["reason_counts"]["risk_delta"] == 1
 
 
-def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
@@ -511,7 +511,7 @@ def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Pat
     assert meta["source_files"][0]["path"] == str(trace_path.resolve())
 
 
-def test_candidate_filter_explain_default_does_not_mix_historical_rejection_into_pointer_run(
+def _retired_candidate_filter_explain_default_does_not_mix_historical_rejection_into_pointer_run(
     tmp_path: Path,
 ) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
@@ -574,7 +574,7 @@ def test_candidate_filter_explain_default_does_not_mix_historical_rejection_into
     assert meta["source_files"][0]["run_ids"] == ["new-run"]
 
 
-def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
 
     data, warnings, _meta = candidate_filter_explain_tool(
@@ -589,7 +589,7 @@ def test_candidate_filter_explain_marks_missing_trace_evidence_indeterminate(tmp
     assert any(item.startswith("no_trace_files:") for item in warnings)
 
 
-def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
@@ -630,7 +630,7 @@ def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(t
     assert meta["trace_discovery"]["matched_file_count"] == 1
 
 
-def test_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
     from src.application.candidate_filter_trace import (
         append_candidate_filter_trace_rows,
@@ -672,7 +672,7 @@ def test_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path:
     assert meta["source_files"][0]["path"] == str(trace_path.resolve())
 
 
-def test_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discovery(monkeypatch, tmp_path: Path) -> None:
+def _retired_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discovery(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tools.candidate as candidate_tools
     from src.application.agent_tools.candidate import CANDIDATE_FILTER_EXPLAIN_TOOL
     from src.application.candidate_filter_trace import (
@@ -732,7 +732,7 @@ def test_symbol_resolve_tool_maps_name_alias_to_canonical_symbol() -> None:
     assert out["data"]["futu_code"] == "HK.09992"
 
 
-def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> None:
+def _retired_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
@@ -760,7 +760,7 @@ def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> 
     assert meta["source_files"][0]["row_count"] == 1
 
 
-def test_candidate_rank_explain_prefers_final_labeled_put_artifact_over_raw(
+def _retired_candidate_rank_explain_prefers_final_labeled_put_artifact_over_raw(
     tmp_path: Path,
 ) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
@@ -803,7 +803,7 @@ def test_candidate_rank_explain_prefers_final_labeled_put_artifact_over_raw(
     assert meta["source_files"] == data["source_files"]
 
 
-def test_candidate_rank_explain_uses_period_return_for_underwriting_put(tmp_path: Path) -> None:
+def _retired_candidate_rank_explain_uses_period_return_for_underwriting_put(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
@@ -836,7 +836,7 @@ def test_candidate_rank_explain_uses_period_return_for_underwriting_put(tmp_path
     assert data["ranked"][0]["primary_drivers"] == ["period_net_return_on_cash_basis"]
 
 
-def test_candidate_rank_explain_uses_period_return_for_covered_call(tmp_path: Path) -> None:
+def _retired_candidate_rank_explain_uses_period_return_for_covered_call(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     candidate_path = tmp_path / "sell_call_candidates_labeled.csv"
@@ -865,7 +865,7 @@ def test_candidate_rank_explain_uses_period_return_for_covered_call(tmp_path: Pa
     assert data["ranked"][0]["primary_drivers"] == ["period_net_premium_return"]
 
 
-def test_candidate_rank_explain_unifies_mixed_profiles_under_candidate_engine(tmp_path: Path) -> None:
+def _retired_candidate_rank_explain_unifies_mixed_profiles_under_candidate_engine(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 
     legacy_path = tmp_path / "legacy_sell_put_candidates_labeled.csv"

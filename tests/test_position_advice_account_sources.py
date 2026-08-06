@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.opening_candidate_snapshot import (
+    dependency_from_hash,
+    seal_opening_candidate_snapshot,
+)
 from src.application.position_advice_account_sources import (
     PositionAdviceAccountSourceError,
     build_cash_capacity,
@@ -101,7 +104,14 @@ def _decision_snapshot() -> dict:
 def _account_run_inputs(
     tmp_path: Path,
 ) -> tuple[Path, Path, dict, dict]:
-    state = tmp_path / "account" / "state"
+    state = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+    )
     quotes = tmp_path / "required"
     state.mkdir(parents=True)
     quotes.mkdir()
@@ -145,29 +155,45 @@ def _account_run_inputs(
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         },
     )
-    decision = {
-        "schema_version": "candidate_all_decisions.v1",
-        "candidate_id": "candidate-1",
-        "strategy_mode": "put",
-        "quote_snapshot_id": quote["snapshot_id"],
-        "risk_policy_hash": "c" * 64,
-    }
-    capture = {
-        "schema_version": (
-            "position_advice_candidate_all_decisions_capture.v1"
-        ),
-        "account_run_id": "run-1",
-        "account": "lx",
-        "complete": True,
-        "quote_receipt_relpaths": {
-            "NVDA": "quotes/NVDA/receipt.json",
+    seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
         },
-        "candidate_decisions": [decision],
-    }
-    capture["capture_hash"] = canonical_sha256(capture)
-    _write_json(
-        state / "position_advice_candidate_all_decisions.raw.json",
-        capture,
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=[
+            dependency_from_hash(kind=kind, sha256=char * 64)
+            for kind, char in (
+                ("required_data", "c"),
+                ("portfolio", "d"),
+                ("ledger", "e"),
+                ("fx", "f"),
+                ("earnings_rv", "1"),
+            )
+        ],
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": mode,
+                "status": "completed",
+                "reason": "all_decisions_captured",
+                "quote_snapshot_id": quote["snapshot_id"],
+                "quote_receipt_relpath": "quotes/NVDA/receipt.json",
+            }
+            for mode in ("put", "call")
+        ],
+        candidate_decisions=[],
+        final_candidates={"put": [], "call": []},
+        sealed_at=NOW,
     )
     return state, quotes, quote, snapshot
 
@@ -327,21 +353,6 @@ def test_account_run_publishes_completed_zero_candidate_source_with_quote_depend
     tmp_path: Path,
 ) -> None:
     state, quotes, quote, snapshot = _account_run_inputs(tmp_path)
-    capture_path = (
-        state
-        / "position_advice_candidate_all_decisions.raw.json"
-    )
-    capture = json.loads(capture_path.read_text(encoding="utf-8"))
-    capture["candidate_decisions"] = []
-    capture["capture_hash"] = canonical_sha256(
-        {
-            key: value
-            for key, value in capture.items()
-            if key != "capture_hash"
-        }
-    )
-    capture_path.write_text(json.dumps(capture), encoding="utf-8")
-
     result = publish_account_run_sources(
         account_run_id="run-1",
         normalized_account="lx",

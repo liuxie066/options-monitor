@@ -21,7 +21,7 @@ from src.application.symbol_aliases import symbol_aliases_from_config
 
 _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_filter_explain.output.v1",
-    "source_label": "OM candidate filter trace",
+    "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "functions",
     "row_count_field": "trace_count",
     "fact_fields": [
@@ -59,7 +59,7 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
 
 _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_rank_explain.output.v1",
-    "source_label": "OM candidate report CSV",
+    "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "ranked",
     "row_count_field": "row_count",
     "fact_fields": [
@@ -123,47 +123,38 @@ def _candidate_filter_explain_tool(
 CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_rank_explain",
     description=(
-        "Explain how already-generated candidate rows were ranked. Use after candidates exist when the question is "
-        "about ordering or score drivers; use candidate_filter_explain instead for rejection or absence questions."
+        "Explain the recorded order in a sealed account opening-candidate snapshot. The tool never re-ranks rows."
     ),
-    requires=("local_candidate_reports",),
+    requires=("opening_candidate_snapshot",),
     capabilities=("ranking_explain", "read_only"),
     input_schema={
         "mode": "optional put|call|all; defaults to all",
         "top_n": "optional int, max 100; defaults to 10",
-        "report_dir": "optional report dir; defaults to output_shared/reports then output_shared/agent_tools/reports",
-        "output_dir": "optional output root; uses <output_dir>/reports",
-        "run_id": "optional output_runs run id; searches run account report dirs",
-        "run_dir": "optional explicit run dir; searches run account report dirs",
-        "account": "optional account label when run_id/run_dir is supplied",
-        "candidate_path": "optional explicit candidate CSV path",
-        "candidate_paths": "optional list of candidate CSV paths",
-        "score_weights": (
-            "optional object: annualized_return, net_income, liquidity, risk_distance, "
-            "vol_edge, delta_target, concentration, path_risk"
-        ),
-        "compare_baseline": "optional bool; compare against return-then-income baseline",
+        "run_id": "optional output_runs run id; omitted resolves the latest sealed snapshot",
+        "account": {
+            "type": "string",
+            "required": True,
+            "description": "Logical account label bound to the physical OpenD account snapshot",
+        },
     },
     handler=_candidate_rank_explain_tool,
     pure_read=True,
     safe_default_input={"mode": "all", "top_n": 10},
     examples=(
-        {"input": {"mode": "put", "top_n": 5}},
-        {"input": {"candidate_path": "output_shared/reports/sell_put_candidates_labeled.csv", "mode": "put"}},
+        {"input": {"account": "lx", "mode": "put", "top_n": 5}},
+        {"input": {"account": "sy", "run_id": "20260514T100000Z", "mode": "call"}},
     ),
     output_contract=_CANDIDATE_RANK_OUTPUT_CONTRACT,
-    copilot_input_fields=("mode", "top_n", "run_id", "account", "score_weights", "compare_baseline"),
+    copilot_input_fields=("mode", "top_n", "run_id", "account"),
 )
 
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     description=(
-        "Explain why a symbol was rejected, post-filtered, accepted, or not observed across candidate "
-        "filter functions from existing trace rows. When conclusion_status is indeterminate, the trace "
-        "does not support a rejection reason or prove that the symbol was not processed."
+        "Explain the recorded opening decision for a symbol from a sealed account snapshot. The tool never re-filters rows."
     ),
-    requires=("candidate_filter_trace",),
-    capabilities=("candidate_filter_trace", "filter_explain", "read_only"),
+    requires=("opening_candidate_snapshot",),
+    capabilities=("opening_candidate_snapshot", "filter_explain", "read_only"),
     input_schema={
         "symbol": {
             "type": "string",
@@ -177,36 +168,28 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         },
         "config_path": "optional explicit config path",
         "runtime_root": "optional explicit runtime root; defaults from config_path, OM_RUNTIME_ROOT, service profile, and repo root",
-        "account": "optional scan-scope account label; not part of symbol identity",
+        "account": {
+            "type": "string",
+            "required": True,
+            "description": "Logical account label bound to the physical OpenD account snapshot",
+        },
         "function": (
             "optional "
             + strategy_key_help(
                 (
                     STRATEGY_SELL_PUT,
                     STRATEGY_COVERED_CALL,
-                    STRATEGY_CLOSE_ADVICE,
-                    STRATEGY_YIELD_ENHANCEMENT,
                 )
             )
-            + "|cash_reserve|share_coverage"
         ),
-        "run_id": "optional output_runs run id; omitted means search last-run pointer and recent runtime runs",
-        "run_dir": "optional explicit output_runs/<run_id> directory",
-        "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
-        "trace_path": "optional explicit candidate_filter_trace.jsonl path",
-        "trace_paths": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional list of candidate_filter_trace.jsonl paths",
-        },
+        "run_id": "optional output_runs run id; omitted resolves the latest sealed snapshot",
     },
     handler=_candidate_filter_explain_tool,
     pure_read=True,
     safe_default_input={},
     examples=(
         {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
-        {"input": {"run_id": "20260514T100000Z", "symbol": "泡泡玛特"}},
-        {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
+        {"input": {"run_id": "20260514T100000Z", "account": "sy", "symbol": "泡泡玛特"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
     copilot_input_fields=("config_key", "symbol", "account", "function", "run_id"),
