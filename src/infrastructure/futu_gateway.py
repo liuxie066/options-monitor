@@ -9,9 +9,13 @@ Centralizes:
 - Explicit fail-fast error classification (2FA/auth expired/rate limit)
 """
 
+import ast
 from dataclasses import dataclass, field
+from importlib import metadata as importlib_metadata
+from importlib import util as importlib_util
 import logging
 from numbers import Integral
+from pathlib import Path
 import random
 import time
 from typing import Any, Iterable
@@ -20,6 +24,107 @@ from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 
 
 LOG = logging.getLogger(__name__)
+
+FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
+FUTU_EARNINGS_CALENDAR_CAPABILITY = "get_earnings_calendar"
+FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON = "opend_earnings_calendar_unsupported"
+
+
+def _numeric_version(value: Any) -> tuple[int, ...]:
+    parts: list[int] = []
+    for raw_part in str(value or "").strip().split("."):
+        digits = ""
+        for character in raw_part:
+            if not character.isdigit():
+                break
+            digits += character
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def _version_at_least(value: Any, minimum: str) -> bool:
+    observed = _numeric_version(value)
+    required = _numeric_version(minimum)
+    if not observed or not required:
+        return False
+    width = max(len(observed), len(required))
+    return observed + (0,) * (width - len(observed)) >= required + (0,) * (width - len(required))
+
+
+def _futu_package_root() -> Path | None:
+    try:
+        spec = importlib_util.find_spec("futu")
+    except Exception:
+        return None
+    locations = getattr(spec, "submodule_search_locations", None) if spec is not None else None
+    if not locations:
+        return None
+    for raw_path in locations:
+        path = Path(str(raw_path)).resolve()
+        if path.is_dir():
+            return path
+    return None
+
+
+def _open_quote_context_has_earnings_calendar(package_root: Path | None) -> bool:
+    if package_root is None:
+        return False
+    source_path = Path(package_root) / "quote" / "open_quote_context.py"
+    try:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "OpenQuoteContext":
+            continue
+        return any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == FUTU_EARNINGS_CALENDAR_CAPABILITY
+            for item in node.body
+        )
+    return False
+
+
+def inspect_futu_sdk_earnings_calendar_capability(
+    *,
+    package_root: Path | None = None,
+    installed_version: str | None = None,
+) -> dict[str, Any]:
+    """Inspect the installed SDK without importing it or creating Futu log files."""
+
+    root = Path(package_root).resolve() if package_root is not None else _futu_package_root()
+    version = str(installed_version or "").strip()
+    if not version:
+        try:
+            version = importlib_metadata.version("futu-api")
+        except importlib_metadata.PackageNotFoundError:
+            version = ""
+    installed = root is not None and bool(version)
+    version_supported = installed and _version_at_least(
+        version,
+        FUTU_EARNINGS_CALENDAR_MIN_VERSION,
+    )
+    method_available = _open_quote_context_has_earnings_calendar(root)
+    supported = bool(installed and version_supported and method_available)
+    if not installed:
+        reason_code = "futu_api_missing"
+    elif not version_supported:
+        reason_code = "futu_api_version_too_old"
+    elif not method_available:
+        reason_code = FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON
+    else:
+        reason_code = None
+    return {
+        "supported": supported,
+        "installed": installed,
+        "installed_version": version or None,
+        "minimum_version": FUTU_EARNINGS_CALENDAR_MIN_VERSION,
+        "method_available": method_available,
+        "capability": FUTU_EARNINGS_CALENDAR_CAPABILITY,
+        "reason_code": reason_code,
+    }
 
 
 def _ensure_futu_api_importable() -> None:
@@ -299,6 +404,17 @@ class _FutuAPIClient:
             return self._unwrap(quote.get_financials_earnings_price_history(**kwargs))
         raise AttributeError("get_financials_earnings_price_history unavailable; upgrade futu-api")
 
+    def get_earnings_calendar(self, **kwargs: Any) -> Any:
+        quote = self._quote()
+        method = getattr(quote, FUTU_EARNINGS_CALENDAR_CAPABILITY, None)
+        if not callable(method):
+            raise FutuGatewayCapabilityUnavailableError(
+                "OpenD earnings calendar is unavailable; upgrade futu-api and OpenD",
+                capability=FUTU_EARNINGS_CALENDAR_CAPABILITY,
+                reason_code=FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON,
+            )
+        return self._unwrap(method(**kwargs))
+
     def get_corporate_actions_dividends(self, **kwargs: Any) -> Any:
         quote = self._quote()
         if hasattr(quote, "get_corporate_actions_dividends"):
@@ -334,6 +450,22 @@ class FutuGatewayRateLimitError(FutuGatewayError):
 
 class FutuGatewayTransientError(FutuGatewayError):
     code = "TRANSIENT"
+
+
+class FutuGatewayCapabilityUnavailableError(FutuGatewayError):
+    code = "CAPABILITY_UNAVAILABLE"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        capability: str,
+        reason_code: str,
+        raw_error: Any | None = None,
+    ) -> None:
+        super().__init__(message, raw_error=raw_error)
+        self.capability = str(capability)
+        self.reason_code = str(reason_code)
 
 
 def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
@@ -612,6 +744,32 @@ class FutuGateway:
             return self.client.get_financials_earnings_price_history(code=code)
         except Exception as exc:
             self._raise_mapped(exc, action="get_financials_earnings_price_history")
+        raise AssertionError("unreachable")
+
+    def get_earnings_calendar(
+        self,
+        *,
+        market: Any,
+        begin_date: str,
+        end_date: str,
+        sort_type: Any | None = None,
+        filter_list: Any | None = None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "market": market,
+            "begin_date": str(begin_date),
+            "end_date": str(end_date),
+        }
+        if sort_type is not None:
+            kwargs["sort_type"] = sort_type
+        if filter_list is not None:
+            kwargs["filter_list"] = filter_list
+        try:
+            return self.client.get_earnings_calendar(**kwargs)
+        except FutuGatewayCapabilityUnavailableError:
+            raise
+        except Exception as exc:
+            self._raise_mapped(exc, action=FUTU_EARNINGS_CALENDAR_CAPABILITY)
         raise AssertionError("unreachable")
 
     def get_corporate_actions_dividends(self, code: str) -> Any:

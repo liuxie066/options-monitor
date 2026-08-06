@@ -14,6 +14,7 @@ from src.application.platform_profile import PlatformProfile, current_platform_p
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
+from src.infrastructure.futu_gateway import inspect_futu_sdk_earnings_calendar_capability
 
 
 def run_setup_check(
@@ -69,6 +70,25 @@ def run_setup_check(
         "required Python imports are available" if not missing_deps else "required Python imports are missing",
         {"missing": missing_deps, "checked": runtime_imports} if missing_deps else {"checked": runtime_imports},
         hint="./.venv/bin/pip install -r requirements.txt -c constraints.txt" if missing_deps else None,
+    )
+
+    earnings_calendar_capability = inspect_futu_sdk_earnings_calendar_capability()
+    earnings_calendar_supported = bool(earnings_calendar_capability.get("supported"))
+    minimum_futu_version = str(earnings_calendar_capability.get("minimum_version") or "10.9.6908")
+    add(
+        "install.futu_earnings_calendar",
+        "ok" if earnings_calendar_supported else "error",
+        (
+            "Futu SDK earnings-calendar capability is available"
+            if earnings_calendar_supported
+            else "Futu SDK earnings-calendar capability is unavailable"
+        ),
+        earnings_calendar_capability,
+        hint=(
+            None
+            if earnings_calendar_supported
+            else f"Install futu-api>={minimum_futu_version} and use an OpenD build that supports get_earnings_calendar."
+        ),
     )
 
     server_deps_available = importlib.util.find_spec("lark_oapi") is not None
