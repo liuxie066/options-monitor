@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.engine import rank_candidate_rows
 from src.application.multi_tick.misc import AccountResult
 
 
@@ -139,6 +141,7 @@ def _assemble(
 ):
     from src.application.daily_decision_brief_service import assemble_daily_decision_brief
 
+    _materialize_opening_snapshot_fixture(base, market=market)
     return assemble_daily_decision_brief(
         base=base,
         run_id="run-1",
@@ -151,6 +154,171 @@ def _assemble(
         now_utc=now_utc
         or datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
     )
+
+
+def _materialize_opening_snapshot_fixture(base: Path, *, market: str) -> None:
+    """Translate legacy test setup into the current sealed-source contract.
+
+    Individual scenarios below still use compact CSV setup as fixture syntax;
+    production code never reads those files as opening-candidate authority.
+    """
+
+    account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
+    if not account_dir.is_dir():
+        return
+    path_groups = {
+        "put": sorted(account_dir.glob("*_sell_put_candidates_labeled.csv")),
+        "call": sorted(account_dir.glob("*_sell_call_candidates.csv")),
+    }
+    if not any(path_groups.values()):
+        return
+
+    rows_by_mode: dict[str, list[dict]] = {"put": [], "call": []}
+    mode_failed: dict[str, bool] = {"put": False, "call": False}
+    for mode, paths in path_groups.items():
+        for path in paths:
+            try:
+                raw = path.read_bytes()
+                if raw in {b"\n", b"\r\n"}:
+                    frame = pd.DataFrame()
+                else:
+                    frame = pd.read_csv(path)
+            except Exception:
+                mode_failed[mode] = True
+                continue
+            rows_by_mode[mode].extend(
+                dict(item)
+                for item in json.loads(frame.to_json(orient="records"))
+            )
+
+    market_norm = market.upper()
+    for mode, rows in rows_by_mode.items():
+        deduped: dict[tuple[str, str, str, str], dict] = {}
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            row_market = "HK" if symbol.endswith(".HK") else "US"
+            if row_market != market_norm:
+                continue
+            identity = (
+                symbol,
+                str(row.get("contract_symbol") or row.get("code") or ""),
+                str(row.get("expiration") or ""),
+                str(row.get("strike") or ""),
+            )
+            deduped.setdefault(identity, row)
+        rows_by_mode[mode] = rank_candidate_rows(
+            list(deduped.values()),
+            mode=mode,
+        )
+
+    strategy_results: list[dict] = []
+    ranked_candidates: list[dict] = []
+    candidate_decisions: list[dict] = []
+    scope_results: list[dict] = []
+    any_complete = False
+    any_failed = False
+    for mode in ("put", "call"):
+        observed = bool(path_groups[mode])
+        failed = mode_failed[mode]
+        rows = rows_by_mode[mode]
+        if failed:
+            status = "data_unavailable"
+            any_failed = True
+        elif observed:
+            status = "candidates_found" if rows else "no_candidate"
+            any_complete = True
+        else:
+            status = "not_applicable"
+        strategy_results.append(
+            {
+                "strategy_mode": mode,
+                "strategy_status": status,
+                "capacity_status": (
+                    "not_applicable" if status == "not_applicable" else "available"
+                ),
+                "candidate_count": len(rows),
+                "scope_count": max(1, len(rows)) if observed else 0,
+            }
+        )
+        for rank, facts in enumerate(rows, start=1):
+            candidate_id = canonical_sha256(
+                {
+                    "schema": "opening_candidate_identity.v1",
+                    "account": "lx",
+                    "futu_account_id": "12345",
+                    "market": market_norm,
+                    "strategy_mode": mode,
+                    "symbol": str(facts.get("symbol") or "").upper(),
+                    "contract_symbol": facts.get("contract_symbol"),
+                    "expiration": facts.get("expiration"),
+                    "strike": facts.get("strike"),
+                }
+            )
+            candidate_decisions.append({"candidate_id": candidate_id})
+            ranked_candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "strategy_mode": mode,
+                    "rank": rank,
+                    "facts": facts,
+                    "ranking": {},
+                }
+            )
+            scope_results.append(
+                {
+                    "scope": "contract",
+                    "candidate_id": candidate_id,
+                    "symbol": facts.get("symbol"),
+                    "strategy_mode": mode,
+                    "expiration": facts.get("expiration"),
+                    "strike": facts.get("strike"),
+                    "contract_symbol": facts.get("contract_symbol"),
+                    "status": "accepted",
+                    "reason_codes": [],
+                }
+            )
+
+    if any_failed and any_complete:
+        opening_status = "partial_data"
+    elif any_failed:
+        opening_status = "data_unavailable"
+    elif ranked_candidates:
+        opening_status = "candidates_found"
+    else:
+        opening_status = "no_candidate"
+    dependencies = [
+        {"kind": kind, "relpath": None, "sha256": char * 64}
+        for kind, char in (
+            ("required_data", "a"),
+            ("portfolio", "b"),
+            ("ledger", "c"),
+            ("fx", "d"),
+            ("earnings_rv", "e"),
+        )
+    ]
+    snapshot = {
+        "schema_version": "opening_candidate_snapshot.v1",
+        "run_id": "run-1",
+        "account": "lx",
+        "futu_account_id": "12345",
+        "trade_env": "REAL",
+        "market": market_norm,
+        "strategy_modes": ["put", "call"],
+        "account_config_sha256": "f" * 64,
+        "strategy_policy_sha256": "1" * 64,
+        "required_data_manifest_sha256": "a" * 64,
+        "dependencies": dependencies,
+        "sealed_at_utc": "2026-07-17T13:59:59Z",
+        "opening_status": opening_status,
+        "strategy_results": strategy_results,
+        "scope_results": scope_results,
+        "candidate_decisions": candidate_decisions,
+        "ranked_candidates": ranked_candidates,
+    }
+    snapshot["content_sha256"] = canonical_sha256(snapshot)
+    snapshot_path = account_dir / "state" / "opening_candidate_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
 
 def _put_row(
@@ -809,10 +977,19 @@ def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Pat
     brief = _assemble(tmp_path)
 
     assert brief["actionability"] == "live_actionable"
-    assert [item["contract_symbol"] for item in brief["candidates"]["sell_put"]] == ["NVDA_HIGH"]
+    assert [
+        item["contract_symbol"]
+        for item in brief["candidates"]["sell_put"]
+    ] == ["NVDA_HIGH", "NVDA_LOW"]
     assert brief["capacity"]["sell_put"]["contracts_available"] == 2
     assert brief["capacity"]["covered_call"]["contracts_available"] == 2
-    assert len([item for item in brief["actions"] if item["strategy_family"] == "sell_put"]) == 1
+    assert len(
+        [
+            item
+            for item in brief["actions"]
+            if item["strategy_family"] == "sell_put"
+        ]
+    ) == 2
     assert all("fake" not in item.get("reason", "") for item in brief["actions"])
 
 
@@ -1042,7 +1219,7 @@ def test_candidate_index_uses_one_ranked_candidate_per_symbol_beyond_display_lim
     assert len(brief["candidates"]["sell_put"]) == 3
     assert len(brief["candidate_index"]) == 4
     by_symbol = {item["symbol"]: item for item in brief["candidate_index"]}
-    assert by_symbol["NVDA"]["contract_count"] == 1
+    assert by_symbol["NVDA"]["contract_count"] == 2
     assert by_symbol["NVDA"]["representative"]["contract_symbol"] == "NVDA_HIGH"
     assert set(by_symbol) == {"NVDA", "PDD", "FUTU", "GOOGL"}
 
@@ -1180,12 +1357,13 @@ def test_event_projection_does_not_change_action_identity_or_candidate_order(tmp
     }
 
     assert before == after
-    assert [item["contract_symbol"] for item in with_snapshot["candidates"]["sell_put"]] == [
-        "NVDA_HIGH",
-    ]
+    assert [
+        item["contract_symbol"]
+        for item in with_snapshot["candidates"]["sell_put"]
+    ] == ["NVDA_HIGH", "NVDA_LOW"]
 
 
-def test_candidate_priority_does_not_promote_lower_return_same_symbol_contract(tmp_path: Path) -> None:
+def test_candidate_priority_does_not_change_sealed_candidate_order(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
@@ -1197,8 +1375,12 @@ def test_candidate_priority_does_not_promote_lower_return_same_symbol_contract(t
     brief = _assemble(tmp_path)
     priorities = {item["contract_symbol"]: item["priority"] for item in brief["actions"] if item["action_type"] == "open_candidate"}
 
+    assert [
+        item["contract_symbol"]
+        for item in brief["candidates"]["sell_put"]
+    ] == ["NVDA_DEFAULT", "NVDA_STRONG"]
     assert priorities["NVDA_DEFAULT"] == "P1"
-    assert "NVDA_STRONG" not in priorities
+    assert priorities["NVDA_STRONG"] == "P0"
 
 
 def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> None:
@@ -1700,7 +1882,10 @@ def test_partial_symbol_csv_failure_becomes_gap_without_blocking_other_actions(t
 
     assert brief["actionability"] == "live_actionable"
     assert any(item["contract_symbol"] == "PDD_VALID" for item in brief["actions"])
-    assert any(item["reason"] == "csv_unavailable" for item in brief["data_gaps"])
+    assert any(
+        item["reason"] == "opening_candidate_strategy_data_unavailable"
+        for item in brief["data_gaps"]
+    )
 
 
 def test_header_only_and_empty_csv_are_readable_empty_decisions(tmp_path: Path) -> None:
@@ -1946,19 +2131,20 @@ def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
 
     brief = _assemble(tmp_path, market="HK")
 
-    assert {item["contract_symbol"] for item in brief["candidates"]["sell_put"]} == {
-        "0700_P430",
-    }
+    assert [
+        item["contract_symbol"]
+        for item in brief["candidates"]["sell_put"]
+    ] == ["0700_P430", "0700_P440"]
     assert {item["contract_symbol"] for item in brief["actions"] if item.get("contract_symbol")} == {
         "0700_P430",
+        "0700_P440",
     }
     assert "0700_P450_RAW_ONLY" not in json.dumps(brief, sort_keys=True)
     from src.application.daily_decision_brief_renderer import render_full_brief
 
     assert "0700_P450_RAW_ONLY" not in render_full_brief(brief)
-    assert "有效行动 1 条" in brief["strategy_summary"]
-    assert "候选证据：Sell Put 1，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
-    assert "数据缺口" in brief["strategy_summary"]
+    assert "有效行动 2 条" in brief["strategy_summary"]
+    assert "候选证据：Sell Put 2，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
     assert not any(item["path"].endswith("_sell_put_candidates.csv") for item in brief["source_artifacts"])
 
 
@@ -1990,18 +2176,17 @@ def test_sell_put_controlled_crlf_is_authoritative_empty(tmp_path: Path) -> None
     )
 
 
-def test_sell_put_header_only_requires_minimum_schema(tmp_path: Path) -> None:
+def test_legacy_header_shape_does_not_define_snapshot_availability(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text("symbol,annualized\n", encoding="utf-8")
 
     brief = _assemble(tmp_path)
 
-    assert brief["actionability"] == "blocked"
+    assert brief["actionability"] == "live_actionable"
+    assert brief["candidates"]["sell_put"] == []
     assert any(
-        item["strategy_family"] == "sell_put"
-        and item["reason"] == "csv_unavailable"
-        and item["error_type"] == "SchemaError"
-        for item in brief["data_gaps"]
+        item["kind"] == "opening_candidate_snapshot"
+        for item in brief["source_artifacts"]
     )
 
 
@@ -2014,8 +2199,7 @@ def test_sell_put_zero_byte_is_malformed_not_empty(tmp_path: Path) -> None:
     assert brief["actionability"] == "blocked"
     assert any(
         item["strategy_family"] == "sell_put"
-        and item["reason"] == "csv_unavailable"
-        and item["error_type"] == "EmptyDataError"
+        and item["reason"] == "opening_candidate_strategy_data_unavailable"
         for item in brief["data_gaps"]
     )
 
@@ -2029,8 +2213,7 @@ def test_sell_put_unrecognized_whitespace_is_malformed_not_empty(tmp_path: Path)
     assert brief["actionability"] == "blocked"
     assert any(
         item["strategy_family"] == "sell_put"
-        and item["reason"] == "csv_unavailable"
-        and item["error_type"] == "EmptyDataError"
+        and item["reason"] == "opening_candidate_strategy_data_unavailable"
         for item in brief["data_gaps"]
     )
 
@@ -2047,9 +2230,8 @@ def test_sell_put_raw_only_artifact_reports_canonical_missing_without_fallback(t
     assert brief["candidates"]["sell_put"] == []
     assert "RAW_ONLY" not in json.dumps(brief, sort_keys=True)
     assert any(
-        item["strategy_family"] == "sell_put"
-        and item["artifact_key"] == "nvda"
-        and item["reason"] == "canonical_labeled_artifact_missing"
+        item.get("strategy_family") == "sell_put"
+        and item.get("reason") == "opening_candidate_snapshot_unavailable"
         for item in brief["data_gaps"]
     )
 
@@ -2070,7 +2252,8 @@ def test_sell_put_failure_preserves_covered_call_action_and_degrades_status(tmp_
     assert brief["candidates"]["sell_put"] == []
     assert any(item.get("contract_symbol") == "NVDA_CALL_VALID" for item in brief["actions"])
     assert any(
-        item["strategy_family"] == "sell_put" and item["reason"] == "csv_unavailable"
+        item["strategy_family"] == "sell_put"
+        and item["reason"] == "opening_candidate_strategy_data_unavailable"
         for item in brief["data_gaps"]
     )
 

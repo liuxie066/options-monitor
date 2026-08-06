@@ -544,17 +544,14 @@ def _proposal_for_candidate(
 ) -> dict[str, Any] | None:
     if lifecycle_state != "open":
         return None
-    replacement = dict(
-        decision.get("replacement_candidate_decision") or {}
-    )
-    eligibility = str(
-        replacement.get("replacement_eligibility") or ""
-    )
-    if eligibility not in {
-        "accepted_opening",
-        "capacity_deferred_to_allocator",
-    }:
+    opening = dict(decision.get("opening_decision") or {})
+    invariant = dict(decision.get("invariant_decision") or {})
+    if opening.get("accepted") is not True or invariant.get("accepted") is not True:
         return None
+    # Position Advice owns replacement eligibility.  A sealed opening
+    # candidate is the input fact; replacement economics and capacity are
+    # evaluated below against the current position and current resource pools.
+    eligibility = "accepted_opening"
     candidate = dict(decision.get("normalized_input") or {})
     contracts = int(view.contracts_open or 0)
     multiplier = _positive_decimal(view.multiplier)
@@ -854,15 +851,9 @@ def _proposal_for_candidate(
         ),
         "evidence_status": "complete",
         "risk_eligibility_status": "accepted",
-        "opening_decision_hash": replacement.get(
-            "opening_decision_hash"
-        ),
-        "invariant_decision_hash": replacement.get(
-            "invariant_decision_hash"
-        ),
-        "replacement_decision_hash": replacement.get(
-            "replacement_decision_hash"
-        ),
+        "opening_decision_hash": opening.get("decision_hash"),
+        "invariant_decision_hash": invariant.get("decision_hash"),
+        "replacement_decision_hash": None,
         "replacement_eligibility": eligibility,
         "candidate": candidate,
         "current_extrinsic": economics["current_extrinsic"],
@@ -1240,9 +1231,6 @@ def _validated_candidates(
             reasons.append("candidate_input_hash_mismatch")
         opening = dict(item.get("opening_decision") or {})
         invariant = dict(item.get("invariant_decision") or {})
-        replacement = dict(
-            item.get("replacement_candidate_decision") or {}
-        )
         if not _embedded_hash_valid(opening, "decision_hash"):
             reasons.append("opening_decision_hash_mismatch")
         if not _embedded_hash_valid(invariant, "decision_hash"):
@@ -1254,17 +1242,10 @@ def _validated_candidates(
             != canonical_sha256(risk_policy)
         ):
             reasons.append("risk_policy_hash_mismatch")
-        if not _embedded_hash_valid(
-            replacement,
-            "replacement_decision_hash",
-        ):
-            reasons.append("replacement_decision_hash_mismatch")
-        if (
-            replacement.get("candidate_id") != candidate_id
-            or replacement.get("quote_snapshot_id")
-            != item.get("quote_snapshot_id")
-        ):
-            reasons.append("replacement_candidate_binding_mismatch")
+        if opening.get("accepted") is not True:
+            reasons.append("opening_candidate_not_accepted")
+        if invariant.get("accepted") is not True:
+            reasons.append("opening_invariant_not_accepted")
         if reasons:
             errors[candidate_id or f"invalid-{len(errors)}"] = tuple(
                 sorted(set(reasons))
@@ -1272,12 +1253,6 @@ def _validated_candidates(
             continue
         seen.add(candidate_id)
         valid.append(item)
-    valid.sort(
-        key=lambda item: (
-            str(item.get("strategy_mode") or ""),
-            str(item.get("candidate_id") or ""),
-        )
-    )
     return valid, errors
 
 

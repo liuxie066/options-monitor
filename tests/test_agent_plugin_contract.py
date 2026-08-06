@@ -186,7 +186,21 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert candidate_filter_explain["requires_confirm"] is False
     assert "symbol" in candidate_filter_explain["input_schema"]
     assert candidate_filter_explain["safe_default_input"] == {}
-    assert candidate_filter_explain["input_json_schema"]["required"] == ["symbol"]
+    assert candidate_filter_explain["input_json_schema"]["required"] == [
+        "symbol",
+        "account",
+    ]
+    for retired_field in (
+        "candidate_path",
+        "candidate_paths",
+        "report_dir",
+        "run_dir",
+        "output_dir",
+        "score_weights",
+        "compare_baseline",
+    ):
+        assert retired_field not in candidate_filter_explain["input_schema"]
+        assert retired_field not in candidate_rank_explain["input_schema"]
     assert candidate_filter_explain["input_json_schema"]["properties"]["config_key"]["enum"] == ["us", "hk"]
 
 

@@ -41,6 +41,12 @@ from src.application.symbol_mutations import normalize_symbol_read
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import publish_strategy_scan_status_index
+from src.application.opening_candidate_snapshot import (
+    dependency_from_file,
+    dependency_from_hash,
+    seal_opening_candidate_snapshot,
+    strategy_policy_hash,
+)
 from src.infrastructure.io_utils import atomic_write_json
 
 LIQUIDITY_COMMON_FIELDS = (
@@ -263,6 +269,12 @@ def run_watchlist_pipeline(
     position_advice_candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None,
+    opening_final_candidates_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None,
+    opening_runtime_context_sink_fn: (
+        Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None
+    ) = None,
     required_data_snapshot_manifest: Path | None = None,
     prepared_portfolio_context_manifest: Path | None = None,
     prepared_portfolio_context_manifest_sha256: str | None = None,
@@ -317,6 +329,8 @@ def run_watchlist_pipeline(
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
         **context_kwargs,
     )
+    if opening_runtime_context_sink_fn is not None:
+        opening_runtime_context_sink_fn(portfolio_ctx, option_ctx)
 
     watchlist_items = []
     for item0 in _iter_watchlist(cfg):
@@ -453,6 +467,9 @@ def run_watchlist_pipeline(
                     ),
                     "candidate_capture_status_sink_fn": (
                         position_advice_candidate_capture_status_sink_fn
+                    ),
+                    "final_candidates_sink_fn": (
+                        opening_final_candidates_sink_fn
                     ),
                 }
                 if quote_snapshot_id:
@@ -593,6 +610,11 @@ def run_watchlist_pipeline_default(
     capture_started_at = datetime.now(timezone.utc)
     captured_decisions: list[dict[str, Any]] = []
     capture_statuses: list[dict[str, Any]] = []
+    captured_final_candidates: dict[str, list[dict[str, Any]]] = {
+        "put": [],
+        "call": [],
+    }
+    captured_runtime_context: dict[str, Any] = {}
     capture_lock = Lock()
 
     def _capture_all_decisions(rows: list[dict[str, Any]]) -> None:
@@ -602,6 +624,27 @@ def run_watchlist_pipeline_default(
     def _capture_status(status: dict[str, Any]) -> None:
         with capture_lock:
             capture_statuses.append(dict(status))
+
+    def _capture_final_candidates(
+        mode: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        with capture_lock:
+            captured_final_candidates.setdefault(str(mode), []).extend(
+                dict(item) for item in rows
+            )
+
+    def _capture_runtime_context(
+        portfolio_ctx: dict[str, Any] | None,
+        option_ctx: dict[str, Any] | None,
+    ) -> None:
+        with capture_lock:
+            captured_runtime_context["portfolio"] = (
+                dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
+            )
+            captured_runtime_context["ledger"] = (
+                dict(option_ctx) if isinstance(option_ctx, dict) else None
+            )
 
     candidate_capture_enabled = bool(account_run_id and want_scan)
     result = run_watchlist_pipeline(
@@ -655,6 +698,12 @@ def run_watchlist_pipeline_default(
         ),
         position_advice_candidate_capture_status_sink_fn=(
             _capture_status if candidate_capture_enabled else None
+        ),
+        opening_final_candidates_sink_fn=(
+            _capture_final_candidates if candidate_capture_enabled else None
+        ),
+        opening_runtime_context_sink_fn=(
+            _capture_runtime_context if candidate_capture_enabled else None
         ),
         required_data_snapshot_manifest=required_data_snapshot_manifest,
         prepared_portfolio_context_manifest=prepared_portfolio_context_manifest,
@@ -842,5 +891,79 @@ def run_watchlist_pipeline_default(
         state_dir / "position_advice_candidate_all_decisions.raw.json",
         capture_payload,
         sort_keys=True,
+    )
+    # Legacy direct callers can still exercise the capture seam without a
+    # complete Account Run authority. Formal Account Runs always supply both.
+    if required_data_snapshot_manifest is None or not str(
+        account_config_sha256 or ""
+    ).strip():
+        return result
+    portfolio_snapshot = captured_runtime_context.get("portfolio")
+    option_snapshot = captured_runtime_context.get("ledger")
+    if not isinstance(portfolio_snapshot, dict):
+        portfolio_snapshot = {}
+    if not isinstance(option_snapshot, dict):
+        option_snapshot = {}
+    authority = portfolio_snapshot.get("capacity_authority")
+    if not isinstance(authority, dict):
+        authority = {}
+    dependencies = [
+        dependency_from_file(
+            kind="required_data",
+            path=Path(required_data_snapshot_manifest),
+            base=base,
+        ),
+        dependency_from_file(
+            kind="portfolio",
+            path=(
+                Path(prepared_portfolio_context_manifest)
+                if prepared_portfolio_context_manifest is not None
+                else state_dir / "portfolio_context.json"
+            ),
+            base=base,
+        ),
+        dependency_from_file(
+            kind="ledger",
+            path=(
+                Path(prepared_option_positions_context_manifest)
+                if prepared_option_positions_context_manifest is not None
+                else state_dir / "option_positions_context.json"
+            ),
+            base=base,
+        ),
+    ]
+    required_hash = str(dependencies[0]["sha256"])
+    fx_payload = (
+        portfolio_snapshot.get("exchange_rates")
+        if isinstance(portfolio_snapshot.get("exchange_rates"), dict)
+        else option_snapshot.get("exchange_rates")
+    )
+    if not isinstance(fx_payload, dict):
+        fx_payload = {}
+    dependencies.extend(
+        (
+            dependency_from_hash(
+                kind="fx",
+                sha256=canonical_sha256(fx_payload),
+            ),
+            dependency_from_hash(
+                kind="earnings_rv",
+                sha256=required_hash,
+            ),
+        )
+    )
+    seal_opening_candidate_snapshot(
+        base=base,
+        run_id=account_run_id,
+        account=account,
+        market=str(authority.get("market") or ""),
+        physical_account=authority,
+        account_config_sha256=str(account_config_sha256 or ""),
+        strategy_policy_sha256=strategy_policy_hash(cfg),
+        dependencies=dependencies,
+        scan_statuses=normalized_statuses,
+        candidate_decisions=decisions,
+        final_candidates=captured_final_candidates,
+        sealed_at=captured_at,
     )
     return result

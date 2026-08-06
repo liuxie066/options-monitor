@@ -257,6 +257,7 @@ def run_sell_put_scan_and_summarize(
     risk_policy_version: str | None = None,
     quote_snapshot_id: str | None = None,
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
@@ -342,6 +343,12 @@ def run_sell_put_scan_and_summarize(
         except Exception as exc:
             log.warning("sell_put_steps: failed to write fail-closed sell-put CSV for %s: %s", symbol, exc)
 
+
+    if final_candidates_sink_fn is not None:
+        final_candidates_sink_fn(
+            "put",
+            [dict(item) for item in df_sp_lab.to_dict("records")],
+        )
 
     if not is_scheduled:
         render_sell_put_alerts(
