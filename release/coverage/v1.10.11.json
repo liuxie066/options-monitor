@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "1.10.11",
+  "base": {
+    "tag": "v1.10.10",
+    "commit": "46b37c8395f048185ed6bff6648da47449b945b7"
+  },
+  "reviewed_head": "beb869b3186a3f56269360496539753c63c69095",
+  "commits": [
+    {
+      "sha": "beb869b3186a3f56269360496539753c63c69095",
+      "subject": "feat: align sell put underwriting strategy"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Aligned Sell Put opportunity selection with assignment-tolerant underwriting by using a spot-bounded 20% strike recall window, mid-price limit economics, whole-period net return, and near-return tie-breaks where concentration and open interest remain ranking evidence instead of hard gates.",
+      "commits": [
+        "beb869b3186a3f56269360496539753c63c69095"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Made Sell Put market and capital evidence explicit with five-minute active-session quote freshness, DTE-matched OpenD realized volatility, fixed implied-volatility units, and settlement-currency cash capacity with stale-FX controls.",
+      "commits": [
+        "beb869b3186a3f56269360496539753c63c69095"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Consolidated Close Advice short-vol compatibility in the domain model and removed obsolete opening-strategy adapters without changing historical position interpretation.",
+      "commits": [
+        "beb869b3186a3f56269360496539753c63c69095"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made Sell Put fail closed when live spot, quote, required realized-volatility windows, earnings coverage, cash headroom, or required FX evidence is missing or stale, preventing incomplete OpenD or runtime data from becoming actionable recommendations.",
+      "commits": [
+        "beb869b3186a3f56269360496539753c63c69095"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
