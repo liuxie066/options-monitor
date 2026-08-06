@@ -467,17 +467,28 @@ def build_share_coverage(
     for symbol in symbols:
         stock = stocks.get(symbol)
         stock = dict(stock) if isinstance(stock, Mapping) else {}
-        eligible = _nonnegative_integer(stock.get("shares", 0), f"{symbol}.shares")
+        total = _nonnegative_integer(stock.get("shares", 0), f"{symbol}.shares")
+        can_sell_raw = stock.get("can_sell_qty")
+        can_sell = (
+            _nonnegative_integer(can_sell_raw, f"{symbol}.can_sell_qty")
+            if can_sell_raw is not None
+            else None
+        )
+        eligible = min(total, can_sell) if can_sell is not None else total
         locked_shares = _nonnegative_integer(
             locked.get(symbol, 0),
             f"{symbol}.locked_shares",
         )
         available = eligible - locked_shares
         reason = str(unavailable_map.get(symbol) or "").strip() or None
+        if can_sell is None and reason is None:
+            reason = "can_sell_qty_missing"
         complete = reason is None and available >= 0
         rows.append(
             {
                 "symbol": symbol,
+                "underlying_shares_total": total,
+                "can_sell_qty": can_sell,
                 "eligible_underlying_shares": eligible,
                 "locked_by_open_covered_calls": locked_shares,
                 "uncommitted_covered_shares": available if complete else None,
@@ -487,7 +498,7 @@ def build_share_coverage(
                 ),
                 "complete": complete,
                 "reason": reason or (
-                    "locked_shares_exceed_underlying"
+                    "locked_shares_exceed_eligible_underlying"
                     if available < 0
                     else None
                 ),

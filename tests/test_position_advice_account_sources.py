@@ -117,6 +117,7 @@ def _account_run_inputs(
             "stocks_by_symbol": {
                 "NVDA": {
                     "shares": 200,
+                    "can_sell_qty": 200,
                     "avg_cost": 100,
                     "currency": "USD",
                 }
@@ -208,6 +209,7 @@ def test_cash_and_share_capacity_fail_closed_on_unknown_basis() -> None:
             "stocks_by_symbol": {
                 "NVDA": {
                     "shares": 200,
+                    "can_sell_qty": 200,
                     "avg_cost": 100,
                     "currency": "USD",
                 }
@@ -220,6 +222,30 @@ def test_cash_and_share_capacity_fail_closed_on_unknown_basis() -> None:
         },
     )
     assert coverage["symbols"][0]["uncommitted_covered_shares"] == 100
+
+
+def test_share_coverage_is_incomplete_without_opend_can_sell_quantity() -> None:
+    coverage = build_share_coverage(
+        portfolio_context={
+            "stocks_by_symbol": {
+                "NVDA": {
+                    "shares": 200,
+                    "avg_cost": 100,
+                    "currency": "USD",
+                }
+            }
+        },
+        option_positions_context={
+            "decision_snapshot_status": "trusted",
+            "locked_shares_by_symbol": {"NVDA": 0},
+            "locked_shares_unavailable_by_symbol": {},
+        },
+    )
+
+    row = coverage["symbols"][0]
+    assert row["complete"] is False
+    assert row["reason"] == "can_sell_qty_missing"
+    assert row["uncommitted_covered_shares"] is None
 
 
 def test_account_run_publishes_complete_receipt_dependency_graph(

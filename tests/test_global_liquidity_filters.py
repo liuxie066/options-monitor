@@ -1426,7 +1426,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
             report_dir=base / 'output' / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            stock={'shares': 200, 'avg_cost': 100.0},
+            stock={'shares': 200, 'can_sell_qty': 200, 'avg_cost': 100.0},
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 0},
             global_sell_call_liquidity={
@@ -1537,7 +1537,7 @@ def test_sell_call_underwriting_scan_bypasses_return_income_floor() -> None:
             report_dir=base / 'output' / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            stock={'shares': 200, 'avg_cost': 100.0},
+            stock={'shares': 200, 'can_sell_qty': 200, 'avg_cost': 100.0},
             exchange_rate_converter=CurrencyConverter(ExchangeRates()),
             locked_shares_by_symbol={'AAPL': 0},
             global_sell_call_liquidity={'min_net_income': 100},

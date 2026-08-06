@@ -31,7 +31,6 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     old_open_position_ledger = m.open_position_ledger
     old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
-    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
         m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
@@ -41,7 +40,6 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             "cash_secured_total_by_ccy": {"CNY": 72000.0},
             "cash_secured_total_cny": 72000.0,
         }
-        m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_futu"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -62,7 +60,6 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
         m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
-        m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 130000.0
@@ -136,7 +133,6 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
     old_open_position_ledger = m.open_position_ledger
     old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
-    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
         m.load_account_portfolio_context = fake_load_account_portfolio_context
@@ -147,7 +143,6 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
             "cash_secured_total_cny": 12000.0,
         }
-        m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_holdings_override"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +167,6 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
         m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
-        m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "holdings"
     assert result["cash_available_cny"] == 90000.0
@@ -190,7 +184,6 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
     old_open_position_ledger = m.open_position_ledger
     old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
-    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.load_account_portfolio_context = fake_load_account_portfolio_context
         m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
@@ -200,7 +193,6 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
             "cash_secured_total_by_ccy": {"CNY": 8000.0},
             "cash_secured_total_cny": 8000.0,
         }
-        m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_external_holdings"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,7 +220,6 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
         m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
-        m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "holdings"
     assert result["cash_available_cny"] == 50000.0
@@ -246,7 +237,6 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
     old_open_position_ledger = m.open_position_ledger
     old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
-    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.load_account_portfolio_context = fake_load_account_portfolio_context
         m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
@@ -259,7 +249,6 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
                 "0700.HK": "short_put_cash_secured_basis_missing",
             },
         }
-        m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_unavailable"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -279,7 +268,6 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
         m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
-        m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
     assert result["cash_secured_usage_reliable"] is False
     assert result["cash_secured_used_cny"] is None

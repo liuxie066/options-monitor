@@ -445,18 +445,25 @@ def _sell_put_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _covered_call_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
     shares_total, total_issue = _wheel_context_number(rows, "shares_total", "shares")
+    shares_can_sell, can_sell_issue = _wheel_context_number(rows, "shares_can_sell")
     shares_locked, locked_issue = _wheel_context_number(rows, "shares_locked")
     explicit_available, available_issue = _wheel_context_number(rows, "shares_available_for_cover")
     issues = {
         "shares_total": total_issue,
+        "shares_can_sell": can_sell_issue,
         "shares_locked": locked_issue,
         "shares_available_for_cover": available_issue,
     }
     missing_fields = [field for field, issue in issues.items() if issue == "missing" and field != "shares_available_for_cover"]
     inconsistent_fields = [field for field, issue in issues.items() if issue == "inconsistent"]
     shares_available = explicit_available
-    if shares_available is None and shares_total is not None and shares_locked is not None:
-        shares_available = max(0.0, shares_total - shares_locked)
+    if (
+        shares_available is None
+        and shares_total is not None
+        and shares_can_sell is not None
+        and shares_locked is not None
+    ):
+        shares_available = max(0.0, min(shares_total, shares_can_sell) - shares_locked)
 
     called_away_shares: list[float] = []
     called_away_ratios: list[float] = []
@@ -469,7 +476,13 @@ def _covered_call_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for row in rows:
         multiplier = first_float(row, "multiplier", "contract_multiplier")
         contracts = first_float(row, "contracts", "contract_count") or 1.0
-        if multiplier is None or multiplier <= 0 or shares_total is None or shares_locked is None:
+        if (
+            multiplier is None
+            or multiplier <= 0
+            or shares_total is None
+            or shares_can_sell is None
+            or shares_locked is None
+        ):
             not_evaluable_count += 1
             continue
         called = multiplier * contracts
@@ -480,6 +493,7 @@ def _covered_call_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
             post_locked_ratios.append((shares_locked + called) / shares_total)
         capacity = compute_sell_call_share_capacity(
             shares_total=shares_total,
+            shares_can_sell=shares_can_sell,
             shares_locked=shares_locked,
             shares_available_for_cover=shares_available,
             multiplier=multiplier,
@@ -498,6 +512,7 @@ def _covered_call_wheel_risk(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "status": "evaluable" if not missing_fields and not inconsistent_fields else "not_evaluable",
         "candidate_scenario_count": len(rows),
         "shares_total": shares_total,
+        "shares_can_sell": shares_can_sell,
         "shares_locked": shares_locked,
         "shares_available_for_cover": shares_available,
         "locked_share_ratio": (shares_locked / shares_total) if shares_total and shares_locked is not None else None,

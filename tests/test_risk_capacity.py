@@ -94,7 +94,7 @@ def test_sell_put_cash_capacity_fails_closed_when_basis_missing() -> None:
     assert capacity.reason == "cash_basis_missing"
 
 
-def test_sell_put_effective_cash_haircuts_only_positive_non_native_cash() -> None:
+def test_sell_put_effective_cash_uses_positive_foreign_cash_without_haircut() -> None:
     rates = {("CNY", "USD"): 1.0 / 7.0}
     result = compute_sell_put_effective_cash(
         cash_by_currency={"USD": 10_000, "CNY": 70_000},
@@ -104,7 +104,8 @@ def test_sell_put_effective_cash_haircuts_only_positive_non_native_cash() -> Non
     )
 
     assert result.available
-    assert result.cash_free == 8_000 + 9_000 * 0.95
+    assert result.cash_free == 17_000
+    assert result.reason == "cash_supported_by_same_currency_then_fx"
 
 
 def test_sell_put_effective_cash_keeps_native_cash_when_foreign_fx_is_missing() -> None:
@@ -117,7 +118,7 @@ def test_sell_put_effective_cash_keeps_native_cash_when_foreign_fx_is_missing() 
 
     assert result.available
     assert result.cash_free == 18_000
-    assert result.reason == "native_cash_only_cross_currency_fx_unavailable:CNY"
+    assert result.reason == "known_cash_only_cross_currency_fx_unavailable:CNY"
 
 
 def test_sell_put_effective_cash_marks_stale_fx_while_keeping_native_cash() -> None:
@@ -131,12 +132,106 @@ def test_sell_put_effective_cash_marks_stale_fx_while_keeping_native_cash() -> N
 
     assert result.available
     assert result.cash_free == 18_000
-    assert result.reason == "native_cash_only_cross_currency_fx_stale:CNY"
+    assert result.reason == "known_cash_only_cross_currency_fx_stale:CNY"
+
+
+def test_sell_put_effective_cash_blocks_when_missing_fx_is_needed() -> None:
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "CNY": 70_000},
+        cash_secured_by_currency={"USD": 2_000},
+        native_currency="USD",
+        cash_required_native=20_000,
+        convert_currency=lambda _amount, _source, _target: None,
+    )
+
+    assert not result.available
+    assert result.cash_free is None
+    assert result.reason == "cross_currency_cash_fx_unavailable:CNY"
+
+
+def test_sell_put_effective_cash_keeps_native_pool_when_stale_fx_is_not_needed() -> None:
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "CNY": 70_000},
+        cash_secured_by_currency={"USD": 2_000},
+        native_currency="USD",
+        cash_required_native=10_000,
+        convert_currency=lambda _amount, _source, _target: None,
+        fx_status="unavailable_stale",
+    )
+
+    assert result.available
+    assert result.cash_free == 18_000
+    assert result.reason == "known_cash_only_cross_currency_fx_stale:CNY"
+
+
+def test_sell_put_effective_cash_deducts_foreign_short_put_deficit() -> None:
+    rates = {("HKD", "USD"): 1.0 / 7.8}
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "HKD": 1_000},
+        cash_secured_by_currency={"HKD": 8_800},
+        native_currency="USD",
+        cash_required_native=10_000,
+        convert_currency=lambda amount, source, target: amount * rates[(source, target)],
+    )
+
+    assert result.available
+    assert result.cash_free == 19_000
+
+
+def test_sell_put_effective_cash_fails_when_foreign_lock_fx_is_missing() -> None:
+    result = compute_sell_put_effective_cash(
+        cash_by_currency={"USD": 20_000, "HKD": 1_000},
+        cash_secured_by_currency={"HKD": 8_800},
+        native_currency="USD",
+        cash_required_native=10_000,
+        convert_currency=lambda _amount, _source, _target: None,
+    )
+
+    assert not result.available
+    assert result.cash_free is None
+    assert result.reason == "cross_currency_secured_cash_fx_unavailable:HKD->USD"
+
+
+def test_sell_put_capacity_uses_same_currency_then_fx_algorithm_for_us_and_hk() -> None:
+    scenarios = (
+        (
+            "USD",
+            {"USD": 10_000, "CNY": 70_000},
+            lambda amount, source, target: (
+                amount / 7.0 if (source, target) == ("CNY", "USD") else None
+            ),
+        ),
+        (
+            "HKD",
+            {"HKD": 10_000, "CNY": 9_200},
+            lambda amount, source, target: (
+                amount / 0.92 if (source, target) == ("CNY", "HKD") else None
+            ),
+        ),
+    )
+
+    for native_currency, cash, converter in scenarios:
+        effective = compute_sell_put_effective_cash(
+            cash_by_currency=cash,
+            cash_secured_by_currency={},
+            native_currency=native_currency,
+            cash_required_native=10_000,
+            convert_currency=converter,
+        )
+        capacity = compute_sell_put_cash_capacity(
+            cash_required_native=10_000,
+            cash_free_effective_native=effective.cash_free,
+            cash_native_currency=native_currency,
+        )
+        assert effective.available
+        assert effective.cash_free == 20_000
+        assert capacity.max_new_contracts == 2
 
 
 def test_sell_call_share_capacity_uses_actual_multiplier() -> None:
     capacity = compute_sell_call_share_capacity(
         shares_total=600,
+        shares_can_sell=600,
         shares_locked=100,
         multiplier=500,
     )
@@ -145,6 +240,43 @@ def test_sell_call_share_capacity_uses_actual_multiplier() -> None:
     assert capacity.shares_available_for_cover == 500
     assert capacity.covered_contracts_available == 1
     assert capacity.is_fully_covered_available is True
+
+
+def test_sell_call_share_capacity_uses_lower_of_total_and_can_sell() -> None:
+    capacity = compute_sell_call_share_capacity(
+        shares_total=600,
+        shares_can_sell=520,
+        shares_locked=20,
+        multiplier=500,
+    )
+
+    assert capacity.accepted
+    assert capacity.shares_eligible == 520
+    assert capacity.shares_available_for_cover == 500
+    assert capacity.covered_contracts_available == 1
+
+
+def test_sell_call_share_capacity_fails_when_lock_exceeds_eligible_shares() -> None:
+    capacity = compute_sell_call_share_capacity(
+        shares_total=600,
+        shares_can_sell=100,
+        shares_locked=200,
+        multiplier=100,
+    )
+
+    assert not capacity.accepted
+    assert capacity.reason == "locked_shares_exceed_eligible_underlying"
+
+
+def test_sell_call_share_capacity_requires_integral_multiplier() -> None:
+    capacity = compute_sell_call_share_capacity(
+        shares_total=600,
+        shares_can_sell=600,
+        multiplier=99.5,
+    )
+
+    assert not capacity.accepted
+    assert capacity.reason == "invalid_multiplier"
 
 
 def test_short_call_locked_shares_derives_from_multiplier() -> None:

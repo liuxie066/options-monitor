@@ -738,6 +738,18 @@ def run_one_account(
             base=request.base,
             data_config=portfolio_cfg.get("data_config"),
         )
+        prepared_fx_payload = (
+            (
+                prepared_option_context.get("exchange_rates")
+                if isinstance(
+                    prepared_option_context.get("exchange_rates"),
+                    dict,
+                )
+                else {}
+            )
+            if isinstance(prepared_option_context, dict)
+            else None
+        )
         position_advice_sources = publish_account_position_advice_sources(
             account_run_root=acct_report_dir,
             account_state_dir=acct_state_dir,
@@ -756,11 +768,9 @@ def run_one_account(
                 else None
             ),
             portfolio_context_override=prepared_portfolio_context,
-            fx_payload_override=(
-                prepared_option_context.get("exchange_rates")
-                if isinstance(prepared_option_context, dict)
-                else None
-            ),
+            # An unavailable prepared observation is an explicit empty fact;
+            # never fall back to an unrelated account-local rate cache.
+            fx_payload_override=prepared_fx_payload,
         )
         source_summary = {
             key: value

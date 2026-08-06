@@ -1307,6 +1307,7 @@ def snapshot_from_row(
         "existing_short_put_assignment_cny_total": first_float(row, "existing_short_put_assignment_cny_total"),
         "covered_notional_cny": first_float(row, "covered_notional_cny"),
         "shares_total": first_float(row, "shares_total", "shares"),
+        "shares_can_sell": first_float(row, "shares_can_sell", "can_sell_qty"),
         "shares_locked": first_float(row, "shares_locked"),
         "shares_available_for_cover": first_float(row, "shares_available_for_cover"),
         "covered_contracts_available": first_float(row, "covered_contracts_available"),

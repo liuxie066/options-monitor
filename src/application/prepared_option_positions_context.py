@@ -11,6 +11,9 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
 from domain.domain.position_advice_authority import scope_for
 from domain.services import adapt_option_positions_context
+from src.application.exchange_rate_loader import (
+    fetch_opend_exchange_rate_observation,
+)
 from src.application.ledger.api import (
     decision_state_snapshot_from_rows,
     open_position_ledger_from_data_config,
@@ -32,7 +35,7 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
-from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+from src.infrastructure.exchange_rates import exchange_rate_observation_status
 
 
 PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA = (
@@ -146,20 +149,21 @@ def prepare_option_positions_contexts(
     observed_at_utc = observed_at.isoformat()
     lifecycle_now_ms = int(observed_at.timestamp() * 1000)
     rates: dict[str, Any] | None
-    fx_status = "ready"
+    fx_observation: dict[str, Any] | None = None
+    fx_status = "unavailable"
     fx_error_type: str | None = None
     try:
-        candidate = get_exchange_rates_or_fetch_latest(
-            cache_path=(expected_run_state_dir / "rate_cache.json").resolve(),
-            max_age_hours=24,
-            log=log,
+        candidate = fetch_opend_exchange_rate_observation(
+            (account, configs[account]) for account in sorted(configs)
         )
-        rates = dict(candidate) if isinstance(candidate, Mapping) else None
-        if rates is not None and str(rates.get("freshness_status") or "").lower() == "stale_fallback":
-            rates = None
-            fx_status = "unavailable_stale"
-        elif rates is None:
-            fx_status = "unavailable"
+        fx_observation = (
+            dict(candidate) if isinstance(candidate, Mapping) else None
+        )
+        fx_status = exchange_rate_observation_status(
+            fx_observation,
+            max_age_hours=24,
+        )
+        rates = fx_observation if fx_status == "ready" else None
     except Exception as exc:
         rates = None
         fx_status = "unavailable"
@@ -169,7 +173,7 @@ def prepare_option_positions_contexts(
     fx_observation_sha256 = canonical_sha256(
         {
             "status": fx_status,
-            "rates": rates,
+            "observation": fx_observation,
             "error_type": fx_error_type,
         }
     )

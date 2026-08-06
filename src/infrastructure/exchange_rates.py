@@ -17,9 +17,11 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
-from urllib import request
 
 from src.infrastructure.io_utils import atomic_write_json
+
+
+OPEND_EXCHANGE_RATE_SOURCE = "opend_fx_market_snapshot"
 
 
 @dataclass(frozen=True)
@@ -95,12 +97,6 @@ class CurrencyConverter:
         return self.cny_to_native(amount_cny, native_ccy=target)
 
 
-SINA_EXCHANGE_RATE_SYMBOLS = {
-    'USDCNY': 'usdcny',
-    'HKDCNY': 'hkdcny',
-}
-
-
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -133,7 +129,31 @@ def _is_cache_fresh(obj: dict | None, *, max_age_hours: int | None) -> bool:
     if ts is None:
         return False
     age_seconds = (_utc_now() - ts).total_seconds()
-    return age_seconds <= int(max_age_hours) * 3600
+    return 0 <= age_seconds <= int(max_age_hours) * 3600
+
+
+def exchange_rate_observation_status(
+    payload: Mapping[str, Any] | None,
+    *,
+    max_age_hours: int = 24,
+) -> str:
+    """Classify one provider observation without changing its timestamp."""
+
+    if not isinstance(payload, Mapping):
+        return "unavailable"
+    value = dict(payload)
+    if str(value.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
+        return "unavailable"
+    rates = value.get("rates")
+    if not isinstance(rates, Mapping) or not rates:
+        return "unavailable"
+    if _payload_timestamp(value) is None:
+        return "unavailable_stale"
+    return (
+        "ready"
+        if _is_cache_fresh(value, max_age_hours=max_age_hours)
+        else "unavailable_stale"
+    )
 
 
 def _read_cache(path: Path) -> dict | None:
@@ -156,6 +176,13 @@ def get_cached_exchange_rates(
     obj = _read_cache(cache_path)
     if obj is None:
         return None
+    if str(obj.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
+        return None
+    if _payload_timestamp(obj) is None:
+        return None
+    rates = obj.get("rates")
+    if not isinstance(rates, Mapping) or not rates:
+        return None
     if not _is_cache_fresh(obj, max_age_hours=max_age_hours):
         return None
     return obj
@@ -168,7 +195,7 @@ def _warn(log: Callable[[str], None] | None, message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _save_rates(
+def save_exchange_rate_observation(
     path: Path,
     payload: Mapping[str, Any],
     *,
@@ -184,75 +211,11 @@ def _save_rates(
             raise ValueError("exchange-rate payload rates are required")
         if _payload_timestamp(value) is None:
             raise ValueError("exchange-rate payload timestamp is required")
-        if not str(value.get("source") or "").strip():
-            raise ValueError("exchange-rate payload source is required")
+        if str(value.get("source") or "").strip() != OPEND_EXCHANGE_RATE_SOURCE:
+            raise ValueError("exchange-rate payload source must be OpenD")
         atomic_write_json(path, value, sort_keys=True)
     except Exception as exc:
         _warn(log, f"[WARN] exchange_rate cache write failed: path={path} error={exc}")
-
-
-def _extract_last_float(payload: str) -> float | None:
-    try:
-        left = payload.index('"')
-        right = payload.rindex('"')
-    except ValueError:
-        return None
-    fields = [item.strip() for item in payload[left + 1:right].split(',')]
-    if len(fields) < 2:
-        return None
-    for idx in (8, 1):
-        try:
-            value = float(fields[idx])
-        except Exception:
-            continue
-        if value > 0:
-            return value
-    return None
-
-
-def _fetch_sina_exchange_rate(
-    pair: str,
-    *,
-    log: Callable[[str], None] | None = None,
-) -> float | None:
-    symbol = SINA_EXCHANGE_RATE_SYMBOLS.get(pair)
-    if not symbol:
-        return None
-    url = f'https://hq.sinajs.cn/list=fx_s{symbol}'
-    req = request.Request(
-        url,
-        headers={
-            'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://finance.sina.com.cn/',
-        },
-    )
-    try:
-        with request.urlopen(req, timeout=10) as resp:
-            payload = resp.read().decode('gbk', errors='ignore')
-    except Exception as exc:
-        _warn(log, f"[WARN] sina exchange_rate fetch failed: pair={pair} error={exc}")
-        return None
-    value = _extract_last_float(payload)
-    if value is None:
-        _warn(log, f"[WARN] sina exchange_rate payload invalid: pair={pair}")
-    return value
-
-
-def fetch_latest_exchange_rates(
-    *,
-    log: Callable[[str], None] | None = None,
-) -> dict | None:
-    rates: dict[str, float] = {}
-    for pair in ('USDCNY', 'HKDCNY'):
-        value = _fetch_sina_exchange_rate(pair, log=log)
-        if value is None:
-            return None
-        rates[pair] = value
-    return {
-        'rates': rates,
-        'timestamp': _utc_now().isoformat(),
-        'source': 'sina_fx',
-    }
 
 
 def get_exchange_rates_or_fetch_latest(
@@ -263,26 +226,22 @@ def get_exchange_rates_or_fetch_latest(
     log: Callable[[str], None] | None = None,
     write_cache: bool = True,
 ) -> dict | None:
+    """Compatibility reader for a fresh OpenD observation cache.
+
+    The function name is retained for existing callers, but it no longer
+    performs an external fetch and never returns a stale fallback. OpenD is the
+    sole formal provider; its original observation is written by the owning
+    portfolio/snapshot path via :func:`save_exchange_rate_observation`.
+    """
+
+    del write_through_path, write_cache
     cached = get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
     if cached is not None:
         return cached
-
-    stale = _read_cache(cache_path)
     _warn(
         log,
-        f"[WARN] exchange_rate cache miss/stale: {Path(cache_path).resolve()}; trying sina live fetch",
+        f"[WARN] OpenD exchange_rate observation missing/stale: {Path(cache_path).resolve()}",
     )
-    latest = fetch_latest_exchange_rates(log=log)
-    if latest is not None:
-        if write_cache:
-            _save_rates(Path(write_through_path or cache_path), latest, log=log)
-        return latest
-    if stale is not None:
-        _warn(log, "[WARN] exchange_rate live fetch unavailable; fallback to stale cache")
-        fallback = dict(stale)
-        fallback["freshness_status"] = "stale_fallback"
-        return fallback
-    _warn(log, "[WARN] exchange_rate live fetch unavailable and no local cache")
     return None
 
 
@@ -293,12 +252,7 @@ def load_exchange_rate_info(
     fetch_latest_on_miss: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> dict | None:
-    if fetch_latest_on_miss:
-        return get_exchange_rates_or_fetch_latest(
-            cache_path=cache_path,
-            max_age_hours=max_age_hours,
-            log=log,
-        )
+    del fetch_latest_on_miss, log
     return get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
 
 
@@ -335,10 +289,8 @@ def get_usd_per_cny_exchange_rate(base_dir: Path) -> float | None:
 
     rate_cache stores USDCNY (CNY per 1 USD). We invert it.
 
-    NOTE: This function keeps the existing call signature.
-    It reads and refreshes the repo-local cache:
-      1) <base_dir>/output_shared/state/rate_cache.json
-      2) on miss/stale, fetch latest online and write back to the same file
+    NOTE: This function keeps the existing call signature and reads only a
+    fresh OpenD observation from the repo-local cache.
     """
     try:
         base_dir = Path(base_dir).resolve()

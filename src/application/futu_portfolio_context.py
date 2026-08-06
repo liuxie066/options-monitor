@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from domain.domain.ledger.position_fields import normalize_account
@@ -13,6 +15,10 @@ from domain.domain.symbol_identity import (
     symbol_currency,
 )
 from src.application.account_config import resolve_futu_account_ids
+from src.infrastructure.exchange_rates import (
+    OPEND_EXCHANGE_RATE_SOURCE,
+    exchange_rate_observation_status,
+)
 
 
 _VALID_TRD_ENVS = {"REAL", "SIMULATE"}
@@ -39,6 +45,8 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
+_OPEND_FX_CODES = ("FX.USDCNH", "FX.USDHKD")
+_OPEND_FX_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -168,6 +176,104 @@ def _to_futu_acc_id(value: Any) -> int:
     if not digits.isdigit():
         raise ValueError(f"invalid futu account_id={value!r}")
     return int(raw)
+
+
+def _positive_float(value: Any) -> float | None:
+    parsed = _to_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _opend_fx_mid(row: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    bid = _positive_float(_pick(row, "bid_price", "bid"))
+    ask = _positive_float(_pick(row, "ask_price", "ask"))
+    if bid is not None and ask is not None and ask >= bid:
+        return (bid + ask) / 2.0, "bid_ask_mid"
+    last = _positive_float(_pick(row, "last_price", "price"))
+    return last, ("last_price" if last is not None else None)
+
+
+def _opend_fx_observed_at(row: Mapping[str, Any]) -> datetime | None:
+    timestamp = _positive_float(
+        _pick(row, "update_timestamp", "timestamp")
+    )
+    if timestamp is not None:
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    raw = str(_pick(row, "update_time", "data_time") or "").strip()
+    if not raw or raw.upper() == "N/A":
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_OPEND_FX_TIMEZONE)
+    return parsed.astimezone(timezone.utc)
+
+
+def build_opend_exchange_rate_observation(
+    snapshot_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Project USDCNH and USDHKD snapshots into the strategy rate schema."""
+
+    by_code = {
+        str(_pick(row, "code", "symbol") or "").strip().upper(): row
+        for row in snapshot_rows
+        if str(_pick(row, "code", "symbol") or "").strip()
+    }
+    usdcnh_row = by_code.get("FX.USDCNH")
+    usdhkd_row = by_code.get("FX.USDHKD")
+    if not isinstance(usdcnh_row, Mapping) or not isinstance(usdhkd_row, Mapping):
+        return None
+    usdcnh, usdcnh_basis = _opend_fx_mid(usdcnh_row)
+    usdhkd, usdhkd_basis = _opend_fx_mid(usdhkd_row)
+    if usdcnh is None or usdhkd is None:
+        return None
+    observed = [
+        _opend_fx_observed_at(usdcnh_row),
+        _opend_fx_observed_at(usdhkd_row),
+    ]
+    timestamp = (
+        min(item for item in observed if item is not None).isoformat()
+        if all(item is not None for item in observed)
+        else None
+    )
+    payload: dict[str, Any] = {
+        "rates": {
+            # OpenD exposes the offshore RMB pair; strategy currency naming
+            # remains CNY for compatibility with account cash buckets.
+            "USDCNY": usdcnh,
+            "HKDCNY": usdcnh / usdhkd,
+        },
+        "source": OPEND_EXCHANGE_RATE_SOURCE,
+        "provider_pairs": ["FX.USDCNH", "FX.USDHKD"],
+        "price_basis": {
+            "FX.USDCNH": usdcnh_basis,
+            "FX.USDHKD": usdhkd_basis,
+        },
+        "provider_update_time_raw": {
+            code: str(_pick(row, "update_time", "data_time") or "") or None
+            for code, row in (
+                ("FX.USDCNH", usdcnh_row),
+                ("FX.USDHKD", usdhkd_row),
+            )
+        },
+    }
+    if timestamp is not None:
+        payload["timestamp"] = timestamp
+    return payload
+
+
+def _runtime_market(cfg: Mapping[str, Any], *, fallback: str) -> str:
+    for key in ("_resolved", "_generated"):
+        node = cfg.get(key)
+        if isinstance(node, Mapping):
+            value = str(node.get("market") or "").strip().lower()
+            if value:
+                return value
+    return str(fallback or "").strip().lower() or "unknown"
 
 
 def _normalize_currency(value: Any, *, fallback: str = "CNY") -> str:
@@ -373,6 +479,10 @@ def build_futu_portfolio_context(
     base_currency: str = "CNY",
     source_observed_at: str | None = None,
     broker_account_identifiers: set[str] | list[str] | tuple[str, ...] = (),
+    futu_account_id: str | None = None,
+    trd_env: str | None = None,
+    capacity_market: str | None = None,
+    exchange_rate_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     cash_by_currency: dict[str, float] = {}
     cash_components_by_currency: dict[str, dict[str, float]] = {}
@@ -380,6 +490,7 @@ def build_futu_portfolio_context(
     cash_source_kinds: set[str] = set()
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
     stock_cost_basis: dict[str, dict[str, float | int]] = {}
+    stock_sellability: dict[str, dict[str, int | bool]] = {}
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
     for row in _dedup_balance_rows(balance_rows):
@@ -410,6 +521,9 @@ def build_futu_portfolio_context(
         shares = _to_int(_pick(row, "qty", "quantity", "hold_qty", "shares"))
         if shares is None or shares <= 0:
             continue
+        can_sell = _to_int(
+            _pick(row, "can_sell_qty", "can_sell_quantity", "sellable_qty")
+        )
 
         avg_cost = _to_float(_pick(row, "cost_price", "average_cost", "avg_cost", "cost"))
         currency = _normalize_currency(
@@ -426,6 +540,10 @@ def build_futu_portfolio_context(
                 "symbol": symbol,
                 "name": name,
                 "shares": shares,
+                "can_sell_qty": can_sell,
+                "eligible_underlying_shares": (
+                    min(shares, can_sell) if can_sell is not None and can_sell >= 0 else None
+                ),
                 "avg_cost": avg_cost if unknown_shares == 0 else None,
                 "cost_basis_complete": unknown_shares == 0,
                 "cost_known_shares": known_shares,
@@ -433,11 +551,19 @@ def build_futu_portfolio_context(
                 "currency": currency,
                 "broker": str(market),
                 "account": (normalize_account(account) if account else ""),
+                "delivery_asset_type": "ordinary_stock",
+                "coverage_allocation_status": "unallocated",
+                "stock_lot_id": None,
+                "wheel_batch_return_status": "not_calculated_unallocated",
             }
             stock_cost_basis[symbol] = {
                 "known_shares": known_shares,
                 "unknown_shares": unknown_shares,
                 "known_cost_total": float(avg_cost or 0.0) * known_shares,
+            }
+            stock_sellability[symbol] = {
+                "known": can_sell is not None and can_sell >= 0,
+                "can_sell_qty": max(0, int(can_sell or 0)),
             }
             continue
 
@@ -449,6 +575,21 @@ def build_futu_portfolio_context(
             basis["known_shares"] = int(basis["known_shares"]) + shares
             basis["known_cost_total"] = float(basis["known_cost_total"]) + (float(avg_cost) * shares)
         existing["shares"] = new_shares
+        sellability = stock_sellability[symbol]
+        if can_sell is None or can_sell < 0:
+            sellability["known"] = False
+        else:
+            sellability["can_sell_qty"] = int(sellability["can_sell_qty"]) + can_sell
+        existing["can_sell_qty"] = (
+            int(sellability["can_sell_qty"])
+            if bool(sellability["known"])
+            else None
+        )
+        existing["eligible_underlying_shares"] = (
+            min(new_shares, int(existing["can_sell_qty"]))
+            if existing["can_sell_qty"] is not None
+            else None
+        )
         known_shares = int(basis["known_shares"])
         unknown_shares = int(basis["unknown_shares"])
         existing["cost_known_shares"] = known_shares
@@ -466,19 +607,72 @@ def build_futu_portfolio_context(
     identifiers = sorted(
         {str(item or "").strip() for item in broker_account_identifiers if str(item or "").strip()}
     )
+    physical_id = str(futu_account_id or "").strip()
+    if not physical_id and len(identifiers) == 1:
+        physical_id = identifiers[0]
+    account_norm = normalize_account(account) if account else ""
+    authority_status = (
+        "available"
+        if account_norm and physical_id and len(identifiers) <= 1 and trd_env and capacity_market
+        else "unavailable"
+    )
+    capacity_authority = {
+        "schema_version": "physical_account_capacity_authority.v1",
+        "status": authority_status,
+        "logical_account": account_norm or None,
+        "futu_account_id": physical_id or None,
+        "trd_env": str(trd_env or "").strip().upper() or None,
+        "market": str(capacity_market or "").strip().lower() or None,
+        "source_observed_at": observed_at,
+        "source": "opend",
+    }
+    capacity_identity_hash = canonical_sha256(capacity_authority)
+    for stock in stocks_by_symbol.values():
+        stock["futu_account_id"] = physical_id or None
+        stock["trd_env"] = capacity_authority["trd_env"]
+        stock["market"] = capacity_authority["market"]
+        stock["source_observed_at"] = observed_at
+        stock["capacity_identity_hash"] = capacity_identity_hash
+        stock["capacity_authority_status"] = authority_status
+
+    fx_payload = (
+        dict(exchange_rate_observation)
+        if isinstance(exchange_rate_observation, Mapping)
+        else None
+    )
+    fx_status = exchange_rate_observation_status(fx_payload, max_age_hours=24)
+    cash_capacity_by_currency = {
+        currency: {
+            "currency": currency,
+            "amount": amount,
+            "futu_account_id": physical_id or None,
+            "trd_env": capacity_authority["trd_env"],
+            "market": capacity_authority["market"],
+            "source_observed_at": observed_at,
+            "capacity_identity_hash": capacity_identity_hash,
+            "capacity_authority_status": authority_status,
+            "pool_additive_across_candidates": False,
+        }
+        for currency, amount in sorted(cash_by_currency.items())
+    }
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "source_observed_at": observed_at,
         "source_account_identifiers": identifiers,
+        "capacity_authority": capacity_authority,
+        "capacity_identity_hash": capacity_identity_hash,
         "filters": {"broker": str(market), "account": account},
         "cash_by_currency": cash_by_currency,
         "cash_components_by_currency": cash_components_by_currency,
+        "cash_capacity_by_currency": cash_capacity_by_currency,
         "cash_source": (
             "mixed" if len(cash_source_kinds) > 1 else next(iter(cash_source_kinds), "empty")
         ),
         "cash_power_by_currency": cash_power_by_currency,
         "cash_power_source": "futu_net_cash_power",
         "stocks_by_symbol": stocks_by_symbol,
+        "exchange_rates": fx_payload,
+        "exchange_rate_status": fx_status,
         "raw_selected_count": len(balance_rows) + len(position_rows),
         "portfolio_source_name": "futu",
     }
@@ -504,6 +698,11 @@ def fetch_futu_portfolio_context(
     account_ids = set(resolve_futu_account_ids(cfg, account=account))
     if not account_ids:
         raise ValueError(f"no futu account_id for account={account}")
+    if len(account_ids) != 1:
+        raise ValueError(
+            f"futu portfolio context requires exactly one physical account_id for account={account}"
+        )
+    physical_account_id = next(iter(account_ids))
 
     gateway = build_ready_futu_broker_gateway(
         host=str(host),
@@ -519,6 +718,16 @@ def fetch_futu_portfolio_context(
         position_rows = _query_rows_for_account_ids(
             gateway, "get_positions", account_ids, trd_env=trd_env
         )
+        exchange_rate_observation = None
+        try:
+            ensure_quote_ready = getattr(gateway, "ensure_quote_ready", None)
+            if callable(ensure_quote_ready):
+                ensure_quote_ready()
+            exchange_rate_observation = build_opend_exchange_rate_observation(
+                _rows(gateway.get_snapshot(_OPEND_FX_CODES))
+            )
+        except Exception:
+            exchange_rate_observation = None
     finally:
         gateway.close()
 
@@ -534,4 +743,8 @@ def fetch_futu_portfolio_context(
         base_currency=base_currency,
         source_observed_at=source_observed_at,
         broker_account_identifiers=account_ids,
+        futu_account_id=physical_account_id,
+        trd_env=trd_env,
+        capacity_market=_runtime_market(cfg, fallback=base_currency),
+        exchange_rate_observation=exchange_rate_observation,
     )

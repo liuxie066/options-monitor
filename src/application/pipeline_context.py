@@ -415,15 +415,6 @@ def load_exchange_rates(
             max_age_hours=24,
             log=log,
         )
-        if (
-            isinstance(rates_obj, dict)
-            and str(rates_obj.get("freshness_status") or "").strip().lower()
-            == "stale_fallback"
-        ):
-            log("[WARN] exchange rates exceed 24h; cross-currency cash disabled")
-            if status_out is not None:
-                status_out["status"] = "unavailable_stale"
-            return None, None
         rates_map = rates_obj.get('rates') if isinstance(rates_obj, dict) and isinstance(rates_obj.get('rates'), dict) else rates_obj
         if isinstance(rates_map, dict):
             try:
