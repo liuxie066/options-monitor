@@ -191,7 +191,7 @@ def _payload(*, multiplier: object = 100.0) -> dict[str, object]:
                 "realized_volatility_20": 0.18,
                 "realized_volatility_60": 0.19,
                 "realized_volatility_120": 0.2,
-                "realized_volatility_estimate": 0.19,
+                "realized_volatility_estimate": 0.183,
                 "in_the_money": False,
                 "currency": "USD",
                 "otm_pct": 0.0909090909,
@@ -735,7 +735,7 @@ def test_finalizer_rejects_meta_and_row_rv_mismatch_without_artifacts(
     assert isinstance(meta, dict)
     rv_meta = meta["realized_volatility"]
     assert isinstance(rv_meta, dict)
-    rv_meta["realized_volatility_estimate"] = 0.2
+    rv_meta["realized_volatility_20"] = 0.2
 
     _assert_fresh_finalizer_rejects_without_artifacts(
         tmp_path=tmp_path,

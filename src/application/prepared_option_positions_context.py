@@ -155,7 +155,10 @@ def prepare_option_positions_contexts(
             log=log,
         )
         rates = dict(candidate) if isinstance(candidate, Mapping) else None
-        if rates is None:
+        if rates is not None and str(rates.get("freshness_status") or "").lower() == "stale_fallback":
+            rates = None
+            fx_status = "unavailable_stale"
+        elif rates is None:
             fx_status = "unavailable"
     except Exception as exc:
         rates = None
@@ -263,6 +266,7 @@ def prepare_option_positions_contexts(
                     "account_config_sha256": authority.account_config_sha256,
                     "ledger_generation_sha256": ledger_generation_sha256,
                     "fx_observation_sha256": fx_observation_sha256,
+                    "fx_status": fx_status,
                     "source_observed_at": observed_at_utc,
                 }
                 context = dict(context)

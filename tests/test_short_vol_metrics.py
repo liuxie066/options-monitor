@@ -3,8 +3,11 @@ from __future__ import annotations
 import math
 
 
-def test_compute_realized_volatility_snapshot_uses_weighted_windows() -> None:
-    from src.application.short_vol_metrics import compute_realized_volatility_snapshot
+def test_compute_realized_volatility_snapshot_uses_dte_matched_windows() -> None:
+    from src.application.short_vol_metrics import (
+        compute_realized_volatility_snapshot,
+        realized_volatility_estimate_for_dte,
+    )
 
     closes = []
     price = 100.0
@@ -19,8 +22,20 @@ def test_compute_realized_volatility_snapshot_uses_weighted_windows() -> None:
     assert out.rv_20 is not None and out.rv_20 > 0
     assert out.rv_60 is not None and out.rv_60 > 0
     assert out.rv_120 is not None and out.rv_120 > 0
-    expected = (out.rv_20 * 0.50 + out.rv_60 * 0.30 + out.rv_120 * 0.20)
-    assert math.isclose(out.rv_estimate or 0.0, expected, rel_tol=0.0, abs_tol=0.000002)
+    assert out.rv_estimate is None
+    expected_30 = out.rv_20 * 0.70 + out.rv_60 * 0.30
+    expected_60 = out.rv_20 * 0.30 + out.rv_60 * 0.50 + out.rv_120 * 0.20
+    expected_90 = out.rv_20 * 0.20 + out.rv_60 * 0.40 + out.rv_120 * 0.40
+    assert math.isclose(realized_volatility_estimate_for_dte(dte=30, rv_20=out.rv_20, rv_60=out.rv_60, rv_120=out.rv_120) or 0.0, expected_30, rel_tol=0.0, abs_tol=0.000002)
+    assert math.isclose(realized_volatility_estimate_for_dte(dte=60, rv_20=out.rv_20, rv_60=out.rv_60, rv_120=out.rv_120) or 0.0, expected_60, rel_tol=0.0, abs_tol=0.000002)
+    assert math.isclose(realized_volatility_estimate_for_dte(dte=90, rv_20=out.rv_20, rv_60=out.rv_60, rv_120=out.rv_120) or 0.0, expected_90, rel_tol=0.0, abs_tol=0.000002)
+
+
+def test_dte_matched_rv_fails_closed_when_required_window_is_missing() -> None:
+    from src.application.short_vol_metrics import realized_volatility_estimate_for_dte
+
+    assert realized_volatility_estimate_for_dte(dte=30, rv_20=0.2, rv_60=None, rv_120=0.3) is None
+    assert realized_volatility_estimate_for_dte(dte=60, rv_20=0.2, rv_60=0.22, rv_120=None) is None
 
 
 def test_compute_realized_volatility_snapshot_fails_closed_without_returns() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Mapping
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,15 @@ class SellCallShareCapacity:
     shares_available_for_cover: int
     covered_contracts_available: int
     is_fully_covered_available: bool
+
+
+@dataclass(frozen=True)
+class SellPutEffectiveCash:
+    available: bool
+    native_currency: str
+    cash_free: float | None
+    reason: str
+    skipped_positive_currencies: tuple[str, ...] = ()
 
 
 def _to_float(value: Any) -> float | None:
@@ -46,8 +55,118 @@ def _to_nonnegative_int(value: Any) -> int:
     return max(0, int(v))
 
 
+def _normalized_currency_amounts(values: Mapping[str, Any] | None) -> dict[str, float] | None:
+    if not isinstance(values, Mapping):
+        return None
+    normalized: dict[str, float] = {}
+    for raw_currency, raw_amount in values.items():
+        currency = str(raw_currency or "").strip().upper()
+        if currency == "RMB":
+            currency = "CNY"
+        if not currency:
+            continue
+        amount = _to_float(raw_amount)
+        if amount is None:
+            return None
+        normalized[currency] = normalized.get(currency, 0.0) + amount
+    return normalized
+
+
+def compute_sell_put_effective_cash(
+    *,
+    cash_by_currency: Mapping[str, Any] | None,
+    cash_secured_by_currency: Mapping[str, Any] | None,
+    native_currency: str,
+    convert_currency: Callable[[float, str, str], float | None],
+    non_native_haircut: float = 0.95,
+    fx_status: str | None = None,
+) -> SellPutEffectiveCash:
+    """Compute assignment capacity in the option's native currency.
+
+    Native cash receives full weight. Positive cash in another currency receives
+    the configured haircut after conversion. Existing short-put secured cash is
+    deducted in its own currency before conversion; a foreign-currency deficit
+    therefore consumes capacity at full weight rather than receiving a haircut.
+    """
+
+    native = str(native_currency or "").strip().upper()
+    if native == "RMB":
+        native = "CNY"
+    if not native:
+        return SellPutEffectiveCash(False, "", None, "native_currency_missing")
+    if not 0.0 <= float(non_native_haircut) <= 1.0:
+        return SellPutEffectiveCash(False, native, None, "invalid_non_native_haircut")
+
+    cash = _normalized_currency_amounts(cash_by_currency)
+    secured = _normalized_currency_amounts(cash_secured_by_currency or {})
+    if cash is None or secured is None:
+        return SellPutEffectiveCash(False, native, None, "cash_by_currency_invalid")
+    if not cash:
+        return SellPutEffectiveCash(False, native, None, "cash_by_currency_missing")
+
+    total_native = 0.0
+    usable_component_count = 0
+    skipped_positive: list[str] = []
+    fx_unavailable_label = (
+        "fx_stale"
+        if str(fx_status or "").strip().lower() in {"stale", "unavailable_stale"}
+        else "fx_unavailable"
+    )
+    for currency in sorted(set(cash) | set(secured)):
+        net_amount = cash.get(currency, 0.0) - secured.get(currency, 0.0)
+        if currency == native:
+            total_native += net_amount
+            usable_component_count += 1
+            continue
+        if net_amount == 0:
+            continue
+        converted = convert_currency(net_amount, currency, native)
+        converted_value = _to_float(converted)
+        if converted_value is None:
+            if net_amount < 0:
+                return SellPutEffectiveCash(
+                    False,
+                    native,
+                    None,
+                    f"cross_currency_secured_cash_{fx_unavailable_label}:{currency}->{native}",
+                )
+            skipped_positive.append(currency)
+            continue
+        usable_component_count += 1
+        total_native += (
+            converted_value * float(non_native_haircut)
+            if converted_value > 0
+            else converted_value
+        )
+
+    if usable_component_count == 0:
+        reason = (
+            f"cross_currency_cash_{fx_unavailable_label}:"
+            + ",".join(skipped_positive)
+            if skipped_positive
+            else "cash_capacity_unavailable"
+        )
+        return SellPutEffectiveCash(False, native, None, reason, tuple(skipped_positive))
+    reason = (
+        f"native_cash_only_cross_currency_{fx_unavailable_label}:"
+        + ",".join(skipped_positive)
+        if skipped_positive
+        else "cash_supported_by_native_plus_haircut"
+    )
+    return SellPutEffectiveCash(
+        True,
+        native,
+        total_native,
+        reason,
+        tuple(skipped_positive),
+    )
+
+
 def compute_sell_put_cash_capacity(
     *,
+    cash_required_native: Any = None,
+    cash_free_effective_native: Any = None,
+    cash_native_currency: Any = None,
     cash_required_cny: Any = None,
     cash_free_cny: Any = None,
     cash_free_total_cny: Any = None,
@@ -55,6 +174,19 @@ def compute_sell_put_cash_capacity(
     cash_free_usd: Any = None,
 ) -> SellPutCashCapacity:
     """Decide whether a sell-put candidate has enough known cash headroom."""
+
+    req_native = _to_float(cash_required_native)
+    free_native = _to_float(cash_free_effective_native)
+    native_currency = str(cash_native_currency or "").strip().upper()
+    if req_native is not None and free_native is not None and native_currency:
+        accepted = req_native <= free_native
+        return SellPutCashCapacity(
+            accepted=accepted,
+            basis=f"native_plus_haircut:{native_currency}",
+            reason=("cash_supported" if accepted else "effective_native_cash_insufficient"),
+            cash_required=req_native,
+            cash_free=free_native,
+        )
 
     req_cny = _to_float(cash_required_cny)
     free_cny = _to_float(cash_free_cny)

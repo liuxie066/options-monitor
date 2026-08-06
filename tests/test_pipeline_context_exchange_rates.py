@@ -60,6 +60,34 @@ def test_load_exchange_rates_uses_shared_run_cache_when_supplied(
     assert observed == [(shared_state / "rate_cache.json").resolve()]
 
 
+def test_load_exchange_rates_disables_stale_fallback_for_cross_currency_cash(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import pipeline_context as ctx
+    from src.infrastructure import exchange_rates
+
+    monkeypatch.setattr(
+        exchange_rates,
+        "get_exchange_rates_or_fetch_latest",
+        lambda **_kwargs: {
+            "rates": {"USDCNY": 7.25, "HKDCNY": 0.93},
+            "freshness_status": "stale_fallback",
+        },
+    )
+    messages: list[str] = []
+    status: dict[str, str] = {}
+
+    assert ctx.load_exchange_rates(
+        base=tmp_path,
+        state_dir=tmp_path,
+        log=messages.append,
+        status_out=status,
+    ) == (None, None)
+    assert status == {"status": "unavailable_stale"}
+    assert any("exceed 24h" in message for message in messages)
+
+
 def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
     monkeypatch,
     tmp_path: Path,

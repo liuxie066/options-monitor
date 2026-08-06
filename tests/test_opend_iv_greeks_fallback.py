@@ -7,6 +7,16 @@ from typing import Any, Callable, cast
 import pandas as pd
 
 
+def test_opend_iv_is_always_converted_from_percent_to_decimal() -> None:
+    from src.application.opend_normalize import normalize_iv
+
+    assert normalize_iv(25.0) == 0.25
+    assert normalize_iv(0.25) == 0.0025
+    assert normalize_iv(None) is None
+    assert normalize_iv(-1.0) is None
+    assert normalize_iv(float("inf")) is None
+
+
 def _build_gateway(*, chain_rows: list[dict[str, object]], snapshot_handler):
     class _Gateway:
         def get_snapshot(self, codes):  # noqa: ANN001

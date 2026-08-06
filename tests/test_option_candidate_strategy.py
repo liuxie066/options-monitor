@@ -49,12 +49,12 @@ def test_put_layered_rank_matches_previous_fill_limit_behavior() -> None:
 
     df = pd.DataFrame(
         [
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 1, "risk_label": "激进", "annualized_net_return_on_cash_basis": 0.20, "net_income": 100},
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 2, "risk_label": "激进", "annualized_net_return_on_cash_basis": 0.18, "net_income": 300},
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 3, "risk_label": "中性", "annualized_net_return_on_cash_basis": 0.16, "net_income": 90},
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 4, "risk_label": "保守", "annualized_net_return_on_cash_basis": 0.14, "net_income": 80},
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 5, "risk_label": "中性", "annualized_net_return_on_cash_basis": 0.13, "net_income": 120},
-            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 6, "risk_label": "保守", "annualized_net_return_on_cash_basis": 0.12, "net_income": 130},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 1, "risk_label": "激进", "period_net_return_on_cash_basis": 0.20, "annualized_net_return_on_cash_basis": 0.20, "net_income": 100},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 2, "risk_label": "激进", "period_net_return_on_cash_basis": 0.18, "annualized_net_return_on_cash_basis": 0.18, "net_income": 300},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 3, "risk_label": "中性", "period_net_return_on_cash_basis": 0.16, "annualized_net_return_on_cash_basis": 0.16, "net_income": 90},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 4, "risk_label": "保守", "period_net_return_on_cash_basis": 0.14, "annualized_net_return_on_cash_basis": 0.14, "net_income": 80},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 5, "risk_label": "中性", "period_net_return_on_cash_basis": 0.13, "annualized_net_return_on_cash_basis": 0.13, "net_income": 120},
+                {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 6, "risk_label": "保守", "period_net_return_on_cash_basis": 0.12, "annualized_net_return_on_cash_basis": 0.12, "net_income": 130},
         ]
     )
 
@@ -161,7 +161,7 @@ def test_score_candidates_keeps_strategy_score_diagnostic_only() -> None:
 
     ranked = rank_candidates(score_candidates(df, cfg), cfg)
 
-    assert list(ranked["contract_symbol"]) == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
+    assert list(ranked["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
 def test_rank_candidates_delegates_to_candidate_engine_ranker(monkeypatch) -> None:
@@ -500,7 +500,7 @@ def test_run_candidate_scan_keeps_configured_score_weights_diagnostic_only(tmp_p
         base_dir=tmp_path,
     )
 
-    assert list(out["contract_symbol"]) == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
+    assert list(out["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
 def test_run_candidate_scan_applies_sell_put_spot_ceiling(tmp_path: Path) -> None:

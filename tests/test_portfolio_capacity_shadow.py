@@ -54,6 +54,7 @@ def test_sell_put_capacity_uses_strategy_rank_across_symbol_files(tmp_path: Path
                 "symbol": "AAPL",
                 "contract_symbol": "AAPL260619P100000",
                 "annualized_net_return_on_cash_basis": 0.18,
+                "period_net_return_on_cash_basis": 0.18,
                 "premium_edge_score": 0.8,
                 "strike_safety_margin_pct": 0.05,
             }
@@ -66,6 +67,7 @@ def test_sell_put_capacity_uses_strategy_rank_across_symbol_files(tmp_path: Path
                 "symbol": "NVDA",
                 "contract_symbol": "NVDA260619P100000",
                 "annualized_net_return_on_cash_basis": 0.20,
+                "period_net_return_on_cash_basis": 0.20,
                 "premium_edge_score": 1.2,
                 "strike_safety_margin_pct": 0.15,
             }

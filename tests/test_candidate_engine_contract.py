@@ -188,12 +188,16 @@ def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
         max_strike=140,
         put_cash_required=15500,
         put_cash_free=12000,
+        put_cash_capacity_reason="native_cash_only_cross_currency_fx_stale:CNY",
     )
 
     assert payload["accepted"] is False
     reasons = [r["reason"] for r in payload["rejects"]]
     assert reasons == ["hard_dte", "hard_strike", "hard_capacity_put"]
     assert all(r["stage"] == STAGE_HARD_CONSTRAINTS for r in payload["rejects"])
+    assert payload["rejects"][-1]["message"].endswith(
+        "native_cash_only_cross_currency_fx_stale:CNY"
+    )
 
 
 def test_candidate_engine_stage1_allows_atm_put_and_rejects_itm_put() -> None:
@@ -433,8 +437,8 @@ def test_candidate_engine_stage4_rank_keys_match_put_call_policy() -> None:
     from domain.domain.engine import rank_candidate_rows
 
     put_rows = [
-        {"contract_symbol": "A", "annualized_net_return_on_cash_basis": 0.12, "net_income": 100, "delta": -0.10},
-        {"contract_symbol": "B", "annualized_net_return_on_cash_basis": 0.10, "net_income": 200, "delta": -0.22},
+        {"contract_symbol": "A", "period_net_return_on_cash_basis": 0.03, "annualized_net_return_on_cash_basis": 0.12, "net_income": 100, "delta": -0.10},
+        {"contract_symbol": "B", "period_net_return_on_cash_basis": 0.02, "annualized_net_return_on_cash_basis": 0.10, "net_income": 200, "delta": -0.22},
     ]
     assert [r["contract_symbol"] for r in rank_candidate_rows(put_rows, mode="put")] == ["A", "B"]
 
@@ -465,7 +469,7 @@ def test_candidate_engine_strategy_score_keeps_legacy_default_components() -> No
     assert score.components["risk_distance"] == 0.0
 
 
-def test_candidate_engine_rank_keeps_annualized_return_primary_when_score_weights_change() -> None:
+def test_candidate_engine_near_period_return_uses_liquidity_not_score_weights() -> None:
     from domain.domain.engine import CandidateScoreWeights, rank_candidate_rows
 
     rows = [
@@ -488,15 +492,15 @@ def test_candidate_engine_rank_keeps_annualized_return_primary_when_score_weight
     ]
 
     assert [r["contract_symbol"] for r in rank_candidate_rows(rows, mode="put")] == [
-        "HIGH_RETURN_WIDE",
         "LOWER_RETURN_LIQUID",
+        "HIGH_RETURN_WIDE",
     ]
     ranked = rank_candidate_rows(
         rows,
         mode="put",
         score_weights=CandidateScoreWeights(liquidity=0.02),
     )
-    assert [r["contract_symbol"] for r in ranked] == ["HIGH_RETURN_WIDE", "LOWER_RETURN_LIQUID"]
+    assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
 def test_candidate_engine_path_risk_score_is_diagnostic_not_a_rank_override() -> None:
@@ -555,27 +559,30 @@ def test_candidate_engine_selects_one_best_contract_per_symbol() -> None:
 
     selected = select_best_candidate_per_symbol(rows, mode="put")
 
-    assert [row["contract_symbol"] for row in selected] == ["NVDA_HIGH", "AAPL_ONLY"]
+    assert [row["contract_symbol"] for row in selected] == ["NVDA_LOW", "AAPL_ONLY"]
 
 
-def test_candidate_engine_uses_assignment_discount_and_concentration_only_as_ties() -> None:
+def test_candidate_engine_uses_concentration_across_near_return_symbol_winners() -> None:
     from domain.domain.engine import rank_candidate_rows
 
     rows = [
         {
             "contract_symbol": "HIGHER_RETURN",
+            "period_net_return_on_cash_basis": 0.021,
             "annualized_net_return_on_cash_basis": 0.21,
             "net_assignment_discount_pct": 0.01,
             "symbol_concentration_after": 0.50,
         },
         {
             "contract_symbol": "BETTER_DISCOUNT",
+            "period_net_return_on_cash_basis": 0.020,
             "annualized_net_return_on_cash_basis": 0.20,
             "net_assignment_discount_pct": 0.10,
             "symbol_concentration_after": 0.10,
         },
         {
             "contract_symbol": "LOWER_CONCENTRATION",
+            "period_net_return_on_cash_basis": 0.020,
             "annualized_net_return_on_cash_basis": 0.20,
             "net_assignment_discount_pct": 0.10,
             "symbol_concentration_after": 0.05,
@@ -585,9 +592,9 @@ def test_candidate_engine_uses_assignment_discount_and_concentration_only_as_tie
     ranked = rank_candidate_rows(rows, mode="put")
 
     assert [row["contract_symbol"] for row in ranked] == [
-        "HIGHER_RETURN",
         "LOWER_CONCENTRATION",
         "BETTER_DISCOUNT",
+        "HIGHER_RETURN",
     ]
 
 
@@ -622,9 +629,96 @@ def test_candidate_engine_explains_rank_score_components() -> None:
     assert explanation["score_inputs"]["spread_ratio"] == 0.35
     assert explanation["score_warnings"] == ["wide_spread"]
     assert explanation["risk_notes"] == ["价差偏宽"]
-    assert "annualized_return" in explanation["primary_drivers"]
-    assert "年化收益" in explanation["primary_driver_labels"]
-    assert "年化净收益" in explanation["rank_reason"]
+    assert explanation["primary_drivers"] == ["period_net_return_on_cash_basis"]
+    assert "持有期净收益" in explanation["primary_driver_labels"]
+    assert "持有期净收益" in explanation["rank_reason"]
+
+
+def test_sell_put_ranking_uses_period_return_before_annualized_return() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    rows = [
+        {
+            "symbol": "AAPL",
+            "contract_symbol": "SHORT_HIGH_ANNUAL",
+            "period_net_return_on_cash_basis": 0.025,
+            "annualized_net_return_on_cash_basis": 0.30,
+        },
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "LONG_HIGH_PERIOD",
+            "period_net_return_on_cash_basis": 0.030,
+            "annualized_net_return_on_cash_basis": 0.15,
+        },
+    ]
+
+    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
+        "LONG_HIGH_PERIOD",
+        "SHORT_HIGH_ANNUAL",
+    ]
+
+
+def test_sell_put_within_symbol_near_return_ignores_concentration_and_volume() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    rows = [
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "BETTER_DISCOUNT",
+            "period_net_return_on_cash_basis": 0.0200,
+            "net_assignment_discount_pct": 0.12,
+            "spread_ratio": 0.20,
+            "open_interest": None,
+            "volume": 0,
+            "symbol_concentration_after": 0.90,
+        },
+        {
+            "symbol": "NVDA",
+            "contract_symbol": "WORSE_DISCOUNT",
+            "period_net_return_on_cash_basis": 0.0215,
+            "net_assignment_discount_pct": 0.08,
+            "spread_ratio": 0.05,
+            "open_interest": 500,
+            "volume": 1000,
+            "symbol_concentration_after": 0.01,
+        },
+    ]
+
+    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
+        "BETTER_DISCOUNT",
+        "WORSE_DISCOUNT",
+    ]
+
+
+def test_sell_put_return_bands_are_anchored_to_current_max() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    rows = [
+        {"symbol": "NVDA", "contract_symbol": "TOP", "period_net_return_on_cash_basis": 0.0100, "net_assignment_discount_pct": 0.01},
+        {"symbol": "NVDA", "contract_symbol": "NEAR", "period_net_return_on_cash_basis": 0.0085, "net_assignment_discount_pct": 0.10},
+        {"symbol": "NVDA", "contract_symbol": "CHAIN_ONLY", "period_net_return_on_cash_basis": 0.0070, "net_assignment_discount_pct": 0.50},
+    ]
+
+    assert [row["contract_symbol"] for row in rank_candidate_rows(rows, mode="put")] == [
+        "NEAR",
+        "TOP",
+        "CHAIN_ONLY",
+    ]
+
+
+def test_sell_put_ranking_preserves_repeated_row_objects() -> None:
+    from domain.domain.engine import rank_candidate_rows
+
+    repeated = {
+        "symbol": "NVDA",
+        "contract_symbol": "DUPLICATE",
+        "period_net_return_on_cash_basis": 0.01,
+        "net_assignment_discount_pct": 0.05,
+    }
+
+    ranked = rank_candidate_rows([repeated, repeated], mode="put")
+
+    assert ranked == [repeated, repeated]
 
 
 def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:

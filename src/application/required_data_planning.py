@@ -158,6 +158,7 @@ class RequiredDataFetchPlanBundle:
     projected_expirations: list[str] = field(default_factory=list)
     require_realized_volatility: bool = False
     spot_observation_complete: bool = False
+    spot_observation_error: str | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -176,6 +177,7 @@ class RequiredDataFetchPlanBundle:
             "projected_expirations": list(self.projected_expirations),
             "require_realized_volatility": self.require_realized_volatility,
             "spot_observation_complete": bool(self.spot_observation_complete),
+            "spot_observation_error": self.spot_observation_error,
         }
 
 
@@ -197,29 +199,12 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
-def _load_existing_spot(*, required_data_dir: Path, symbol: str) -> float | None:
-    path = required_data_dir / "parsed" / f"{symbol}_required_data.csv"
-    if not path.exists() or path.stat().st_size <= 0:
-        return None
-    try:
-        import pandas as pd
-
-        df = pd.read_csv(path, usecols=["spot"])
-        spots = pd.to_numeric(df["spot"], errors="coerce").dropna()
-        if spots.empty:
-            return None
-        return float(spots.iloc[0])
-    except Exception:
-        return None
-
-
 def _resolve_spot_reference(
     *,
     symbol: str,
     host: str,
     port: int,
     base_dir: Path,
-    required_data_dir: Path,
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
@@ -238,9 +223,6 @@ def _resolve_spot_reference(
             return fresh
     except Exception:
         pass
-    existing = _load_existing_spot(required_data_dir=required_data_dir, symbol=symbol)
-    if existing is not None and existing > 0:
-        return existing
     return None
 
 
@@ -350,18 +332,47 @@ def _resolve_put_side_plan(
     expirations = filtered
     configured_min_strike = _safe_float(sell_put_cfg.get("min_strike"))
     configured_max_strike = _safe_float(sell_put_cfg.get("max_strike"))
-    min_strike = configured_min_strike
-    max_strike = configured_max_strike
-    if spot_reference is not None and spot_reference > 0:
-        max_strike = min(value for value in (configured_max_strike, spot_reference) if value is not None)
+    if not expirations:
+        return OptionSideFetchPlan(
+            option_type="put",
+            min_dte=window.min_dte,
+            max_dte=window.max_dte,
+            explicit_expirations=[],
+            strike_window=StrikeWindowPlan(
+                min_strike=None,
+                max_strike=None,
+                source=f"{source_prefix}.no_expirations",
+                buffer_applied=False,
+                buffer_pct=0.0,
+                base_min_strike=None,
+                base_max_strike=None,
+            ),
+            planning_reason="no eligible expirations; spot not required",
+            source_fields=[
+                f"{source_prefix}.min_dte",
+                f"{source_prefix}.max_dte",
+            ],
+            spot_reference=spot_reference,
+        )
+    if spot_reference is None or spot_reference <= 0:
+        raise RuntimeError(f"OpenD spot unavailable for {symbol} sell-put recall")
+    max_strike = min(
+        value
+        for value in (configured_max_strike, spot_reference)
+        if value is not None
+    )
+    derived_min_strike = max_strike * (1.0 - DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
+    min_strike = max(
+        value
+        for value in (configured_min_strike, derived_min_strike)
+        if value is not None
+    )
     planning_reason = f"use configured {source_prefix} near/far bounds"
     source_fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike", f"{source_prefix}.min_dte", f"{source_prefix}.max_dte"]
-    if min_strike is None and max_strike is not None:
-        min_strike = max_strike * (1.0 - DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
-        planning_reason = f"derive {source_prefix} far bound from configured near bound -20%"
-        source_fields = source_fields + [f"{source_prefix}.max_strike"]
-    if spot_reference is not None and spot_reference > 0:
-        source_fields = source_fields + ["spot"]
+    planning_reason = (
+        f"derive {source_prefix} recall window from min(configured max, OpenD spot) and -20%"
+    )
+    source_fields = source_fields + ["spot"]
     return OptionSideFetchPlan(
         option_type="put",
         min_dte=window.min_dte,
@@ -1147,7 +1158,6 @@ def build_required_data_fetch_plan(
             )
         except Exception as exc:
             trading_date_resolution_error = exc
-    spot_observation_complete = frozen_trading_date is not None
     spot_reference: float | None = None
     if frozen_trading_date is not None:
         spot_cache_key = _spot_observation_cache_key(
@@ -1171,13 +1181,17 @@ def build_required_data_fetch_plan(
                 host=fetch_host,
                 port=fetch_port,
                 base_dir=base,
-                required_data_dir=required_data_dir,
                 snapshot_max_wait_sec=snapshot_max_wait_sec,
                 snapshot_window_sec=snapshot_window_sec,
                 snapshot_max_calls=snapshot_max_calls,
             )
             if spot_observation_cache is not None:
                 spot_observation_cache[spot_cache_key] = spot_reference
+    spot_observation_complete = (
+        spot_reference is not None
+        and math.isfinite(float(spot_reference))
+        and float(spot_reference) > 0
+    )
     if (
         discovery_cache_key is None
         and frozen_trading_date is not None
@@ -1243,19 +1257,23 @@ def build_required_data_fetch_plan(
     available_expirations = list(expiration_discovery.expirations)
 
     side_plans: list[OptionSideFetchPlan] = []
+    spot_observation_error: str | None = None
     yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg)
     combo_yield_enabled = bool(yield_enhancement_policy.enabled)
     if want_put or combo_yield_enabled:
-        side_plans.append(
-            _resolve_put_side_plan(
-                symbol=symbol,
-                sell_put_cfg=sell_put_cfg,
-                limit_expirations=limit_expirations,
-                available_expirations=available_expirations,
-                trading_date=trading_date,
-                spot_reference=spot_reference,
+        try:
+            side_plans.append(
+                _resolve_put_side_plan(
+                    symbol=symbol,
+                    sell_put_cfg=sell_put_cfg,
+                    limit_expirations=limit_expirations,
+                    available_expirations=available_expirations,
+                    trading_date=trading_date,
+                    spot_reference=spot_reference,
+                )
             )
-        )
+        except RuntimeError as exc:
+            spot_observation_error = str(exc)
     if want_call:
         side_plans.append(
             _resolve_call_side_plan(
@@ -1294,6 +1312,8 @@ def build_required_data_fetch_plan(
         projection_outcome: FetchPlanOutcome = "success_empty"
     elif expiration_discovery.outcome in {"provider_error", "parse_error"}:
         projection_outcome = expiration_discovery.outcome
+    elif spot_observation_error is not None:
+        projection_outcome = "provider_error"
     elif side_plans and not projected_expirations:
         projection_outcome = "projection_empty"
     else:
@@ -1332,4 +1352,5 @@ def build_required_data_fetch_plan(
         projected_expirations=projected_expirations,
         require_realized_volatility=require_realized_volatility,
         spot_observation_complete=spot_observation_complete,
+        spot_observation_error=spot_observation_error,
     )

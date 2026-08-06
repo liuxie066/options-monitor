@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -31,6 +32,8 @@ def _write_put_required_data(
         [
             {
                 "symbol": "NVDA",
+                "market": "US",
+                "quote_update_time": "2026-04-01 10:59:00",
                 "option_type": "put",
                 "expiration": "2026-09-18",
                 "contract_symbol": "NVDA-20260918-PUT-100",
@@ -76,6 +79,7 @@ def _capture_put_decisions(
             "put_cash_required": 10_000,
             "put_cash_free": put_cash_free,
         },
+        quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         quiet=True,
     )
     return captured
@@ -179,6 +183,7 @@ def test_real_sell_put_scanner_accepts_atm_contract(tmp_path: Path) -> None:
         min_volume=0,
         max_spread_ratio=1,
         event_risk_cfg={"enabled": False, "mode": "warn"},
+        quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
         quiet=True,
     )
 

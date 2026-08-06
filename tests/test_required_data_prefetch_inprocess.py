@@ -28,7 +28,7 @@ class _Gateway:
 def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.required_data_planning as planning
 
-    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(
         planning,
         "list_option_expirations",
@@ -50,11 +50,6 @@ def _patch_0700_plan_discovery(
         planning,
         "get_underlier_spot",
         lambda *args, **kwargs: spot,
-    )
-    monkeypatch.setattr(
-        planning,
-        "_load_existing_spot",
-        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         planning,
@@ -98,6 +93,7 @@ def _strict_success_rows_payload(
     """Build provider evidence accepted by the strict S1 finalizer contract."""
 
     from domain.domain.symbol_identity import resolve_symbol_identity
+    from src.application.short_vol_metrics import realized_volatility_estimate_for_dte
 
     normalized_rows: list[dict[str, object]] = []
     for index, raw_row in enumerate(rows):
@@ -126,11 +122,15 @@ def _strict_success_rows_payload(
                 "realized_volatility_120": float(
                     row.get("realized_volatility_120") or 0.28
                 ),
-                "realized_volatility_estimate": float(
-                    row.get("realized_volatility_estimate") or 0.25
-                ),
             }
         )
+        if "realized_volatility_estimate" not in row:
+            row["realized_volatility_estimate"] = realized_volatility_estimate_for_dte(
+                dte=row["dte"],
+                rv_20=float(row["realized_volatility_20"]),
+                rv_60=float(row["realized_volatility_60"]),
+                rv_120=float(row["realized_volatility_120"]),
+            )
         normalized_rows.append(row)
     code_set = [str(row["contract_symbol"]) for row in normalized_rows]
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -160,7 +160,7 @@ def _strict_success_rows_payload(
             "realized_volatility_20": 0.20,
             "realized_volatility_60": 0.24,
             "realized_volatility_120": 0.28,
-            "realized_volatility_estimate": 0.25,
+            "realized_volatility_estimate": None,
         },
     }
     payload_meta.update(meta or {})
@@ -949,7 +949,7 @@ def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_underwriting() ->
 
 
 def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Path, monkeypatch) -> None:
-    _patch_0700_plan_discovery(monkeypatch, spot=None)
+    _patch_0700_plan_discovery(monkeypatch, spot=444.8)
     watchlist = [
         {
             "symbol": "0700.HK",
@@ -988,7 +988,7 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     assert captured["option_types"] == "put"
     assert captured["min_dte"] == 20
     assert captured["max_dte"] == 60
-    assert captured["side_strike_windows"] == {"put": {"min_strike": 360.0, "max_strike": 450.0}}
+    assert captured["side_strike_windows"] == {"put": {"min_strike": 355.84000000000003, "max_strike": 444.8}}
     assert captured["include_realized_volatility"] is True
 
 
@@ -1044,7 +1044,7 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1107,7 +1107,7 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     assert captured["max_dte"] == 90
     side_strike_windows = captured["side_strike_windows"]
     assert isinstance(side_strike_windows, dict)
-    assert side_strike_windows["put"] == {"min_strike": 360.0, "max_strike": 450.0}
+    assert side_strike_windows["put"] == {"min_strike": 355.84000000000003, "max_strike": 444.8}
     assert side_strike_windows["call"]["min_strike"] == 550
     assert result["symbols_total"] == 2
     assert result["unique_symbols_total"] == 1
@@ -1131,7 +1131,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-29", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1277,7 +1277,7 @@ def test_inprocess_empty_put_rv_demand_is_carried_by_single_active_call_request(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-29", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1410,7 +1410,7 @@ def test_inprocess_multi_spec_preserves_nested_connection_failure_for_gateway(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-29", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1525,7 +1525,7 @@ def test_inprocess_multi_spec_duplicate_child_contract_fails_without_receipt(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-29", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1609,7 +1609,7 @@ def test_subprocess_multi_spec_fails_before_execution_or_publication(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-29", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     watchlist = [
         {
@@ -1927,7 +1927,7 @@ def test_prefetch_refetches_legacy_cache_without_strict_completeness_evidence(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-19", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     shared_required = tmp_path / "shared_required"
     (shared_required / "raw").mkdir(parents=True)
@@ -1991,7 +1991,7 @@ def test_prefetch_reuses_strict_cache_without_resaving_raw_observation(
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-19", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     shared_required = tmp_path / "shared_required"
     watchlist = [
@@ -2079,7 +2079,7 @@ def test_prefetch_refetches_stale_strict_cache_before_publishing_current_receipt
     _patch_0700_plan_discovery(
         monkeypatch,
         ["2026-06-19", "2026-07-17"],
-        spot=None,
+        spot=444.8,
     )
     shared_required = tmp_path / "shared_required"
     stale_observed_at = "2020-01-01T00:00:00Z"

@@ -1947,10 +1947,10 @@ def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
     brief = _assemble(tmp_path, market="HK")
 
     assert {item["contract_symbol"] for item in brief["candidates"]["sell_put"]} == {
-        "0700_P440",
+        "0700_P430",
     }
     assert {item["contract_symbol"] for item in brief["actions"] if item.get("contract_symbol")} == {
-        "0700_P440",
+        "0700_P430",
     }
     assert "0700_P450_RAW_ONLY" not in json.dumps(brief, sort_keys=True)
     from src.application.daily_decision_brief_renderer import render_full_brief

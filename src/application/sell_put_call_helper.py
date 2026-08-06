@@ -206,16 +206,13 @@ def _liquidity_reject_reason(
     return None
 
 
-def _normalized_iv(*values: Any) -> float | None:
+def _mean_canonical_iv(*values: Any) -> float | None:
     parsed: list[float] = []
     for value in values:
         out = _safe_float(value)
         if out is None or out <= 0:
             continue
-        if out > 3.0:
-            out = out / 100.0
-        if out > 0:
-            parsed.append(float(out))
+        parsed.append(float(out))
     if not parsed:
         return None
     return sum(parsed) / float(len(parsed))
@@ -928,7 +925,7 @@ def _build_yield_enhancement_pair_rows(
             expected_iv = (
                 None
                 if structure_mode == "staggered_expiry_pair"
-                else _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
+                else _mean_canonical_iv(put_leg.implied_volatility, call_leg.implied_volatility)
             )
             try:
                 candidate = _build_pair_row(

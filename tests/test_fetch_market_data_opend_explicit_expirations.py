@@ -161,6 +161,7 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
                         "bid_price": 0.9,
                         "ask_price": 1.1,
                         "option_contract_multiplier": 100,
+                        "update_time": "2026-07-27 15:59:00",
                     }
                     for code in codes
                 ]
@@ -239,7 +240,23 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
     assert len(rows) == 1
     assert rows[0]["expiration"] == "2026-08-07"
     assert rows[0]["dte"] == 11
-    assert rows[0]["realized_volatility_estimate"] == 0.25
+    assert rows[0]["realized_volatility_estimate"] == 0.212
+    assert rows[0]["market"] == "US"
+    assert rows[0]["quote_update_time"] == "2026-07-27 15:59:00"
+    from src.application.opend_symbol_outputs import save_outputs
+
+    _raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        payload,
+        output_root=tmp_path / "required_data",
+        publish_cache_metadata=False,
+    )
+    import pandas as pd
+
+    persisted = pd.read_csv(csv_path).iloc[0]
+    assert persisted["market"] == "US"
+    assert persisted["quote_update_time"] == "2026-07-27 15:59:00"
     assert meta["status"] == "ok"
     assert meta["source_outcome"] == "success_rows"
     assert meta["trading_date"] == "2026-07-27"

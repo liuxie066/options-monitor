@@ -20,9 +20,35 @@ from domain.domain.cash_secured_utils import (
     read_cash_secured_total_cny,
 )
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.risk_capacity import (
+    SellPutEffectiveCash,
+    compute_sell_put_effective_cash,
+)
 from src.infrastructure.exchange_rates import CurrencyConverter
 
 log = logging.getLogger(__name__)
+
+
+def _effective_cash_in_native_currency(
+    *,
+    cash_by_ccy: dict[str, Any] | None,
+    cash_secured_by_ccy: dict[str, Any] | None,
+    native_currency: str,
+    exchange_rate_converter: CurrencyConverter,
+    fx_status: str | None = None,
+) -> SellPutEffectiveCash:
+    return compute_sell_put_effective_cash(
+        cash_by_currency=cash_by_ccy,
+        cash_secured_by_currency=cash_secured_by_ccy,
+        native_currency=native_currency,
+        convert_currency=lambda amount, source, target: exchange_rate_converter.convert(
+            amount,
+            from_ccy=source,
+            to_ccy=target,
+        ),
+        non_native_haircut=0.95,
+        fx_status=fx_status,
+    )
 
 
 def sell_put_opening_capacity_inputs(
@@ -34,25 +60,35 @@ def sell_put_opening_capacity_inputs(
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
 ) -> dict[str, Any]:
-    """Return the legacy cash gate as Candidate Engine resource inputs."""
+    """Return gross assignment requirement and effective native cash headroom."""
 
     try:
         strike_value = float(strike)
         multiplier_value = float(multiplier)
     except (TypeError, ValueError):
-        return {"put_cash_capacity_available": False}
+        return {
+            "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "assignment_requirement_invalid",
+        }
     if strike_value <= 0 or multiplier_value <= 0 or not isinstance(portfolio_ctx, dict):
-        return {"put_cash_capacity_available": False}
+        return {
+            "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "assignment_requirement_or_portfolio_context_invalid",
+        }
 
     option_ctx = portfolio_ctx.get("option_ctx")
     if not isinstance(option_ctx, dict):
-        return {"put_cash_capacity_available": False}
+        return {
+            "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "option_position_cash_secured_context_missing",
+        }
     unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
     if isinstance(unavailable, dict) and unavailable:
         return {
             "put_cash_required": strike_value * multiplier_value,
             "put_cash_free": None,
             "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "cash_secured_state_unavailable",
         }
 
     try:
@@ -61,56 +97,39 @@ def sell_put_opening_capacity_inputs(
             option_ctx,
             by_symbol_by_ccy=normalized_by_ccy,
         )
-        used_total_cny = read_cash_secured_total_cny(option_ctx)
-        used_total_usd = float(total_by_ccy.get("USD") or 0.0)
         cash_by_ccy = portfolio_ctx.get("cash_by_currency")
         if not isinstance(cash_by_ccy, dict):
-            return {"put_cash_capacity_available": False}
-        cash_cny_raw = cash_by_ccy.get("CNY")
-        cash_cny = float(cash_cny_raw) if cash_cny_raw is not None else None
-        cash_total_cny = _sum_cash_total_cny(
-            cash_by_ccy,
+            return {
+                "put_cash_capacity_available": False,
+                "put_cash_capacity_reason": "cash_by_currency_missing",
+            }
+        native_currency = normalize_currency(currency)
+        cash_headroom = _effective_cash_in_native_currency(
+            cash_by_ccy=cash_by_ccy,
+            cash_secured_by_ccy=total_by_ccy,
+            native_currency=native_currency,
             exchange_rate_converter=exchange_rate_converter,
+            fx_status=portfolio_ctx.get("_sell_put_fx_status"),
         )
-        cash_usd_raw = cash_by_ccy.get("USD")
-        cash_usd = float(cash_usd_raw) if cash_usd_raw is not None else None
     except (TypeError, ValueError):
-        return {"put_cash_capacity_available": False}
+        return {
+            "put_cash_capacity_available": False,
+            "put_cash_capacity_reason": "cash_capacity_inputs_invalid",
+        }
 
-    native_currency = normalize_currency(currency)
     native_required = strike_value * multiplier_value
-    required_cny = exchange_rate_converter.native_to_cny(
-        native_required,
-        native_ccy=native_currency,
-    )
-    if required_cny is not None and cash_cny is not None and used_total_cny is not None:
-        return {
-            "put_cash_required": float(required_cny),
-            "put_cash_free": float(cash_cny) - float(used_total_cny),
-            "put_cash_capacity_available": True,
-        }
-    if (
-        required_cny is not None
-        and cash_total_cny is not None
-        and used_total_cny is not None
-    ):
-        return {
-            "put_cash_required": float(required_cny),
-            "put_cash_free": float(cash_total_cny) - float(used_total_cny),
-            "put_cash_capacity_available": True,
-        }
-    if native_currency == "USD" and cash_usd is not None:
+    if cash_headroom.available and cash_headroom.cash_free is not None:
         return {
             "put_cash_required": native_required,
-            "put_cash_free": cash_usd - used_total_usd,
+            "put_cash_free": cash_headroom.cash_free,
             "put_cash_capacity_available": True,
+            "put_cash_capacity_reason": cash_headroom.reason,
         }
     return {
-        "put_cash_required": (
-            float(required_cny) if required_cny is not None else native_required
-        ),
+        "put_cash_required": native_required,
         "put_cash_free": None,
         "put_cash_capacity_available": False,
+        "put_cash_capacity_reason": cash_headroom.reason,
     }
 
 
@@ -181,6 +200,7 @@ def enrich_sell_put_candidates_with_cash(
     used_total_cny = None
     used_symbol_cny = None
     cash_secured_unavailable_reason = ""
+    total_by_ccy_norm: dict[str, float] = {}
 
     if option_ctx:
         unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
@@ -327,9 +347,6 @@ def enrich_sell_put_candidates_with_cash(
         k = exchange_rate_converter.native_to_cny(1.0, native_ccy=ccy) if ccy else None
         if k is None or k <= 0:
             df_sp_lab['cash_required_cny'] = pd.NA
-            if ccy:
-                empty_reason = df_sp_lab['cash_requirement_unavailable_reason'].fillna('').astype(str).str.strip() == ''
-                df_sp_lab.loc[empty_reason, 'cash_requirement_unavailable_reason'] = f'sell_put_candidate_cny_rate_missing:{ccy}'
         else:
             df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
             try:
@@ -343,6 +360,91 @@ def enrich_sell_put_candidates_with_cash(
         df_sp_lab['cash_required_usd'] = pd.NA
         df_sp_lab['cash_required_cny'] = pd.NA
         df_sp_lab['cash_requirement_unavailable_reason'] = 'sell_put_candidate_cash_requirement_calc_failed'
+
+    # Canonical Sell Put capacity: gross assignment requirement in the option's
+    # native currency; native cash at 100%, other currencies at 95% after FX.
+    df_sp_lab['cash_required_native'] = pd.NA
+    df_sp_lab['cash_free_effective_native'] = pd.NA
+    df_sp_lab['cash_available_effective_native'] = pd.NA
+    df_sp_lab['cash_native_currency'] = pd.NA
+    df_sp_lab['cash_capacity_basis'] = pd.NA
+    df_sp_lab['cash_fx_status'] = pd.NA
+    cash_by_ccy = (
+        portfolio_ctx.get('cash_by_currency')
+        if isinstance(portfolio_ctx, dict)
+        and isinstance(portfolio_ctx.get('cash_by_currency'), dict)
+        else None
+    )
+    fx_status = (
+        portfolio_ctx.get("_sell_put_fx_status")
+        if isinstance(portfolio_ctx, dict)
+        else None
+    )
+    for idx, row in df_sp_lab.iterrows():
+        native_currency = normalize_currency(row.get('currency'))
+        required_native = None
+        try:
+            strike_value = float(row.get('strike'))
+            multiplier_value = float(row.get('multiplier'))
+            if strike_value > 0 and multiplier_value > 0:
+                required_native = strike_value * multiplier_value
+        except (TypeError, ValueError):
+            pass
+        if native_currency:
+            df_sp_lab.at[idx, 'cash_native_currency'] = native_currency
+        if required_native is not None:
+            df_sp_lab.at[idx, 'cash_required_native'] = required_native
+        if not native_currency or required_native is None:
+            continue
+        available_headroom = _effective_cash_in_native_currency(
+            cash_by_ccy=cash_by_ccy,
+            cash_secured_by_ccy={},
+            native_currency=native_currency,
+            exchange_rate_converter=exchange_rate_converter,
+            fx_status=fx_status,
+        )
+        free_headroom = _effective_cash_in_native_currency(
+            cash_by_ccy=cash_by_ccy,
+            cash_secured_by_ccy=total_by_ccy_norm,
+            native_currency=native_currency,
+            exchange_rate_converter=exchange_rate_converter,
+            fx_status=fx_status,
+        )
+        df_sp_lab.at[idx, 'cash_fx_status'] = free_headroom.reason
+        if cash_secured_unavailable_reason:
+            continue
+        if not free_headroom.available or free_headroom.cash_free is None:
+            raw_reason = df_sp_lab.at[idx, 'cash_requirement_unavailable_reason']
+            empty_reason = '' if pd.isna(raw_reason) else str(raw_reason).strip()
+            if not empty_reason:
+                df_sp_lab.at[idx, 'cash_requirement_unavailable_reason'] = free_headroom.reason
+            continue
+        df_sp_lab.at[idx, 'cash_free_effective_native'] = free_headroom.cash_free
+        if available_headroom.available and available_headroom.cash_free is not None:
+            df_sp_lab.at[idx, 'cash_available_effective_native'] = available_headroom.cash_free
+        df_sp_lab.at[idx, 'cash_capacity_basis'] = f'native_plus_haircut:{native_currency}'
+
+        if native_currency == 'USD':
+            df_sp_lab.at[idx, 'cash_free_usd'] = free_headroom.cash_free
+        free_cny = exchange_rate_converter.convert(
+            free_headroom.cash_free,
+            from_ccy=native_currency,
+            to_ccy='CNY',
+        )
+        available_cny = (
+            exchange_rate_converter.convert(
+                available_headroom.cash_free,
+                from_ccy=native_currency,
+                to_ccy='CNY',
+            )
+            if available_headroom.available
+            and available_headroom.cash_free is not None
+            else None
+        )
+        if free_cny is not None:
+            df_sp_lab.at[idx, 'cash_free_total_cny'] = free_cny
+        if available_cny is not None:
+            df_sp_lab.at[idx, 'cash_available_total_cny'] = available_cny
 
     try:
         df_sp_lab.to_csv(out_path, index=False)

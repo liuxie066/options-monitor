@@ -39,6 +39,7 @@ from domain.domain.close_advice import (
     sort_advice_rows,
     synthesize_combo_yield_group_close_advice,
 )
+from domain.domain.short_vol_assessment import resolve_short_vol_assessment_config
 from domain.domain.combo_yield_lifecycle import build_option_group_inventory
 from domain.domain.fee_calc import (
     FUTU_HK_OPTION_FEE_BASIS,
@@ -91,8 +92,6 @@ from src.application.candidate_filter_trace import (
     infer_trace_scope_from_path,
 )
 from src.application.events.annotator import annotate_candidates_with_event_snapshot, load_event_snapshot
-from src.application.covered_call_strategy_risk import resolve_covered_call_short_vol_config
-from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
     SELL_PUT_FAMILY,
@@ -1230,23 +1229,13 @@ def _evaluate_position_close_advice(
             position=pos,
             config=config,
         )
-        if resolution.strategy_family == SELL_PUT_FAMILY:
-            short_vol_cfg = resolve_sell_put_short_vol_config(side_cfg)
+        if resolution.strategy_family in {SELL_PUT_FAMILY, SELL_CALL_FAMILY}:
             row = evaluate_short_vol_close_advice(
                 inp,
-                short_vol_config=short_vol_cfg,
+                short_vol_config=resolve_short_vol_assessment_config(side_cfg),
                 close_config=close_cfg,
                 quote_row=quote,
-                mode="put",
-            )
-        elif resolution.strategy_family == SELL_CALL_FAMILY:
-            short_vol_cfg = resolve_covered_call_short_vol_config(side_cfg)
-            row = evaluate_short_vol_close_advice(
-                inp,
-                short_vol_config=short_vol_cfg,
-                close_config=close_cfg,
-                quote_row=quote,
-                mode="call",
+                mode="put" if resolution.strategy_family == SELL_PUT_FAMILY else "call",
             )
         else:
             row = evaluate_close_advice(inp, close_cfg)

@@ -15,6 +15,7 @@ REPLACEMENT_CAPACITY_DEFERRED = "capacity_deferred_to_allocator"
 REPLACEMENT_REJECTED_INVARIANT = "rejected_invariant"
 
 StrategyMode = Literal["put", "call"]
+SELL_PUT_NEAR_RETURN_THRESHOLD = 0.002
 
 STAGE_INPUT_NORMALIZATION = "stage0_input_normalization"
 STAGE_HARD_CONSTRAINTS = "stage1_hard_constraints"
@@ -329,12 +330,14 @@ def _first_float(src: dict[str, Any], *names: str) -> float | None:
 def _candidate_score_inputs(src: dict[str, Any], *, mode: StrategyMode) -> dict[str, float | None]:
     if mode == "put":
         annualized_return = _first_float(src, "annualized_net_return_on_cash_basis")
+        period_return = _sell_put_period_return(src)
         otm_pct = _first_float(src, "otm_pct")
     else:
         annualized_return = _first_float(src, "annualized_net_premium_return")
         otm_pct = _first_float(src, "otm_pct", "strike_above_spot_pct")
     return {
         "annualized_return": annualized_return,
+        "period_return": period_return if mode == "put" else None,
         "net_income": _first_float(src, "net_income"),
         "spread_ratio": _first_float(src, "spread_ratio"),
         "open_interest": _first_float(src, "open_interest"),
@@ -388,6 +391,107 @@ def _candidate_concentration_tie_break(src: dict[str, Any]) -> float:
     return -max(exposures) if exposures else 0.0
 
 
+def _sell_put_period_return(src: dict[str, Any]) -> float | None:
+    explicit = _first_float(
+        src,
+        "period_net_return_on_cash_basis",
+        "period_net_return",
+    )
+    if explicit is not None:
+        return explicit
+    net_income = _first_float(src, "net_income")
+    cash_basis = _first_float(src, "cash_basis")
+    if net_income is not None and cash_basis is not None and cash_basis > 0:
+        return net_income / cash_basis
+    annualized = _first_float(src, "annualized_net_return_on_cash_basis")
+    dte = _first_float(src, "dte")
+    if annualized is not None and dte is not None and dte > 0:
+        return annualized * dte / 365.0
+    return None
+
+
+def _known_low_sort(value: float | None) -> tuple[bool, float]:
+    return (value is None, float("inf") if value is None else float(value))
+
+
+def _known_high_sort(value: float | None) -> tuple[bool, float]:
+    return (value is None, 0.0 if value is None else -float(value))
+
+
+def _sell_put_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        -_candidate_tie_break_margin(src, mode="put"),
+        *_known_low_sort(_first_float(src, "spread_ratio")),
+        *_known_high_sort(_first_float(src, "open_interest")),
+        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
+        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
+    )
+
+
+def _sell_put_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
+    explicit = _first_float(src, "symbol_concentration_after")
+    if explicit is not None:
+        return False, explicit
+    quality = _first_float(src, "concentration_score")
+    if quality is not None:
+        return False, -quality
+    return True, float("inf")
+
+
+def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        *_sell_put_concentration_sort(src),
+        -_candidate_tie_break_margin(src, mode="put"),
+        *_known_low_sort(_first_float(src, "spread_ratio")),
+        *_known_high_sort(_first_float(src, "open_interest")),
+        -float(_first_float(src, "net_income_cny", "net_income") or 0.0),
+        str(src.get("symbol") or "").strip().upper(),
+        str(src.get("contract_symbol") or src.get("option_symbol") or ""),
+    )
+
+
+def _rank_sell_put_return_bands(
+    rows: list[dict[str, Any]],
+    *,
+    tie_key: Any,
+) -> list[dict[str, Any]]:
+    remaining = list(enumerate(rows))
+    ranked: list[dict[str, Any]] = []
+    while remaining:
+        usable = [
+            value
+            for _index, row in remaining
+            if (value := _sell_put_period_return(row)) is not None
+        ]
+        if not usable:
+            ranked.extend(
+                row
+                for _index, row in sorted(
+                    remaining,
+                    key=lambda item: (tie_key(item[1]), item[0]),
+                )
+            )
+            break
+        band_max = max(usable)
+        floor = band_max - SELL_PUT_NEAR_RETURN_THRESHOLD
+        band = [
+            (index, row)
+            for index, row in remaining
+            if (value := _sell_put_period_return(row)) is not None
+            and value >= floor
+        ]
+        ranked.extend(
+            row
+            for _index, row in sorted(
+                band,
+                key=lambda item: (tie_key(item[1]), item[0]),
+            )
+        )
+        band_indices = {index for index, _row in band}
+        remaining = [item for item in remaining if item[0] not in band_indices]
+    return ranked
+
+
 def _candidate_recommendation_sort_tuple(
     src: dict[str, Any],
     *,
@@ -395,13 +499,15 @@ def _candidate_recommendation_sort_tuple(
     annualized_return: float | None,
     net_income: float | None,
 ) -> tuple[Any, ...]:
-    annual_missing = annualized_return is None
+    period_return = _sell_put_period_return(src) if mode == "put" else None
+    primary_return = period_return if mode == "put" else annualized_return
+    annual_missing = primary_return is None
     concentration = _candidate_concentration_tie_break(src)
     spread = _first_float(src, "spread_ratio")
     open_interest = _first_float(src, "open_interest")
     return (
         annual_missing,
-        -float(annualized_return or 0.0),
+        -float(primary_return or 0.0),
         -_candidate_tie_break_margin(src, mode=mode),
         -float(concentration),
         float("inf") if spread is None else float(spread),
@@ -414,6 +520,7 @@ def _candidate_recommendation_sort_tuple(
 
 _SCORE_COMPONENT_LABELS: dict[str, str] = {
     "annualized_return": "年化收益",
+    "period_net_return_on_cash_basis": "持有期净收益",
     "net_income": "净收入",
     "liquidity": "流动性",
     "risk_distance": "风险距离",
@@ -443,7 +550,11 @@ def explain_candidate_rank(
         if _coerce_float(value) is not None
     }
     warnings = [str(item) for item in (rank_key.get("score_warnings") or []) if str(item).strip()]
-    primary_drivers = ["annualized_return"]
+    primary_drivers = [
+        "period_net_return_on_cash_basis"
+        if mode_norm == "put"
+        else "annualized_return"
+    ]
     score_inputs = _candidate_score_inputs(src, mode=mode_norm)
     return {
         "mode": mode_norm,
@@ -455,6 +566,7 @@ def explain_candidate_rank(
         "strategy_score": float(rank_key.get("strategy_score") or 0.0),
         "strategy_score_role": "diagnostic_only",
         "annualized_return": rank_key.get("annualized_return"),
+        "period_net_return": rank_key.get("period_net_return"),
         "net_income": rank_key.get("net_income"),
         "score_components": components,
         "score_component_labels": {name: _SCORE_COMPONENT_LABELS.get(name, name) for name in components},
@@ -464,8 +576,13 @@ def explain_candidate_rank(
         "primary_drivers": primary_drivers,
         "primary_driver_labels": [_SCORE_COMPONENT_LABELS.get(item, item) for item in primary_drivers],
         "rank_reason": (
-            "硬门槛通过后按年化净收益排序；收益相同时再比较"
-            + ("净接货折价和集中度" if mode_norm == "put" else "strike 上行距离和集中度")
+            (
+                "硬门槛通过后按持有期净收益分带；同标的带内依次比较净接货折价、"
+                "价差、OI 和净收入；跨标的代表合约带内先比较接货后集中度，再比较"
+                "净接货折价、价差、OI 和净收入"
+                if mode_norm == "put"
+                else "硬门槛通过后按年化净收益排序；收益相同时再比较strike 上行距离和集中度"
+            )
         ),
     }
 
@@ -753,6 +870,7 @@ def evaluate_candidate_hard_constraints(
     put_cash_required: int | float | None = None,
     put_cash_free: int | float | None = None,
     put_cash_capacity_available: bool | None = None,
+    put_cash_capacity_reason: str | None = None,
     call_covered_contracts_available: int | float | None = None,
     extra_required_fields: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -853,12 +971,17 @@ def evaluate_candidate_hard_constraints(
 
     put_required_v = _coerce_float(put_cash_required)
     put_free_v = _coerce_float(put_cash_free)
+    put_capacity_reason = str(put_cash_capacity_reason or "").strip()
     if mode_norm == "put" and put_cash_capacity_available is False:
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
             reason=REJECT_HARD_CAPACITY_PUT,
-            message="put cash capacity evidence is unavailable",
+            message=(
+                f"put cash capacity evidence is unavailable: {put_capacity_reason}"
+                if put_capacity_reason
+                else "put cash capacity evidence is unavailable"
+            ),
             metric_value=put_required_v,
             threshold=put_free_v,
         )
@@ -867,7 +990,11 @@ def evaluate_candidate_hard_constraints(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
             reason=REJECT_HARD_CAPACITY_PUT,
-            message="put cash requirement exceeds free cash",
+            message=(
+                f"put cash requirement exceeds free cash: {put_capacity_reason}"
+                if put_capacity_reason
+                else "put cash requirement exceeds free cash"
+            ),
             metric_value=put_required_v,
             threshold=put_free_v,
         )
@@ -915,6 +1042,7 @@ def evaluate_candidate_non_resource_hard_constraints(
         put_cash_required=None,
         put_cash_free=None,
         put_cash_capacity_available=None,
+        put_cash_capacity_reason=None,
         call_covered_contracts_available=None,
         extra_required_fields=extra_required_fields,
     )
@@ -1331,6 +1459,7 @@ def build_candidate_rank_key(
         out: dict[str, Any] = {
             "strategy_score": score.total,
             "annualized_return": annual,
+            "period_net_return": score_inputs["period_return"],
             "net_income": net,
             "score_components": dict(score.components),
             "score_warnings": list(score.warnings),
@@ -1365,6 +1494,7 @@ def build_candidate_rank_key(
     out = {
         "strategy_score": score.total,
         "annualized_return": annual,
+        "period_net_return": None,
         "net_income": net,
         "score_components": dict(score.components),
         "score_warnings": list(score.warnings),
@@ -1385,10 +1515,43 @@ def rank_candidate_rows(
     score_weights: CandidateScoreWeights | None = None,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
-    return sorted(
-        [r for r in rows if isinstance(r, dict)],
-        key=lambda row: build_candidate_rank_key(row, mode=mode_norm, score_weights=score_weights)["sort_tuple"],
+    normalized_rows = [r for r in rows if isinstance(r, dict)]
+    if mode_norm != "put":
+        return sorted(
+            normalized_rows,
+            key=lambda row: build_candidate_rank_key(row, mode=mode_norm, score_weights=score_weights)["sort_tuple"],
+        )
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    group_order: list[str] = []
+    for row in normalized_rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        group_key = symbol or str(
+            row.get("contract_symbol") or row.get("option_symbol") or ""
+        )
+        if group_key not in grouped:
+            grouped[group_key] = []
+            group_order.append(group_key)
+        grouped[group_key].append(row)
+
+    within_ranked = {
+        key: _rank_sell_put_return_bands(
+            grouped[key],
+            tie_key=_sell_put_within_symbol_tie_key,
+        )
+        for key in group_order
+    }
+    representatives = [within_ranked[key][0] for key in group_order]
+    ranked_representatives = _rank_sell_put_return_bands(
+        representatives,
+        tie_key=_sell_put_cross_symbol_tie_key,
     )
+    remainder = [
+        row
+        for key in group_order
+        for row in within_ranked[key][1:]
+    ]
+    return [*ranked_representatives, *remainder]
 
 
 def select_best_candidate_per_symbol(
@@ -1399,13 +1562,12 @@ def select_best_candidate_per_symbol(
 ) -> list[dict[str, Any]]:
     """Return one highest-ranked hard-gate-passing contract per underlying."""
     ranked = rank_candidate_rows(rows, mode=mode, score_weights=score_weights)
-    selected: list[dict[str, Any]] = []
     seen: set[str] = set()
+    selected: list[dict[str, Any]] = []
     for row in ranked:
         symbol = str(row.get("symbol") or "").strip().upper()
         key = symbol or str(row.get("contract_symbol") or row.get("option_symbol") or "")
-        if key in seen:
-            continue
-        seen.add(key)
-        selected.append(row)
+        if key not in seen:
+            seen.add(key)
+            selected.append(row)
     return selected

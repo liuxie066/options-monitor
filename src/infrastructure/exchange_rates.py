@@ -76,6 +76,24 @@ class CurrencyConverter:
             return float(amount)
         return None
 
+    def convert(self, amount: float, *, from_ccy: str, to_ccy: str) -> float | None:
+        source = str(from_ccy or '').strip().upper()
+        target = str(to_ccy or '').strip().upper()
+        if source == 'RMB':
+            source = 'CNY'
+        if target == 'RMB':
+            target = 'CNY'
+        if not source or not target:
+            return None
+        if source == target:
+            return float(amount)
+        amount_cny = self.native_to_cny(float(amount), native_ccy=source)
+        if amount_cny is None:
+            return None
+        if target == 'CNY':
+            return amount_cny
+        return self.cny_to_native(amount_cny, native_ccy=target)
+
 
 SINA_EXCHANGE_RATE_SYMBOLS = {
     'USDCNY': 'usdcny',

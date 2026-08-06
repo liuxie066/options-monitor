@@ -62,6 +62,7 @@ class _StaleRequiredDataError(PositionAdviceSourceError):
 
 REQUIRED_DATA_COLUMNS = [
     "symbol",
+    "market",
     "option_type",
     "expiration",
     "dte",
@@ -72,6 +73,7 @@ REQUIRED_DATA_COLUMNS = [
     "ask",
     "last_price",
     "mid",
+    "quote_update_time",
     "volume",
     "open_interest",
     "implied_volatility",
@@ -521,24 +523,52 @@ def _validate_required_realized_volatility(
     rows: list[Any],
 ) -> dict[str, float | None]:
     meta_values = _required_realized_volatility_values(meta)
-    rv_fields = tuple(meta_values)
+    rv_window_fields = (
+        "realized_volatility_20",
+        "realized_volatility_60",
+        "realized_volatility_120",
+    )
     for row in rows:
         if not isinstance(row, Mapping) or any(
-            field not in row for field in rv_fields
+            field not in row for field in (*rv_window_fields, "realized_volatility_estimate", "dte")
         ):
             raise PositionAdviceSourceError(
                 "required-data rows lack canonical realized volatility"
             )
-        row_values = {
+        row_windows = {
             field: _normalize_realized_volatility_value(
                 row.get(field),
-                allow_none=(field != "realized_volatility_estimate"),
+                allow_none=True,
             )
-            for field in rv_fields
+            for field in rv_window_fields
         }
-        if row_values != meta_values:
+        meta_windows = {field: meta_values[field] for field in rv_window_fields}
+        if row_windows != meta_windows:
             raise PositionAdviceSourceError(
                 "required-data rows contradict canonical realized volatility"
+            )
+        estimate = _normalize_realized_volatility_value(
+            row.get("realized_volatility_estimate"),
+            allow_none=False,
+        )
+        from src.application.short_vol_metrics import (
+            realized_volatility_estimate_for_dte,
+        )
+
+        expected = realized_volatility_estimate_for_dte(
+            dte=row.get("dte"),
+            rv_20=row_windows["realized_volatility_20"],
+            rv_60=row_windows["realized_volatility_60"],
+            rv_120=row_windows["realized_volatility_120"],
+        )
+        if estimate is None or expected is None or not math.isclose(
+            estimate,
+            expected,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise PositionAdviceSourceError(
+                "required-data row realized volatility does not match dte policy"
             )
     return meta_values
 
@@ -564,16 +594,11 @@ def _required_realized_volatility_values(
     meta_values = {
         field: _normalize_realized_volatility_value(
             rv_meta.get(field),
-            allow_none=(field != "realized_volatility_estimate"),
+            allow_none=True,
         )
         for field in rv_fields
     }
-    estimate = meta_values["realized_volatility_estimate"]
-    if (
-        str(rv_meta.get("status") or "").strip().lower() != "ok"
-        or estimate is None
-        or estimate <= 0
-    ):
+    if str(rv_meta.get("status") or "").strip().lower() != "ok":
         raise PositionAdviceSourceError(
             "required-data payload lacks required realized volatility"
         )

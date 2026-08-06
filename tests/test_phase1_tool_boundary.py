@@ -16,7 +16,10 @@ if str(BASE) not in sys.path:
 def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.application.multi_tick import required_data_prefetch as prefetch_mod
 
-    monkeypatch.setattr("src.application.required_data_planning._resolve_spot_reference", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "src.application.required_data_planning._resolve_spot_reference",
+        lambda **_kwargs: 100.0,
+    )
     monkeypatch.setattr(
         "src.application.required_data_planning.list_option_expirations",
         lambda *_args, **_kwargs: ["2026-12-18"],
@@ -199,6 +202,39 @@ def test_prefetch_required_data_idempotency_audit() -> None:
         assert len(calls) == 1
     finally:
         mod.ToolExecutionService.execute = old_exec
+
+
+def test_prefetch_required_data_fails_closed_when_merged_put_plan_lacks_spot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.multi_tick import required_data_prefetch as mod
+
+    monkeypatch.setattr(
+        "src.application.required_data_planning._resolve_spot_reference",
+        lambda **_kwargs: None,
+    )
+    with TemporaryDirectory() as td, pytest.raises(
+        RuntimeError,
+        match="global required-data plan incomplete",
+    ):
+        mod.prefetch_required_data(
+            vpy=Path("/usr/bin/python3"),
+            base=Path(td),
+            cfg={
+                "runtime": {"prefetch": {"execution_mode": "subprocess"}},
+                "symbols": [
+                    _declared_put_symbol(
+                        "AAPL",
+                        {"source": "yahoo", "limit_expirations": 8},
+                    ),
+                    _declared_put_symbol(
+                        "AAPL",
+                        {"source": "yahoo", "limit_expirations": 8},
+                    ),
+                ],
+            },
+            shared_required=Path(td) / "required_data",
+        )
 
 
 def test_prefetch_required_data_protections_minimal(monkeypatch) -> None:

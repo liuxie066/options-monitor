@@ -388,7 +388,14 @@ def load_global_option_positions_risk_context(
         log(f"[WARN] global option positions risk context not available: {exc}")
         return None
 
-def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
+def load_exchange_rates(
+    *,
+    base: Path,
+    state_dir: Path,
+    log,
+    shared_state_dir: Path | None = None,
+    status_out: dict[str, str] | None = None,
+) -> tuple[float | None, float | None]:
     """Best-effort exchange-rate loader.
 
     Use the shared infrastructure exchange-rate helper so cache miss behavior
@@ -396,6 +403,8 @@ def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: P
     """
     usd_per_cny_exchange_rate = None
     cny_per_hkd_exchange_rate = None
+    if status_out is not None:
+        status_out["status"] = "unavailable"
     try:
         from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
@@ -406,6 +415,15 @@ def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: P
             max_age_hours=24,
             log=log,
         )
+        if (
+            isinstance(rates_obj, dict)
+            and str(rates_obj.get("freshness_status") or "").strip().lower()
+            == "stale_fallback"
+        ):
+            log("[WARN] exchange rates exceed 24h; cross-currency cash disabled")
+            if status_out is not None:
+                status_out["status"] = "unavailable_stale"
+            return None, None
         rates_map = rates_obj.get('rates') if isinstance(rates_obj, dict) and isinstance(rates_obj.get('rates'), dict) else rates_obj
         if isinstance(rates_map, dict):
             try:
@@ -420,6 +438,11 @@ def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: P
                 cny_per_hkd_exchange_rate = None
             if usdcny and usdcny > 0:
                 usd_per_cny_exchange_rate = 1.0 / usdcny
+            if status_out is not None and (
+                usd_per_cny_exchange_rate is not None
+                or cny_per_hkd_exchange_rate is not None
+            ):
+                status_out["status"] = "ready"
     except Exception as e:
         log(f"[WARN] exchange rates not available: {e}")
     return usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate
@@ -575,14 +598,28 @@ def build_pipeline_context(
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
             exchange_rate_scalars_from_option_context(option_ctx or {})
         )
+        prepared_authority = (
+            option_ctx.get("prepared_authority")
+            if isinstance(option_ctx, dict)
+            and isinstance(option_ctx.get("prepared_authority"), dict)
+            else {}
+        )
+        fx_status = str(prepared_authority.get("fx_status") or "").strip().lower()
     else:
+        rate_status: dict[str, str] = {}
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
             load_exchange_rates(
                 base=base,
                 state_dir=state_dir,
                 shared_state_dir=shared_state_dir,
                 log=log,
+                status_out=rate_status,
             )
         )
+        fx_status = str(rate_status.get("status") or "").strip().lower()
+
+    if fx_status == "unavailable_stale" and isinstance(portfolio_ctx, dict):
+        portfolio_ctx = dict(portfolio_ctx)
+        portfolio_ctx["_sell_put_fx_status"] = fx_status
 
     return portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate

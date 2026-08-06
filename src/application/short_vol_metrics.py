@@ -10,6 +10,11 @@ import pandas as pd
 
 TRADING_DAYS_PER_YEAR = 252
 DEFAULT_RV_WINDOWS = (20, 60, 120)
+RV_DTE_WEIGHTS: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = (
+    (30, ((20, 0.70), (60, 0.30))),
+    (60, ((20, 0.30), (60, 0.50), (120, 0.20))),
+    (90, ((20, 0.20), (60, 0.40), (120, 0.40))),
+)
 
 
 @dataclass(frozen=True)
@@ -22,12 +27,22 @@ class RealizedVolatilitySnapshot:
     status: str = "missing"
     reason: str | None = None
 
-    def to_row_fields(self) -> dict[str, Any]:
+    def to_row_fields(self, *, dte: int | None = None) -> dict[str, Any]:
+        estimate = (
+            realized_volatility_estimate_for_dte(
+                dte=dte,
+                rv_20=self.rv_20,
+                rv_60=self.rv_60,
+                rv_120=self.rv_120,
+            )
+            if dte is not None
+            else self.rv_estimate
+        )
         return {
             "realized_volatility_20": self.rv_20,
             "realized_volatility_60": self.rv_60,
             "realized_volatility_120": self.rv_120,
-            "realized_volatility_estimate": self.rv_estimate,
+            "realized_volatility_estimate": estimate,
         }
 
     def to_meta(self) -> dict[str, Any]:
@@ -36,6 +51,7 @@ class RealizedVolatilitySnapshot:
             "reason": self.reason,
             "sample_count": self.sample_count,
             **self.to_row_fields(),
+            "estimation_policy": "dte_matched_v1",
         }
 
 
@@ -74,23 +90,11 @@ def compute_realized_volatility_snapshot(
             reason="insufficient_window_returns",
         )
 
-    # Give the most recent realized volatility more weight without making the
-    # estimate depend on a single short window.
-    weighted_parts: list[tuple[float, float]] = []
-    if rv20 is not None:
-        weighted_parts.append((rv20, 0.50))
-    if rv60 is not None:
-        weighted_parts.append((rv60, 0.30))
-    if rv120 is not None:
-        weighted_parts.append((rv120, 0.20))
-    total_weight = sum(weight for _value, weight in weighted_parts)
-    estimate = sum(value * weight for value, weight in weighted_parts) / total_weight if total_weight > 0 else None
-
     return RealizedVolatilitySnapshot(
         rv_20=_round_optional(rv20),
         rv_60=_round_optional(rv60),
         rv_120=_round_optional(rv120),
-        rv_estimate=_round_optional(estimate),
+        rv_estimate=None,
         sample_count=len(closes),
         status="ok",
     )
@@ -194,3 +198,37 @@ def _round_optional(value: float | None) -> float | None:
     if value is None:
         return None
     return round(float(value), 6)
+
+
+def realized_volatility_weights_for_dte(dte: int | float) -> tuple[tuple[int, float], ...]:
+    try:
+        dte_value = int(dte)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dte must be an integer in [1, 90]") from exc
+    if dte_value <= 0 or dte_value > 90:
+        raise ValueError("dte must be in [1, 90]")
+    for upper_bound, weights in RV_DTE_WEIGHTS:
+        if dte_value <= upper_bound:
+            return weights
+    raise ValueError("dte must be in [1, 90]")
+
+
+def realized_volatility_estimate_for_dte(
+    *,
+    dte: int | float,
+    rv_20: float | None,
+    rv_60: float | None,
+    rv_120: float | None,
+) -> float | None:
+    values = {20: rv_20, 60: rv_60, 120: rv_120}
+    try:
+        weights = realized_volatility_weights_for_dte(dte)
+    except ValueError:
+        return None
+    weighted = 0.0
+    for window, weight in weights:
+        value = values.get(window)
+        if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+            return None
+        weighted += float(value) * float(weight)
+    return _round_optional(weighted)

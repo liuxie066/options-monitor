@@ -4329,9 +4329,9 @@ def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> 
 
     assert out["ok"] is True
     assert out["data"]["row_count"] == 2
-    assert out["data"]["ranked"][0]["contract_symbol"] == "NVDA_PUT_WIDE"
+    assert out["data"]["ranked"][0]["contract_symbol"] == "NVDA_PUT_LIQUID"
     assert out["data"]["ranked"][0]["score_components"]["liquidity"] > 0
-    assert "年化收益" in out["data"]["ranked"][0]["primary_driver_labels"]
+    assert "持有期净收益" in out["data"]["ranked"][0]["primary_driver_labels"]
     assert out["data"]["ranked"][0]["strategy_score_role"] == "diagnostic_only"
     assert out["data"]["groups"][0]["baseline"]["changes"] == []
     assert out["meta"]["source_files"][0]["path"].endswith("sell_put_candidates_labeled.csv")

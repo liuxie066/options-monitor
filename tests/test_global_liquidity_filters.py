@@ -975,7 +975,7 @@ def test_validate_config_allows_single_near_bound_modes() -> None:
     validate_config(cfg)
 
 
-def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
+def test_sell_put_steps_keep_spread_gate_but_not_oi_or_volume_hard_gates() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
@@ -1032,8 +1032,8 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert out[0]['strategy'] == 'sell_put'
     assert calls
     kwargs = calls[0]
-    assert kwargs['min_open_interest'] == 50.0
-    assert kwargs['min_volume'] == 12.0
+    assert kwargs['min_open_interest'] is None
+    assert kwargs['min_volume'] is None
     assert kwargs['max_spread_ratio'] == 0.31
     assert kwargs['score_weights'] is None
     assert 'min_iv' not in kwargs
@@ -1551,6 +1551,7 @@ def test_sell_call_underwriting_scan_bypasses_return_income_floor() -> None:
 
 
 def test_sell_put_reject_stage_is_strategy_gate() -> None:
+    from datetime import datetime, timezone
     _add_repo_to_syspath()
     from tempfile import TemporaryDirectory
 
@@ -1566,7 +1567,9 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
         pd.DataFrame(
             [
                 {
-                    'symbol': 'AAPL',
+                        'symbol': 'AAPL',
+                        'market': 'US',
+                        'quote_update_time': '2026-04-01 10:59:00',
                     'option_type': 'put',
                     'expiration': '2026-05-15',
                     'dte': 30,
@@ -1585,7 +1588,9 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
                     'delta': -0.22,
                 },
                 {
-                    'symbol': 'AAPL',
+                        'symbol': 'AAPL',
+                        'market': 'US',
+                        'quote_update_time': '2026-04-01 10:59:00',
                     'option_type': 'put',
                     'expiration': '2026-05-15',
                     'dte': 30,
@@ -1612,8 +1617,9 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
             output=out_path,
             min_annualized_net_return=0.01,
             min_net_income=120.0,
-            min_open_interest=10,
-            quiet=True,
+                min_open_interest=10,
+                quote_freshness_now_utc=datetime(2026, 4, 1, 15, 0, tzinfo=timezone.utc),
+                quiet=True,
         )
 
         assert list(out['contract_symbol']) == ['PASS']

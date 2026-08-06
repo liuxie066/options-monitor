@@ -41,16 +41,17 @@
 
 ## Sell Put
 
-Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选择最值得承保的 put。
+Sell Put 的核心目标是：在愿意以合适价格接货、但不主动追求接货的前提下，按 `mid` 挂限价等待，通过整个持有周期的净权利金收益参与投资布局。候选是等待机会，不是即时成交承诺。
 
 ### 召回
 
 - option type: put
-- DTE 在配置窗口内
-- `strike <= min(max_strike, spot)`；`max_strike` 为空时只受现价上限约束
-- `strike >= min_strike`，其中 `min_strike` 可为空
-- 基础流动性满足配置
-- 现金覆盖仍由现有 cash-secured 逻辑负责
+- DTE 保持市场/symbol 当前配置窗口，通常 US 7–60、HK 7–90
+- 召回上界为 `min(configured max_strike, OpenD spot)`；未配置 max 时使用 spot
+- 从召回上界向下抓取 20%，显式且更严格的 `min_strike` 继续生效
+- OpenD spot 缺失时 fail closed，不读取旧 required-data spot，也不只用配置 max 猜测窗口
+- `bid > 0`、`ask > 0`、`ask >= bid`，按 `mid=(bid+ask)/2` 计算限价机会
+- OpenD 原始 `update_time` 在活跃交易时段内不超过 5 分钟；闭市报价只作观察证据，不参与正式排序
 
 `max_strike` 是愿意接货的最高价，现价是自然上限。二者组成同一个硬门槛，不再在门槛通过后重复增加一层“价格安全边际”筛选。
 
@@ -60,8 +61,22 @@ Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选�
 - 单笔净收益达到阈值
 - `IV / RV` 达到阈值
 - `IV - RV` 达到阈值
-- 事件风险可接受
-- spread、open interest、volume 等基础流动性通过
+- 到期前无财报，且 earnings coverage 完整、事件源可用
+- 相对价差 `(ask-bid)/mid <= 40%`
+- 完整 `strike * multiplier` 接货金额有可靠现金覆盖
+
+OI 和 volume 不再是 Sell Put 硬门槛：OI 只在收益接近时参与次级排序，缺失值排在可靠值之后；volume 只展示。delta 也只展示。
+
+OpenD IV 在适配层固定从百分数除以 100。RV 从 OpenD 前复权日线计算，并按 DTE 匹配：`<=30` 使用 RV20/RV60 的 70%/30%；`31–60` 使用 RV20/RV60/RV120 的 30%/50%/20%；`61–90` 使用 20%/40%/40%。期限档要求的任一窗口缺失即 fail closed，不重新归一化。
+
+现金硬门槛与收益资金口径分离：
+
+```text
+period_net_return = net_income / (strike * multiplier - net_income)
+assignment_cash_required = strike * multiplier
+```
+
+已有 Short Put 担保现金先按币种扣除。结算币种现金按 100% 计入，其他币种按可靠 FX 折算后只计 95%；FX 超过 24 小时时禁用跨币种覆盖、保留结算币种现金，并明确标记 `fx_stale`。不再增加额外通用现金缓冲。
 
 不再作为 Sell Put 开仓硬筛：
 
@@ -82,11 +97,14 @@ Sell Put 的核心目标是：在愿意以某个价格接货的前提下，选�
 排序顺序：
 
 1. 所有硬门槛通过。
-2. 每个标的只保留 `annualized_net_return_on_cash_basis` 最高的合约。
-3. 不同标的继续按 `annualized_net_return_on_cash_basis` 降序。
-4. 年化净收益相同时，依次用净接货折价、`concentration_score`、spread、OI 和净收益额稳定破同分。
+2. 正式主收益为持有周期非年化 `period_net_return`；最低年化收益只负责硬门槛。
+3. 对每轮剩余候选，以最高 period return 为锚点，把差值不超过 `0.002` 的候选组成收益区间，再处理下一组。
+4. 同一标的区间内依次用净接货折价、spread、OI、净收益额和合约标识选代表合约；同标的内不使用集中度。
+5. 不同标的代表合约区间内依次用较低的接货后 symbol concentration、净接货折价、spread、OI、净收益额、symbol 和合约标识排序。
 
-`net_assignment_discount_pct = (spot - breakeven) / spot`。它和集中度只负责破同分，不覆盖年化净收益主排序。`strategy_score`、`premium_edge_score` 等字段继续用于解释和研究，但不再改变正式推荐顺序。
+`net_assignment_discount_pct = (spot - breakeven) / spot`。集中度只在不同标的且收益接近时参与选择，不是硬风险门槛。delta、volume、`strategy_score`、`premium_edge_score` 和研究 score 不改变正式推荐顺序。
+
+正式排序唯一所有者是 `domain/domain/engine/candidate_engine.py::rank_candidate_rows`；underwriting、DataFrame adapter、通知和 explain 工具只委托或解释这一结果。
 
 ## Covered Call
 
@@ -309,8 +327,8 @@ identity 重复执行为 no-op，任何既有 identity 冲突均失败关闭。
 兼容边界：
 
 - 开仓扫描证据使用 `scan_strategy_profile`，Sell Put / Covered Call 的承保扫描记录为 `insurance_underwriting`。
-- `enrich_and_filter_*_short_vol` 只保留为旧调用方兼容别名，内部转发到 underwriting 入口；配置层不再接受 `strategy=short_vol`。
-- Close Advice 继续使用 `short_vol` thesis 字段，不在本轮重命名；当前 Sell Put / Covered Call 配置参数从顶层 `insurance_underwriting` 字段读取。
+- 历史 `enrich_and_filter_*_short_vol` 开仓别名及对应配置包装已移除，当前开仓只有 underwriting 入口。
+- Close Advice 继续读取历史 `short_vol` thesis 字段；兼容解析由 `domain/domain/short_vol_assessment.py` 统一负责，当前 Sell Put / Covered Call 顶层 underwriting 字段优先。
 - 开仓 underwriting 不再请求全局 path-risk / concentration context；只有明确声明 `scan_uses_path_risk` 的策略才应加载该上下文。
 
 不在本轮实现：

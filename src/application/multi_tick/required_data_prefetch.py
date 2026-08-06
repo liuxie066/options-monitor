@@ -217,7 +217,15 @@ def _build_prefetch_fetch_plan(
             discovery_outcome = str(
                 getattr(expiration_discovery, "outcome", "") or ""
             )
-            if discovery_outcome == "success_empty":
+            source_projection_outcomes = {
+                str(bundle.projection_outcome or "").strip()
+                for bundle in bundles
+            }
+            if "provider_error" in source_projection_outcomes:
+                projection_outcome = "provider_error"
+            elif "parse_error" in source_projection_outcomes:
+                projection_outcome = "parse_error"
+            elif discovery_outcome == "success_empty":
                 projection_outcome = "success_empty"
             elif discovery_outcome in {"provider_error", "parse_error"}:
                 projection_outcome = discovery_outcome
@@ -262,6 +270,12 @@ def _build_prefetch_fetch_plan(
                 spot_observation_complete=all(
                     bundle.spot_observation_complete for bundle in bundles
                 ),
+                spot_observation_error="; ".join(
+                    str(bundle.spot_observation_error)
+                    for bundle in bundles
+                    if bundle.spot_observation_error
+                )
+                or None,
             )
     return _build_single_prefetch_fetch_plan(
         symbol_cfg,
