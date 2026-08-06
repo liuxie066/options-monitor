@@ -137,7 +137,7 @@ def _build_prefetch_fetch_plan(
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
-    spot_observation_cache: dict[tuple[Any, ...], float | None] | None = None,
+    spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
@@ -190,6 +190,23 @@ def _build_prefetch_fetch_plan(
             spot_reference = next(
                 (bundle.spot_reference for bundle in bundles if bundle.spot_reference is not None),
                 None,
+            )
+            underlier_observations = [
+                bundle.underlier_observation
+                for bundle in bundles
+                if bundle.underlier_observation is not None
+            ]
+            if underlier_observations and any(
+                item != underlier_observations[0]
+                for item in underlier_observations[1:]
+            ):
+                raise RuntimeError(
+                    "required-data source plans have inconsistent underlier observations"
+                )
+            underlier_observation = (
+                underlier_observations[0]
+                if underlier_observations
+                else None
             )
             merged_side_plans = _merge_required_data_side_plans([
                 side_plan
@@ -252,6 +269,7 @@ def _build_prefetch_fetch_plan(
                         require_realized_volatility
                     ),
                 ),
+                underlier_observation=underlier_observation,
                 expiration_discovery_complete=all(
                     bundle.expiration_discovery_complete for bundle in bundles
                 ),
@@ -294,7 +312,7 @@ def _build_single_prefetch_fetch_plan(
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
-    spot_observation_cache: dict[tuple[Any, ...], float | None] | None = None,
+    spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -352,6 +370,7 @@ def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | N
             "side_strike_windows": None,
             "explicit_expirations": None,
             "spot_override": None,
+            "underlier_observation": None,
             "include_realized_volatility": False,
             "trading_date": None,
         }
@@ -415,6 +434,11 @@ def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | N
         ),
         "scheduled_outcome": projection_outcome,
         "spot_override": fetch_plan.spot_reference,
+        "underlier_observation": (
+            fetch_plan.underlier_observation.to_dict()
+            if fetch_plan.underlier_observation is not None
+            else None
+        ),
         "include_realized_volatility": (
             fetch_plan.require_realized_volatility
         ),
@@ -484,6 +508,11 @@ def _fetch_symbol_for_required_data_request(
         host=request.host,
         port=request.port,
         spot_override=request.spot_override,
+        underlier_observation=(
+            dict(request.underlier_observation)
+            if request.underlier_observation is not None
+            else None
+        ),
         fetch_spot_if_missing=request.fetch_spot_if_missing,
         base_dir=base,
         option_types=request.option_types,
@@ -720,6 +749,11 @@ def _publish_planned_success_empty(
             "snapshot_missing_code_set": [],
             "snapshot_unexpected_code_set": [],
             "snapshot_complete": True,
+            "underlier_observation": (
+                fetch_plan.underlier_observation.to_dict()
+                if fetch_plan.underlier_observation is not None
+                else None
+            ),
             "realized_volatility": {
                 "status": "not_applicable_no_contracts",
                 "reason": "not_applicable_no_contracts",
@@ -851,6 +885,7 @@ def _fetch_one_inprocess(
                 host=host,
                 port=port,
                 spot_override=fetch_kwargs.get("spot_override"),
+                underlier_observation=fetch_kwargs.get("underlier_observation"),
                 base_dir=base,
                 option_types=str(fetch_kwargs["option_types"]),
                 side_strike_windows=fetch_kwargs.get("side_strike_windows"),
@@ -890,6 +925,11 @@ def _fetch_one_inprocess(
                         opend_fetch_cfg
                     ),
                     spot_override=fetch_plan.spot_reference,
+                    underlier_observation=(
+                        fetch_plan.underlier_observation.to_dict()
+                        if fetch_plan.underlier_observation is not None
+                        else None
+                    ),
                     fetch_spot_if_missing=(
                         not fetch_plan.spot_observation_complete
                     ),
@@ -1149,7 +1189,7 @@ def _prefetch_required_data_unlocked(
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
     expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
-    spot_observation_cache: dict[tuple[Any, ...], float | None] = {}
+    spot_observation_cache: dict[tuple[Any, ...], Any] = {}
     fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
         id(symbol_cfg): _build_prefetch_fetch_plan(
             symbol_cfg,

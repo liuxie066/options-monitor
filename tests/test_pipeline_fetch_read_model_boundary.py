@@ -2087,6 +2087,7 @@ def test_tcom_shared_required_data_is_account_order_invariant(
                     "realized_volatility_120": 0.3,
                     "realized_volatility_estimate": 0.3,
                 },
+                "underlier_observation": request.underlier_observation,
                 "source_observed_at": _TEST_EVIDENCE_OBSERVED_AT.isoformat(),
                 "completed_at_utc": _TEST_EVIDENCE_COMPLETED_AT.isoformat(),
             },

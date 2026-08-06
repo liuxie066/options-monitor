@@ -6,6 +6,7 @@ import pandas as pd
 
 from src.application.opend_fetch_config import OpenDEndpointRateLimit
 from src.application.opend_market_snapshot_fetching import fetch_option_snapshots
+from src.application.opend_market_snapshot_fetching import get_underlier_observation_opend
 
 
 SNAPSHOT_LIMIT = OpenDEndpointRateLimit(
@@ -13,6 +14,42 @@ SNAPSHOT_LIMIT = OpenDEndpointRateLimit(
     max_calls=60,
     max_wait_sec=30.0,
 )
+
+
+def test_underlier_observation_binds_snapshot_and_market_state(tmp_path: Path) -> None:
+    class Gateway:
+        def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
+            assert codes == ["US.NVDA"]
+            return pd.DataFrame(
+                [
+                    {
+                        "code": "US.NVDA",
+                        "last_price": 180.0,
+                        "update_time": "2026-08-06 10:59:00",
+                        "sec_status": "NORMAL",
+                        "suspension": False,
+                    }
+                ]
+            )
+
+        def get_market_state(self, codes):  # type: ignore[no-untyped-def]
+            assert codes == ["US.NVDA"]
+            return pd.DataFrame(
+                [{"code": "US.NVDA", "market_state": "MORNING"}]
+            )
+
+    observation = get_underlier_observation_opend(
+        Gateway(),
+        "US.NVDA",
+        market="US",
+        base_dir=tmp_path,
+        rate_limited_call=lambda **kwargs: kwargs["call"](),
+        now_utc=pd.Timestamp("2026-08-06T15:00:00Z").to_pydatetime(),
+    )
+
+    assert observation.status == "ready"
+    assert observation.last_price == 180.0
+    assert observation.market_state == "MORNING"
 
 
 def _fetch(*, tmp_path: Path, handler, fallback_max_codes: int):  # type: ignore[no-untyped-def]

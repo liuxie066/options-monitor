@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.opening_quote_evidence import (
+    OpeningUnderlierObservation,
+    normalize_underlier_observation,
+)
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.opend_fetch_config import (
     DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT,
@@ -23,12 +28,20 @@ SNAPSHOT_KEEP_COLUMNS = [
     "last_price",
     "bid_price",
     "ask_price",
+    "ask_vol",
+    "bid_vol",
     "volume",
     "option_open_interest",
     "option_implied_volatility",
     "option_delta",
     "option_contract_multiplier",
+    "option_contract_size",
     "lot_size",
+    "price_spread",
+    "stock_owner",
+    "stock_type",
+    "suspension",
+    "sec_status",
     "open_interest",
     "implied_volatility",
     "delta",
@@ -141,6 +154,124 @@ def get_spot_opend(
         return None
 
 
+def get_underlier_observation_opend(
+    gateway: Any,
+    underlier_code: str,
+    *,
+    market: str,
+    base_dir: Path | None = None,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
+    errors: list[dict[str, Any]] | None = None,
+    rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+    metrics: dict[str, Any] | None = None,
+    now_utc: datetime | None = None,
+) -> OpeningUnderlierObservation:
+    """Fetch one run-scoped OpenD spot observation without fallback prices."""
+
+    snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
+        snapshot_max_wait_sec=snapshot_max_wait_sec,
+        snapshot_window_sec=snapshot_window_sec,
+        snapshot_max_calls=snapshot_max_calls,
+    ).market_snapshot
+
+    def _limited(call: Callable[[], Any]) -> Any:
+        if base_dir is None:
+            return call()
+        return rate_limited_call(
+            base_dir=Path(base_dir),
+            endpoint="market_snapshot",
+            **snapshot_limit.call_kwargs(),
+            call=call,
+        )
+
+    snapshot_row: dict[str, Any] | None = None
+    market_state_row: dict[str, Any] | None = None
+    try:
+        def _snapshot_call() -> Any:
+            _increment_metric(metrics, "spot_snapshot_opend_calls")
+            _increment_metric(metrics, "spot_snapshot_requested_codes")
+            return gateway.get_snapshot([underlier_code])
+
+        snapshot = _limited(_snapshot_call)
+        snapshot_row = _single_provider_row(snapshot, expected_code=underlier_code)
+        if snapshot_row is None:
+            _append_opend_observation_error(
+                errors,
+                stage="underlier_snapshot",
+                code=underlier_code,
+                error_code="UNDERLIER_SNAPSHOT_INVALID",
+                message="underlier snapshot does not contain exactly one requested row",
+            )
+    except Exception as exc:
+        _append_opend_observation_error(
+            errors,
+            stage="underlier_snapshot",
+            code=underlier_code,
+            error_code=classify_option_chain_error(exc),
+            message=str(exc),
+        )
+
+    try:
+        def _market_state_call() -> Any:
+            _increment_metric(metrics, "spot_market_state_opend_calls")
+            _increment_metric(metrics, "spot_market_state_requested_codes")
+            return gateway.get_market_state([underlier_code])
+
+        market_state = _limited(_market_state_call)
+        market_state_row = _single_provider_row(
+            market_state,
+            expected_code=underlier_code,
+        )
+        if market_state_row is None:
+            _append_opend_observation_error(
+                errors,
+                stage="underlier_market_state",
+                code=underlier_code,
+                error_code="UNDERLIER_MARKET_STATE_INVALID",
+                message="market-state response does not contain exactly one requested row",
+            )
+    except Exception as exc:
+        _append_opend_observation_error(
+            errors,
+            stage="underlier_market_state",
+            code=underlier_code,
+            error_code=classify_option_chain_error(exc),
+            message=str(exc),
+        )
+
+    return normalize_underlier_observation(
+        code=underlier_code,
+        market=market,
+        snapshot_row=snapshot_row,
+        market_state_row=market_state_row,
+        now_utc=now_utc,
+    )
+
+
+def _single_provider_row(value: Any, *, expected_code: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        rows = [dict(item) for item in value if isinstance(item, dict)]
+    elif hasattr(value, "to_dict"):
+        try:
+            raw_rows = value.to_dict(orient="records")
+        except TypeError:
+            raw_rows = value.to_dict("records")
+        if isinstance(raw_rows, list):
+            rows = [dict(item) for item in raw_rows if isinstance(item, dict)]
+    matches = [
+        row
+        for row in rows
+        if str(row.get("code") or "").strip().upper()
+        == str(expected_code or "").strip().upper()
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _increment_metric(metrics: dict[str, Any] | None, key: str, value: int = 1) -> None:
     if metrics is None:
         return
@@ -170,6 +301,41 @@ def get_underlier_spot(
         return get_spot_opend(
             gateway,
             normalize_underlier(symbol, base_dir=effective_base_dir).code,
+            base_dir=effective_base_dir,
+            snapshot_max_wait_sec=snapshot_max_wait_sec,
+            snapshot_window_sec=snapshot_window_sec,
+            snapshot_max_calls=snapshot_max_calls,
+            rate_limited_call=rate_limited_opend_call,
+        )
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            pass
+
+
+def get_underlier_observation(
+    symbol: str,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    base_dir: Path | None = None,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
+) -> OpeningUnderlierObservation:
+    effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
+    underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
+    gateway = build_ready_futu_quote_gateway(
+        host=host,
+        port=int(port),
+        is_option_chain_cache_enabled=False,
+    )
+    try:
+        return get_underlier_observation_opend(
+            gateway,
+            underlier.code,
+            market=underlier.market,
             base_dir=effective_base_dir,
             snapshot_max_wait_sec=snapshot_max_wait_sec,
             snapshot_window_sec=snapshot_window_sec,

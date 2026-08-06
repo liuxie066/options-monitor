@@ -251,6 +251,31 @@ def test_gateway_event_source_methods_delegate_to_quote_client() -> None:
     }
 
 
+def test_gateway_market_state_delegates_to_quote_client() -> None:
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.calls = []
+
+        def get_market_state(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return [{"code": "US.NVDA", "market_state": "MORNING"}]
+
+    gateway = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+
+    rows = gateway.get_market_state(["US.NVDA"])
+
+    assert rows == [{"code": "US.NVDA", "market_state": "MORNING"}]
+    assert gateway.client.calls == [{"code_list": ["US.NVDA"]}]
+
+
 def test_gateway_earnings_calendar_delegates_exact_market_window() -> None:
     from src.infrastructure.futu_gateway import build_futu_gateway
 

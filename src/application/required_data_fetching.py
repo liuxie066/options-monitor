@@ -23,6 +23,7 @@ class RequiredDataFetchRequest:
     host: str = "127.0.0.1"
     port: int = 11111
     spot_override: float | None = None
+    underlier_observation: dict[str, object] | None = None
     fetch_spot_if_missing: bool = True
     output_root: Path | None = None
     option_types: str = "put,call"
@@ -62,6 +63,11 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             host=str(request.host),
             port=int(request.port),
             spot_override=request.spot_override,
+            underlier_observation=(
+                dict(request.underlier_observation)
+                if request.underlier_observation is not None
+                else None
+            ),
             fetch_spot_if_missing=request.fetch_spot_if_missing,
             base_dir=Path(base),
             chain_cache=bool(request.chain_cache),
@@ -108,6 +114,7 @@ def build_fetch_request_from_spec(
     chain_cache_force_refresh: bool = False,
     opend_fetch_config: dict[str, float | int] | None = None,
     spot_override: float | None = None,
+    underlier_observation: dict[str, object] | None = None,
     fetch_spot_if_missing: bool = True,
 ) -> RequiredDataFetchRequest:
     if not spec.explicit_expirations:
@@ -144,6 +151,11 @@ def build_fetch_request_from_spec(
         host=str(spec.host),
         port=int(spec.port),
         spot_override=spot_override,
+        underlier_observation=(
+            dict(underlier_observation)
+            if underlier_observation is not None
+            else None
+        ),
         fetch_spot_if_missing=fetch_spot_if_missing,
         output_root=output_root,
         option_types=",".join(spec.option_types),
@@ -168,6 +180,7 @@ def merge_required_data_payloads(*, symbol: str, payloads: list[dict[str, object
     expirations: set[str] = set()
     spot: float | None = None
     underlier_code: str | None = None
+    underlier_observation: dict[str, object] | None = None
     for payload_index, payload in enumerate(payloads):
         if not isinstance(payload, dict):
             continue
@@ -184,6 +197,19 @@ def merge_required_data_payloads(*, symbol: str, payloads: list[dict[str, object
         meta = payload.get("meta")
         if isinstance(meta, dict):
             meta_items.append(meta)
+            child_underlier_observation = meta.get("underlier_observation")
+            if child_underlier_observation is not None:
+                if not isinstance(child_underlier_observation, dict):
+                    raise RuntimeError(
+                        "required-data child underlier observation is invalid"
+                    )
+                normalized_observation = dict(child_underlier_observation)
+                if underlier_observation is None:
+                    underlier_observation = normalized_observation
+                elif underlier_observation != normalized_observation:
+                    raise RuntimeError(
+                        "required-data child underlier observations conflict"
+                    )
         child_contracts: set[str] = set()
         for row in payload.get("rows") or []:
             if not isinstance(row, dict):
@@ -218,6 +244,7 @@ def merge_required_data_payloads(*, symbol: str, payloads: list[dict[str, object
             "source": "opend",
             "request_count": len(payloads),
             "requests": meta_items,
+            "underlier_observation": underlier_observation,
             "reconciled_contract_overlap_count": len(reconciled_overlaps),
             "reconciled_contract_overlaps": sorted(reconciled_overlaps),
         },

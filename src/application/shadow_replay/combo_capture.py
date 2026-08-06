@@ -246,6 +246,11 @@ def capture_combo_variants(
                             chain_cache_force_refresh=chain_cache_force_refresh,
                             opend_fetch_config=fetch_kwargs,
                             spot_override=bundle.spot_reference,
+                            underlier_observation=(
+                                bundle.underlier_observation.to_dict()
+                                if bundle.underlier_observation is not None
+                                else None
+                            ),
                         ),
                     )
                     observed_at = utc_now()
