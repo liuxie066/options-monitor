@@ -94,6 +94,17 @@ REQUIRED_DATA_COLUMNS = [
     "realized_volatility_60",
     "realized_volatility_120",
     "realized_volatility_estimate",
+    "term_matched_rv",
+    "term_matched_rv_status",
+    "term_matched_rv_reason",
+    "term_matched_rv_remaining_sessions",
+    "term_matched_rv_lookback_sessions",
+    "term_matched_rv_input_start",
+    "term_matched_rv_input_end",
+    "term_matched_rv_input_session_count",
+    "term_matched_rv_input_hash",
+    "term_matched_rv_legacy_shadow",
+    "term_matched_rv_shadow_difference",
     "in_the_money",
     "currency",
     "otm_pct",
@@ -545,6 +556,13 @@ def _validate_required_realized_volatility(
     rows: list[Any],
 ) -> dict[str, float | None]:
     meta_values = _required_realized_volatility_values(meta)
+    rv_meta = meta.get("realized_volatility")
+    assert isinstance(rv_meta, Mapping)
+    term_matched = rv_meta.get("term_matched")
+    if not isinstance(term_matched, Mapping):
+        raise PositionAdviceSourceError(
+            "required-data payload lacks term-matched realized volatility"
+        )
     rv_window_fields = (
         "realized_volatility_20",
         "realized_volatility_60",
@@ -552,7 +570,22 @@ def _validate_required_realized_volatility(
     )
     for row in rows:
         if not isinstance(row, Mapping) or any(
-            field not in row for field in (*rv_window_fields, "realized_volatility_estimate", "dte")
+            field not in row
+            for field in (
+                *rv_window_fields,
+                "realized_volatility_estimate",
+                "term_matched_rv",
+                "term_matched_rv_status",
+                "term_matched_rv_reason",
+                "term_matched_rv_remaining_sessions",
+                "term_matched_rv_lookback_sessions",
+                "term_matched_rv_input_start",
+                "term_matched_rv_input_end",
+                "term_matched_rv_input_session_count",
+                "term_matched_rv_input_hash",
+                "expiration",
+                "dte",
+            )
         ):
             raise PositionAdviceSourceError(
                 "required-data rows lack canonical realized volatility"
@@ -592,7 +625,139 @@ def _validate_required_realized_volatility(
             raise PositionAdviceSourceError(
                 "required-data row realized volatility does not match dte policy"
             )
+        expiration = str(row.get("expiration") or "").strip()
+        term_entry = term_matched.get(expiration)
+        if not isinstance(term_entry, Mapping):
+            raise PositionAdviceSourceError(
+                "required-data payload lacks expiry term-matched realized volatility"
+            )
+        _validate_term_matched_rv_binding(row=row, term_entry=term_entry)
     return meta_values
+
+
+def _validate_term_matched_rv_binding(
+    *,
+    row: Mapping[str, Any],
+    term_entry: Mapping[str, Any],
+) -> None:
+    expiration = str(row.get("expiration") or "").strip()
+    if (
+        term_entry.get("schema_version") != "term_matched_rv.v1"
+        or str(term_entry.get("expiration") or "").strip() != expiration
+    ):
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility is invalid"
+        )
+    status = str(term_entry.get("status") or "").strip().lower()
+    if status not in {"ok", "data_unavailable"}:
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility is invalid"
+        )
+    reason = term_entry.get("reason")
+    unavailable_reason_invalid = status == "data_unavailable" and (
+        not isinstance(reason, str) or not str(reason).strip()
+    )
+    if (status == "ok" and reason is not None) or unavailable_reason_invalid:
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility is invalid"
+        )
+    meta_rv = _normalize_realized_volatility_value(
+        term_entry.get("term_matched_rv"),
+        allow_none=(status == "data_unavailable"),
+    )
+    row_rv = _normalize_realized_volatility_value(
+        row.get("term_matched_rv"),
+        allow_none=(status == "data_unavailable"),
+    )
+    if (
+        meta_rv != row_rv
+        or str(row.get("term_matched_rv_status")) != status
+        or row.get("term_matched_rv_reason") != reason
+    ):
+        raise PositionAdviceSourceError(
+            "required-data row contradicts term-matched realized volatility"
+        )
+    remaining = term_entry.get("remaining_sessions")
+    lookback = term_entry.get("lookback_sessions")
+    close_count = term_entry.get("input_close_session_count")
+    return_count = term_entry.get("input_return_count")
+    if status == "data_unavailable":
+        known_horizon_invalid = remaining is not None and (
+            isinstance(remaining, bool)
+            or not isinstance(remaining, int)
+            or remaining < 0
+            or isinstance(lookback, bool)
+            or not isinstance(lookback, int)
+            or lookback != max(20, remaining)
+        )
+        row_bindings = {
+            "term_matched_rv_remaining_sessions": remaining,
+            "term_matched_rv_lookback_sessions": lookback,
+            "term_matched_rv_input_start": None,
+            "term_matched_rv_input_end": None,
+            "term_matched_rv_input_session_count": 0,
+            "term_matched_rv_input_hash": None,
+        }
+        if (
+            meta_rv is not None
+            or (remaining is None) != (lookback is None)
+            or known_horizon_invalid
+            or term_entry.get("input_start") is not None
+            or term_entry.get("input_end") is not None
+            or term_entry.get("input_close_session_count") != 0
+            or term_entry.get("input_return_count") != 0
+            or term_entry.get("input_hash") is not None
+            or any(row.get(field) != value for field, value in row_bindings.items())
+        ):
+            raise PositionAdviceSourceError(
+                "required-data unavailable term-matched volatility evidence is invalid"
+            )
+        return
+    if (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, int)
+        or remaining <= 0
+        or isinstance(lookback, bool)
+        or not isinstance(lookback, int)
+        or lookback != max(20, remaining)
+        or isinstance(close_count, bool)
+        or not isinstance(close_count, int)
+        or close_count != lookback + 1
+        or isinstance(return_count, bool)
+        or not isinstance(return_count, int)
+        or return_count != lookback
+    ):
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility horizon is invalid"
+        )
+    try:
+        input_start = date.fromisoformat(str(term_entry.get("input_start") or ""))
+        input_end = date.fromisoformat(str(term_entry.get("input_end") or ""))
+    except ValueError as exc:
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility input range is invalid"
+        ) from exc
+    input_hash = str(term_entry.get("input_hash") or "")
+    if (
+        input_start > input_end
+        or len(input_hash) != 64
+        or any(char not in "0123456789abcdef" for char in input_hash)
+    ):
+        raise PositionAdviceSourceError(
+            "required-data term-matched realized volatility evidence is invalid"
+        )
+    row_bindings = {
+        "term_matched_rv_remaining_sessions": remaining,
+        "term_matched_rv_lookback_sessions": lookback,
+        "term_matched_rv_input_start": input_start.isoformat(),
+        "term_matched_rv_input_end": input_end.isoformat(),
+        "term_matched_rv_input_session_count": close_count,
+        "term_matched_rv_input_hash": input_hash,
+    }
+    if any(row.get(field) != value for field, value in row_bindings.items()):
+        raise PositionAdviceSourceError(
+            "required-data row term-matched realized volatility evidence mismatch"
+        )
 
 
 def _required_realized_volatility_values(
@@ -620,10 +785,19 @@ def _required_realized_volatility_values(
         )
         for field in rv_fields
     }
-    if str(rv_meta.get("status") or "").strip().lower() != "ok":
+    if str(rv_meta.get("status") or "").strip().lower() not in {"ok", "partial"}:
         raise PositionAdviceSourceError(
             "required-data payload lacks required realized volatility"
         )
+    for evidence_field in ("qfq_history", "trading_calendar"):
+        evidence = rv_meta.get(evidence_field)
+        if (
+            not isinstance(evidence, Mapping)
+            or str(evidence.get("status") or "").strip().lower() != "ok"
+        ):
+            raise PositionAdviceSourceError(
+                "required-data payload lacks term-matched realized volatility evidence"
+            )
     return meta_values
 
 

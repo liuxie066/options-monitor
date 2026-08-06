@@ -1098,13 +1098,30 @@ def _spot_reference_matches_frame(*, df: pd.DataFrame, spot_reference: Any) -> b
 
 
 def _has_realized_volatility(df: pd.DataFrame) -> bool:
-    return (
-        _strict_positive_frame_values(
-            df=df,
-            column="realized_volatility_estimate",
-        )
-        is not None
-    )
+    required_columns = {
+        "term_matched_rv",
+        "term_matched_rv_status",
+        "term_matched_rv_reason",
+    }
+    if df.empty or not required_columns.issubset(df.columns):
+        return False
+    for rv, status_value, reason_value in zip(
+        df["term_matched_rv"].tolist(),
+        df["term_matched_rv_status"].tolist(),
+        df["term_matched_rv_reason"].tolist(),
+    ):
+        status = str(status_value or "").strip().lower()
+        reason = "" if pd.isna(reason_value) else str(reason_value).strip()
+        normalized_rv = _strict_finite_float(rv)
+        if status == "ok":
+            if normalized_rv is None or normalized_rv <= 0 or reason:
+                return False
+        elif status == "data_unavailable":
+            if not pd.isna(rv) or not reason:
+                return False
+        else:
+            return False
+    return True
 
 
 def _read_required_data_csv(parsed: Path) -> pd.DataFrame:

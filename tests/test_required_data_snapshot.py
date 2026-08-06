@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -181,6 +182,26 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
     fetch_plan = _fetch_plan(symbol)
     contract = _expected_contract(symbol, fetch_plan=fetch_plan)
     observed_at = _OBSERVED_AT
+    term_hash = hashlib.sha256(
+        f"fixture:{symbol}:2026-08-28".encode()
+    ).hexdigest()
+    term = {
+        "schema_version": "term_matched_rv.v1",
+        "expiration": "2026-08-28",
+        "status": "ok",
+        "reason": None,
+        "term_matched_rv": 0.2,
+        "remaining_sessions": 24,
+        "lookback_sessions": 24,
+        "input_start": "2026-07-01",
+        "input_end": "2026-08-03",
+        "input_close_session_count": 25,
+        "input_return_count": 24,
+        "input_hash": term_hash,
+        "missing_sessions": [],
+        "legacy_weighted_rv": 0.2,
+        "shadow_difference": 0.0,
+    }
     payload = {
         "symbol": symbol,
         "underlier_code": _underlier_code(symbol),
@@ -208,6 +229,32 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "reason": None,
+                "sample_count": 120,
+                "estimation_policy": "term_matched_sessions_v1",
+                "term_matched": {"2026-08-28": term},
+                "qfq_history": {
+                    "status": "ok",
+                    "market": ("HK" if symbol.endswith(".HK") else "US"),
+                    "underlier_code": _underlier_code(symbol),
+                    "autype": "QFQ",
+                    "cache_identity": (
+                        f"{'HK' if symbol.endswith('.HK') else 'US'}:"
+                        f"{_underlier_code(symbol)}:QFQ"
+                    ),
+                    "completed_before": "2026-08-04",
+                    "session_count": 120,
+                    "input_hash": hashlib.sha256(
+                        f"fixture:qfq:{symbol}".encode()
+                    ).hexdigest(),
+                },
+                "trading_calendar": {
+                    "status": "ok",
+                    "market": ("HK" if symbol.endswith(".HK") else "US"),
+                    "start": "2026-07-01",
+                    "end": "2026-08-28",
+                    "session_count": 42,
+                },
             },
             "source_observed_at": observed_at,
             "completed_at_utc": observed_at,
@@ -228,6 +275,17 @@ def _publish_quote(root: Path, *, run_id: str, symbol: str = "3690.HK") -> None:
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "term_matched_rv": 0.2,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+                "term_matched_rv_remaining_sessions": 24,
+                "term_matched_rv_lookback_sessions": 24,
+                "term_matched_rv_input_start": "2026-07-01",
+                "term_matched_rv_input_end": "2026-08-03",
+                "term_matched_rv_input_session_count": 25,
+                "term_matched_rv_input_hash": term_hash,
+                "term_matched_rv_legacy_shadow": 0.2,
+                "term_matched_rv_shadow_difference": 0.0,
                 "multiplier": 100,
             }
         ],

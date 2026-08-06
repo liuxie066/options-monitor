@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -201,6 +202,24 @@ def _required_payload(
     observed_at: datetime = NOW,
     completed_at: datetime = NOW + timedelta(seconds=1),
 ) -> dict[str, object]:
+    term_hash = hashlib.sha256(b"fixture:NVDA:2026-08-21").hexdigest()
+    term = {
+        "schema_version": "term_matched_rv.v1",
+        "expiration": "2026-08-21",
+        "status": "ok",
+        "reason": None,
+        "term_matched_rv": 0.2,
+        "remaining_sessions": 25,
+        "lookback_sessions": 25,
+        "input_start": "2026-06-18",
+        "input_end": "2026-07-24",
+        "input_close_session_count": 26,
+        "input_return_count": 25,
+        "input_hash": term_hash,
+        "missing_sessions": [],
+        "legacy_weighted_rv": 0.2,
+        "shadow_difference": 0.0,
+    }
     return {
         "symbol": "NVDA",
         "underlier_code": "US.NVDA",
@@ -224,6 +243,17 @@ def _required_payload(
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "term_matched_rv": 0.2,
+                "term_matched_rv_status": "ok",
+                "term_matched_rv_reason": None,
+                "term_matched_rv_remaining_sessions": 25,
+                "term_matched_rv_lookback_sessions": 25,
+                "term_matched_rv_input_start": "2026-06-18",
+                "term_matched_rv_input_end": "2026-07-24",
+                "term_matched_rv_input_session_count": 26,
+                "term_matched_rv_input_hash": term_hash,
+                "term_matched_rv_legacy_shadow": 0.2,
+                "term_matched_rv_shadow_difference": 0.0,
                 "currency": "USD",
                 "multiplier": 100,
             }
@@ -259,6 +289,27 @@ def _required_payload(
                 "realized_volatility_60": 0.2,
                 "realized_volatility_120": 0.2,
                 "realized_volatility_estimate": 0.2,
+                "reason": None,
+                "sample_count": 120,
+                "estimation_policy": "term_matched_sessions_v1",
+                "term_matched": {"2026-08-21": term},
+                "qfq_history": {
+                    "status": "ok",
+                    "market": "US",
+                    "underlier_code": "US.NVDA",
+                    "autype": "QFQ",
+                    "cache_identity": "US:US.NVDA:QFQ",
+                    "completed_before": "2026-07-27",
+                    "session_count": 120,
+                    "input_hash": hashlib.sha256(b"fixture:qfq:NVDA").hexdigest(),
+                },
+                "trading_calendar": {
+                    "status": "ok",
+                    "market": "US",
+                    "start": "2026-06-01",
+                    "end": "2026-08-21",
+                    "session_count": 58,
+                },
             },
         },
     }
