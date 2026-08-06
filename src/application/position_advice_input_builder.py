@@ -172,14 +172,6 @@ def build_immutable_input(
             for item in candidate_inputs.get("candidate_decisions", [])
             if isinstance(item, Mapping)
         ],
-        "replacement_candidate_decisions": [
-            dict(item)
-            for item in candidate_inputs.get(
-                "replacement_candidate_decisions",
-                [],
-            )
-            if isinstance(item, Mapping)
-        ],
         "capacity": dict(economic_inputs.get("capacity") or {}),
         "fees": dict(economic_inputs.get("fees") or {}),
         "quote_quality": dict(economic_inputs.get("quote_quality") or {}),

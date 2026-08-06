@@ -137,6 +137,7 @@ def run_sell_call_scan_and_summarize(
     risk_policy_version: str | None = None,
     quote_snapshot_id: str | None = None,
     all_decisions_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    final_candidates_sink_fn: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     """Run sell_call scan + (optional) render + summarize.
 
@@ -406,6 +407,11 @@ def run_sell_call_scan_and_summarize(
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
             out_path=symbol_cc,
+        )
+    if final_candidates_sink_fn is not None:
+        final_candidates_sink_fn(
+            "call",
+            [dict(item) for item in df_cc.to_dict("records")],
         )
     if not is_scheduled:
         render_sell_call_alerts(

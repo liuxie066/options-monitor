@@ -5,7 +5,6 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.position_advice_authority import (
     AuthorityResolution,
     scope_for,
@@ -17,6 +16,10 @@ from src.application.opend_symbol_outputs import (
 )
 from src.application.position_advice_account_sources import (
     publish_account_run_sources,
+)
+from src.application.opening_candidate_snapshot import (
+    dependency_from_hash,
+    seal_opening_candidate_snapshot,
 )
 from src.application.position_advice_authority_service import (
     apply_authority_change,
@@ -250,22 +253,45 @@ def _prepare_sources(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             "rates": {"USDCNY": 7.2},
         },
     )
-    capture = {
-        "schema_version": (
-            "position_advice_candidate_all_decisions_capture.v1"
-        ),
-        "account_run_id": "run-1",
-        "account": "lx",
-        "complete": True,
-        "quote_receipt_relpaths": {
-            "NVDA": quote_path.relative_to(quotes).as_posix(),
+    seal_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        physical_account={
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "12345",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
         },
-        "candidate_decisions": [],
-    }
-    capture["capture_hash"] = canonical_sha256(capture)
-    _write_json(
-        state / "position_advice_candidate_all_decisions.raw.json",
-        capture,
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=[
+            dependency_from_hash(kind=kind, sha256=char * 64)
+            for kind, char in (
+                ("required_data", "c"),
+                ("portfolio", "d"),
+                ("ledger", "e"),
+                ("fx", "f"),
+                ("earnings_rv", "1"),
+            )
+        ],
+        scan_statuses=[
+            {
+                "symbol": "NVDA",
+                "strategy_mode": mode,
+                "status": "completed",
+                "reason": "no_expirations",
+                "quote_snapshot_id": quote_receipt["snapshot_id"],
+                "quote_receipt_relpath": quote_path.relative_to(quotes).as_posix(),
+            }
+            for mode in ("put", "call")
+        ],
+        candidate_decisions=[],
+        final_candidates={"put": [], "call": []},
+        sealed_at=completed_at,
     )
     result = publish_account_run_sources(
         account_run_id="run-1",

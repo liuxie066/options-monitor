@@ -30,6 +30,11 @@ from src.application.position_advice_source_receipts import (
     sha256_bytes,
     source_dependency_from_receipt,
 )
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    load_opening_candidate_snapshot,
+    ranked_opening_candidate_decisions,
+)
 
 
 CASH_SCOPE_SEMANTICS_VERSION = "uncommitted_headroom.v1"
@@ -141,15 +146,37 @@ def publish_account_run_sources(
         expected_source_kind="ledger_decision_state",
     )
 
-    candidate_capture = _read_json_object(
-        state_root / "position_advice_candidate_all_decisions.raw.json",
-        "candidate all-decisions capture",
-    )
-    _validate_candidate_capture(
-        candidate_capture,
-        account_run_id=run_id,
-        account=account,
-    )
+    try:
+        runtime_base = _opening_snapshot_runtime_base(
+            state_root,
+            run_id=run_id,
+            account=account,
+        )
+        opening_snapshot = load_opening_candidate_snapshot(
+            base=runtime_base,
+            run_id=run_id,
+            account=account,
+        )
+    except OpeningCandidateSnapshotError as exc:
+        raise PositionAdviceAccountSourceError(str(exc)) from exc
+    try:
+        candidate_decisions = ranked_opening_candidate_decisions(
+            opening_snapshot
+        )
+    except OpeningCandidateSnapshotError as exc:
+        raise PositionAdviceAccountSourceError(str(exc)) from exc
+    quote_receipt_relpaths = {
+        str(item.get("symbol") or "").strip().upper(): str(
+            item.get("quote_receipt_relpath") or ""
+        ).strip()
+        for item in opening_snapshot.get("scope_results") or []
+        if isinstance(item, Mapping)
+        and item.get("scope") == "strategy"
+        and str(item.get("quote_receipt_relpath") or "").strip()
+    }
+    candidate_capture = {
+        "quote_receipt_relpaths": quote_receipt_relpaths,
+    }
     quote_records, quote_dependencies = _quote_dependencies(
         capture=candidate_capture,
         required_data_root=quote_root,
@@ -166,7 +193,7 @@ def publish_account_run_sources(
         broker=_required_text(broker, "broker"),
         portfolio_account_identity_hash=identity_hash,
         included_markets=markets,
-        decisions=candidate_capture.get("candidate_decisions") or [],
+        decisions=candidate_decisions,
         quote_dependencies=quote_dependencies,
         source_observed_at=candidate_observed_at,
         completed_at=completed,
@@ -303,6 +330,27 @@ def publish_account_run_sources(
             {str(item["source_kind"]) for item in receipt_records}
         ),
     }
+
+
+def _opening_snapshot_runtime_base(
+    state_root: Path,
+    *,
+    run_id: str,
+    account: str,
+) -> Path:
+    root = Path(state_root).resolve()
+    expected_tail = (
+        "output_runs",
+        str(run_id),
+        "accounts",
+        str(account).lower(),
+        "state",
+    )
+    if tuple(root.parts[-5:]) != expected_tail or len(root.parents) < 5:
+        raise PositionAdviceAccountSourceError(
+            "opening candidate snapshot path is outside the Account Run"
+        )
+    return root.parents[4]
 
 
 def publish_account_position_advice_sources(

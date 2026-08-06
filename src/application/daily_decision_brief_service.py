@@ -21,7 +21,6 @@ from domain.domain.close_advice import (
     select_close_advice_notification_rows,
 )
 from domain.domain.engine import (
-    select_best_candidate_per_symbol,
     select_best_yield_enhancement_per_symbol,
 )
 from domain.domain.risk_capacity import compute_sell_call_share_capacity, compute_sell_put_cash_capacity
@@ -67,6 +66,11 @@ from src.application.required_data_snapshot import (
     RequiredDataSnapshotError,
     load_required_data_snapshot_manifest,
     resolve_frozen_required_data,
+)
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    load_opening_candidate_snapshot,
+    ranked_opening_candidates,
 )
 
 
@@ -125,19 +129,15 @@ def assemble_daily_decision_brief(
     close_advice_notify_levels = _close_advice_notify_levels(config_map)
     close_advice_max_items = _close_advice_max_items_per_account(config_map)
 
-    put_rows, put_available = _load_sell_put_candidates(
-        run_account_dir=run_account_dir,
-        market=market_norm,
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
-    )
-    call_rows, call_available = _load_candidate_family(
-        run_account_dir=run_account_dir,
-        market=market_norm,
-        family="covered_call",
-        paths_to_try=sorted(run_account_dir.glob("*_sell_call_candidates.csv")),
-        source_artifacts=source_artifacts,
-        data_gaps=data_gaps,
+    put_rows, put_available, call_rows, call_available = (
+        _load_opening_candidate_families(
+            base=base_path,
+            run_id=run_id_norm,
+            account=account_norm,
+            market=market_norm,
+            source_artifacts=source_artifacts,
+            data_gaps=data_gaps,
+        )
     )
     combo_rows, combo_available = _load_candidate_family(
         run_account_dir=run_account_dir,
@@ -303,18 +303,8 @@ def assemble_daily_decision_brief(
     if "combo_yield" in failed_families:
         combo_rows, combo_available = [], False
 
-    ranked_puts = (
-        select_best_candidate_per_symbol(put_rows, mode="put")
-        if put_rows
-        else []
-    )
-    ranked_calls = (
-        select_best_candidate_per_symbol(call_rows, mode="call")
-        if call_rows
-        else []
-    )
-    selected_puts = ranked_puts[:max_candidates]
-    selected_calls = ranked_calls[:max_candidates]
+    selected_puts = put_rows[:max_candidates]
+    selected_calls = call_rows[:max_candidates]
     ranked_combos = (
         select_best_yield_enhancement_per_symbol(combo_rows)
         if combo_rows
@@ -608,8 +598,8 @@ def assemble_daily_decision_brief(
             account=account_norm,
             market=market_norm,
             market_date=market_date,
-            ranked_puts=ranked_puts,
-            ranked_calls=ranked_calls,
+            ranked_puts=put_rows,
+            ranked_calls=call_rows,
             combo_rows=combo_rows,
             event_snapshot=event_snapshot,
             event_snapshot_reason=event_snapshot_reason,
@@ -697,6 +687,93 @@ def assemble_daily_decision_briefs(
             now_utc=now_utc,
         )
     return out
+
+
+def _load_opening_candidate_families(
+    *,
+    base: Path,
+    run_id: str,
+    account: str,
+    market: str,
+    source_artifacts: list[dict[str, Any]],
+    data_gaps: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool, list[dict[str, Any]], bool]:
+    try:
+        snapshot = load_opening_candidate_snapshot(
+            base=base,
+            run_id=run_id,
+            account=account,
+        )
+    except OpeningCandidateSnapshotError as exc:
+        for family in ("sell_put", "covered_call"):
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "strategy_family": family,
+                    "reason": "opening_candidate_snapshot_unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+        return [], False, [], False
+    if str(snapshot.get("market") or "").upper() != market:
+        for family in ("sell_put", "covered_call"):
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "strategy_family": family,
+                    "reason": "opening_candidate_snapshot_market_mismatch",
+                }
+            )
+        return [], False, [], False
+
+    source_artifacts.append(
+        {
+            "kind": "opening_candidate_snapshot",
+            "path": "state/opening_candidate_snapshot.json",
+            "row_count": len(snapshot.get("ranked_candidates") or []),
+            "content_sha256": snapshot.get("content_sha256"),
+        }
+    )
+    result_by_mode = {
+        str(item.get("strategy_mode") or ""): dict(item)
+        for item in snapshot.get("strategy_results") or []
+        if isinstance(item, Mapping)
+    }
+    rows_by_mode: dict[str, list[dict[str, Any]]] = {"put": [], "call": []}
+    for item in ranked_opening_candidates(snapshot):
+        mode = str(item.get("strategy_mode") or "")
+        if mode not in rows_by_mode:
+            continue
+        row = _json_safe(dict(item.get("facts") or {}))
+        if _row_market(row) != market:
+            continue
+        row["candidate_id"] = item.get("candidate_id")
+        row["_opening_snapshot_rank"] = item.get("rank")
+        row["_source_path"] = "state/opening_candidate_snapshot.json"
+        row["_source_row"] = item.get("rank")
+        rows_by_mode[mode].append(row)
+
+    available: dict[str, bool] = {}
+    for mode, family in (("put", "sell_put"), ("call", "covered_call")):
+        status = str(result_by_mode.get(mode, {}).get("strategy_status") or "")
+        available[mode] = bool(rows_by_mode[mode]) or status in {
+            "candidates_found",
+            "no_candidate",
+        }
+        if not available[mode]:
+            data_gaps.append(
+                {
+                    "scope": "strategy",
+                    "strategy_family": family,
+                    "reason": "opening_candidate_strategy_data_unavailable",
+                }
+            )
+    return (
+        rows_by_mode["put"],
+        available["put"],
+        rows_by_mode["call"],
+        available["call"],
+    )
 
 
 def _load_sell_put_candidates(

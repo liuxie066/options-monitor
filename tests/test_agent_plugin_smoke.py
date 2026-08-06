@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
@@ -4277,27 +4278,22 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     assert out["data"]["top_candidates"][0]["symbol"] == "NVDA"
 
 
-def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> None:
+def test_candidate_rank_explain_reads_sealed_account_snapshot(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
-    pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "contract_symbol": "NVDA_PUT_WIDE",
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "strike": 100,
-                "annualized_net_return_on_cash_basis": 0.120,
-                "net_income": 100,
-                "spread_ratio": 0.95,
-                "open_interest": 1,
-                "volume": 0,
-                "delta": -0.20,
-                "otm_pct": 0.08,
-                "dte": 30,
-            },
+    dependencies = [
+        {"kind": kind, "relpath": None, "sha256": char * 64}
+        for kind, char in (
+            ("required_data", "a"),
+            ("portfolio", "b"),
+            ("ledger", "c"),
+            ("fx", "d"),
+            ("earnings_rv", "e"),
+        )
+    ]
+    rows = [
+        (
+            "liquid",
             {
                 "symbol": "NVDA",
                 "contract_symbol": "NVDA_PUT_LIQUID",
@@ -4306,35 +4302,103 @@ def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> 
                 "strike": 95,
                 "annualized_net_return_on_cash_basis": 0.115,
                 "net_income": 100,
-                "spread_ratio": 0.05,
-                "open_interest": 500,
-                "volume": 20,
-                "delta": -0.15,
-                "otm_pct": 0.10,
-                "dte": 30,
+                "period_net_return_on_cash_basis": 0.00945,
             },
-        ]
-    ).to_csv(candidate_path, index=False)
+        ),
+        (
+            "wide",
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "NVDA_PUT_WIDE",
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "annualized_net_return_on_cash_basis": 0.120,
+                "net_income": 100,
+                "period_net_return_on_cash_basis": 0.0090,
+            },
+        ),
+    ]
+    snapshot = {
+        "schema_version": "opening_candidate_snapshot.v1",
+        "run_id": "run-1",
+        "account": "lx",
+        "futu_account_id": "12345",
+        "trade_env": "REAL",
+        "market": "US",
+        "strategy_modes": ["put"],
+        "account_config_sha256": "f" * 64,
+        "strategy_policy_sha256": "1" * 64,
+        "required_data_manifest_sha256": "a" * 64,
+        "dependencies": dependencies,
+        "sealed_at_utc": "2026-06-01T00:00:00Z",
+        "opening_status": "candidates_found",
+        "strategy_results": [
+            {
+                "strategy_mode": "put",
+                "strategy_status": "candidates_found",
+                "capacity_status": "available",
+                "candidate_count": 2,
+                "scope_count": 1,
+            }
+        ],
+        "scope_results": [],
+        "candidate_decisions": [
+            {"candidate_id": candidate_id} for candidate_id, _facts in rows
+        ],
+        "ranked_candidates": [
+            {
+                "candidate_id": candidate_id,
+                "strategy_mode": "put",
+                "rank": rank,
+                "facts": facts,
+                "ranking": {
+                    "annualized_return": facts[
+                        "annualized_net_return_on_cash_basis"
+                    ],
+                    "net_income": facts["net_income"],
+                    "rank_reason": "持有期净收益优先",
+                    "risk_notes": [],
+                    "score_warnings": [],
+                },
+            }
+            for rank, (candidate_id, facts) in enumerate(rows, start=1)
+        ],
+    }
+    snapshot["content_sha256"] = canonical_sha256(snapshot)
+    snapshot_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+        / "opening_candidate_snapshot.json"
+    )
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     out = run_tool(
         "candidate_rank_explain",
         {
-            "candidate_path": str(candidate_path),
+            "runtime_root": str(tmp_path),
+            "run_id": "run-1",
+            "account": "lx",
             "mode": "put",
             "top_n": 1,
-            "score_weights": {"liquidity": 0.02},
-            "compare_baseline": True,
         },
     )
 
     assert out["ok"] is True
     assert out["data"]["row_count"] == 2
     assert out["data"]["ranked"][0]["contract_symbol"] == "NVDA_PUT_LIQUID"
-    assert out["data"]["ranked"][0]["score_components"]["liquidity"] > 0
-    assert "持有期净收益" in out["data"]["ranked"][0]["primary_driver_labels"]
-    assert out["data"]["ranked"][0]["strategy_score_role"] == "diagnostic_only"
-    assert out["data"]["groups"][0]["baseline"]["changes"] == []
-    assert out["meta"]["source_files"][0]["path"].endswith("sell_put_candidates_labeled.csv")
+    assert out["data"]["ranked"][0]["rank_reason"] == "持有期净收益优先"
+    assert out["data"]["groups"][0]["ranking_policy"] == (
+        "opening_candidate_snapshot"
+    )
+    assert out["meta"]["source_files"][0]["path"].endswith(
+        "opening_candidate_snapshot.json"
+    )
 
 
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:

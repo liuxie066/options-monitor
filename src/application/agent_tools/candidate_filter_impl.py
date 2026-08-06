@@ -1,25 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tools.candidate_filter_trace_discovery import (
-    CandidateFilterTraceDiscovery,
-    discover_candidate_filter_trace_paths,
-)
-from src.application.candidate_filter_trace import (
-    CANDIDATE_FILTER_FUNCTIONS,
-    TRACE_STATUS_ORDER,
-    read_candidate_filter_trace,
-)
 from src.application.candidate_reject_summary import candidate_rule_label
+from src.application.opening_candidate_snapshot import (
+    OpeningCandidateSnapshotError,
+    load_latest_opening_candidate_snapshot,
+    load_opening_candidate_snapshot,
+)
 
 
-_REJECTION_STATUSES = {"rejected", "reject", "filtered", "post_filtered", "excluded", "blocked", "skip", "skipped"}
+_FUNCTION_MODE = {"sell_put": "put", "sell_call": "call"}
 
 
 def candidate_filter_explain_tool(
@@ -30,175 +26,199 @@ def candidate_filter_explain_tool(
     symbol_aliases: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     raw_symbol = str(payload.get("symbol") or "").strip()
-    if not raw_symbol:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="symbol is required",
-            hint="Pass symbol with optional account/function/run_id; trace discovery uses the runtime root automatically.",
-        )
-    symbol = _symbol_for_match(raw_symbol, symbol_aliases=symbol_aliases)
     account = str(payload.get("account") or "").strip().lower()
-    function_filter = str(payload.get("function") or "").strip().lower()
-    if function_filter and function_filter not in CANDIDATE_FILTER_FUNCTIONS:
+    if not raw_symbol or not account:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message=f"unsupported function: {function_filter}",
-            hint=f"Supported functions: {', '.join(CANDIDATE_FILTER_FUNCTIONS)}.",
+            message="symbol and account are required",
+            hint="Pass the logical account and symbol; run_id is optional.",
         )
-
-    trace_discovery = discover_candidate_filter_trace_paths(payload, repo_base=repo_base)
-    trace_paths = list(trace_discovery.paths)
-    warnings: list[str] = []
-    if not trace_paths:
-        warnings.append("no_trace_files: candidate_filter_trace.jsonl not found")
-
-    loaded_rows: list[dict[str, Any]] = []
-    source_files: list[dict[str, Any]] = []
-    for path in trace_paths:
-        rows = read_candidate_filter_trace(path)
-        if rows:
-            source_files.append(
-                {
-                    "path": mask_path(path),
-                    "rows": len(rows),
-                    "run_ids": sorted(
-                        {
-                            str(row.get("run_id"))
-                            for row in rows
-                            if str(row.get("run_id") or "").strip()
-                        }
-                    ),
-                }
+    symbol = (
+        canonical_symbol(raw_symbol, symbol_aliases=symbol_aliases)
+        or raw_symbol.upper()
+    )
+    function_filter = str(payload.get("function") or "").strip().lower()
+    if function_filter and function_filter not in _FUNCTION_MODE:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"unsupported opening function: {function_filter}",
+            hint="Supported functions: sell_put, sell_call.",
+        )
+    base = Path(payload.get("runtime_root") or repo_base()).resolve()
+    try:
+        if str(payload.get("run_id") or "").strip():
+            snapshot = load_opening_candidate_snapshot(
+                base=base,
+                run_id=str(payload["run_id"]).strip(),
+                account=account,
             )
-            loaded_rows.extend(rows)
+        else:
+            snapshot = load_latest_opening_candidate_snapshot(
+                base=base,
+                account=account,
+            )
+    except OpeningCandidateSnapshotError as exc:
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING",
+            message=str(exc),
+            details={"account": account, "run_id": payload.get("run_id")},
+        ) from exc
 
-    matching = [
-        row
-        for row in loaded_rows
-        if _symbol_for_match(row.get("symbol"), symbol_aliases=symbol_aliases) == symbol
-        and (not account or str(row.get("account") or "").strip().lower() == account)
-        and (not function_filter or str(row.get("function") or "").strip().lower() == function_filter)
+    requested_mode = _FUNCTION_MODE.get(function_filter)
+    scoped = [
+        dict(item)
+        for item in snapshot.get("scope_results") or []
+        if isinstance(item, Mapping)
+        and str(item.get("symbol") or "").upper() == symbol
+        and (
+            requested_mode is None
+            or str(item.get("strategy_mode") or "") == requested_mode
+        )
     ]
-    if not matching:
-        warnings.append("no_matching_trace_rows: no trace rows matched symbol/account/function")
-
-    functions = [function_filter] if function_filter else list(CANDIDATE_FILTER_FUNCTIONS)
-    summaries = [_summarize_function(fn, [row for row in matching if str(row.get("function") or "") == fn]) for fn in functions]
-
-    status_counts = Counter(str(row.get("status") or "") for row in matching)
-    function_counts = Counter(str(row.get("function") or "") for row in matching)
-    evidence_status = "available" if matching else ("trace_files_missing" if not trace_paths else "no_matching_rows")
+    functions = [function_filter] if function_filter else ["sell_put", "sell_call"]
+    summaries = [
+        _summarize_function(
+            function,
+            [
+                item
+                for item in scoped
+                if item.get("strategy_mode") == _FUNCTION_MODE[function]
+            ],
+            run_id=str(snapshot.get("run_id") or "") or None,
+            account=account,
+        )
+        for function in functions
+    ]
+    status_counts = Counter(str(item.get("status") or "unknown") for item in scoped)
+    function_counts = Counter(
+        "sell_put" if item.get("strategy_mode") == "put" else "sell_call"
+        for item in scoped
+    )
+    source = {
+        "path": mask_path("state/opening_candidate_snapshot.json"),
+        "rows": len(scoped),
+        "run_ids": [snapshot.get("run_id")],
+        "content_sha256": snapshot.get("content_sha256"),
+    }
     return (
         {
             "symbol": symbol,
             "raw_symbol": raw_symbol,
             "canonical_symbol": symbol,
-            "account": account or None,
+            "account": account,
             "scope": {
-                "account": account or None,
-                "account_semantics": "scan_scope",
+                "account": account,
+                "account_semantics": "opening_candidate_snapshot",
             },
-            "evidence_status": evidence_status,
-            "conclusion_status": "supported" if matching else "indeterminate",
-            "trace_count": len(matching),
-            "run_ids": sorted(
-                {
-                    str(row.get("run_id"))
-                    for row in matching
-                    if str(row.get("run_id") or "").strip()
-                }
-            ),
+            "opening_status": snapshot.get("opening_status"),
+            "evidence_status": "available",
+            "conclusion_status": "supported" if scoped else "indeterminate",
+            "trace_count": len(scoped),
+            "run_ids": [snapshot.get("run_id")],
             "status_counts": dict(status_counts),
             "function_counts": dict(function_counts),
             "functions": summaries,
         },
-        warnings,
-        {
-            "source_files": source_files,
-            "trace_discovery": _trace_discovery_meta(trace_discovery, mask_path=mask_path),
-        },
+        ([] if scoped else ["no_matching_snapshot_scope"]),
+        {"source_files": [source]},
     )
 
 
-def _symbol_for_match(value: Any, *, symbol_aliases: Mapping[str, Any] | None = None) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return canonical_symbol(raw, symbol_aliases=symbol_aliases) or raw.upper()
-
-
-def _trace_discovery_meta(
-    discovery: CandidateFilterTraceDiscovery,
+def _summarize_function(
+    function_name: str,
+    rows: list[dict[str, Any]],
     *,
-    mask_path: Callable[[str | Path | None], str | None],
+    run_id: str | None,
+    account: str,
 ) -> dict[str, Any]:
-    return {
-        "strategy": "explicit_paths" if discovery.explicit_paths else "runtime_roots_latest_runs",
-        "roots": [mask_path(path) for path in discovery.roots],
-        "run_dirs": [mask_path(path) for path in discovery.run_dirs[:10]],
-        "run_dir_count": len(discovery.run_dirs),
-        "considered_path_count": len(discovery.considered_paths),
-        "matched_file_count": len(discovery.paths),
-    }
-
-
-def _summarize_function(function_name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    if not rows:
-        return {
-            "function": function_name,
-            "status": "not_observed",
-            "reason_counts": {},
-            "reason_labels": {},
-            "rejection_reason_counts": {},
-            "rejection_reasons": [],
-            "events": [],
-        }
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            TRACE_STATUS_ORDER.get(str(row.get("status") or ""), 99),
-            str(row.get("stage") or ""),
-            str(row.get("rule") or ""),
-        ),
+    reasons: list[str] = []
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        row_reasons = list(row.get("reason_codes") or [])
+        reason = str(row.get("reason_code") or "").strip()
+        if reason:
+            row_reasons.append(reason)
+        normalized_reasons = sorted(
+            {str(item) for item in row_reasons if str(item).strip()}
+        )
+        reasons.extend(normalized_reasons)
+        if normalized_reasons:
+            for reason_code in normalized_reasons:
+                events.append(
+                    _event(
+                        row,
+                        reason_code,
+                        run_id=run_id,
+                        account=account,
+                    )
+                )
+        else:
+            events.append(
+                _event(
+                    row,
+                    "candidate_accepted",
+                    run_id=run_id,
+                    account=account,
+                )
+            )
+    reason_counts = Counter(reasons)
+    rejection_counts = Counter(
+        reason
+        for reason in reasons
+        if reason not in {"all_decisions_captured", "candidate_accepted"}
     )
-    reason_counts = Counter(str(row.get("rule") or "unknown") for row in rows)
-    rejection_reason_counts = Counter(str(row.get("rule") or "unknown") for row in rows if _is_rejection_row(row))
-    reason_labels = {rule: candidate_rule_label(rule) for rule in sorted(reason_counts)}
     return {
         "function": function_name,
-        "status": str(ordered[0].get("status") or "unknown"),
+        "status": _function_status(rows),
         "reason_counts": dict(reason_counts),
-        "reason_labels": reason_labels,
-        "rejection_reason_counts": dict(rejection_reason_counts),
+        "reason_labels": {
+            reason: candidate_rule_label(reason) for reason in sorted(reason_counts)
+        },
+        "rejection_reason_counts": dict(rejection_counts),
         "rejection_reasons": [
-            {"rule": rule, "label": candidate_rule_label(rule), "count": count}
-            for rule, count in rejection_reason_counts.most_common(8)
+            {
+                "rule": reason,
+                "label": candidate_rule_label(reason),
+                "count": count,
+            }
+            for reason, count in rejection_counts.most_common(8)
         ],
-        "events": [_event_summary(row) for row in ordered[:20]],
+        "events": events[:20],
     }
 
 
-def _event_summary(row: dict[str, Any]) -> dict[str, Any]:
-    rule = str(row.get("rule") or "").strip()
+def _function_status(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "not_observed"
+    contract_rows = [row for row in rows if row.get("scope") == "contract"]
+    if any(row.get("status") == "accepted" for row in contract_rows):
+        return "accepted"
+    if contract_rows:
+        return "rejected"
+    return str(rows[0].get("status") or "unknown")
+
+
+def _event(
+    row: Mapping[str, Any],
+    reason: str,
+    *,
+    run_id: str | None,
+    account: str,
+) -> dict[str, Any]:
+    rejected = reason not in {"candidate_accepted", "all_decisions_captured"}
     return {
-        "run_id": row.get("run_id"),
-        "account": row.get("account"),
-        "status": row.get("status"),
-        "stage": row.get("stage"),
-        "rule": row.get("rule"),
-        "rule_label": candidate_rule_label(rule) if rule else None,
-        "is_rejection": _is_rejection_row(row),
-        "metric_value": row.get("metric_value"),
-        "threshold": row.get("threshold"),
+        "run_id": run_id,
+        "account": account,
+        "status": "rejected" if rejected else str(row.get("status") or "accepted"),
+        "stage": "recorded_opening_decision",
+        "rule": reason,
+        "rule_label": candidate_rule_label(reason),
+        "is_rejection": rejected,
+        "metric_value": None,
+        "threshold": None,
         "contract_symbol": row.get("contract_symbol"),
         "expiration": row.get("expiration"),
         "strike": row.get("strike"),
-        "message": row.get("message"),
-        "evidence_path": row.get("evidence_path"),
+        "message": reason,
+        "evidence_path": "state/opening_candidate_snapshot.json",
     }
-
-
-def _is_rejection_row(row: dict[str, Any]) -> bool:
-    status = str(row.get("status") or "").strip().lower()
-    rule = str(row.get("rule") or "").strip().lower()
-    return status in _REJECTION_STATUSES and rule not in {"candidate_accepted", "accepted"}

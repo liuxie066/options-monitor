@@ -407,10 +407,6 @@ def _build_bound_artifacts(
                 for item in candidate_decisions
             ],
             "candidate_decisions": candidate_decisions,
-            "replacement_candidate_decisions": [
-                dict(item.get("replacement_candidate_decision") or {})
-                for item in candidate_decisions
-            ],
         },
         economic_inputs={
             "capacity": {

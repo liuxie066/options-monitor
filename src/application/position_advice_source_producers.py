@@ -145,12 +145,6 @@ def publish_candidate_decisions_snapshot(
     completed_at: datetime | str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     rows = [dict(item) for item in decisions]
-    rows.sort(
-        key=lambda item: (
-            str(item.get("strategy_mode") or ""),
-            str(item.get("candidate_id") or ""),
-        )
-    )
     dependencies = [dict(item) for item in quote_dependencies]
     quote_ids = {
         str(item.get("snapshot_id") or "")

@@ -55,6 +55,9 @@ class SymbolMonitoringInputs:
     candidate_capture_status_sink_fn: (
         Callable[[dict[str, Any]], None] | None
     ) = None
+    final_candidates_sink_fn: (
+        Callable[[str, list[dict[str, Any]]], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -481,6 +484,7 @@ def run_symbol_monitoring(
                 risk_policy_version=inputs.risk_policy_version,
                 quote_snapshot_id=resolved_quote_snapshot_id or None,
                 all_decisions_sink_fn=put_capture_sink,
+                final_candidates_sink_fn=inputs.final_candidates_sink_fn,
             )
             _append_summary_result(
                 summary_rows,
@@ -633,6 +637,7 @@ def run_symbol_monitoring(
                 risk_policy_version=inputs.risk_policy_version,
                 quote_snapshot_id=resolved_quote_snapshot_id or None,
                 all_decisions_sink_fn=call_capture_sink,
+                final_candidates_sink_fn=inputs.final_candidates_sink_fn,
             )
             call_status = "completed"
             call_reason = None
