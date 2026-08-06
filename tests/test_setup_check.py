@@ -62,6 +62,31 @@ def test_setup_check_reports_yfinance_as_runtime_dependency(monkeypatch, tmp_pat
     assert checks["install.dependencies"]["value"]["checked"] == ["pandas", "futu", "yfinance"]
 
 
+def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "src.application.setup.check.inspect_futu_sdk_earnings_calendar_capability",
+        lambda: {
+            "supported": False,
+            "installed": True,
+            "installed_version": "10.8.6808",
+            "minimum_version": "10.9.6908",
+            "method_available": False,
+            "reason_code": "futu_api_version_too_old",
+        },
+    )
+
+    out = run_setup_check(repo_root=tmp_path, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    capability = checks["install.futu_earnings_calendar"]
+    assert capability["status"] == "error"
+    assert capability["value"]["reason_code"] == "futu_api_version_too_old"
+    assert "10.9.6908" in capability["hint"]
+
+
 def test_setup_check_reports_stale_runtime_config_and_schedule_readiness(monkeypatch, tmp_path: Path) -> None:
     from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 
