@@ -251,6 +251,158 @@ def test_gateway_event_source_methods_delegate_to_quote_client() -> None:
     }
 
 
+def test_gateway_earnings_calendar_delegates_exact_market_window() -> None:
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.calls = []
+
+        def get_earnings_calendar(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return [
+                {
+                    "security": "US.NVDA",
+                    "earnings_date": "2026-08-19",
+                    "earnings_timestamp": 1787108400.0,
+                    "pub_type": "AFTER",
+                }
+            ]
+
+    gw = build_futu_gateway(
+        backend_cls=FakeBackend,
+        client_cls=FakeClient,
+    )
+
+    rows = gw.get_earnings_calendar(
+        market="US",
+        begin_date="2026-08-17",
+        end_date="2026-08-21",
+    )
+
+    assert rows == [
+        {
+            "security": "US.NVDA",
+            "earnings_date": "2026-08-19",
+            "earnings_timestamp": 1787108400.0,
+            "pub_type": "AFTER",
+        }
+    ]
+    assert gw.client.calls == [
+        {
+            "market": "US",
+            "begin_date": "2026-08-17",
+            "end_date": "2026-08-21",
+        }
+    ]
+
+
+def test_futu_api_client_earnings_calendar_unwraps_empty_result() -> None:
+    from src.infrastructure.futu_gateway import _FutuAPIClient
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_earnings_calendar(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return 0, []
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.quote = FakeQuote()
+
+        def _ensure_quote_client(self):
+            return self.quote
+
+    backend = FakeBackend()
+    client = _FutuAPIClient(backend, is_option_chain_cache_enabled=False)
+
+    assert client.get_earnings_calendar(
+        market="HK",
+        begin_date="2026-08-06",
+        end_date="2026-08-06",
+    ) == []
+    assert backend.quote.calls == [
+        {
+            "market": "HK",
+            "begin_date": "2026-08-06",
+            "end_date": "2026-08-06",
+        }
+    ]
+
+
+def test_futu_api_client_earnings_calendar_fails_with_stable_capability_reason() -> None:
+    from src.infrastructure.futu_gateway import (
+        FutuGatewayCapabilityUnavailableError,
+        _FutuAPIClient,
+    )
+
+    class FakeBackend:
+        def _ensure_quote_client(self):
+            return object()
+
+    client = _FutuAPIClient(FakeBackend(), is_option_chain_cache_enabled=False)
+
+    try:
+        client.get_earnings_calendar(
+            market="US",
+            begin_date="2026-08-06",
+            end_date="2026-08-06",
+        )
+    except FutuGatewayCapabilityUnavailableError as exc:
+        assert exc.code == "CAPABILITY_UNAVAILABLE"
+        assert exc.reason_code == "opend_earnings_calendar_unsupported"
+        assert exc.capability == "get_earnings_calendar"
+    else:
+        raise AssertionError("expected FutuGatewayCapabilityUnavailableError")
+
+
+def test_inspect_futu_sdk_earnings_calendar_capability_requires_version_and_method(tmp_path: Path) -> None:
+    from src.infrastructure.futu_gateway import (
+        FUTU_EARNINGS_CALENDAR_MIN_VERSION,
+        inspect_futu_sdk_earnings_calendar_capability,
+    )
+
+    package_root = tmp_path / "futu"
+    quote_dir = package_root / "quote"
+    quote_dir.mkdir(parents=True)
+    source = quote_dir / "open_quote_context.py"
+    source.write_text(
+        "class OpenQuoteContext:\n"
+        "    def get_earnings_calendar(self, market, begin_date=None, end_date=None):\n"
+        "        return market, begin_date, end_date\n",
+        encoding="utf-8",
+    )
+
+    supported = inspect_futu_sdk_earnings_calendar_capability(
+        package_root=package_root,
+        installed_version=FUTU_EARNINGS_CALENDAR_MIN_VERSION,
+    )
+    old = inspect_futu_sdk_earnings_calendar_capability(
+        package_root=package_root,
+        installed_version="10.8.6808",
+    )
+    source.write_text("class OpenQuoteContext:\n    pass\n", encoding="utf-8")
+    missing_method = inspect_futu_sdk_earnings_calendar_capability(
+        package_root=package_root,
+        installed_version=FUTU_EARNINGS_CALENDAR_MIN_VERSION,
+    )
+
+    assert supported["supported"] is True
+    assert supported["reason_code"] is None
+    assert old["supported"] is False
+    assert old["reason_code"] == "futu_api_version_too_old"
+    assert missing_method["supported"] is False
+    assert missing_method["reason_code"] == "opend_earnings_calendar_unsupported"
+
+
 def test_broker_ready_builder_never_constructs_quote_context() -> None:
     from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 
