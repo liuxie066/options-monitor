@@ -1994,6 +1994,7 @@ def _tcom_required_rows() -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for expiration, dte in (("2026-08-21", 30), ("2026-09-18", 58)):
         for strike in (35.0, 40.0, 42.5):
+            lookback = max(20, dte)
             rows.append(
                 {
                     "symbol": "TCOM",
@@ -2014,11 +2015,51 @@ def _tcom_required_rows() -> list[dict[str, object]]:
                     "realized_volatility_60": 0.3,
                     "realized_volatility_120": 0.3,
                     "realized_volatility_estimate": 0.3,
+                    "term_matched_rv": 0.3,
+                    "term_matched_rv_status": "ok",
+                    "term_matched_rv_reason": None,
+                    "term_matched_rv_remaining_sessions": dte,
+                    "term_matched_rv_lookback_sessions": lookback,
+                    "term_matched_rv_input_start": "2026-01-02",
+                    "term_matched_rv_input_end": "2026-07-22",
+                    "term_matched_rv_input_session_count": lookback + 1,
+                    "term_matched_rv_input_hash": "b" * 64,
                     "currency": "USD",
                     "multiplier": 100,
                 }
             )
     return rows
+
+
+def _tcom_realized_volatility_evidence() -> dict[str, object]:
+    terms: dict[str, object] = {}
+    for expiration, dte in (("2026-08-21", 30), ("2026-09-18", 58)):
+        lookback = max(20, dte)
+        terms[expiration] = {
+            "schema_version": "term_matched_rv.v1",
+            "expiration": expiration,
+            "status": "ok",
+            "reason": None,
+            "term_matched_rv": 0.3,
+            "remaining_sessions": dte,
+            "lookback_sessions": lookback,
+            "input_start": "2026-01-02",
+            "input_end": "2026-07-22",
+            "input_close_session_count": lookback + 1,
+            "input_return_count": lookback,
+            "input_hash": "b" * 64,
+        }
+    return {
+        "status": "ok",
+        "reason": None,
+        "realized_volatility_20": 0.3,
+        "realized_volatility_60": 0.3,
+        "realized_volatility_120": 0.3,
+        "realized_volatility_estimate": 0.3,
+        "term_matched": terms,
+        "qfq_history": {"status": "ok"},
+        "trading_calendar": {"status": "ok"},
+    }
 
 
 def _plan_semantics(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
@@ -2079,14 +2120,7 @@ def test_tcom_shared_required_data_is_account_order_invariant(
                 "snapshot_returned_code_set": codes,
                 "snapshot_missing_code_set": [],
                 "snapshot_unexpected_code_set": [],
-                "realized_volatility": {
-                    "status": "ok",
-                    "reason": None,
-                    "realized_volatility_20": 0.3,
-                    "realized_volatility_60": 0.3,
-                    "realized_volatility_120": 0.3,
-                    "realized_volatility_estimate": 0.3,
-                },
+                "realized_volatility": _tcom_realized_volatility_evidence(),
                 "underlier_observation": request.underlier_observation,
                 "source_observed_at": _TEST_EVIDENCE_OBSERVED_AT.isoformat(),
                 "completed_at_utc": _TEST_EVIDENCE_COMPLETED_AT.isoformat(),

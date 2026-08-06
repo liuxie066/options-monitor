@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import time
@@ -19,12 +19,17 @@ from domain.services import (
     adapt_opend_tool_payload,
 )
 from domain.domain.fetch_source import resolve_symbol_fetch_source
+from domain.domain.symbol_identity import resolve_symbol_identity
 from domain.storage.repositories import state_repo
 from src.application.config_sections import (
     resolve_templates_config,
     resolve_watchlist_config,
 )
 from src.application.config_profiles import apply_profiles
+from src.application.earnings_calendar import (
+    earnings_calendar_scan_date,
+    prefetch_market_earnings_calendars,
+)
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
@@ -474,6 +479,60 @@ def _required_data_plan_trading_date(
     except ValueError:
         return None
     return parsed if parsed.isoformat() == raw_value else None
+
+
+def _earnings_calendar_market_requests(
+    *,
+    symbol_cfgs: list[dict[str, Any]],
+    fetch_plans_by_config_id: dict[int, RequiredDataFetchPlanBundle],
+    scan_at_utc: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Build the run-shared market requests from the frozen fetch plans."""
+
+    requests: dict[str, dict[str, Any]] = {}
+    for symbol_cfg in symbol_cfgs:
+        fetch_plan = fetch_plans_by_config_id[id(symbol_cfg)]
+        expirations = sorted(
+            {
+                str(value).strip()
+                for value in fetch_plan.projected_expirations
+                if str(value).strip()
+            }
+        )
+        if not expirations:
+            continue
+        identity = resolve_symbol_identity(symbol_cfg.get("symbol"))
+        if identity is None or identity.market not in {"US", "HK"}:
+            raise RuntimeError(
+                "earnings calendar underlier identity is unavailable for "
+                f"{symbol_cfg.get('symbol')}"
+            )
+        scan_date = earnings_calendar_scan_date(identity.market, scan_at_utc)
+        fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+        endpoint = (
+            str(fetch_cfg.get("host") or "127.0.0.1"),
+            _to_int(fetch_cfg.get("port") or 11111, 11111),
+        )
+        request = requests.setdefault(
+            identity.market,
+            {
+                "host": endpoint[0],
+                "port": endpoint[1],
+                "scan_date": scan_date.isoformat(),
+                "expirations_by_underlier": {},
+            },
+        )
+        if request["scan_date"] != scan_date.isoformat():
+            raise RuntimeError(
+                f"earnings calendar {identity.market} trading date is inconsistent"
+            )
+        expirations_by_underlier = request["expirations_by_underlier"]
+        if not isinstance(expirations_by_underlier, dict):
+            raise RuntimeError("earnings calendar request is invalid")
+        current = expirations_by_underlier.setdefault(identity.futu_code, [])
+        current.extend(expirations)
+        expirations_by_underlier[identity.futu_code] = sorted(set(current))
+    return requests
 
 
 def _flat_opend_fetch_config(
@@ -1146,6 +1205,7 @@ def prefetch_required_data(
     shared_required: Path,
     force_refresh: bool = False,
     producer_run_id: str | None = None,
+    scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
     with _required_data_prefetch_file_lock(base):
         return _prefetch_required_data_unlocked(
@@ -1156,6 +1216,7 @@ def prefetch_required_data(
             shared_required=shared_required,
             force_refresh=force_refresh,
             producer_run_id=producer_run_id,
+            scan_at_utc=scan_at_utc,
         )
 
 
@@ -1168,6 +1229,7 @@ def _prefetch_required_data_unlocked(
     shared_required: Path,
     force_refresh: bool = False,
     producer_run_id: str | None = None,
+    scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
@@ -1237,6 +1299,17 @@ def _prefetch_required_data_unlocked(
             "global required-data plan incomplete; discovery or projection failed for: "
             + ", ".join(failed_symbols)
         )
+
+    earnings_scan_at_utc = scan_at_utc or datetime.now(timezone.utc)
+    earnings_calendar = prefetch_market_earnings_calendars(
+        market_requests=_earnings_calendar_market_requests(
+            symbol_cfgs=fetch_syms,
+            fetch_plans_by_config_id=fetch_plan_cache,
+            scan_at_utc=earnings_scan_at_utc,
+        ),
+        output_dir=shared_required / "earnings_calendar",
+        scan_at_utc=earnings_scan_at_utc,
+    )
 
     def _get_fetch_plan(symbol_cfg: dict[str, Any]) -> RequiredDataFetchPlanBundle:
         cache_key = id(symbol_cfg)
@@ -1513,6 +1586,7 @@ def _prefetch_required_data_unlocked(
             'run_fetch_summary': run_fetch_summary,
             'prefetch_budget_plan': budget_plan.summary(),
             'global_required_data_plan': global_required_data_plan,
+            'earnings_calendar': earnings_calendar,
             'opend_rate_limit_classes': [],
             'opend_rate_limit_items': [],
             'rate_limit_cooldowns': [],
@@ -1624,6 +1698,7 @@ def _prefetch_required_data_unlocked(
         'opend_rate_limit_items': list(coordinator_result.opend_rate_limit_items),
         'prefetch_budget_plan': budget_plan.summary(),
         'global_required_data_plan': global_required_data_plan,
+        'earnings_calendar': earnings_calendar,
         'rate_limit_cooldowns': rate_limit_cooldowns,
         'fetch_metrics': fetch_metrics,
         'run_fetch_summary': run_fetch_summary,

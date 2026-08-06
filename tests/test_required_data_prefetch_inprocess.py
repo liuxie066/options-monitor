@@ -35,6 +35,16 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         "list_option_expirations",
         lambda *args, **kwargs: ["2026-08-21", "2026-09-18"],
     )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_market_earnings_calendars",
+        lambda **kwargs: {
+            "schema_version": "opend_earnings_calendar.v1",
+            "source": "opend",
+            "market_count": len(kwargs.get("market_requests") or {}),
+            "markets": {},
+        },
+    )
 
 
 def _patch_0700_plan_discovery(
@@ -428,6 +438,98 @@ def test_prefetch_builds_complete_global_plan_before_first_chain_fetch(
         item["fetch_binding"] == item["expected_fetch_contract"]["fetch_binding"]
         for item in result["global_required_data_plan"]["symbols"]
     )
+
+
+def test_prefetch_fetches_earnings_once_per_market_for_shared_symbols(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.earnings_calendar as earnings_mod
+
+    watchlist = [
+        {
+            "symbol": symbol,
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+            "sell_put": {
+                "enabled": True,
+                "min_dte": 1,
+                "max_dte": 60,
+                "max_strike": 500,
+            },
+        }
+        for symbol in ("AAPL", "NVDA")
+    ]
+
+    class EarningsGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.earnings_calls: list[dict[str, object]] = []
+
+        def get_earnings_calendar(self, **kwargs):
+            self.earnings_calls.append(dict(kwargs))
+            return []
+
+    earnings_gateways: list[EarningsGateway] = []
+
+    def build_earnings_gateway(**kwargs):
+        gateway = EarningsGateway()
+        earnings_gateways.append(gateway)
+        return gateway
+
+    def fetch(symbol: str, **kwargs):
+        return _strict_success_rows_for_fetch(symbol, kwargs)
+
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fetch)
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
+        lambda **kwargs: _Gateway(),
+    )
+    monkeypatch.setattr(
+        earnings_mod,
+        "build_ready_futu_quote_gateway",
+        build_earnings_gateway,
+    )
+    monkeypatch.setattr(
+        mod,
+        "prefetch_market_earnings_calendars",
+        earnings_mod.prefetch_market_earnings_calendars,
+    )
+    _patch_success_finalizer(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "adapt_opend_tool_payload",
+        lambda payload: {"source_name": "opend", "payload": payload},
+    )
+    monkeypatch.setattr(
+        mod.state_repo,
+        "append_source_snapshot_event",
+        lambda *args, **kwargs: None,
+    )
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
+        shared_required=tmp_path / "shared_required",
+        producer_run_id="shared-earnings-run",
+        scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["earnings_calendar"]["market_count"] == 1
+    assert len(earnings_gateways) == 1
+    assert earnings_gateways[0].earnings_calls
+    assert earnings_gateways[0].close_calls == 1
+    artifact = json.loads(
+        (
+            tmp_path
+            / "shared_required"
+            / "earnings_calendar"
+            / "US.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(artifact["evidence_by_underlier"]) == {"US.AAPL", "US.NVDA"}
 
 
 def test_prefetch_fails_closed_when_global_expiration_discovery_is_incomplete(

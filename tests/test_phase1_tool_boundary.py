@@ -17,8 +17,8 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.application.multi_tick import required_data_prefetch as prefetch_mod
 
     monkeypatch.setattr(
-        "src.application.required_data_planning._resolve_spot_reference",
-        lambda **_kwargs: 100.0,
+        "src.application.required_data_planning.get_underlier_spot",
+        lambda *_args, **_kwargs: 100.0,
     )
     monkeypatch.setattr(
         "src.application.required_data_planning.list_option_expirations",
@@ -37,6 +37,16 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         prefetch_mod,
         "finalize_required_data_quote_candidate",
         lambda **_kwargs: {"quote_receipt_path": None},
+    )
+    monkeypatch.setattr(
+        prefetch_mod,
+        "prefetch_market_earnings_calendars",
+        lambda **kwargs: {
+            "schema_version": "opend_earnings_calendar.v1",
+            "source": "opend",
+            "market_count": len(kwargs.get("market_requests") or {}),
+            "markets": {},
+        },
     )
 
 
@@ -210,8 +220,8 @@ def test_prefetch_required_data_fails_closed_when_merged_put_plan_lacks_spot(
     from src.application.multi_tick import required_data_prefetch as mod
 
     monkeypatch.setattr(
-        "src.application.required_data_planning._resolve_spot_reference",
-        lambda **_kwargs: None,
+        "src.application.required_data_planning.get_underlier_spot",
+        lambda *_args, **_kwargs: None,
     )
     with TemporaryDirectory() as td, pytest.raises(
         RuntimeError,
